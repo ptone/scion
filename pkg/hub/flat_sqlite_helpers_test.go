@@ -120,10 +120,13 @@ func newFlatHubFixture(t *testing.T, opts flatHubOpts) *flatHubFixture {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, flat))
 
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: project.ID, BrokerID: legacy.ID, BrokerName: legacy.Name, Status: store.BrokerStatusOnline}))
+	// Both brokers are remote and serve the hub-managed project from their
+	// own checkout (LocalPath); a remote broker without one is refused at
+	// create (ptone/scion#5813).
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: project.ID, BrokerID: legacy.ID, BrokerName: legacy.Name, LocalPath: fixtureProviderCheckout(t), Status: store.BrokerStatusOnline}))
 	project.DefaultRuntimeBrokerID = legacy.ID
 	if opts.linkFlat {
-		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: project.ID, BrokerID: flat.ID, BrokerName: flat.Name, Status: store.BrokerStatusOnline}))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: project.ID, BrokerID: flat.ID, BrokerName: flat.Name, LocalPath: fixtureProviderCheckout(t), Status: store.BrokerStatusOnline}))
 	}
 	require.NoError(t, s.UpdateProject(ctx, project))
 
@@ -356,12 +359,12 @@ type flatRegFixture struct {
 
 func (f *flatRegFixture) register(t *testing.T, as *store.User, req CreateBrokerRegistrationRequest) *httptest.ResponseRecorder {
 	t.Helper()
-	return doRequestAsUser(t, f.srv, as, http.MethodPost, "/api/v1/brokers", req)
+	return doRequestAsUserLoopback(t, f.srv, as, http.MethodPost, "/api/v1/brokers", req)
 }
 
 func (f *flatRegFixture) join(t *testing.T, req BrokerJoinRequest) *httptest.ResponseRecorder {
 	t.Helper()
-	return doRequestNoAuth(t, f.srv, http.MethodPost, "/api/v1/brokers/join", req)
+	return doRequestNoAuthLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers/join", req)
 }
 
 // registerFlat performs a full flat registration and join, returning the

@@ -20,34 +20,56 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // stubRunSh records how it was started, then exits 0. It writes its args
-// one per line, its PID, its working directory and selected env vars.
+// one per line, its PID and parent PID, its SIGINT disposition, its working
+// directory and selected env vars. Tests append to it (stubRunShWith) to
+// change how it ends.
 const stubRunSh = `#!/usr/bin/env bash
 set -euo pipefail
 out=${STUB_OUT:?}
 printf '%s\n' "$@" > "$out/args"
 echo "$$" > "$out/pid"
+echo "$PPID" > "$out/ppid"
+trap -p INT > "$out/int_trap"
+ls -l /proc/$$/fd > "$out/fds_long" 2>/dev/null || true
 pwd > "$out/cwd"
 {
   echo "RUNNER_WORKSPACE=${RUNNER_WORKSPACE:-}"
   echo "RUNNER_TEMP=${RUNNER_TEMP:-}"
-  echo "TMPDIR=${TMPDIR:-}"
+  echo "TMPDIR_SET=${TMPDIR+yes}"
+  echo "GOTMPDIR=${GOTMPDIR:-}"
   echo "GOPATH=${GOPATH:-}"
   echo "GOCACHE=${GOCACHE:-}"
   echo "GOMODCACHE=${GOMODCACHE:-}"
   echo "GOLANGCI_LINT_CACHE=${GOLANGCI_LINT_CACHE:-}"
   echo "XDG_CACHE_HOME_SET=${XDG_CACHE_HOME+yes}"
   echo "TOKEN_SET=${RUNNER_CLAIM_TOKEN+yes}"
+  echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=${ACTIONS_RUNNER_HOOK_JOB_STARTED:-}"
+  echo "CR_JOB_GUARD_REPOS=${CR_JOB_GUARD_REPOS:-}"
+  echo "CR_TEST_MODE_SET=${CR_TEST_MODE+yes}"
 } > "$out/env"
 echo "stub run.sh started"
 `
 
+// stubRunShWith returns the stub run.sh with tail appended after its recording.
+func stubRunShWith(tail string) string { return stubRunSh + tail }
+
+// setRunSh replaces the harness's run.sh.
+func (h *harness) setRunSh(script string) {
+	h.t.Helper()
+	if err := os.WriteFile(filepath.Join(h.runnerDir, "run.sh"), []byte(script), 0o755); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
 func requireTools(t *testing.T) {
 	t.Helper()
-	for _, tool := range []string{"bash", "curl", "jq", "awk", "tar"} {
+	for _, tool := range []string{"bash", "curl", "jq", "awk", "tar", "sha256sum", "stat"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Fatalf("entrypoint harness needs %s on PATH: %v", tool, err)
 		}
@@ -194,15 +216,17 @@ func respondRaw(contentType, body string) func(http.ResponseWriter) {
 	}
 }
 
-// harness is one prepared entrypoint run: a fake scratch mount, a mount
+// harness is one prepared entrypoint run: HOME as a fake volume mount, a mount
 // table that lists it, a runner dir with the stub run.sh, and the env.
 type harness struct {
 	t                  *testing.T
-	scratch, mountinfo string
+	vol, mountinfo     string // vol is HOME, the fake ephemeral-disk mount point
 	runnerDir, stubOut string
 	token, jit         string
 	idToken, audience  string
 	home               string       // HOME of the entrypoint run (and CR_EXPECTED_HOME)
+	guardHook          string       // test copy of cr-ci-job-guard.sh (CR_JOB_GUARD_HOOK)
+	guardSHAFile       string       // test copy of its pinned sha256 (CR_JOB_GUARD_SHA_FILE)
 	meta               *claimServer // fake metadata server, wired by default
 	env                map[string]string
 }
@@ -213,7 +237,7 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 	root := t.TempDir()
 	h := &harness{
 		t:         t,
-		scratch:   filepath.Join(root, "scratch"),
+		vol:       root,
 		mountinfo: filepath.Join(root, "mountinfo"),
 		runnerDir: filepath.Join(root, "actions-runner"),
 		stubOut:   filepath.Join(root, "stub-out"),
@@ -224,7 +248,7 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 		audience:  strings.TrimSuffix(mediatorURL, "/"),
 	}
 	h.meta = newMetadataServer(t, h.audience, respondIDToken(h.idToken))
-	for _, d := range []string{h.scratch, h.runnerDir, h.stubOut} {
+	for _, d := range []string{h.runnerDir, h.stubOut} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -238,7 +262,14 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 	if err := os.WriteFile(filepath.Join(h.runnerDir, "run.sh"), []byte(stubRunSh), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	h.guardHook, h.guardSHAFile = installGuard(t, root)
 	h.env = map[string]string{
+		// Test mode (the entrypoint is not PID 1 here): the CR_* overrides take effect.
+		"CR_TEST_MODE":             "1",
+		"CR_JOB_GUARD_HOOK":        h.guardHook,
+		"CR_JOB_GUARD_SHA_FILE":    h.guardSHAFile,
+		"CR_JOB_GUARD_OWNER_UID":   strconv.Itoa(os.Getuid()),
+		"GH_REPOS":                 testRepoFull,
 		"PATH":                     os.Getenv("PATH"),
 		"HOME":                     root,
 		"CR_EXPECTED_HOME":         root,
@@ -246,12 +277,13 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 		"MEDIATOR_URL":             mediatorURL,
 		"GH_JOB_ID":                "4242",
 		"RUNNER_NAME":              "cr-job-4242",
-		"CR_SCRATCH_DIR":           h.scratch,
 		"CR_MOUNTINFO":             h.mountinfo,
 		"CR_RUNNER_DIR":            h.runnerDir,
 		"CR_CLAIM_BACKOFF_SECONDS": "0",
 		"CR_METADATA_URL":          h.meta.URL,
 		"STUB_OUT":                 h.stubOut,
+		// The runner-output FIFOs go under the test's own temp dir, not /tmp.
+		"CR_FIFO_TMPDIR": root,
 	}
 	return h
 }
@@ -260,7 +292,7 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 // the entrypoint's PATH.
 func (h *harness) stubCommand(name, script string) {
 	h.t.Helper()
-	bin := filepath.Join(filepath.Dir(h.scratch), "stub-bin")
+	bin := filepath.Join(h.home, "stub-bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		h.t.Fatal(err)
 	}
@@ -275,7 +307,7 @@ func (h *harness) stubCommand(name, script string) {
 func (h *harness) writeMountinfo(fstype string) {
 	h.t.Helper()
 	content := "22 1 0:21 / / rw,relatime - overlay overlay rw\n" +
-		fmt.Sprintf("36 22 8:16 / %s rw,relatime shared:7 - %s /dev/sdb rw\n", h.scratch, fstype)
+		fmt.Sprintf("36 22 8:16 / %s rw,relatime shared:7 - %s /dev/sdb rw\n", h.vol, fstype)
 	if err := os.WriteFile(h.mountinfo, []byte(content), 0o644); err != nil {
 		h.t.Fatal(err)
 	}
@@ -289,11 +321,7 @@ type result struct {
 
 func (h *harness) run() result {
 	h.t.Helper()
-	cmd := exec.Command("bash", "entrypoint.sh")
-	cmd.Env = make([]string, 0, len(h.env))
-	for k, v := range h.env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
+	cmd := h.entrypointCmd()
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -354,8 +382,19 @@ func TestEntrypointSuccess(t *testing.T) {
 	if got, want := h.stubFile("args"), "--jitconfig\n"+h.jit; got != want {
 		t.Errorf("run.sh args = %q, want --jitconfig and the claimed config", got)
 	}
-	if got := h.stubFile("pid"); got != strconv.Itoa(res.pid) {
-		t.Errorf("run.sh pid = %s, entrypoint pid = %d: run.sh was not exec'd in place", got, res.pid)
+	// run.sh is the entrypoint's child (not exec'd), so the entrypoint can report the
+	// runner's real exit code and forward signals.
+	if got := h.stubFile("ppid"); got != strconv.Itoa(res.pid) {
+		t.Errorf("run.sh parent pid = %s, entrypoint pid = %d: run.sh is not the entrypoint's child", got, res.pid)
+	}
+	// The watcher's done FIFO is closed for the child: no fd of run.sh points at it.
+	// (Other inherited fds, such as a build wrapper's lock, are not the entrypoint's.)
+	if fds := h.stubFile("fds_long"); strings.Contains(fds, "watcher-done") || strings.Contains(fds, "idle-wait") {
+		t.Errorf("run.sh inherited the watcher's done FIFO or the idle timer's FIFO:\n%s", fds)
+	}
+	// An ignored SIGINT would break run.sh's graceful cancel (RUNNER_MANUALLY_TRAP_SIG).
+	if got := h.stubFile("int_trap"); got != "" {
+		t.Errorf("run.sh starts with SIGINT disposition %q, want the default (not ignored)", got)
 	}
 	if got := h.stubFile("cwd"); got != h.runnerDir {
 		t.Errorf("run.sh cwd = %s, want %s", got, h.runnerDir)
@@ -367,23 +406,33 @@ func TestEntrypointSuccess(t *testing.T) {
 	env := h.stubFile("env")
 	for _, want := range []string{
 		"RUNNER_WORKSPACE=" + h.home + "/work",
-		"RUNNER_TEMP=" + h.scratch + "/_temp",
-		"TMPDIR=" + h.scratch + "/_temp",
+		"RUNNER_TEMP=" + h.home + "/work/_temp",
+		"TMPDIR_SET=",
+		"GOTMPDIR=" + h.home + "/.cr-ci/go-tmp",
 		"GOPATH=" + h.home + "/go",
 		"GOCACHE=" + h.home + "/.cache/go-build",
 		"GOMODCACHE=" + h.home + "/go/pkg/mod",
 		"GOLANGCI_LINT_CACHE=" + h.home + "/.cache/golangci-lint",
 		"XDG_CACHE_HOME_SET=",
 		"TOKEN_SET=",
+		"ACTIONS_RUNNER_HOOK_JOB_STARTED=" + h.guardHook,
+		"CR_JOB_GUARD_REPOS=" + testRepoFull,
+		"CR_TEST_MODE_SET=",
 	} {
 		if !strings.Contains(env+"\n", want+"\n") {
 			t.Errorf("run.sh env lacks %q; got:\n%s", want, env)
 		}
 	}
-	h.checkHomeLinks()
-	for _, d := range []string{"_work", "_temp", "_diag", ".cache/go-build", ".cache/golangci-lint", "go/pkg/mod"} {
-		if fi, err := os.Stat(filepath.Join(h.scratch, d)); err != nil || !fi.IsDir() {
-			t.Errorf("%s/%s was not created: %v", h.scratch, d, err)
+	h.checkHomeDirs()
+	// The runner's _diag must stay off the volume (F-D): it lives in the runner dir.
+	for _, d := range []string{"_diag", "work/_diag"} {
+		if _, err := os.Lstat(filepath.Join(h.vol, d)); !os.IsNotExist(err) {
+			t.Errorf("%s/%s exists (err %v); the runner's logs must not go to the volume", h.vol, d, err)
+		}
+	}
+	for _, d := range []string{"work/_temp", ".cache/go-build", ".cache/golangci-lint", "go/pkg/mod", ".cr-ci/go-tmp"} {
+		if fi, err := os.Lstat(filepath.Join(h.vol, d)); err != nil || !fi.IsDir() {
+			t.Errorf("%s/%s was not created as a real directory: %v", h.vol, d, err)
 		}
 	}
 
@@ -501,27 +550,33 @@ func TestEntrypointNonRetryableResponses(t *testing.T) {
 	}
 }
 
-func TestEntrypointScratchChecks(t *testing.T) {
+// setMissingHome points HOME (and CR_EXPECTED_HOME) at a directory that does not exist.
+func (h *harness) setMissingHome() {
+	missing := filepath.Join(h.home, "no-such-home")
+	h.env["HOME"], h.env["CR_EXPECTED_HOME"] = missing, missing
+}
+
+func TestEntrypointVolumeChecks(t *testing.T) {
 	cases := []struct {
 		name    string
 		mutate  func(h *harness)
 		wantMsg string
 	}{
-		{"missing", func(h *harness) { os.RemoveAll(h.scratch) }, "does not exist"},
+		{"missing", func(h *harness) { h.setMissingHome() }, "does not exist"},
 		{"not a mount point", func(h *harness) {
 			if err := os.WriteFile(h.mountinfo, []byte("22 1 0:21 / / rw - overlay overlay rw\n"), 0o644); err != nil {
 				h.t.Fatal(err)
 			}
 		}, "is not a mount point"},
-		{"mount table unreadable, same device as parent", func(h *harness) { h.env["CR_MOUNTINFO"] = filepath.Join(h.scratch, "no-such-file") }, "is not a mount point"},
+		{"mount table unreadable, same device as parent", func(h *harness) { h.env["CR_MOUNTINFO"] = filepath.Join(h.vol, "no-such-file") }, "is not a mount point"},
 		{"not writable", func(h *harness) {
 			if os.Geteuid() == 0 {
 				h.t.Skip("root ignores directory permissions")
 			}
-			if err := os.Chmod(h.scratch, 0o555); err != nil {
+			if err := os.Chmod(h.vol, 0o555); err != nil {
 				h.t.Fatal(err)
 			}
-			h.t.Cleanup(func() { os.Chmod(h.scratch, 0o755) })
+			h.t.Cleanup(func() { os.Chmod(h.vol, 0o755) })
 		}, "not writable"},
 	}
 	for _, tc := range cases {
@@ -535,6 +590,101 @@ func TestEntrypointScratchChecks(t *testing.T) {
 				t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
 			}
 		})
+	}
+}
+
+// E: a job definition from before this image mounts the volume at /scratch, so HOME is
+// a plain directory of the root filesystem. The entrypoint must fail closed (exit 2,
+// no claim) and say how to fix it.
+func TestEntrypointOldJobLayoutFailsClosed(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusOK))
+	h := newHarness(t, cs.URL)
+	old := filepath.Join(t.TempDir(), "scratch")
+	if err := os.MkdirAll(old, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	content := "22 1 0:21 / / rw,relatime - overlay overlay rw\n" +
+		fmt.Sprintf("36 22 8:16 / %s rw,relatime shared:7 - ext4 /dev/sdb rw\n", old)
+	if err := os.WriteFile(h.mountinfo, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := h.run()
+	expectFailure(t, h, res, 2, "is not a mount point")
+	if !strings.Contains(res.stderr, "a job still mounting it at /scratch is from before this image") {
+		t.Errorf("stderr lacks the old-layout hint:\n%s", res.stderr)
+	}
+	if n := len(cs.recorded()); n != 0 {
+		t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
+	}
+	if h.stubStarted() {
+		t.Error("run.sh was started")
+	}
+}
+
+// C (probe): the volume root's owner and mode are logged at every start, and a root
+// owned by this uid that is group- or world-writable is tightened to 0755.
+func TestEntrypointVolumeRootProbe(t *testing.T) {
+	h := newSuccessHarness(t)
+	if err := os.Chmod(h.vol, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(h.vol, 0o755) })
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	want := fmt.Sprintf("volume root %s: owner uid %d, mode 777; set to 0755", h.vol, os.Getuid())
+	if !strings.Contains(res.stderr, want) {
+		t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
+	}
+	if fi, err := os.Stat(h.vol); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Errorf("volume root mode = %v (%v), want 0755", modeOf(fi), err)
+	}
+
+	h2 := newSuccessHarness(t)
+	if err := os.Chmod(h2.vol, 0o755); err != nil { // t.TempDir is 0700
+		t.Fatal(err)
+	}
+	res = h2.run()
+	want = fmt.Sprintf("volume root %s: owner uid %d, mode 755\n", h2.vol, os.Getuid())
+	if !strings.Contains(res.stderr, want) {
+		t.Errorf("stderr lacks %q (no chmod needed):\n%s", want, res.stderr)
+	}
+
+	// The production-likely case: a world-writable volume root owned by another uid
+	// (root on Cloud Run). This uid cannot chmod it, so the entrypoint only logs it and
+	// leaves the mode alone. A stub stat reports another uid (this uid + 1, so the case
+	// also holds when the tests run as root) and mode 777 for the owner/mode query on the
+	// volume root only (the job guard's own stat calls, on other paths, see the real stat).
+	other := os.Getuid() + 1
+	h3 := newSuccessHarness(t)
+	if err := os.Chmod(h3.vol, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realStat, err := exec.LookPath("stat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h3.stubCommand("stat", fmt.Sprintf(`#!/usr/bin/env bash
+if [[ ${!#} == %q && " $* " == *" %%u %%a "* ]]; then
+  echo "%d 777"
+  exit 0
+fi
+exec %q "$@"
+`, h3.vol, other, realStat))
+	res = h3.run()
+	if res.exitCode != 0 {
+		t.Fatalf("777 root owned by uid %d: exit code = %d, want 0; stderr:\n%s", other, res.exitCode, res.stderr)
+	}
+	want = fmt.Sprintf("volume root %s: owner uid %d, mode 777\n", h3.vol, other)
+	if !strings.Contains(res.stderr, want) {
+		t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
+	}
+	if strings.Contains(res.stderr, "set to 0755") || strings.Contains(res.stderr, "chmod 0755 failed") {
+		t.Errorf("the entrypoint tried to change a volume root it does not own:\n%s", res.stderr)
+	}
+	if fi, err := os.Stat(h3.vol); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Errorf("volume root mode = %v (%v), want it left as found (0755 here)", modeOf(fi), err)
 	}
 }
 
@@ -569,6 +719,8 @@ func TestEntrypointConfigErrors(t *testing.T) {
 		{"http to a remote host", func(h *harness) { h.env["MEDIATOR_URL"] = "http://mediator.example.com" }, "must be an https origin"},
 		{"url with a path", func(h *harness) { h.env["MEDIATOR_URL"] = "https://mediator.example.com/x" }, "must be an https origin"},
 		{"remote metadata url", func(h *harness) { h.env["CR_METADATA_URL"] = "http://metadata.example.com" }, "CR_METADATA_URL must be"},
+		{"zero idle timeout", func(h *harness) { h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "0" }, "RUNNER_IDLE_TIMEOUT_SECONDS must be"},
+		{"idle timeout with a unit", func(h *harness) { h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "10m" }, "RUNNER_IDLE_TIMEOUT_SECONDS must be"},
 		{"runner dir without run.sh", func(h *harness) { os.Remove(filepath.Join(h.runnerDir, "run.sh")) }, "run.sh not found"},
 	}
 	for _, tc := range cases {
@@ -600,7 +752,7 @@ if [[ ${!#} == %q ]]; then
   exit 0
 fi
 exec %q "$@"
-`, h.scratch, realStat))
+`, h.vol, realStat))
 }
 
 func TestEntrypointScratchDeviceFallback(t *testing.T) {
@@ -613,7 +765,7 @@ func TestEntrypointScratchDeviceFallback(t *testing.T) {
 				h.t.Fatal(err)
 			}
 		}},
-		{"mount table unreadable", func(h *harness) { h.env["CR_MOUNTINFO"] = filepath.Join(h.scratch, "no-such-file") }},
+		{"mount table unreadable", func(h *harness) { h.env["CR_MOUNTINFO"] = filepath.Join(h.vol, "no-such-file") }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -641,7 +793,7 @@ func TestEntrypointScratchMountTableLogged(t *testing.T) {
 	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
 	h = newHarness(t, cs.URL)
 	res := h.run()
-	if want := h.scratch + " is a mount (ext4): listed in " + h.mountinfo; !strings.Contains(res.stderr, want) {
+	if want := h.vol + " is a mount (ext4): listed in " + h.mountinfo; !strings.Contains(res.stderr, want) {
 		t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
 	}
 }
@@ -679,9 +831,18 @@ func TestEntrypointScratchStatFailure(t *testing.T) {
 	if err := os.WriteFile(h.mountinfo, []byte("22 1 0:21 / / rw - overlay overlay rw\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h.stubCommand("stat", "#!/usr/bin/env bash\necho 'stat: simulated failure' >&2\nexit 1\n")
+	// Fails for /scratch and its parent only (the job guard's own stat calls, on other
+	// paths, run first and must still work).
+	realStat, err := exec.LookPath("stat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.stubCommand("stat", fmt.Sprintf(`#!/usr/bin/env bash
+case ${!#} in %q | %q) echo 'stat: simulated failure' >&2; exit 1 ;; esac
+exec %q "$@"
+`, h.vol, filepath.Dir(h.vol), realStat))
 	res := h.run()
-	expectFailure(t, h, res, 2, "cannot stat")
+	expectFailure(t, h, res, 2, "cannot stat "+h.vol+" to verify that it is a mount")
 	if n := len(cs.recorded()); n != 0 {
 		t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
 	}
@@ -853,35 +1014,49 @@ func TestEntrypointIDTokenTrailingNewline(t *testing.T) {
 	}
 }
 
-// checkHomeLinks asserts the cache-parity layout: ~/work, ~/.cache and ~/go are
-// symlinks whose literal targets mirror HOME under the scratch dir.
-func (h *harness) checkHomeLinks() {
+// checkHomeDirs asserts the cache-parity layout: ~/work, ~/.cache, ~/go and ~/.npm
+// are REAL directories on the volume (HOME), not symlinks, so their physical paths are
+// their logical ones (actions/setup-node's lock-file hashing, whole-directory caches).
+func (h *harness) checkHomeDirs() {
 	h.t.Helper()
-	for link, target := range map[string]string{
-		"work":   h.scratch + "/_work",
-		".cache": h.scratch + "/.cache",
-		"go":     h.scratch + "/go",
-	} {
-		got, err := os.Readlink(filepath.Join(h.home, link))
-		if err != nil || got != target {
-			h.t.Errorf("~/%s -> %q (err %v), want a symlink to %s", link, got, err, target)
+	for _, d := range []string{"work", ".cache", "go", ".npm"} {
+		fi, err := os.Lstat(filepath.Join(h.home, d))
+		if err != nil || !fi.IsDir() {
+			h.t.Errorf("~/%s: %v (mode %v), want a real directory", d, err, modeOf(fi))
 		}
 	}
 }
 
-func TestEntrypointHomeLinksKeptWhenCorrect(t *testing.T) {
+func modeOf(fi os.FileInfo) os.FileMode {
+	if fi == nil {
+		return 0
+	}
+	return fi.Mode()
+}
+
+// Directories already present (for example from an earlier step in the same execution)
+// are kept with their contents.
+func TestEntrypointHomeDirsKeptWhenPresent(t *testing.T) {
 	var h *harness
 	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
 	h = newHarness(t, cs.URL)
-	for link, target := range map[string]string{"work": "/_work", ".cache": "/.cache", "go": "/go"} {
-		if err := os.Symlink(h.scratch+target, filepath.Join(h.home, link)); err != nil {
+	for _, d := range []string{"work", ".cache", "go", ".npm"} {
+		if err := os.MkdirAll(filepath.Join(h.home, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(h.home, d, "keep"), []byte(d), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if res := h.run(); res.exitCode != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
 	}
-	h.checkHomeLinks()
+	h.checkHomeDirs()
+	for _, d := range []string{"work", ".cache", "go", ".npm"} {
+		if b, err := os.ReadFile(filepath.Join(h.home, d, "keep")); err != nil || string(b) != d {
+			t.Errorf("~/%s/keep lost: %v", d, err)
+		}
+	}
 }
 
 func TestEntrypointHomeLinkConflicts(t *testing.T) {
@@ -890,26 +1065,26 @@ func TestEntrypointHomeLinkConflicts(t *testing.T) {
 		mutate  func(h *harness)
 		wantMsg string
 	}{
-		{"real ~/.cache dir", func(h *harness) {
-			if err := os.Mkdir(filepath.Join(h.home, ".cache"), 0o755); err != nil {
+		{"~/work is a symlink (the old /scratch layout)", func(h *harness) {
+			if err := os.Symlink("/scratch/_work", filepath.Join(h.home, "work")); err != nil {
 				h.t.Fatal(err)
 			}
-		}, ".cache exists and is not a symlink"},
-		{"real ~/work dir", func(h *harness) {
-			if err := os.Mkdir(filepath.Join(h.home, "work"), 0o755); err != nil {
+		}, "work is a symlink; want a real directory"},
+		{"~/.cache is a symlink", func(h *harness) {
+			if err := os.Symlink(filepath.Join(h.home, "elsewhere"), filepath.Join(h.home, ".cache")); err != nil {
 				h.t.Fatal(err)
 			}
-		}, "work exists and is not a symlink"},
-		{"~/go links elsewhere", func(h *harness) {
-			if err := os.Symlink(h.scratch+"/gopath", filepath.Join(h.home, "go")); err != nil {
+		}, ".cache is a symlink; want a real directory"},
+		{"~/go is a file", func(h *harness) {
+			if err := os.WriteFile(filepath.Join(h.home, "go"), nil, 0o644); err != nil {
 				h.t.Fatal(err)
 			}
-		}, "go is a symlink to "},
-		{"~/.cache links to the old non-mirrored target", func(h *harness) {
-			if err := os.Symlink(h.scratch+"/cache", filepath.Join(h.home, ".cache")); err != nil {
+		}, "go exists and is not a directory"},
+		{"~/.npm is a symlink", func(h *harness) {
+			if err := os.Symlink("/scratch/.npm", filepath.Join(h.home, ".npm")); err != nil {
 				h.t.Fatal(err)
 			}
-		}, ".cache is a symlink to "},
+		}, ".npm is a symlink; want a real directory"},
 		{"HOME is not the expected home", func(h *harness) { h.env["CR_EXPECTED_HOME"] = "/home/runner" }, "want /home/runner"},
 		{"HOME unset", func(h *harness) { delete(h.env, "HOME") }, "HOME is not set"},
 	}
@@ -927,26 +1102,47 @@ func TestEntrypointHomeLinkConflicts(t *testing.T) {
 	}
 }
 
+// tarCommand runs tar with a minimal environment: an inherited TAR_OPTIONS (for
+// example --exclude) would otherwise change what the round-trip tests see.
+func tarCommand(args ...string) *exec.Cmd {
+	cmd := exec.Command("tar", args...)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "LC_ALL=C"}
+	return cmd
+}
+
 // TestEntrypointCacheTarRoundTrip reproduces actions/cache's archive scheme
 // (entries relative to GITHUB_WORKSPACE, tar -P -C "$GITHUB_WORKSPACE") between
 // an ubuntu-latest layout and the layout the entrypoint leaves behind, in both
 // directions. GITHUB_WORKSPACE is <home>/work/scion/scion on both.
-func TestEntrypointCacheTarRoundTrip(t *testing.T) {
+func TestEntrypointCacheTarRoundTrip(t *testing.T) { cacheTarRoundTrip(t, false) }
+
+// With RUNNER_BUILD_CACHE_IN_RAM=true, ~/.cache is a link to a RAM dir; the same
+// (subdirectory) archives must restore where Go reads, with the ~/.cache bytes in RAM.
+func TestEntrypointCacheTarRoundTripRAM(t *testing.T) { cacheTarRoundTrip(t, true) }
+
+func cacheTarRoundTrip(t *testing.T, inRAM bool) {
 	var h *harness
 	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
 	h = newHarness(t, cs.URL)
+	ramDir := filepath.Join(t.TempDir(), "ram-build-cache")
+	cacheRoot := filepath.Join(h.vol, ".cache") // where ~/.cache bytes physically land (a real dir)
+	if inRAM {
+		h.env["RUNNER_BUILD_CACHE_IN_RAM"] = "true"
+		h.env["CR_RAM_CACHE_DIR"] = ramDir
+		cacheRoot = ramDir
+	}
 	if res := h.run(); res.exitCode != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
 	}
 	crWorkspace := filepath.Join(h.home, "work", "scion", "scion")
-	if err := os.MkdirAll(crWorkspace, 0o755); err != nil { // creates it under scratch/_work
+	if err := os.MkdirAll(crWorkspace, 0o755); err != nil { // a real path under the real ~/work
 		t.Fatal(err)
 	}
 	entries := []string{"../../../.cache/go-build/ab/obj", "../../../go/pkg/mod/cache/download/m/@v/v1.zip", "../../../.cache/golangci-lint/x"}
 
 	tarRun := func(args ...string) {
 		t.Helper()
-		out, err := exec.Command("tar", args...).CombinedOutput()
+		out, err := tarCommand(args...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("tar %v: %v\n%s", args, err, out)
 		}
@@ -986,18 +1182,24 @@ func TestEntrypointCacheTarRoundTrip(t *testing.T) {
 	tarRun(append([]string{"-cPf", ubuntuTar, "-C", ubuntuWorkspace}, entries...)...)
 	tarRun("-xPf", ubuntuTar, "-C", crWorkspace)
 	for logical, physical := range map[string]string{
-		filepath.Join(h.home, ".cache/go-build/ab/obj"):                filepath.Join(h.scratch, ".cache/go-build/ab/obj"),
-		filepath.Join(h.home, "go/pkg/mod/cache/download/m/@v/v1.zip"): filepath.Join(h.scratch, "go/pkg/mod/cache/download/m/@v/v1.zip"),
-		filepath.Join(h.home, ".cache/golangci-lint/x"):                filepath.Join(h.scratch, ".cache/golangci-lint/x"),
+		filepath.Join(h.home, ".cache/go-build/ab/obj"):                filepath.Join(cacheRoot, "go-build/ab/obj"),
+		filepath.Join(h.home, "go/pkg/mod/cache/download/m/@v/v1.zip"): filepath.Join(h.vol, "go/pkg/mod/cache/download/m/@v/v1.zip"),
+		filepath.Join(h.home, ".cache/golangci-lint/x"):                filepath.Join(cacheRoot, "golangci-lint/x"),
 	} {
 		if b, err := os.ReadFile(logical); err != nil || string(b) != "from-ubuntu" {
 			t.Errorf("ubuntu archive did not restore to %s (what Go reads): %v", logical, err)
 		}
-		if _, err := os.Lstat(physical); err != nil {
-			t.Errorf("restored bytes are not on the scratch disk at %s: %v", physical, err)
+		if b, err := os.ReadFile(physical); err != nil || string(b) != "from-ubuntu" {
+			t.Errorf("restored bytes are not physically at %s: %v", physical, err)
 		}
 	}
-	h.checkHomeLinks() // tar must not have replaced a link
+	if inRAM {
+		if got, err := os.Readlink(filepath.Join(h.home, ".cache")); err != nil || got != ramDir {
+			t.Errorf("~/.cache = %q (%v), want a link to %s after the restore", got, err, ramDir)
+		}
+	} else {
+		h.checkHomeDirs() // tar must not have changed the real directories
+	}
 
 	// cr-ci -> ubuntu-latest: an archive saved through the links restores under the
 	// plain HOME, not under /home/home/... or next to it.
@@ -1020,68 +1222,514 @@ func TestEntrypointCacheTarRoundTrip(t *testing.T) {
 	}
 }
 
-// A whole-directory cache path (actions/cache path: ~/.cache) archives directory
-// entries such as ../../../.cache/ itself. Extracting them must not replace the
-// ~/.cache link with a real directory: tar resolves ".." physically, so the entry
-// lands on /scratch/.cache (a real dir), and the link is never walked.
+// A whole-directory cache path (actions/cache path: ~/.npm, as actions/setup-node's npm
+// cache saves it, or ~/.cache) archives the directory member itself, such as
+// ../../../.npm/. GNU tar replaces an existing symlink to a directory with a real
+// directory when it extracts such a member (unless --keep-directory-symlink, which
+// actions/cache does not pass), so these must be real directories: the archive then
+// restores in place, on the volume, exactly as on ubuntu-latest.
 func TestEntrypointCacheTarWholeDirectory(t *testing.T) {
-	var h *harness
-	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
-	h = newHarness(t, cs.URL)
-	if res := h.run(); res.exitCode != 0 {
-		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
-	}
-	crWorkspace := filepath.Join(h.home, "work", "scion", "scion")
-	if err := os.MkdirAll(crWorkspace, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	ubuntuHome := filepath.Join(t.TempDir(), "home", "runner")
-	ubuntuWorkspace := filepath.Join(ubuntuHome, "work", "scion", "scion")
-	for _, d := range []string{ubuntuWorkspace, filepath.Join(ubuntuHome, ".cache", "go-build", "ab")} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(ubuntuHome, ".cache", "go-build", "ab", "obj"), []byte("whole-dir"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	archive := filepath.Join(t.TempDir(), "whole.tar")
-	for _, args := range [][]string{
-		{"-cPf", archive, "-C", ubuntuWorkspace, "../../../.cache"},
-		{"-xPf", archive, "-C", crWorkspace},
-	} {
-		if out, err := exec.Command("tar", args...).CombinedOutput(); err != nil {
-			t.Fatalf("tar %v: %v\n%s", args, err, out)
-		}
-	}
-	if out, err := exec.Command("tar", "-tPf", archive).Output(); err != nil || !strings.Contains(string(out), "../../../.cache/\n") {
-		t.Fatalf("archive lacks the ../../../.cache/ directory entry (err %v):\n%s", err, out)
-	}
-	h.checkHomeLinks() // the directory entry must not have replaced the link
-	if b, err := os.ReadFile(filepath.Join(h.home, ".cache", "go-build", "ab", "obj")); err != nil || string(b) != "whole-dir" {
-		t.Errorf("whole-directory archive did not restore to ~/.cache/go-build: %v", err)
-	}
-	if _, err := os.Lstat(filepath.Join(h.scratch, ".cache", "go-build", "ab", "obj")); err != nil {
-		t.Errorf("restored bytes are not on the scratch disk: %v", err)
+	for _, dir := range []string{".npm", ".cache"} {
+		t.Run(dir, func(t *testing.T) {
+			var h *harness
+			cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+			h = newHarness(t, cs.URL)
+			if res := h.run(); res.exitCode != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+			}
+			crWorkspace := filepath.Join(h.home, "work", "scion", "scion")
+			if err := os.MkdirAll(crWorkspace, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			ubuntuHome := filepath.Join(t.TempDir(), "home", "runner")
+			ubuntuWorkspace := filepath.Join(ubuntuHome, "work", "scion", "scion")
+			inner := filepath.Join(dir, "sub", "obj")
+			for _, d := range []string{ubuntuWorkspace, filepath.Join(ubuntuHome, filepath.Dir(inner))} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(ubuntuHome, inner), []byte("whole-dir"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			member := "../../../" + dir
+			archive := filepath.Join(t.TempDir(), "whole.tar")
+			for _, args := range [][]string{
+				{"-cPf", archive, "-C", ubuntuWorkspace, member},
+				{"-xPf", archive, "-C", crWorkspace},
+			} {
+				if out, err := tarCommand(args...).CombinedOutput(); err != nil {
+					t.Fatalf("tar %v: %v\n%s", args, err, out)
+				}
+			}
+			if out, err := tarCommand("-tPf", archive).Output(); err != nil || !strings.Contains(string(out), member+"/\n") {
+				t.Fatalf("archive lacks the %s/ directory entry (err %v):\n%s", member, err, out)
+			}
+			h.checkHomeDirs() // still real directories
+			if b, err := os.ReadFile(filepath.Join(h.home, inner)); err != nil || string(b) != "whole-dir" {
+				t.Errorf("whole-directory archive did not restore to ~/%s: %v", inner, err)
+			}
+			// No link anywhere on the way: the restored path is physically where it reads.
+			if got, err := filepath.EvalSymlinks(filepath.Join(h.home, inner)); err != nil || got != filepath.Join(h.vol, inner) {
+				t.Errorf("~/%s resolves to %q (%v), want the volume path %s", inner, got, err, filepath.Join(h.vol, inner))
+			}
+		})
 	}
 }
 
-// If a HOME link cannot be created, the entrypoint exits 2 before the claim.
-func TestEntrypointHomeLinkCreateFails(t *testing.T) {
-	cs := newClaimServer(t, respondStatus(http.StatusOK))
-	h := newHarness(t, cs.URL)
-	if os.Geteuid() == 0 {
-		h.t.Skip("root ignores directory permissions")
+// --- Exit code and signals (section 5) ------------------------------------------
+
+func newSuccessHarness(t *testing.T) *harness {
+	t.Helper()
+	var h *harness
+	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL)
+	return h
+}
+
+func TestEntrypointPropagatesRunShExitCode(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.setRunSh(stubRunShWith("exit 134\n"))
+	res := h.run()
+	if res.exitCode != 134 {
+		t.Errorf("exit code = %d, want run.sh's 134; stderr:\n%s", res.exitCode, res.stderr)
 	}
-	// HOME read-only: ln -s into it fails, while the scratch dir (a subdirectory with
-	// its own permissions) stays writable for the earlier checks.
-	if err := os.Chmod(h.home, 0o555); err != nil {
+	if !strings.Contains(res.stderr, "run.sh exited 134") {
+		t.Errorf("stderr does not report run.sh's exit code:\n%s", res.stderr)
+	}
+}
+
+// run-helper.sh (actions/runner) turns an unknown Runner.Listener exit code into
+// "Exiting with unknown error code: N" and exit 0; run.sh then exits 0 too.
+func TestEntrypointMapsRunHelperUnknownExitCode(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.setRunSh(stubRunShWith(`echo "Runner listener exited"
+echo "Exiting with unknown error code: 134"
+echo "Exiting runner..."
+exit 0
+`))
+	res := h.run()
+	if res.exitCode != 134 {
+		t.Errorf("exit code = %d, want 134 from run-helper's line; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	for _, line := range []string{"Exiting with unknown error code: 134", "Exiting runner..."} {
+		if !strings.Contains(res.stdout, line+"\n") {
+			t.Errorf("runner output line %q was not passed through to stdout:\n%s", line, res.stdout)
+		}
+	}
+	if !strings.Contains(res.stderr, "unknown exit code 134") {
+		t.Errorf("stderr does not explain the mapped exit code:\n%s", res.stderr)
+	}
+}
+
+// Only run-helper.sh's exact line counts: anchored, digits only.
+func TestEntrypointIgnoresOtherUnknownCodeLines(t *testing.T) {
+	for _, line := range []string{
+		"job step said: Exiting with unknown error code: 7",
+		"Exiting with unknown error code: 7 (and more)",
+		"Exiting with unknown error code: abc",
+		"Exiting with unknown error code: 08", // leading zero: would be octal in (( ))
+		"Exiting with unknown error code: ",
+	} {
+		t.Run(line, func(t *testing.T) {
+			h := newSuccessHarness(t)
+			h.setRunSh(stubRunShWith("printf '%s\\n' '" + line + "'\nexit 0\n"))
+			if res := h.run(); res.exitCode != 0 {
+				t.Errorf("exit code = %d, want 0: %q must not be taken as run-helper's line; stderr:\n%s", res.exitCode, line, res.stderr)
+			}
+		})
+	}
+}
+
+// killEntrypoint ends a started entrypoint on a test's failure path, together with
+// the stub run.sh: run.sh runs in its own process group (job control), so killing
+// the entrypoint alone could leave it running past the test.
+func killEntrypoint(h *harness, cmd *exec.Cmd) {
+	if b, err := os.ReadFile(filepath.Join(h.stubOut, "pid")); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 {
+			_ = syscall.Kill(-pid, syscall.SIGKILL) // run.sh's process group
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+	// The entrypoint's own process group (entrypointCmd: Setpgid): the entrypoint, its
+	// output watcher and its idle watchdog, which hold the test's stdout/stderr pipes.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+}
+
+// entrypointCmd returns the command that runs entrypoint.sh with the harness env, as
+// the leader of its own process group, so killEntrypoint can end it together with the
+// background processes it starts (output watcher, idle watchdog). WaitDelay bounds
+// Wait if a process that escaped the group still holds the output pipes.
+func (h *harness) entrypointCmd() *exec.Cmd {
+	cmd := exec.Command("bash", "entrypoint.sh")
+	cmd.Env = make([]string, 0, len(h.env))
+	for k, v := range h.env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 30 * time.Second
+	return cmd
+}
+
+// signalStub waits until it is signalled, records the signal and exits with a
+// signal-specific code (42 for TERM, 43 for INT).
+const signalStub = `trap 'echo TERM > "$out/signal"; exit 42' TERM
+trap 'echo INT > "$out/signal"; exit 43' INT
+touch "$out/ready"
+for _ in $(seq 1 300); do sleep 0.1; done
+exit 9
+`
+
+func TestEntrypointForwardsSignals(t *testing.T) {
+	for _, tc := range []struct {
+		sig  syscall.Signal
+		name string
+		code int
+	}{{syscall.SIGTERM, "TERM", 42}, {syscall.SIGINT, "INT", 43}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSuccessHarness(t)
+			h.setRunSh(stubRunShWith(signalStub))
+			cmd := h.entrypointCmd()
+			var stdout, stderr strings.Builder
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			ready := filepath.Join(h.stubOut, "ready")
+			deadline := time.Now().Add(20 * time.Second)
+			for {
+				if _, err := os.Stat(ready); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					killEntrypoint(h, cmd)
+					t.Fatalf("stub run.sh never became ready; stderr:\n%s", stderr.String())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if err := cmd.Process.Signal(tc.sig); err != nil {
+				t.Fatal(err)
+			}
+			err := cmd.Wait()
+			code := 0
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				code = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if got := h.stubFile("signal"); got != tc.name {
+				t.Errorf("run.sh received %q, want %s forwarded from the entrypoint", got, tc.name)
+			}
+			if code != tc.code {
+				t.Errorf("exit code = %d, want run.sh's %d; stderr:\n%s", code, tc.code, stderr.String())
+			}
+			// Normally logged on receipt; in the narrow window before runner_pid is set,
+			// logged when the recorded signal is forwarded right after the start.
+			if !strings.Contains(stderr.String(), "received SIG"+tc.name+"; forwarding it to run.sh") &&
+				!strings.Contains(stderr.String(), "forwarding SIG"+tc.name+", which arrived while run.sh was starting") {
+				t.Errorf("stderr does not log the forwarded signal:\n%s", stderr.String())
+			}
+			for name, secret := range map[string]string{"claim token": h.token, "JIT config": h.jit, "ID token": h.idToken} {
+				if strings.Contains(stdout.String(), secret) || strings.Contains(stderr.String(), secret) {
+					t.Errorf("%s leaked into entrypoint output", name)
+				}
+			}
+		})
+	}
+}
+
+// --- Warm-up mode (deploy-job.sh --warm-up) ---------------------------------------
+
+func warmupHarness(t *testing.T) (*harness, *claimServer) {
+	t.Helper()
+	cs := newClaimServer(t, respondStatus(http.StatusInternalServerError))
+	h := newHarness(t, cs.URL)
+	for _, k := range []string{"RUNNER_CLAIM_TOKEN", "MEDIATOR_URL", "GH_JOB_ID", "RUNNER_NAME", "GH_REPOS"} {
+		delete(h.env, k)
+	}
+	h.env["RUNNER_WARMUP"] = "1"
+	return h, cs
+}
+
+func TestEntrypointWarmUp(t *testing.T) {
+	h, cs := warmupHarness(t)
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if h.stubStarted() {
+		t.Error("run.sh was started in warm-up mode")
+	}
+	if n := len(cs.recorded()) + len(h.meta.recorded()); n != 0 {
+		t.Errorf("warm-up made %d mediator/metadata requests, want none", n)
+	}
+	if !strings.Contains(res.stderr, "warm-up OK") {
+		t.Errorf("stderr lacks the warm-up result:\n%s", res.stderr)
+	}
+	h.checkHomeDirs() // the checks still ran
+}
+
+func TestEntrypointWarmUpStillChecks(t *testing.T) {
+	h, _ := warmupHarness(t)
+	h.setMissingHome()
+	expectFailure(t, h, h.run(), 2, "does not exist")
+
+	h2, _ := warmupHarness(t)
+	h2.env["RUNNER_WARMUP"] = "yes"
+	expectFailure(t, h2, h2.run(), 2, "RUNNER_WARMUP must be 1 or unset")
+}
+
+func TestEntrypointBuildCacheInRAMValue(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["RUNNER_BUILD_CACHE_IN_RAM"] = "yes"
+	expectFailure(t, h, h.run(), 2, "RUNNER_BUILD_CACHE_IN_RAM must be true or false")
+}
+
+func TestEntrypointBuildCacheInRAMLinks(t *testing.T) {
+	h := newSuccessHarness(t)
+	ramDir := filepath.Join(t.TempDir(), "ram")
+	h.env["RUNNER_BUILD_CACHE_IN_RAM"] = "true"
+	h.env["CR_RAM_CACHE_DIR"] = ramDir
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if got, err := os.Readlink(filepath.Join(h.home, ".cache")); err != nil || got != ramDir {
+		t.Errorf("~/.cache = %q (%v), want a link to %s", got, err, ramDir)
+	}
+	for _, d := range []string{"work", "go", ".npm"} { // the rest stay real directories
+		if fi, err := os.Lstat(filepath.Join(h.home, d)); err != nil || !fi.IsDir() {
+			t.Errorf("~/%s: %v, want a real directory", d, err)
+		}
+	}
+	for _, d := range []string{"go-build", "golangci-lint"} {
+		if fi, err := os.Stat(filepath.Join(ramDir, d)); err != nil || !fi.IsDir() {
+			t.Errorf("%s/%s was not created in RAM: %v", ramDir, d, err)
+		}
+	}
+	if !strings.Contains(res.stderr, "build cache in RAM") {
+		t.Errorf("stderr does not log RAM mode:\n%s", res.stderr)
+	}
+}
+
+// A SIGTERM during the claim phase (here: between claim retries) stops the
+// entrypoint at the next checkpoint with 128+15, without starting run.sh.
+func TestEntrypointSignalDuringClaim(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusServiceUnavailable))
+	h := newHarness(t, cs.URL)
+	h.env["CR_CLAIM_BACKOFF_SECONDS"] = "2"
+	cmd := h.entrypointCmd()
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	h.t.Cleanup(func() { os.Chmod(h.home, 0o755) })
-	res := h.run()
-	expectFailure(t, h, res, 2, "cannot create symlink "+h.home+"/work -> "+h.scratch+"/_work")
+	deadline := time.Now().Add(20 * time.Second)
+	for len(cs.recorded()) == 0 {
+		if time.Now().After(deadline) {
+			killEntrypoint(h, cmd)
+			t.Fatalf("no claim attempt; stderr:\n%s", stderr.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	err := cmd.Wait()
+	code := 0
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code = exitErr.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	if code != 143 {
+		t.Errorf("exit code = %d, want 143 (128+SIGTERM); stderr:\n%s", code, stderr.String())
+	}
+	if h.stubStarted() {
+		t.Error("run.sh was started after a SIGTERM during the claim")
+	}
+	if !strings.Contains(stderr.String(), "received SIGTERM before run.sh started") {
+		t.Errorf("stderr does not log the early signal:\n%s", stderr.String())
+	}
+	if n := len(cs.recorded()); n > 2 {
+		t.Errorf("%d claim attempts after the signal, want the retries to stop", n)
+	}
+	// The FIFO directory created before the claim is removed on that exit too.
+	if left, _ := filepath.Glob(filepath.Join(h.home, "cr-ci-entrypoint.*")); len(left) != 0 {
+		t.Errorf("FIFO directory left behind after the signalled exit: %v", left)
+	}
+}
+
+// run.sh exiting immediately on the forwarded signal: the entrypoint's wait is
+// interrupted by the trap and run.sh may already be gone by the liveness check. The
+// exit code must still be run.sh's (42), not the interrupted wait's 128+15. (The race
+// is narrow; this guards the code path rather than forcing the interleaving.)
+func TestEntrypointSignalFastExitKeepsRunShCode(t *testing.T) {
+	for i := 0; i < 3; i++ { // a few rounds: the interleaving varies
+		h := newSuccessHarness(t)
+		h.setRunSh(stubRunShWith(`sleep 30 &
+nap=$!
+trap 'kill "$nap" 2>/dev/null; exit 42' TERM
+touch "$out/ready"
+wait "$nap"
+exit 9
+`))
+		cmd := h.entrypointCmd()
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		ready := filepath.Join(h.stubOut, "ready")
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			if _, err := os.Stat(ready); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				killEntrypoint(h, cmd)
+				t.Fatalf("stub never became ready; stderr:\n%s", stderr.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		err := cmd.Wait()
+		var exitErr *exec.ExitError
+		code := 0
+		if errors.As(err, &exitErr) {
+			code = exitErr.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if code != 42 {
+			t.Fatalf("round %d: exit code = %d, want run.sh's 42; stderr:\n%s", i, code, stderr.String())
+		}
+	}
+}
+
+// The runner-output FIFOs are set up before the claim: a failure there exits 2 with
+// the single-use claim token unspent (no claim request at all).
+func TestEntrypointFIFOSetupFailsBeforeClaim(t *testing.T) {
+	var h *harness
+	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
+	h = newHarness(t, cs.URL)
+	h.env["CR_FIFO_TMPDIR"] = filepath.Join(h.home, "no-such-dir")
+	expectFailure(t, h, h.run(), 2, "cannot create a private temp directory")
 	if n := len(cs.recorded()); n != 0 {
-		t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
+		t.Errorf("%d claim requests, want none: the token must stay unspent", n)
+	}
+}
+
+// A failed claim (exit 3) removes the FIFO directory it created.
+func TestEntrypointClaimFailureRemovesFIFODir(t *testing.T) {
+	cs := newClaimServer(t, respondStatus(http.StatusGone))
+	h := newHarness(t, cs.URL)
+	fifoRoot := filepath.Join(h.home, "fifos")
+	if err := os.Mkdir(fifoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.env["CR_FIFO_TMPDIR"] = fifoRoot
+	expectFailure(t, h, h.run(), 3, "410")
+	if left, _ := filepath.Glob(filepath.Join(fifoRoot, "cr-ci-entrypoint.*")); len(left) != 0 {
+		t.Errorf("FIFO directory left behind after the failed claim: %v", left)
+	}
+}
+
+// --- Idle timeout (RUNNER_IDLE_TIMEOUT_SECONDS) -------------------------------------
+
+// A runner that has not started a job by its idle deadline is stopped like a cancel
+// (SIGTERM to run.sh), and the execution ends 0 with a distinct log line.
+func TestEntrypointIdleTimeoutStopsRunner(t *testing.T) {
+	h := newSuccessHarness(t)
+	// 3 s: the stub's recording prelude runs before its traps are set, and a TERM that
+	// came first would end it by default instead of through the trap.
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "3"
+	h.setRunSh(stubRunShWith(signalStub))
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Errorf("exit code = %d, want 0 (an idle stop is not a failure); stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if got := h.stubFile("signal"); got != "TERM" {
+		t.Errorf("run.sh received %q, want TERM from the idle watchdog", got)
+	}
+	for _, want := range []string{
+		"idle timeout: no job started within 3s of the container start; stopping the runner gracefully",
+		"idle_timeout: runner stopped after 3s without a job (run.sh exited 42); exiting 0",
+	} {
+		if !strings.Contains(res.stderr, want) {
+			t.Errorf("stderr does not contain %q:\n%s", want, res.stderr)
+		}
+	}
+}
+
+// A job that starts shortly before the deadline (3 s after run.sh starts, the deadline
+// 9 s after the entrypoint starts: about 6 s of margin for the claim and a loaded
+// machine) is not touched: the runner runs it to
+// the end and the entrypoint reports run.sh's own result.
+func TestEntrypointIdleTimeoutJobJustBeforeDeadline(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "9"
+	h.setRunSh(stubRunShWith(`trap 'echo TERM > "$out/signal"; exit 42' TERM
+trap 'echo INT > "$out/signal"; exit 43' INT
+sleep 3
+echo "2026-10-22 21:00:00Z: Running job: lint"
+for _ in $(seq 1 30); do sleep 0.1; done
+echo "2026-10-22 21:00:03Z: Job lint completed with result: Succeeded"
+exit 0
+`))
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Errorf("exit code = %d, want run.sh's 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(h.stubOut, "signal")); err == nil {
+		t.Errorf("run.sh was signalled (%s), want the started job left alone", h.stubFile("signal"))
+	}
+	if strings.Contains(res.stderr, "idle") {
+		t.Errorf("stderr reports an idle stop for a runner that started a job:\n%s", res.stderr)
+	}
+	if !strings.Contains(res.stderr, "run.sh exited 0") {
+		t.Errorf("stderr does not report run.sh's exit:\n%s", res.stderr)
+	}
+}
+
+// A run that ends before the deadline does not wait for it, and leaves no watchdog behind.
+func TestEntrypointIdleTimeoutDoesNotDelayExit(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "60"
+	start := time.Now()
+	res := h.run()
+	if res.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if d := time.Since(start); d > 30*time.Second {
+		t.Errorf("entrypoint took %s, want it to end with run.sh, not at the idle deadline", d)
+	}
+}
+
+// The idle stop raced a job start: the watchdog found no job and sent SIGTERM, and the
+// job's "Running job:" line arrived anyway (here: printed by the stub on SIGTERM, which
+// makes the race deterministic). The cancelled job must not pass for an idle stop.
+func TestEntrypointIdleTimeoutRacedJob(t *testing.T) {
+	h := newSuccessHarness(t)
+	h.env["RUNNER_IDLE_TIMEOUT_SECONDS"] = "3" // room for the stub's prelude before its trap
+	h.setRunSh(stubRunShWith(`trap 'echo "2026-10-22 21:00:01Z: Running job: lint"; echo TERM > "$out/signal"; exit 0' TERM
+for _ in $(seq 1 300); do sleep 0.1; done
+exit 9
+`))
+	res := h.run()
+	if res.exitCode != 4 {
+		t.Errorf("exit code = %d, want 4 for an idle stop that raced a job; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "ERROR idle_timeout_raced_job:") {
+		t.Errorf("stderr does not report the race:\n%s", res.stderr)
+	}
+	if strings.Contains(res.stderr, "without a job") {
+		t.Errorf("stderr reports a plain idle stop for a cancelled job:\n%s", res.stderr)
 	}
 }

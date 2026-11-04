@@ -218,7 +218,7 @@ func (s *Service) stewardAuthority(ctx context.Context, a *Artifact) string {
 	if !ok {
 		return ""
 	}
-	switch st.StewardClause(ctx, a.OwnerRef, a.ScopeRef, "", a.OrphanedAt != nil) {
+	switch st.StewardClause(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef, a.OrphanedAt != nil) {
 	case StewardClauseProjectOwner:
 		return AuthorityStewardProjectOwner
 	case StewardClauseDelegator:
@@ -585,7 +585,7 @@ func (s *Service) handleShared(w http.ResponseWriter, r *http.Request, segs []st
 		return
 	}
 	b, ok := s.backend()
-	if !ok || len(b.viewKey) == 0 {
+	if !ok || !b.viewKeys.configured() {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact sharing is not configured")
 		return
 	}
@@ -636,7 +636,14 @@ func (s *Service) handleShared(w http.ResponseWriter, r *http.Request, segs []st
 	if a.ExpiresAt != nil && a.ExpiresAt.Before(exp) {
 		exp = *a.ExpiresAt
 	}
-	capability := mintLinkViewCapability(b.viewKey, a.ID, a.CurrentSeq, exp.Truncate(time.Second), g.ID)
+	capability, err := mintView(b.viewKeys, a.ID, a.CurrentSeq, exp.Truncate(time.Second), g.ID)
+	if err != nil {
+		// No key may sign now (the active generation's sign_until
+		// passed): answer as when sharing is not configured.
+		s.warnViewIssuanceClosed(r)
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact sharing is not configured")
+		return
+	}
 	h := w.Header()
 	h.Set("Location", RouteView+capability+"/"+escapePath(filePath))
 	h.Set("Cache-Control", "private, no-store")

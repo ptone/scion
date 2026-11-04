@@ -26,8 +26,16 @@ package permissions
 // for a delegated credential, so every key has an admitting catalog
 // operation (pinned by tests in pkg/hub).
 var AgentDelegableRegistry = map[string][]BoundaryKind{
-	"agent.read":   {BoundaryKindProject, BoundaryKindHub},
-	"project.read": {BoundaryKindProject, BoundaryKindHub},
+	"agent.read":    {BoundaryKindProject, BoundaryKindHub},
+	"project.read":  {BoundaryKindProject, BoundaryKindHub},
+	"agent.message": {BoundaryKindProject, BoundaryKindHub},
+	// Admitted on the PTY handshake only; the lifecycle operations that
+	// share it (exec, env, resetauth, keys) are not admitted.
+	"agent.attach": {BoundaryKindProject, BoundaryKindHub},
+	// Admitted on the hub agent list (GET /api/v1/agents) only. Each listed
+	// item is also decided for agent.read, so a grant without agent.read
+	// lists nothing.
+	"agent.list": {BoundaryKindProject, BoundaryKindHub},
 }
 
 // AgentDelegationSharedKeyExemption names a catalog operation whose base

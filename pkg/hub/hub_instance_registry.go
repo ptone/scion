@@ -31,7 +31,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // The hub-instance registry writer (health dashboard F3 design §5.3). Each
@@ -193,7 +192,7 @@ func (s *Server) hubInstanceSnapshot(ctx context.Context, label string) hubInsta
 		Integrations: s.hubInstanceIntegrations(ctx),
 		Features:     hubInstanceFeatures(),
 	}
-	return hubInstanceSnapshotFromChecks(label, version.Short(), checks, stats)
+	return hubInstanceSnapshotFromChecks(label, hubBuildToken(), checks, stats)
 }
 
 // hubInstanceFeatures lists the cross-node capabilities this hub process
@@ -482,8 +481,15 @@ func (r *hubInstanceRegistry) clock() time.Time {
 
 // jitteredHubInstanceInterval returns hubInstanceTickInterval ± 10%.
 func jitteredHubInstanceInterval() time.Duration {
+	return jitteredInterval(hubInstanceTickInterval)
+}
+
+// jitteredInterval returns d ± hubInstanceTickJitter, so replicas started
+// together do not tick in lock step. The registry writer and the async
+// start gate's refresh loop use it.
+func jitteredInterval(d time.Duration) time.Duration {
 	f := 1 + hubInstanceTickJitter*(2*rand.Float64()-1)
-	return time.Duration(float64(hubInstanceTickInterval) * f)
+	return time.Duration(float64(d) * f)
 }
 
 // tick takes one snapshot and writes it: TouchHubInstance (last_seen and the

@@ -112,6 +112,11 @@ type EventPublisher interface {
 	// scheduled chat messages on user.<id>.chat.scheduled. Only the
 	// sender is ever told about a scheduled message.
 	PublishChatScheduledEvent(ctx context.Context, userID string, evt ChatScheduledEvent)
+	// PublishChatStarsChanged tells the user's own sessions, on
+	// user.<id>.chat.stars, that their starred messages changed. The
+	// payload is a content-free invalidation ({"action":"changed"}):
+	// clients refetch current state. Only the owner is ever told.
+	PublishChatStarsChanged(ctx context.Context, userID string)
 	// Subscribe returns a channel that receives events matching the given
 	// subject patterns, along with an unsubscribe function. Patterns use
 	// NATS-style wildcards: '*' matches a single token, '>' matches the
@@ -162,6 +167,7 @@ func (noopEventPublisher) Close()                                               
 
 func (noopEventPublisher) PublishChatScheduledEvent(_ context.Context, _ string, _ ChatScheduledEvent) {
 }
+func (noopEventPublisher) PublishChatStarsChanged(_ context.Context, _ string) {}
 
 // Subscribe on the no-op publisher returns a nil channel (which blocks forever
 // on receive) and a no-op unsubscribe. Callers that need real subscriptions
@@ -384,9 +390,18 @@ type NotificationCreatedEvent struct {
 // UserNotificationEvent is the payload for a non-chat notification addressed
 // to a single user (PublishUserNotification). SubscriberID is the client's
 // second gate; the subject already scopes delivery.
+//
+// Kind, ResourceType and ResourceID are fields of this event only, never of
+// the embedded NotificationCreatedEvent: that struct is also the payload of
+// the broadcast notification.created and project.<id>.notification
+// subjects, which reach other sessions. They are empty, and omitted, for a
+// notification that does not set them.
 type UserNotificationEvent struct {
 	NotificationCreatedEvent
 	SubscriberID string `json:"subscriberId"`
+	Kind         string `json:"kind,omitempty"`
+	ResourceType string `json:"resourceType,omitempty"`
+	ResourceID   string `json:"resourceId,omitempty"`
 }
 
 // AllowListChangedEvent is published when the allow list is modified.
@@ -549,7 +564,23 @@ func (p *ChannelEventPublisher) publishTriggered(subject string, event interface
 		}
 	}
 
-	p.logger().Debug("event published", "subject", subject, "subscribers", matched)
+	if matched > 0 && !isAgentStatusSubject(subject) {
+		p.logger().Debug("event published", "subject", subject, "subscribers", matched)
+	}
+}
+
+// isAgentStatusSubject reports whether subject is an agent status subject
+// (agent.<id>.status or project.<id>.agent.status). These carry per-agent
+// status and heartbeat events, which are not logged per event.
+func isAgentStatusSubject(subject string) bool {
+	tokens := strings.Split(subject, ".")
+	switch len(tokens) {
+	case 3:
+		return tokens[0] == "agent" && tokens[2] == "status"
+	case 4:
+		return tokens[0] == "project" && tokens[2] == "agent" && tokens[3] == "status"
+	}
+	return false
 }
 
 // PublishRaw publishes an arbitrary event on the given subject.
@@ -821,6 +852,9 @@ func (p *eventBuilder) PublishUserNotification(_ context.Context, notif *store.N
 			CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 		},
 		SubscriberID: notif.SubscriberID,
+		Kind:         notif.Kind,
+		ResourceType: notif.ResourceType,
+		ResourceID:   notif.ResourceID,
 	}
 	p.sink("user."+notif.SubscriberID+".notification", evt)
 }
@@ -1109,6 +1143,22 @@ func (p *eventBuilder) PublishChatScheduledEvent(_ context.Context, userID strin
 		return
 	}
 	p.sink("user."+userID+".chat.scheduled", evt)
+}
+
+// ChatStarsEvent is the content-free invalidation published on
+// user.<id>.chat.stars when the user's starred messages changed.
+type ChatStarsEvent struct {
+	// Action is always "changed".
+	Action string `json:"action"`
+}
+
+// PublishChatStarsChanged publishes a starred-messages invalidation to its
+// owner only, on user.<userID>.chat.stars.
+func (p *eventBuilder) PublishChatStarsChanged(_ context.Context, userID string) {
+	if userID == "" {
+		return
+	}
+	p.sink("user."+userID+".chat.stars", ChatStarsEvent{Action: "changed"})
 }
 
 // PublishDispatchDone emits a slim completion event when a broker_dispatch row

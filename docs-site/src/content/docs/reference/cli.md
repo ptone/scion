@@ -14,7 +14,7 @@ These flags are available on all commands:
 - `--format <string>`: Output format (`json` or `plain`).
 - `--hub <url|name>`: Hub API endpoint URL, or the nickname of a Hub in the hub list (`scion hub list`). Overrides `SCION_HUB_ENDPOINT`. An unknown nickname is an error that lists the registered names. Under `scion server` and `scion runtime-broker` a nickname is resolved too, but nothing else comes from the hub list there (no current Hub and no current project). Inside agents nicknames are not resolved, so a URL is needed there. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/).
 - `--hub-profile <name>`: Use a target-hub profile (overrides `SCION_HUB_PROFILE`). See `scion hub profile` and [Test identities on another test hub](/scion/hosted/user/test-identity-target-hubs/).
-- `-y, --yes`: Answer Yes to every confirmation prompt, including destructive ones whose interactive default is No. Required to confirm when stdin is not a terminal.
+- `-y, --yes`: Answer Yes to every confirmation prompt, including destructive ones whose interactive default is No. Required to confirm when stdin is not a terminal. Sending local environment values on `scion start` or `scion resume` without a terminal also needs `--send-env` (see [Environment values from the local environment](#environment-values-from-the-local-environment)).
 - `--non-interactive`: Full non-interactive mode (implies `--yes`, so it also answers Yes to every confirmation; errors on ambiguous prompts).
 - `--debug`: Enable verbose debug output for this command. Agents it starts are not affected; use `--agent-log-level` on `scion start` or `scion resume` to debug an agent.
 - `--tz <IANA zone>`: Show times in this time zone, for example `America/New_York`. Defaults to the local zone (which honors `TZ`). `Local` and invalid names are rejected.
@@ -79,8 +79,8 @@ or register this machine's Runtime Broker: `harness-config install`, `sync`, `pu
 Runtime Broker, or the server run outside a project without `--global` or `--project`:
 `scion use`, `scion hub status`, `scion hub add`, `scion hub list`, `scion hub rename`,
 `scion hub remove`, the `scion hub auth` commands,
-`scion runtime-broker register`, `deregister`, `start`, `stop`, `restart`, `status`, `hubs` and
-`join`, and the `server`, `admin` and `project` commands. Outside a project, the `scion hub`
+`scion runtime-broker register`, `deregister`, `start`, `stop`, `restart`, `status`, `hubs`,
+`join` and `convert`, and the `server`, `admin` and `project` commands. Outside a project, the `scion hub`
 connection commands read and write the global settings, as with `--global`. The hub list
 commands (`add`, `list`, `rename`, `remove`) act on `~/.scion/context.yaml`.
 `scion runtime-broker provide` and `withdraw` act on a project and still need one.
@@ -140,7 +140,8 @@ warning that names them.
     - `-d, --detached`: Run in detached mode (default true).
     - `--config <path>`: Path to inline agent config file (YAML/JSON) for Just-In-Time (JIT) overrides, or `-` for stdin.
     - `--task-file <path>`: Read the task from a file, or `-` for stdin, up to 96 KiB. See [Long tasks and task files](#long-tasks-and-task-files).
-    - `--harness-config <string>`: Named harness configuration to use.
+    - `--harness-config <string>` (alias `--harness`): Named harness configuration to use.
+    - `--model <model>`: Model to use: a size alias (`small`, `medium`, `large`, `extra-large`, or `S` / `M` / `L` / `XL`) or an explicit model ID. It beats the model in a `--config` file, the project default, the template and the Hub default.
     - `--thinking-level <value>`: Thinking level to inject into the agent config: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The level is stored as an integer; each harness maps it to its own tiers (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)).
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
     - `--broker <string>`: Preferred runtime broker ID, name, or slug for execution. A broker that does not exist fails with `runtime_broker_not_found` (404), and the message lists the brokers you can use.
@@ -150,6 +151,7 @@ warning that names them.
     - `--no-wait`: Return as soon as the Hub accepts the launch instead of waiting for the agent to reach `running`. Ignored with `--attach`.
     - `--wait-timeout <duration>`: How long to wait for the agent to start (for example `10m`); must not be negative. The default is the Hub's remaining launch budget plus 30 seconds, or 5 minutes when the Hub does not advertise one. Raise it if the Hub's launch timeout has been raised.
     - `--wait-ready`: After the agent is running, also wait until its harness accepts input (its activity is no longer `initializing`, shown as "starting"). `--wait-timeout`, if set, bounds the whole wait; otherwise the readiness wait is limited to 2 minutes. Prints `Agent '<name>' is ready.` when it is; JSON output adds `"ready": true|false` to `details`. If the agent is not ready in time the command exits with status 3 and the agent is left running. Cannot be combined with `--no-wait`.
+    - `--send-env`: Allow sending values from your local environment that the Hub asks for to provision the agent (see [Environment values from the local environment](#environment-values-from-the-local-environment)). Required when no confirmation prompt can be shown.
 
 `start` waits for the agent to reach `running` when the Hub
 launches it asynchronously, after a workspace upload, or with `--attach`.
@@ -157,13 +159,16 @@ Otherwise (for example when the Hub does not launch asynchronously) it returns
 as soon as the Hub answers, as before, possibly while the agent is still
 provisioning. A synchronous launch runs on the Hub independently of the CLI
 request: if the CLI gives up or you press Ctrl-C mid-dispatch, the Hub keeps
-going instead of rolling the agent back. Each dispatch attempt is bounded at
-120 seconds, so a slow cold start (for example on Kubernetes) can still fail on
-a synchronous launch; enable [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for those. While waiting, each launch step is printed to stderr with a readable label, for example
+going instead of rolling the agent back (`scion start` and `scion create` send
+the initial agent create request and any env-gather submission with a 4-minute
+client timeout instead of the standard 30-second client timeout so synchronous
+creates can complete). Each dispatch attempt is bounded at
+180 seconds, so a slow cold start (for example on Kubernetes) can still fail on
+a synchronous launch; [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create), on by default, avoids that limit. While waiting, each launch step is printed to stderr with a readable label, for example
 `my-agent: provisioning (waiting to be scheduled)` (nothing extra under `--format json`). If the
 launch fails, the error gives the failure code (with its label, unless the message already says
 it), the step and the message, for example `agent 'my-agent' create did not complete
-(image_pull_failed) while pulling the image: ...`. A create, including `scion start` of a new
+(image_pull_failed) while preparing the container (image pull, volume mounts): ...`. A create, including `scion start` of a new
 agent, reports `create did not complete`; a start or resume of an existing agent reports `did not
 start`. A launch that ended with an error ends the wait whatever phase the agent reports. If the wait times out, or you press Ctrl-C, only
 the wait stops: the launch continues on the Hub, and re-running `scion start
@@ -202,6 +207,22 @@ task). If soft-delete retention is enabled on the Hub, the name stays reserved
 until the agent is deleted with force=true or purged; until then, use a new
 name. With `--format json`, `--attach` after a workspace upload attaches without
 printing the JSON result.
+
+#### Environment values from the local environment
+
+When the template, Hub and broker do not supply a variable the agent needs, the Hub asks the CLI
+for it, and the CLI looks for it in its local environment. In an interactive terminal, `scion start`
+and `scion resume` list the keys they found and ask `Send N environment value(s) to use in provisioning this agent?`
+before sending them. On an interactive terminal, `--yes` is an explicit answer: it confirms the
+send without showing the prompt, and `--send-env` is not needed. When no prompt can be shown (stdin
+is not a terminal, `--non-interactive`, `cli.interactive_disabled`, or agent mode), the CLI sends local
+environment values only with `--send-env`. Without it, the command fails without sending anything,
+names the keys (never their values) and the flag, and removes the agent the Hub provisioned for the request. Whenever
+the keys are sent without the text-mode prompt and its list (with `--yes`, with `--format json`, or
+with `--send-env` when no prompt can be shown), the CLI names them, never their values, in one line
+on stderr: `Sending N environment value(s) to the Hub: KEY_A, KEY_B`. With `--format json`, stdout
+carries only the JSON result. To avoid sending local values at all, store them on the Hub with
+`scion hub secret set` or `scion hub env set`.
 
 #### Long tasks and task files
 
@@ -334,6 +355,7 @@ session.
     - `-a, --attach`: Attach to the agent immediately.
     - `-f, --force`: Force resume an agent in the `error` phase. This attempts an in-place restart of a crashed or interrupted session, preserving the prior harness conversation state instead of starting fresh.
     - `--no-wait`, `--wait-timeout <duration>`: Same as for [`scion start`](#scion-start-or-run).
+    - `--send-env`: Same as for [`scion start`](#scion-start-or-run).
     - `--agent-log-level <spec>`: Same as for [`scion start`](#scion-start-or-run). Resume reuses the existing agent, so the flag is not applied and `scion resume` prints a warning; the value saved when the agent was created stays in effect.
 
 ### `scion attach`
@@ -381,7 +403,7 @@ Sends a message to a running agent or user.
     - `--body-file <path>`: Read the message body from a file instead of passing it inline. Useful for long messages and scripted workflows. `--body-file -` reads the body from stdin, like a `-` message argument. Mutually exclusive with the inline `<message>` argument.
     - `--attach <path>`: Attach a file as part of this message (repeatable, at most 10). Use `--artifact` instead for work product to review, version or find later. The CLI first asks the Hub where uploads go (`GET /api/v1/chat/attachments`):
         - **Stored as artifacts** (the `hub.attachment_artifacts` experiment on): the files are checked before anything is uploaded. Each must be a readable regular file at any path, no two may have the same file name (compared case-insensitively), and with an agent recipient their total must fit the Hub's delivery limit (`messaging.attachment_delivery_max_bytes`). An `.html`, `.htm` or `.svg` file, or one whose first bytes contain `<html` or `<svg`, fails with exit code `2`: publish it with `scion artifact publish` and send it with `--artifact`. A Markdown file over 64 KiB prints a hint to publish it as an artifact and is still sent. The files are uploaded in one request, once per recipient for a group send, and the send names them by id. If any file is not stored, nothing is sent. An agent recipient gets the files in `~/.scion/inbox/<message-id>/` before the message text (see [Messaging](/scion/hosted/user/messaging/#attachments-for-agents)).
-        - **Otherwise** (the Hub answers `legacy`, or a Hub from before the probe refuses it): file paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`, and the files are staged in the shared directory. A path that is not a regular file (for example a directory) or is outside allowed roots fails the command.
+        - **Otherwise** (the Hub answers `legacy`, or a Hub from before the probe refuses it): file paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`, and the files are staged in the shared directory. The CLI prints `Warning: attachments are staged on the local scratchpad instead of uploaded to the hub (<reason>); they may not reach the hub or recipients on another broker` on stderr naming why the Hub upload path was not used (for example `the hub.attachment_artifacts experiment is off on the hub`). A path that is not a regular file (for example a directory) or is outside allowed roots fails the command.
         - **Constraints:** Cannot be combined with `--in` or `--at`.
         - **Undelivered attachments (staged files):** When an agent sends the message and the Hub cannot read an attached file (for example, it was staged on a different Runtime Broker's host than the Hub's), the message is still delivered without it, and the command prints `Warning: attachment <path> was not delivered: <reason>` on stderr for each such file. With `--format json`, the warnings are in the result's `attachment_warnings` field instead. Messages sent by a human from the CLI do not report undelivered attachments yet.
     - `--artifact <ref>`: Reference a published artifact, `scion://artifact/<id>` or `scion://artifact/<id>@<seq>` (repeatable, at most 10). The reference is added to the message text, and an agent recipient's message ends with one line per artifact showing how to fetch it (`Artifact: v2 - scion artifact get <ref>`, or `current` for an unpinned reference). The Hub attaches only artifacts the sender can read and prints a warning for the rest; a recipient still needs its own access to read an artifact. See [Artifacts](/scion/reference/artifacts/#artifacts-in-messages).
@@ -397,18 +419,18 @@ Sends a message to a running agent or user.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
 - **Output:**
-  A successful send ends with a confirmation that names the message the Hub created, as a `(message <id>)` suffix, for example `Message accepted for agent 'reviewer' (message 0f3c…).` or `Message sent to user:alice@example.com via Hub (conversation 7b1e…, message 0f3c…).` A group send prints the ID on each recipient's line (`  Accepted: agent:a (message 0f3c…)`), because every recipient gets its own message. The ID is the one agents see as `message_id` in the delivered message. For a message recorded in a conversation, it is also the `<message-id>` that `scion conversation get-message conv:<conversation-id> <message-id>` takes; a message with no conversation (for example a broadcast) cannot be fetched that way. A Hub that does not report an ID gets the confirmation without the suffix. `scion broadcast` prints no ID. With `--format json`, a single send's result has the ID in `message_id`, and a group send's `results` entries carry `message_id` for each accepted (`delivered`), deferred or `unknown` (ambiguous) recipient; a failed recipient has none.
+  A successful send ends with a confirmation that names the conversation the message landed in and the message the Hub created, as a `(conversation <id>, message <id>)` suffix, for example `Message accepted for agent 'reviewer' (conversation 7b1e…, message 0f3c…).` or `Message sent to user:alice@example.com via Hub (conversation 7b1e…, message 0f3c…).` The conversation ID is the one to reply into. A group send prints both IDs on each recipient's line (`  Accepted: agent:a (conversation 7b1e…, message 0f3c…)`), because every recipient gets its own message. The ID is the one agents see as `message_id` in the delivered message. For a message recorded in a conversation, it is also the `<message-id>` that `scion conversation get-message conv:<conversation-id> <message-id>` takes; a message with no conversation (for example a broadcast) cannot be fetched that way. Each part of the suffix is left out when the Hub does not report it: a message the Hub did not record in a conversation has no conversation ID, and a Hub that predates this field reports none. `scion broadcast` prints no ID. With `--format json`, a single send's result has the IDs in `message_id` and `conversation_id`, and a group send's `results` entries carry `message_id` and `conversation_id` for each accepted (`delivered`), deferred or `unknown` (ambiguous) recipient; a failed recipient has neither.
 
 - **What the confirmation means:**
   The Hub reports a status for each agent send, and the CLI words its confirmation by what that status actually confirms. "Accepted" means the Hub handed the message to the agent's runtime, which buffered it as input. It does not confirm that the agent has read or acted on it. No send status currently confirms that.
 
   | Hub status | Meaning | CLI confirmation |
   |---|---|---|
-  | `dispatched`, `delivered` | The runtime accepted and buffered the message. | `Message accepted for agent 'x' (message <id>).` |
+  | `dispatched`, `delivered` | The runtime accepted and buffered the message. | `Message accepted for agent 'x' (conversation <id>, message <id>).` |
   | `delivered_not_persisted` | Accepted as above, but the Hub could not save it to history, so there is no message ID. | `Message accepted for agent 'x'.` |
-  | `ambiguous` (HTTP `202`) | The Hub could not tell whether the runtime took the message. Check before you resend. | `Message accepted for agent 'x' (delivery unconfirmed) (message <id>).` |
-  | `deduplicated` | An agent sent an `@mention` notification that repeats one the Hub sent moments earlier for the same message, so it was not sent again. The ID is the earlier message's. | `Message accepted for agent 'x' (duplicate of an earlier send) (message <id>).` |
-  | `deferred` (HTTP `202`) | The agent is reincarnating. The message was saved to history and not sent yet. The new generation sees it on catch-up. | `agent x is reincarnating; message saved to history and will be seen on catch-up (message <id>).` |
+  | `ambiguous` (HTTP `202`) | The Hub could not tell whether the runtime took the message. Check before you resend. | `Message accepted for agent 'x' (delivery unconfirmed) (conversation <id>, message <id>).` |
+  | `deduplicated` | An agent sent an `@mention` notification that repeats one the Hub sent moments earlier for the same message, so it was not sent again. The ID is the earlier message's. | `Message accepted for agent 'x' (duplicate of an earlier send) (conversation <id>, message <id>).` |
+  | `deferred` (HTTP `202`) | The agent is reincarnating. The message was saved to history and not sent yet. The new generation sees it on catch-up. | `agent x is reincarnating; message saved to history and will be seen on catch-up (conversation <id>, message <id>).` |
   | failed (an error response) | The message was not sent. | An error, and no confirmation. |
 
   `scion broadcast` prints a `Broadcast accepted (…)` line, followed by a note when some targeted agents are still starting (the message is held until they are ready), or `No running agents …` when it reached none. With `--all` it prints `Broadcasting message to <n> agents...`, then `Message accepted for agent 'x' via Hub.` for each agent it reached, whatever the status, and a warning for each send that failed. With `--format json`, a single `scion message` send prints the Hub's response, with its raw `status` value, except a human's `@<agent-name>` send, which prints nothing on success; group sends report the statuses described below.
@@ -420,7 +442,7 @@ Sends a message to a running agent or user.
     "group_id": "…",
     "total": 3, "delivered": 1, "deferred": 0, "failed": 1, "unknown": 1,
     "results": [
-      {"recipient": "agent:a", "status": "delivered", "message_id": "…"},
+      {"recipient": "agent:a", "status": "delivered", "message_id": "…", "conversation_id": "…"},
       {"recipient": "agent:b", "status": "failed", "error": "…"},
       {"recipient": "agent:c", "status": "unknown", "error": "…"}
     ],
@@ -543,8 +565,8 @@ Conversations are referenced using one of three forms:
 **Usage:** `scion conversation [command] [flags]`
 
 - **Commands:**
-    - `list` (default): List conversations you participate in. The NAME column shows `DM:<name>` for a direct conversation (the other participant), otherwise the conversation's display name or thread name.
-    - `get <conversation-ref>`: Show conversation details.
+    - `list` (default): List conversations you participate in. The NAME column shows `DM:<name>` for a direct conversation (the other participant), otherwise the conversation's display name or thread name. Conversation IDs and default-agent IDs are printed in full (never truncated), so any listed ID can be passed directly as `conv:<id>`.
+    - `get <conversation-ref>`: Show conversation details (prints full conversation and default-agent IDs).
     - `get-message <conversation-ref> <message-id>`: Retrieve a single message by its ID from a conversation. Authorization is participant-based — only participants of the conversation can retrieve its messages.
     - `messages <conversation-ref>`: View messages in a conversation.
     - `create <name>`: Create a new group conversation. The group appears as a thread in the project's web chat space. Names must start with a letter or digit, contain only letters, digits, spaces, `_`, or `-`, and be at most 100 characters (returns `400 Bad Request` otherwise). A name already used in the project returns `409` (name conflict).
@@ -662,7 +684,7 @@ per agent) is still printed on stdout, and no separate error message is added.
     - `--stopped`: Delete all agents with stopped containers.
     - `--cleanup-only`: Remove only the agent's local files: its worktree, its agent directory and, unless `--preserve-branch` is given, its git branch. Use it when a delete went through on the Hub but the local cleanup failed. It refuses while the Hub still has the agent (run `scion delete <agent-name>` instead); an agent the Hub no longer has, or has only soft-deleted, is cleaned up. When the Hub cannot be checked (unreachable, or no Hub in use) it refuses unless `--force` is given, which removes the local files without checking. Cannot be combined with `--stopped`. When a Hub delete succeeds but its local cleanup fails, `scion delete` prints the `--cleanup-only` command to retry.
     - `--self`: Allow deleting the current agent. Inside an agent container, if one of the named agents is the agent the CLI runs in, `scion delete` refuses, deletes none of the named agents, and exits 1 with a message that `--self` is required. That agent is matched by name, slug or agent ID within its own project. Deleting the current agent removes its files and branch and ends its session. With `--self` the delete goes ahead as usual; to use it after a refusal, re-run the same command with `--self` added. Other agents are deleted as usual. Outside an agent container `--self` has no effect. Also applies with `--cleanup-only`.
-    - `-f, --force`: Remove the agent from the Hub even when its Runtime Broker cannot be reached or cannot resolve it. A forced delete is permanent: it skips soft-delete retention, so the agent cannot be restored. Runtime resources on the Runtime Broker (containers, worktrees) may need separate cleanup on that Runtime Broker. `--force` does not purge an agent that is already soft-deleted. Applies to every named agent; it cannot be combined with `--stopped` (name the agents to force-delete instead). `--force` does not override a Runtime Broker that holds a different run of the agent than the Hub recorded: the Hub refuses that delete with `409 conflict` and keeps the agent (see [`DELETE /agents/:id`](/scion/reference/api/)).
+    - `-f, --force`: Remove the agent from the Hub even when its Runtime Broker cannot be reached or cannot resolve it. A forced delete is permanent: it skips soft-delete retention, so the agent cannot be restored. Runtime resources on the Runtime Broker (containers, worktrees) may need separate cleanup on that Runtime Broker. `--force` does not purge an agent that is already soft-deleted. Applies to every named agent; it cannot be combined with `--stopped` (name the agents to force-delete instead). When the Runtime Broker holds a different run of the agent than the Hub recorded, `--force` deletes the run it holds and then removes the agent; if the reported run is not a valid run ID, or that delete fails for any reason, including yet another run holding the agent by then (`409 conflict`), the Hub keeps the agent (see [`DELETE /agents/:id`](/scion/reference/api/)).
 
 The Hub may answer `202` when teardown is still running (see [`DELETE /agents/:id`](/scion/reference/api/)). The CLI then polls the agent every 2 seconds for up to 180 seconds. It removes the local worktree only after the Hub confirms the delete:
 - **Delete failed:** the worktree is kept and the command exits non-zero.
@@ -675,7 +697,7 @@ Synchronizes the agent workspace between the host and the container.
 
 **Usage:** `scion sync to|from <agent-name> [flags]` (the direction is required)
 
-The project-level forms (bare `scion sync`, `scion sync push` and `scion sync pull`) and their `--force` flag were removed with the Hub's WebDAV endpoint. They exit with an error. To move project files, use git, or the project's Files tab in the web UI.
+The project-level forms (bare `scion sync`, `scion sync push` and `scion sync pull`) and their `--force` flag were removed with the Hub's project WebDAV endpoint (`/api/v1/projects/:id/dav/`, which now returns `404 Not Found`), and exit with a usage error. To move project files, use git, the project's Files tab in the web UI, or the project workspace file API (`/api/v1/projects/:id/workspace/files` and `/api/v1/projects/:id/workspace/archive`).
 
 - **Flags:**
     - `--dry-run`: Preview changes without syncing.
@@ -784,16 +806,14 @@ as stop, start, and restart); an agent can always reincarnate itself.
     - `--handoff-file <path>`: File whose content becomes the new generation's first task. Required for self-migration.
     - `--handoff-template`: Print the handoff template and exit. Ignores other flags and arguments, and does not contact the Hub.
     - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch; for legacy agents created before `createInputs` was recorded, any remaining inline env keys other than `SCION_AUTO_EXPOSE_PORTS` and adopted `TZ` are kept as explicit with a warning in the plan) without migrating anything.
-    - `--broker <name|id>`: Move the agent to another Runtime Broker (see [Moving to another Runtime Broker](#moving-to-another-runtime-broker) below). Both Runtime Brokers must mount the same NFS export, so the workspace moves without being copied (`transferMode: "export"`). The CLI dry-runs the move first and stops if it is refused; add `--dry-run` to only check it.
-    - `--force`: With `--broker <name|id>`, check a forced move that recreates a clone-per-agent or empty-per-agent workspace on the target (`transferMode: "recreate"`) when the workspace cannot travel through a shared NFS export, waiving the export checks and printing what is kept, carried, recreated, and lost. Currently available with `--dry-run` only (executing a forced move that recreates the workspace returns `501 Not Implemented`).
+    - `--broker <name|id>`: Move the agent to another Runtime Broker (see [Moving to another Runtime Broker](#moving-to-another-runtime-broker) below). By default both Runtime Brokers must mount the same NFS export, so the workspace moves without being copied (`transferMode: "export"`); add `--force` when the workspace is a clone-per-agent or empty-per-agent workspace that can be recreated on the target (`transferMode: "recreate"`). The CLI dry-runs the move first and stops if it is refused; add `--dry-run` to only check it.
+    - `--force`: With `--broker <name|id>`, allow a forced move that recreates a clone-per-agent or empty-per-agent workspace on the target (`transferMode: "recreate"`) when the workspace cannot travel through a shared NFS export, waiving the export checks and printing what is kept, carried, recreated, and lost. Without `--dry-run`, the CLI runs the same checks as a dry run first and sends the move only if it is eligible; it does not print the verdict or consequences of an accepted move, so preview them first with `--dry-run --force`.
     - `--service-account <id|email|name>`: Patch the GCP service account of the new generation. Accepts the same forms and gets the same access checks as `scion create`.
     - `--role <role>`: Patch the agent role of the new generation: `none`, `readonly`, `baseline`, or `full`. Gets the same access checks as `scion create`; an agent reincarnating itself can lower its own role but not raise it.
     - `--model <model>`: Patch the model of the new generation. Model aliases are accepted, as with `scion start`.
     - `--harness-auth <method>`: Patch the harness auth method of the new generation: `api-key`, `oauth-token`, `auth-file`, or `vertex-ai`.
     - `--image <image>`, `-i`: Patch the container image of the new generation.
     - `--thinking-level <value>`: Patch the thinking level of the new generation. Accepts the same values as `scion start`: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The Hub receives the integer. Without the flag, the thinking level is not patched. An invalid value fails before contacting the Hub.
-    - `--shared-dir-backend <name>=<backend>`: Change the recorded [storage backend](/scion/reference/server-config/#changing-an-agents-shared-directory-to-nfs) of the agent's shared directory `<name>`: `nfs` moves it from `local` to `nfs`, and `local` [moves it back](/scion/reference/server-config/#changing-an-agents-shared-directory-back-to-local). Repeatable. Only the agent's record changes; copy the data first. An agent cannot use this on itself, and it cannot be combined with a move to another Runtime Broker. Before a real reincarnation the CLI asks the Hub for the plan and stops if the Hub does not echo the change; if it says the Hub does not support `--shared-dir-backend`, upgrade the Hub. If the next start refuses an empty directory, copy the data and run `scion start` again.
-    - `--allow-empty-shared-dir`: With `--shared-dir-backend`, let the agent start even if the directory on the new backend is empty while the previous one is not.
 
 **Patch flags.** `--service-account`, `--role`, `--model`, `--thinking-level`, `--harness-auth`, and
 `--image` change that setting on the new generation, and later reincarnations keep the new value.
@@ -840,8 +860,7 @@ check. It runs before the workspace and capability checks (`400`, `412`), so exp
 
 #### Moving to another Runtime Broker
 
-`scion reincarnate <agent> --broker <name|id>` moves the agent to another Runtime Broker that mounts
-the same NFS export, keeping its ID, slug, generation chain, and workspace. The full requirements,
+`scion reincarnate <agent> --broker <name|id>` moves the agent to another Runtime Broker, keeping its ID, slug, and generation chain. By default both Runtime Brokers must mount the same NFS export so the workspace moves in place (`transferMode: "export"`); with `--force`, a clone-per-agent or empty-per-agent workspace that cannot travel through a shared export is recreated on the target instead (`transferMode: "recreate"`). The full requirements,
 permissions, and operator notes are in
 [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
 
@@ -849,16 +868,15 @@ The CLI first sends the same request as a dry run. The Hub runs eleven checks in
 `runtime_target`, `workspace_mode`, `workspace_storage_reported`, `same_export`, `workspace_on_export`,
 `workspace_recreatable`, `target_profile`, `target_health`, `access`, `capability` (on both Runtime
 Brokers, with the source online), and `capacity`. The first failing check decides the answer, with `400`, `403`, `409`, `412`,
-`429`, or `503`, and the CLI prints the transfer mode of an eligible move (`export` or `recreate`), every check (`passed`, `failed`, `not_evaluated`, or `waived`), and the move's `consequences` (`kept`, `carried`, `recreated`, and `lost`). When a move without `--force` fails only because the workspace cannot travel through a shared export and a forced move onto the target would apply, the CLI also prints a hint pointing at `--dry-run --force`. A refused move
+`429`, or `503`, and the CLI prints the transfer mode of an eligible move (`export` or `recreate`), every check (`passed`, `failed`, `not_evaluated`, or `waived`), and the move's `consequences` (`kept`, `carried`, `recreated`, and `lost`). When a move without `--force` fails only because the workspace cannot travel through a shared export and a forced move onto the target would apply, the CLI also prints a hint pointing at `--dry-run --force` and `--force`. A refused move
 stops there, before anything changes. With `--dry-run` (or `--dry-run --force`) the CLI only prints the verdict and plan.
 
 When the checks pass, the Hub accepts the move with `202 Accepted` and runs it in the background. It
-stops the agent on the source, moves its quota to the target, provisions it on the target (which first
-confirms through its own mount that the workspace is there), starts the new generation with the
+stops the agent on the source, moves its quota to the target, provisions it on the target (in `export` mode the target confirms through its own mount that the workspace is there; in `recreate` mode it refuses with `409 move_target_not_fresh` if an agent or workspace directory already exists on the target, then creates a fresh clone of the project's git remote (the agent's branch if it was pushed) or an empty workspace), starts the new generation with the
 preamble and handoff, and then removes the agent's local state from the source. A failure in these
 steps does not come back to the CLI, which already has its `202`: the agent goes to the `error`
 phase, and its status message gives the reason. A failure after the agent is assigned to the target
-and before the new generation is running rolls the move back: the agent is left stopped on the
+and before the new generation is running rolls the move back: the Hub removes the agent's state on the target (in `recreate` mode, only directories marked with that move's reincarnation ID) and leaves the agent stopped on the
 source, in the `error` phase, with its previous configuration and workspace, and you can start it
 again or retry. If the target's start fails in a way that may have left a container, the agent stays
 on the target in the `error` phase instead.
@@ -886,8 +904,8 @@ Manages the Scion workspace (Project). `scion projects` is an alias of the group
     - **Note:** If you are in a git repository, add `.scion/agents` to your `.gitignore` to avoid issues with nested git worktrees: `echo ".scion/agents" >> .gitignore`
     - **Hub Integration:** When a hub answers, `init` links the new project to it: without a prompt on the local workstation hub, after a prompt on a remote hub. When no hub is configured or the local server is not running, `init` still succeeds and prints a note pointing at `scion server start`; the project then links on its first hub command.
 - `scion project use [project]`: Show or select the current project: a project on a Hub that commands target when they run outside a scion project directory. `scion use` is an alias with the same flags. The selection is saved per user in `~/.scion/context.yaml`; flags, environment variables and the project of the current directory take precedence over it. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/).
-    - `scion use`: Show the effective Hub and project, where each comes from (`--hub flag`, `SCION_HUB_ENDPOINT` (or `SCION_HUB_URL`), `directory link`, `current context`; for the project `--project flag`, `directory: <path>`, `current context`, `global project`; or `none`), and how the CLI would authenticate. When the current directory overrides the saved context, a `Saved context (applies outside scion project directories): <hub> / <project>` line follows. Reads local state only. With no Hub it prints `No hub selected. Add one with 'scion hub add <name> <url>' or start a local hub with 'scion server start'.` and exits 0. `--format json` prints `effective` (`hub`, `project`, `auth`), `context` and `overridden`.
-    - `scion use <project>`: Select a project and the Hub it lives on; that Hub becomes the current Hub. `<project>` is a slug, name, UUID or git URL, as for `--project`. It is looked up in the known-project list first, and on the registered Hubs when it is not known there or with `--refresh` (5 seconds per Hub; with `--hub`, or with `SCION_HUB_ENDPOINT`/`SCION_HUB_URL` set, only that Hub). When several Hubs have the project, an interactive run asks you to choose; without a terminal, with `--non-interactive` or in agent mode, the command fails with `project '<ref>' exists on several hubs; choose one with --hub:` and one `scion use <ref> --hub <hub>` line per candidate (JSON: `{"error": "ambiguous", "candidates": [...]}`). `--yes` never picks one. When no Hub has it, the error is `project '<ref>' not found on hubs: <hubs>`, or, when some Hubs could not be searched, `project '<ref>' not found on the hubs searched (<hubs>); it may be on the hub that could not be searched (<hub>: not logged in)`, followed by `Log in with: scion hub auth login --hub <hub>` for each Hub you are not logged in to. Inside a project directory, the selection is saved and a note says the directory's project takes precedence there.
+    - `scion use`: Show the effective Hub and project, where each comes from (`--hub flag`, `SCION_HUB_ENDPOINT` (or `SCION_HUB_URL`), `directory link`, `current context`; for the project `--project flag`, `directory: <path>`, `current context`, `global project`; or `none`), and how the CLI would authenticate. When the current directory overrides the saved context, a `Saved context (applies outside scion project directories): <hub> / <project>` line follows. If the saved project was selected while its Hub could not confirm it, bare `scion use` labels the project `current context, unverified` and prints a note with how to verify it (and `unverified: true` in `--format json` on the effective and saved project). Reads local state only. With no Hub it prints `No hub selected. Add one with 'scion hub add <name> <url>' or start a local hub with 'scion server start'.` and exits 0. `--format json` prints `effective` (`hub`, `project`, `auth`), `context` and `overridden`.
+    - `scion use <project>`: Select a project and the Hub it lives on; that Hub becomes the current Hub. `<project>` is a slug, name, UUID or git URL, as for `--project`. It is looked up in the known-project list first, and on the registered Hubs when it is not known there or with `--refresh` (5 seconds per Hub; with `--hub`, or with `SCION_HUB_ENDPOINT`/`SCION_HUB_URL` set, only that Hub). When a known project is selected on a Hub that has no valid login (or refused the login or did not answer), the command still selects it and exits 0, marks it `(unverified)` in `~/.scion/context.yaml`, and names the Hub URL in the `scion hub auth login --hub <url>` hint; the next confirmed selection clears the mark. When several Hubs have the project, an interactive run asks you to choose; without a terminal, with `--non-interactive` or in agent mode, the command fails with `project '<ref>' exists on several hubs; choose one with --hub:` and one `scion use <ref> --hub <hub>` line per candidate (JSON: `{"error": "ambiguous", "candidates": [...]}`). `--yes` never picks one. When no Hub has it, the error is `project '<ref>' not found on hubs: <hubs>`, or, when some Hubs could not be searched, `project '<ref>' not found on the hubs searched (<hubs>); it may be on the hub that could not be searched (<hub>: not logged in)`, followed by `Log in with: scion hub auth login --hub <hub>` for each Hub you are not logged in to. Inside a project directory, the selection is saved and a note says the directory's project takes precedence there.
     - `scion use --hub <hub>`: Make `<hub>` (a nickname or URL) the current Hub and restore the project last selected on it. A URL not in the hub list is added with a nickname derived from its host. No network calls.
     - `scion use --clear`: Forget the current project on the current Hub; the Hub stays current.
     - Flags: `--refresh` (look the project up on the Hubs even if the known-project list has it), `--clear`, `--force` (replace an unreadable `~/.scion/context.yaml`).
@@ -971,7 +989,7 @@ Manages per-user Hub settings.
 
 ### `scion secret`
 
-Manages project-scoped secrets from the host or within an agent container. This command mirrors the `sciontool secret` commands used in agent containers, using the `hubclient` Secrets service to operate on the active project.
+Manages project-scoped secrets from the host or within an agent container. Inside an agent container, `scion secret get` and `scion secret list` are available in agent mode (replacing `sciontool secret get` and `sciontool secret list`, which now print a message pointing to the `scion` commands and exit `1`); `scion secret set` is not available in agent mode, and agents store secrets with `sciontool secret set`.
 
 Unlike `scion hub secret` (which supports managing secrets at any scope: user, hub, project, or broker), `scion secret` is streamlined for project-level secrets within your current project context.
 
@@ -980,9 +998,12 @@ Unlike `scion hub secret` (which supports managing secrets at any scope: user, h
     - Flags:
         - `--type <string>`: Secret type: `environment` (default), `variable`, or `file`.
         - `--target <string>`: Injection target path (defaults to key for env, required for file-type secrets).
-        - `--allow-progeny`: Allow child agents (progeny) to inherit this secret.
-- `scion secret get KEY`: Retrieve the metadata of a project-scoped secret. Secret values are never returned to protect security.
-- `scion secret list`: List metadata (key, type, version, updated time) for all project-scoped secrets. Secret values are never returned. With `--json` or `--format json`, prints the same list shape as `scion hub secret list`.
+- `scion secret get KEY`: Print the metadata of a project-scoped secret (key, scope, type, target, version, timestamps).
+    - Flags:
+        - `--value`: Print the decoded value instead. It is written to stdout as-is, with no added newline or labels, so `export API_KEY=$(scion secret get --value API_KEY)` works. Reading a value requires an agent's hub identity, so it works only inside an agent container; elsewhere the command fails with a message saying so. Cannot be combined with `--metadata` or `--format json`.
+        - `--metadata`: Print the metadata (the default).
+    - With `--format json`, prints the metadata object. The value is never included in JSON output.
+- `scion secret list`: List metadata (key, type, version, updated time) for all project-scoped secrets. Secret values are never returned. With `--format json`, prints the same list shape as `scion hub secret list`.
 
 ### `scion clean`
 
@@ -1141,6 +1162,7 @@ Manages agent templates. `scion template` (singular) is an accepted alias. Scope
 Hub-only commands (require an enabled Hub):
 
 - `sync [template]` (alias `push`): Create or update a template in the Hub; only changed files are uploaded. Use `--all` to sync every local template, or `--name <name>` to sync under a different Hub name.
+    - The template may also be a directory path: `.` or `..`, an absolute path, or one that contains a path separator (such as `./name` or `../name`). That directory is synced as is, and the Hub name defaults to its base name (`--name` overrides it). Such an argument is read relative to the current directory, not looked up in the templates directories. If the base name cannot be a template name (for example a content-hash cache directory), sync stops and asks for `--name`.
 - `pull <name>`: Download a template from the Hub to the local filesystem. Use `--to <path>` for a custom destination.
 - `status`: Show the sync status of templates relative to the Hub.
 
@@ -1206,6 +1228,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - **Hub URL.** Taken from, in order: the root `--hub` flag (a hub nickname or URL), the `SCION_HUB_ENDPOINT` environment variable, then `SCION_HUB_URL`, then the directory's link entry, then the current Hub. This is the order every Hub command uses (see [Hub resolution order](#global-flags)). `--hub-url` is a hidden, deprecated alias of `--hub` that wins over it; it prints a deprecation notice.
         - **Hub list.** A hub URL given with `--hub` or `--hub-url` that is not in the hub list yet is added to it after a successful login, with a nickname derived from its host. When no Hub is current, the Hub logged in to becomes the current Hub after a successful login (`Hub '<name>' (<url>) is now the current hub.`): one given with `--hub` or `--hub-url` (a URL or a nickname), or the directory's link entry Hub, but never one taken from an environment variable. A login never switches a Hub that is already current; when the Hub is not the current Hub, the command prints how to select it (`scion use --hub <name>`).
         - **Settings are never written.** When the Hub came from the current context or from the directory's link entry, the command prints `Logged in to <url> (current hub, selected with 'scion use').` or `Logged in to <url> (the hub this directory is linked to).` A Hub taken from an environment variable is not added to the hub list.
+        - **Hubs behind Identity-Aware Proxy (IAP).** Interactive browser and device-code login cannot traverse an IAP-protected Hub. When `login` detects an IAP challenge, it fails with instructions to set `SCION_TRANSPORT_MODE=iap` and `SCION_TRANSPORT_TOKEN` (or `SCION_TRANSPORT_TOKEN_FILE`) along with a user access token in `SCION_HUB_TOKEN`; see [Workstation CLI access (a person)](/scion/hosted/ha/auth-proxy-iap/#workstation-cli-access-a-person).
     - `logout`: Clear stored credentials. Uses the same Hub URL order. The hub list is not changed.
     - `federation-token`: Obtain a short-lived user access credential that names you to a peer hub, signed with the Hub's OIDC key, and print it. Requires the `federation.project_visitors` [experiment](/scion/reference/experiments/) on the Hub (the Hub answers 404 while it is off or while its OIDC provider is not enabled). Human mode only. A user access token used for this command needs the `federation_token:mint` scope on a hub boundary.
         - Flags:
@@ -1214,13 +1237,14 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 - `scion hub token`: Manage user access tokens (scoped, revocable bearer tokens for CI/CD and automation).
     - `create`: Create a new token.
         - Flags:
-            - `--project <string>`: Project ID or name to scope the token to (required).
+            - `--project <string>`: Project ID or name to scope the token to (required unless `--boundary hub`).
+            - `--boundary <project|hub>`: Token boundary (`project` by default, or `hub` for a hub-bound token; cannot be combined with `--project` when `hub`).
             - `--name <string>`: Token name/label (required).
             - `--scopes <scopes>`: Scopes to grant (required). This flag is **repeatable** and also accepts a **comma-separated list** of scopes (e.g., `--scopes agent:read,agent:create --scopes agent:lifecycle`). Strict empty-value validation is enforced.
             - `--expires <duration>`: Expiry: a positive duration in minutes (90m), hours (2h), days (30d) or years (1y, always 365 days), or an RFC 3339 date (2026-12-31T00:00:00Z) (default: 90d). `m` means minutes; there is no month unit (use 30d or 1y for longer).
             - `--purpose <text>`: Optional bounded description of what the token is for (≤128 bytes, single line, no control characters). Immutable after issuance — there is no update command.
             - `--label <key=value>`: Optional bounded label (repeatable). Keys are lowercase `[a-z][a-z0-9_.-]*` (≤32 bytes); values are ≤64 bytes from a restricted charset. A set of attribution-shaped keys (e.g. `user_id`, `agent`, `actor_binding`) are reserved and rejected. Immutable after issuance.
-    - `scopes`: List every scope accepted by `create --scopes`. With `--project <string>`, also report which scopes you may currently select for a token scoped to that project and, for each one you cannot, why. Supports `--json`.
+    - `scopes`: List every scope accepted by `create --scopes`. With `--project <string>` (project boundary) or `--boundary hub` (no `--project`), also report which scopes you may currently select for that boundary and, for each one you cannot, why. Supports `--json`.
     - `list`: List your access tokens.
     - `revoke <token-id>`: Revoke a token (remains visible in listings as revoked).
     - `delete <token-id>`: Permanently delete a token.
@@ -1243,6 +1267,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags: `--yes`, `--non-interactive`, `--force`
 - `scion hub shadow` and `scion hub unshadow` have been removed. `scion hub shadow` fails with `'scion hub shadow' was removed; run 'scion use <project>' to work with a hub project from any directory`. Directories it created keep working and print a cleanup notice; see [Moving from `scion hub shadow`](/scion/hosted/user/multiple-hubs/#moving-from-scion-hub-shadow).
 - `scion hub brokers`: List all runtime brokers registered on the Hub.
+    - `info [broker-name-or-id]`: Show details for a Runtime Broker, given by name or ID (default: this host's registered Runtime Broker), including its status, capacity, profiles (for a legacy broker), or `Runtime target` and reported defaults (`runtimeTargetPresentation` in `--json`) for a flat Runtime Broker.
     - `join-token create <broker-name>`: Create the broker if it does not exist, and a single-use join token for it, to redeem on the broker host with `scion runtime-broker join` (see [Headless Registration with a Join Token](/scion/hosted/ha/runtime-broker/#headless-registration-with-a-join-token)). The token is printed on stdout; the instructions go to stderr. For an existing broker, only its owner or a super-admin can create a token, and the new token replaces any unused earlier one. The broker's settings are not changed. Requires the `broker.create` permission, with a sign-in or a hub-boundary user access token carrying `broker:create`; a token issues a token only for a broker its user created.
         - `--ttl <duration>`: How long the token is valid, from `5m` to `24h`. Default: the Hub's default, `1h`.
         - `--json`: Print `brokerId`, `brokerName`, `joinToken`, `expiresAt`, `hubEndpoint` and `reissued` as JSON.
@@ -1255,8 +1280,16 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `migrate-names`: Rename legacy (pre hub-prefix) GCP Secret Manager secrets to the hub-prefixed `scion-<12-hex hub hash>-…` scheme. Idempotent; run a plain pass (or `--dry-run`) first, then a separate `--delete-legacy` pass. Does not require a project directory. See [Secrets](/scion/hosted/user/secrets/) for the IAM and rollout ordering.
         - Flags: `--gcp-project <id>` (required), `--credentials <path>`, `--dry-run`, `--delete-legacy` (delete each legacy secret after verifying its hub-prefixed copy), `--hub-id <id>` (defaults to the resolved server hub ID), `--timeout <duration>` (default `5m`), `-c, --config <path>` (server config file; must match the running hub's so hub ID resolution agrees).
 - `scion hub users`: Administer hub users. Not available in agent mode.
-    - `provision <email>`: Pre-register a user (status `invited`, the same record an admin invite creates). The person still signs in through a configured sign-in provider; the role is assigned at first sign-in. Running it again with the same details is safe and reports that the user is already pre-registered. Requires the `user.invite` permission (hub admins hold it) and an interactive sign-in; it is not available on a Hub running with dev auth. See `POST /api/v1/users` in the [API reference](/scion/reference/api/).
+    - `provision <email>`: Pre-register a user (status `invited`, the same record an admin invite creates). The person still signs in through a configured sign-in provider; the role is assigned at first sign-in. Running it again with the same details is safe and reports that the user is already pre-registered. Requires the `user.invite` permission (hub admins hold it), with an interactive sign-in or a hub-boundary user access token carrying `user:invite`; it is not available on a Hub running with dev auth. See `POST /api/v1/users` in the [API reference](/scion/reference/api/).
         - Flags: `--display-name <string>`, `--note <string>`, `--json`.
+    - `invite [email...]`: Invite one or more users to the Hub in a single request (`POST /api/v1/admin/users/invite/bulk`), creating `invited` records and optionally granting project roles. Addresses come from positional arguments (comma-separated lists accepted) and/or `--file <path|->` (one address per line, or CSV `email,note`; blank lines and `#` comments are skipped; `-` reads stdin). At most 1,000 addresses and at most 2,000 memberships (addresses × projects) per request. Requires `user.invite` (plus `user.read` when `--project` is used) and authority to grant every requested project role (`GET /api/v1/projects/:id/members/assignable-roles`); if any role cannot be granted, the Hub refuses the whole request and invites no one. Hub roles cannot be set here (assigned at first sign-in by Hub policy). Exits non-zero if refused or if any address or membership did not complete; safe to re-run (retries only what is missing).
+        - Flags: `--file <path|->`, `--note <string>` (applies to addresses without their own CSV note), `--project <project>=<role>[,<role>...]` (repeatable; `<project>` is a project name or ID, `<role>` is `project-member`, `project-admin`, `project-owner`, or a custom project role name or ID), `--json`.
+- `scion hub delegation`: Manage agent delegation grants: a bounded, time-limited subset of your Hub access that an agent you own or created exchanges, through sciontool, for short-lived delegated credentials. The scion CLI never handles those credentials. Needs your interactive login (an access token is refused). Not available in agent mode. Issuance and exchange need the `hub.agent_delegation` experiment; list, get, revoke and revoke-all always work. See [Agent delegation](/scion/reference/agent-delegation/).
+    - `create <agent>`: Issue a grant for `<agent>` (ID or name). Flags: `--permission <selector>` (repeatable, required; for example `agent:read`, `agent:list`, `project:read`, `agent:message`, `agent:attach`), `--boundary <project|hub>` (default `project`), `--boundary-project <id>` (the project of a project boundary; default: the agent's project), `--name <string>` (required), `--purpose <string>`, `--label key=value` (repeatable), `--expires <duration>` (for example `12h` or `7d`; default 7 days, at most 30), `--max-credential-ttl <duration>` (default 15m, at most 60m), `--json`. With `agent:attach`, the command prints what attach gives the agent (see the linked page).
+    - `list [<agent>]`: List the grants of `<agent>` that you may see, or, without an argument, the grants you issued. Flag: `--json`.
+    - `get <agent> <grant-id>`: Show one grant with its status and active credentials. Flag: `--json`.
+    - `revoke <agent> <grant-id>`: Revoke a grant and every credential exchanged from it. Flag: `--credential <id>` (revoke only that credential).
+    - `revoke-all (--mine | <agent>)`: Revoke every unrevoked grant you issued, or every unrevoked grant of `<agent>` you may revoke this way; grants you may see but not revoke this way are reported as skipped. It asks for confirmation on a terminal (default No); `--yes` (`-y`) or `--non-interactive` confirms, and without a terminal and without either flag it refuses. Flag: `--json`.
 - `scion hub profile`: Manage target-hub profiles: named, non-secret descriptions of another test hub, stored in `~/.scion/hub-profiles/<name>.yaml` (mode `0600`). Select one with `--hub-profile <name>` or `SCION_HUB_PROFILE`. With a profile selected, the bearer comes only from the profile, never from a login, `~/.scion/scion-token`, `SCION_AUTH_TOKEN` or `SCION_HUB_TOKEN`; a command with no applicable profile credential fails. Only these commands run with a profile: `hub status`, `hub profile`, `hub test-identity` (except `delegate`), `hub projects` (list, `info`, `create`, `delete`; name the project explicitly), `artifact publish`, `get`, `versions` and `delete` (`publish` needs `--project <name or id>` on the target), and `create`, `start`, `list`, `stop`, `delete`, `look` and `logs` with `--project <name or id>` on the target (they act as the `--as` identity through the target's API only: no local project, settings, hub sync, agent directory, worktree or local template is used, no environment value is gathered from the local environment (`--config` and `--task-file` content is sent as given), and `--attach`, `--workspace`, `--upload-template`, `delete --cleanup-only`, `list --all` and the `list` relationship filters are refused). `message` is not available with a profile. Every other command is refused, `--hub` with a profile fails with `--hub cannot be used with a hub profile: the profile names the hub`, and `--no-hub` fails with its removal error first. A profile whose endpoint names this agent's own hub (`SCION_HUB_ENDPOINT` or `SCION_HUB_URL`) is refused; when either is set but is not an absolute URL, every profile is refused. The check compares parsed host names and ports (lowercase, without a trailing dot, IP literals in canonical form, loopback and container bridge host names treated as one host; paths ignored). It does not resolve DNS aliases, so a profile naming another name of the same hub is not detected; the target hub's own delegation remains the boundary. In agent mode, `profile add`, `show` and `remove` apply the same check. `--as <alias>` and `--run <label>` (or `SCION_HUB_RUN`) are flags of the `hub` and `artifact` commands and of the agent commands above that apply only with a profile. See [Test identities on another test hub](/scion/hosted/user/test-identity-target-hubs/).
     - `add <name>`: Add a profile. Flags: `--endpoint <url>` (required; https, or http on a loopback host), `--transport <iap|none>` (default `iap`), `--iap-audience <client-id>` and `--uat-sa <email>` (the target's IAP service account; both required for `iap`), `--issuer-sa <email>` (the target's issuer service account), `--admin-issuer-sa <email>` (the target's admin issuer service account; required with an admin delegation and different from `--issuer-sa`), `--issuer-delegation <tier>=<id>` (tiers `member`, `hub-admin` and `super-admin`; repeat the flag or separate entries with commas), `--replace`.
     - `list`, `show <name>`: List profiles; show one and its cached runs. Flag: `--json`.
@@ -1316,6 +1349,19 @@ scion hub test-identity delete "$FIXTURE_ID" --purge
     - `set`: Set hub-wide messaging settings.
         - Flags: `--cross-project-enabled <bool>` (enable or disable cross-project messaging), `--revision <int>` (required, optimistic concurrency revision).
     - `get`: Show the current hub-wide messaging settings and revision.
+- `scion hub settings`: View and change the Hub's server configuration (operational settings, agent defaults, runtimes, profiles, harness configs, telemetry, federation) over `/api/v1/admin/server-config`. Keys are the dotted paths `scion hub settings schema` lists (for example `server.hub.public_url`, `default_max_turns`, `runtimes`); a key below a listed key (`runtimes.k8s.namespace`) changes that part of the current value and saves the whole value, so other entries are kept. Every change is compare-and-set: it sends the revision of each section it changes as read just before (`expected_revisions`), so a change made in between is reported as a conflict instead of being overwritten. Field errors are printed one per line with the key, and a conflict lists each section's expected and current revision and what was already saved. Needs a Hub admin login, or an access token on a hub boundary with `hub_config:read` (`get`, `schema`) or `hub_config:update` (`set`, `unset`).
+    - `get [KEY]`: With no argument, list the sections with their source (`db`, `file` or `default`), revision and last change. With `KEY`, print its value; `--section NAME` prints every key of a section. Secret values are shown masked.
+    - `set KEY VALUE [KEY VALUE ...]`: Change keys in one save. `VALUE` is read as YAML (`true`, `42`, `"text"`, `[a, b]`, `{k: v}`); `--string` sends values as text. `--file <path|->` reads a YAML or JSON document of keys instead; a null in it unsets the key.
+    - `unset KEY [KEY ...]`: Clear keys, so the Hub uses its default. A key below a listed key (`runtimes.old`) is removed from the current value. The GCP permission-check keys and the agent role defaults cannot be cleared this way. `--section NAME --reset` deletes the section's saved values instead, so the Hub uses its startup configuration for the section (asks for confirmation; `--yes` answers it).
+    - `schema [SECTION]`: List the sections and their keys (keys that apply only after a Hub restart are marked); with `SECTION`, print its JSON schema.
+    - Flags on `set` and `unset`: `--revision SECTION=N` (repeatable; pin a section's expected revision), `--dry-run` (print the request body without sending it; values of secret keys are masked), `--no-validate` (send keys the schema does not list and let the Hub decide).
+- `scion hub project-defaults`: View and change the Hub's defaults for new projects (for example `default_scratchpad`) over `/api/v1/admin/project-defaults`: `get [KEY]`, `set KEY VALUE ...`, `unset KEY ...`. Unknown keys are refused, since the Hub would ignore them. Needs a Hub admin login, or a hub-boundary access token with `hub_project_defaults:read` or `hub_project_defaults:update`.
+- `scion hub experiments`: View and override the Hub's [experiments](/scion/reference/experiments/) over `/api/v1/admin/experiments`. Needs a Hub admin login, or a hub-boundary access token with `hub_experiments:update` (also needed to list them).
+    - `list` (alias `ls`): Show each experiment's stage, default, override and whether it is on, with the settings revision.
+    - `enable NAME ...` / `disable NAME ...`: Override experiments on or off hub-wide.
+    - `reset NAME ...`: Remove overrides, returning experiments to their defaults. `--all` removes every override, including those of experiments the Hub no longer knows (asks for confirmation; `--yes` answers it); when the stored overrides are unreadable it also needs `--confirm-malformed`.
+    - `--revision N` on `enable`, `disable` and `reset` pins the expected settings revision (default: the revision just read).
+- None of `scion hub settings`, `scion hub project-defaults` or `scion hub experiments` is available in agent mode.
 
 ### `scion service-accounts`
 
@@ -1343,7 +1389,7 @@ Open a tunnel from your machine to a port inside an agent, or to the agent's SSH
     - `--known-hosts <path>`: With `--ssh`, the absolute path of the known-hosts file holding the agent's pinned host key, for the host-key hint only. Requires `--host-key-alias`. Written into Host blocks by `scion vscode`.
     - `--host-key-alias <host>`: With `--ssh`, the name of the pin in `--known-hosts` (the Host block's `HostKeyAlias`). Requires `--known-hosts`.
 
-By default the tunnel listens on `127.0.0.1` and prints the address it forwards to stderr. `--hub` and `--project` make the command independent of the working directory. The command never prompts. Exit codes: `0` success, `1` other error, `2` usage error, `3` no usable credential or identity changed, `4` agent not found, `5` not permitted, `6` Hub unreachable or unavailable, `7` tunnel closed by policy, `8` tunnel limit reached, `9` agent not running, `10` agent unreachable, `11` Hub does not support tunnels, `130` interrupted, `143` terminated. A listener that gets `3`, `4`, `5` or `11` for a new connection stops accepting connections. It exits with that code once its open connections have ended. A stopped agent (`9`) refuses only that connection, and the listener keeps listening. With `--ssh`, the command prints a one-line hint when the agent's host key no longer matches its pin. Without `--known-hosts` it reads the `scion ssh-config` pins. The hint never changes host-key verification: ssh's `StrictHostKeyChecking` and the Host block's `UserKnownHostsFile` remain the only check.
+By default the tunnel listens on `127.0.0.1` and prints the address it forwards to stderr. `--hub` and `--project` make the command independent of the working directory (when `--global` and `--project <project>` are both given, `--project` is used; `--global` alone or with `--project global` gives no project). When a token from the environment gets an agent not-found error (exit `4`) and its project list is empty, the error notes that the token may lack the `project:list` scope. The command never prompts. Exit codes: `0` success, `1` other error, `2` usage error, `3` no usable credential or identity changed, `4` agent not found, `5` not permitted, `6` Hub unreachable or unavailable, `7` tunnel closed by policy, `8` tunnel limit reached, `9` agent not running, `10` agent unreachable, `11` Hub does not support tunnels, `129` hangup (`SIGHUP`), `130` interrupted, `143` terminated. A listener that gets `3`, `4`, `5` or `11` for a new connection stops accepting connections. It exits with that code once its open connections have ended. A stopped agent (`9`) refuses only that connection, and the listener keeps listening. With `--ssh`, the command prints a one-line hint when the agent's host key no longer matches its pin. Without `--known-hosts` it reads the `scion ssh-config` pins. The hint never changes host-key verification: ssh's `StrictHostKeyChecking` and the Host block's `UserKnownHostsFile` remain the only check.
 
 ```bash
 scion tunnel my-agent --port 5173
@@ -1351,7 +1397,7 @@ scion tunnel my-agent --port 5173 --local-port 8080
 scion tunnel --stdio --ssh --hub https://hub.example.com --project my-project my-agent
 ```
 
-- `scion tunnel status [--json]`: Show the open tunnels of your running `scion tunnel` processes: the Hub endpoint, the credential identity (kind, subject and scope, never the secret), the session IDs and the open tunnels. With `--hub`, only tunnels to that Hub are shown. Reads local state only and never prompts.
+- `scion tunnel status [--json]`: Show the open tunnels and `--local-port` listeners of your running `scion tunnel` processes: the Hub endpoint, the credential identity (kind, subject and scope, never the secret; `hub` scope for the development token), the session IDs, the open listeners (`Listeners` table with a `LOCAL PORT` column in text, `listeners` with `local_port` in `--json`), and the open tunnels. With `--hub`, only tunnels to that Hub are shown. Reads local state only and never prompts.
 
 ### `scion ssh`
 
@@ -1359,9 +1405,9 @@ Open an SSH session to an agent with your system `ssh` client. The connection ru
 
 **Usage:** `scion ssh [flags] <agent> [<command>...]`
 
-- `<agent>` is an agent in the current project, `<project>/<agent>`, or the only agent with that name across all projects. The Hub and project are resolved as for `scion tunnel`, including the project selected with `scion use`.
+- `<agent>` is an agent in the current project, `<project>/<agent>`, or the only agent with that name across all projects. The Hub and project are resolved as for `scion tunnel`, including the project selected with `scion use` (and honoring `--project` when combined with `--global`).
 - Flags for `scion ssh` (such as `--hub` and `--project`) go before the agent. Everything after the agent is the remote command and is passed to `ssh` unchanged, flags included (a `--` right after the agent is dropped).
-- The command never prompts for authentication, registration or sync. It returns the remote command's exit status, or `255` for a local or connection failure (including a usage or flag error), with the reason on one stderr line.
+- The command never prompts for authentication, registration or sync. It returns the remote command's exit status, `129` on `SIGHUP`, `143` on `SIGTERM`, or `255` for a local or connection failure (including a usage or flag error), with the reason on one stderr line (naming `--hub <endpoint>` in the login hint when credentials are missing or refused). On Unix it catches `SIGHUP` and `SIGTERM`, passes the signal on to the child `ssh` process, and kills `ssh` if it has not exited within 5 seconds (on non-Unix systems only `SIGTERM` is caught and `ssh` is killed).
 
 ```bash
 scion ssh my-agent
@@ -1377,7 +1423,7 @@ Print or install SSH Host blocks for reaching agents through `scion tunnel`, for
 
 **Usage:** `scion ssh-config [flags] [<agent>]`
 
-- Flags: `--write`; `--hub` and `--project` work as for `scion tunnel`.
+- Flags: `--write`; `--hub` and `--project` work as for `scion tunnel` (honoring `--project` when combined with `--global`, and naming `--hub <endpoint>` in the login hint).
 
 - Each agent gets a Host named `scion.<hub-label>.<project>.<agent>` whose `ProxyCommand` runs `scion tunnel` with the Hub and project pinned, and whose host key is pinned in a known-hosts file kept by Scion, where `<hub-label>` is derived from the Hub's host name (not its hub-list nickname).
 - With no agent, every agent the Hub lists across all projects is included. With an agent, only that agent's block is updated.
@@ -1489,10 +1535,10 @@ Manages the local host as a Runtime Broker. The old name `scion broker` still wo
 
 **Broker name.** A broker registers on the Hub under its hostname unless `register --broker-name` gives another name. The Hub reuses an existing broker with the same name, so when you run several brokers on one host, give each its own `--broker-name` (and its own `HOME`, so each has its own settings, broker ID and credentials). The name is saved in the global settings as `server.broker.broker_nickname`, where `register`, `join`, `provide`, `withdraw`, `status`, project registration and the broker server itself read it instead of the hostname. An existing `server.broker.broker_name` or `server.broker.broker_nickname` setting is used the same way, so `register`, `join` and project registration send that name rather than the hostname, matching the name `scion server start` already gives the broker. If such a host was registered under its hostname, a `register --force`, or a register after its credentials and broker ID are lost, no longer matches the hostname-named broker on the Hub and creates a new one.
 
-- `scion runtime-broker status`: Show status of the local broker server, including the projects it provides for. Providers added with `--auto-provide` are listed right away. Right after a broker start or restart (a daemon started under 30 seconds ago, or a broker uptime under 30 seconds), `status` waits for the broker to serve and for its Hub connections to report. All of this waiting shares one 5-second budget. A connection the running broker has not reported yet is shown as `pending` (it connects on its first heartbeat). `unknown` means no broker answered on the port.
+- `scion runtime-broker status`: Show status of the local Runtime Broker server, including the projects it provides for. Providers added with `--auto-provide` are listed right away. Right after a Runtime Broker start or restart (a daemon started under 30 seconds ago, or a Runtime Broker uptime under 30 seconds), `status` waits for the Runtime Broker to serve and for its Hub connections to report. All of this waiting shares one 5-second budget. A connection the running Runtime Broker has not reported yet is shown as `pending` (it connects on its first heartbeat), and a connection whose control-channel handshake has not yet completed is shown as `connecting`. `unknown` means no Runtime Broker answered on the port. Each Hub connection (when it runs a control channel) and each online Runtime Broker status block also prints a `Commands:` line showing whether the Hub can send commands to the Runtime Broker over the control channel (`yes (control channel connected)`, `no (the broker reports its control channel to the Hub is not connected; it is online but cannot receive commands)`, `no (the Hub refused the control channel under its transport policy; check server.trusted_proxies on the Hub)` on a live Hub connection, `pending (control channel connecting)` on a live Hub connection, or `not reported`), and the Hub status block prints `Hub API: reachable (<status>)` or `Hub API: unreachable`.
     - `--json`: Output in JSON format.
-    - `--broker <id>`: Show the status of another broker as the Hub sees it, instead of the local one.
-    - `--port <port>`: Port of the local broker.
+    - `--broker <id>`: Show the status of another Runtime Broker as the Hub sees it, instead of the local one.
+    - `--port <port>`: Port of the local Runtime Broker.
 - `scion runtime-broker start`: Start the broker server as a background daemon.
     - `--foreground`: Run in the current process instead of daemonizing. Use this as the `ExecStart` of a systemd `Type=simple` unit.
     - `--port <port>`: Listen on a custom port (default: `server.broker.port` from settings, else 9800).
@@ -1532,6 +1578,13 @@ Manages the local host as a Runtime Broker. The old name `scion broker` still wo
     - `--broker <name|id>`, `--hub <name>`: Operate on another broker or Hub connection.
     - Confirmation: `provide` asks before adding the provider. Without a terminal on stdin (a script, `ssh` without a TTY, a systemd unit), or at end of input, it fails with a message to re-run with `--yes` instead of waiting for an answer.
 - `scion runtime-broker withdraw`: Remove this broker as a provider from a project.
+- `scion runtime-broker convert --plan` (experimental): Plan a move from this host's legacy, profile-based Runtime Broker to [flat Runtime Broker](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental) instances. It is read-only: it writes no file (it does not even migrate legacy settings keys or the legacy `~/.scion` layout, as other commands do), registers nothing, and sends only `GET` requests to the Hub. It prints five sections: the proposed `server.broker.instances` entries as YAML to paste into the global `settings.yaml` (keys and names are proposals you may edit); the profile -> instance map, with `(no mapping: <code>)` for a profile a blocking finding leaves out; the conversion findings, blocking and notice; the proposed per-instance `maxAgents` split of the legacy Runtime Broker's limit, or the decision it needs; and the agents and projects on the Hub still bound to this Runtime Broker. Agents cannot be moved onto a flat Runtime Broker: finish or recreate them before the host switches. The Hub sections use your Hub login and this host's registered Runtime Broker ID; a section you cannot read is noted, not an error. **Values in the output.** Harness env values are redacted: shown as `<redacted>` in the human output and omitted from the JSON output, which lists their keys only. The human output's settings block otherwise keeps the values you need to paste (image registries, contexts and namespaces). The JSON output carries the proposed instances only in their publishable form, the shape a Runtime Broker reports to the Hub: no env value, kubeconfig path, context or secret target. Findings are printed from their code, settings key path and profiles with a fixed text, never with a settings value. Exit status: `0` when the plan has no blocking finding and needs no decision, `3` when it has a blocking finding or needs an operator decision, `1` on an error (including a host that already declares `server.broker.instances`, or is registered as a flat Runtime Broker). A capacity plan the Hub could not supply (no Hub, or the Runtime Broker's settings not visible to you) does not change the exit status; the summary says so. Available in human mode on Linux and macOS; not inside agents and not on Windows.
+    - `--plan`: Required. Prints the plan without changing anything.
+    - `--profiles <a,b>`: Limit the conversion to these profiles. Default: all profiles in the effective global settings, including those from the built-in defaults.
+    - `--choices <file>`: A YAML or JSON list of reviewed operator choices, each with `target_group` and either `split` (profiles kept on their own instance) or `field` and `chosen_profile` (consolidate a differing field on one profile's value, or `template:<name>` to leave it unset). A choice that cannot be applied is a blocking finding at `choices[<i>]`, not an error.
+    - `--skip-hub`: Plan from the local settings only, with no Hub requests. Also the behaviour when no Hub is configured.
+    - `--show-env-values`: Print harness env values in the human output. The output then contains secrets and must not be shared. Refused with `--format json`.
+    - `--format json`: One JSON object with `schemaVersion: 1`. Its `instances` use the publishable presentation shape (camelCase, with its own `schemaVersion`).
 
 ### `scion server`
 
@@ -1544,13 +1597,14 @@ Manages Scion server components (Hub and Broker).
         - `--port <int>`: Port to listen on.
         - `--host <addr>`: Listen address of the Hub API and web server (default `127.0.0.1` in workstation mode; in hosted mode, `server.hub.host`, which defaults to `0.0.0.0`). The Runtime Broker listener is set by `server.broker.host` instead; in workstation mode it defaults to `127.0.0.1`, and `0.0.0.0` counts as unset. In hosted mode, a server that runs only the Runtime Broker listens on `127.0.0.1`, even when `server.broker.host` is set, unless `--host` is given; it then uses `server.broker.host` (the `--host` value itself does not apply to the Runtime Broker).
         - `--db <string>`: Database driver/connection.
-        - `--dev-auth`: Enable dev-auth authentication.
+        - `--dev-auth`: Enable dev-auth authentication. Requires a loopback listen host (`127.0.0.1`, `::1`, or `localhost`), both when the web server is enabled and when the Hub API runs standalone with the web server disabled.
         - `--debug`: Set the server's default log level to `debug`. It changes logging only; see [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level).
         - `--enable-debug-endpoints`: Serve diagnostic endpoints for local development. Off by default and independent of `--debug`. Not for hosted deployments: the server refuses to start in hosted mode (`--hosted`, `--production`, or server mode `hosted` or `production` from `settings.yaml` or `SCION_SERVER_MODE`) when this flag is set.
         - `--test-mode <level>:<hub id>`: Test identity level of a designated test hub: `off` (default), `member`, `admin` or `super-admin` (only on a binary whose test-admin policy classification is complete). Every level except `off` requires the hub id binding, an explicitly configured `server.hub.hub_id` (or `SCION_SERVER_HUB_HUBID`; on a hub that ran with a derived id, set it to its current id, see "Test mode (operators)" in the API reference), `server.hub.class: test`, a test infrastructure marker for this hub id (written offline with `scion server test-infra mark`) and no `--production`; `admin` adds further requirements. A level whose requirements are not all met refuses to start, and so does an unrecognised value (an empty value means `off`). Replaces `--enable-test-identities`, `--enable-test-admin-identities` and `--enable-test-super-admin-identities`, which now fail at startup. See "Test mode (operators)" in the [API reference](/scion/reference/api/).
         - `--admin-emails <emails>`: Email addresses to auto-promote to the administrator role. This flag is **repeatable** and also accepts a **comma-separated list** (e.g. `--admin-emails admin1@example.com,admin2@example.com --admin-emails admin3@example.com`). Strict empty-value validation is enforced.
-- `scion server start` with no flags runs the **workstation server** (Hub, Runtime Broker and Web on 127.0.0.1, SQLite, dev auth) as a daemon. While the Hub's onboarding is not complete, it prints and opens the [onboarding wizard](/scion/getting-started/onboarding/). Without an `image_registry`, a workstation server starts the Hub and the web UI but not the Runtime Broker, and prints the fix; run `scion server restart` after setting the registry (a registry saved in the setup wizard counts).
+- `scion server start` with no flags runs the **workstation server** (Hub, Runtime Broker and Web on 127.0.0.1, SQLite, dev auth) as a daemon. While the Hub's onboarding is not complete, it prints and opens the [onboarding wizard](/scion/getting-started/onboarding/). It opens the web UI through a single-use sign-in link, which it also prints when stdout is a terminal (otherwise it prints the `scion server open` hint). Without an `image_registry`, a workstation server starts the Hub and the web UI but not the Runtime Broker, and prints the fix; run `scion server restart` after setting the registry (a registry saved in the setup wizard counts).
 - `scion server restart`, `scion server status`: Restart the daemon, or show whether it is running.
+- `scion server open`: Open the web UI of the local workstation server in your browser, signed in, through a new single-use sign-in link (valid for about two minutes, up to 32 pending codes). `--print` prints the link instead of opening a browser; without `--print` the link is printed only when stdout is a terminal. The link is created with the server's development token via `POST /auth/dev-launch` and consumed at `GET /auth/dev-signin` (both return `404` when dev auth is off). See [Workstation Server Mode](/scion/workstation/workstation-server/#starting-the-server).
 - `scion server install`: Print a systemd (Linux) or launchd (macOS) service file that runs the server at login. See [Workstation Server Mode](/scion/workstation/workstation-server/).
 - `scion server stop`: Stop the server daemon. It sends an interrupt and waits up to 30 seconds for the process to exit; the PID file is removed only once it has. If the process is still running after 30 seconds, the command fails and keeps the PID file, so the process can still be found (for example by `scion server stop --force`). `--force` also stops any process listening on the server ports, even without a PID file. A server in the foreground stops on Ctrl-C. SIGTERM runs the same graceful shutdown as SIGINT. A Hub that fails to start exits with status 1 after flushing its logs.
 - `scion server migrate`: Copy all Hub data, including agent session metrics, from a SQLite database into a PostgreSQL database. Parents are copied before children, rows whose primary key already exists in the destination are skipped (so a failed run can be restarted), the SQLite file is opened read-only (so a running SQLite Hub can stay up until you cut over), and row counts are compared after each table, stopping on any mismatch. A restart expects the destination to hold only rows from an earlier run; rows changed or deleted in the source since then are not reconciled, and a row-count mismatch stops the run. See [PostgreSQL](/scion/hosted/single-node/hub-server/#postgresql-production).
@@ -1570,6 +1624,10 @@ Manages Scion server components (Hub and Broker).
         - `--batch-size <int>`: Number of messages to process per batch (default: 100).
         - `--checkpoint <string>`: Resume from this pagination cursor (project-scoped).
         - `--db <string>`: Database DSN (overrides configuration/environment DSN).
+- `scion server keys status`: Inspect the server's keyring file (`server.keyring_file`), database encryption policy and migration, and run a fresh encryption audit (`audit.scope: "fresh"`) against the local database (read-only), printing the same report as `GET /api/v1/admin/keys/status` without starting services or requiring the `server.secret_rotation` experiment. Exits `0` whenever it produces a report (including a `NOT READY` report), `1` (`keysExitFailure`) when the operation fails (for example the database could not be opened or read, or the audit failed), and `2` (`keysExitInvalid`) on invalid configuration or an unmet precondition.
+    - Flags: `--config <path>` (server settings file), `--keyring-file <path>`, `--keyring-file-allow-world-readable`, `--db <dsn>`, `--no-store` (report the keyring only; do not open the database), `--format json`.
+- `scion server keys check`: Validate the keyring file and configuration (`server.keyring_file`) without starting services or opening the database. Exits `0` when valid and `2` (`keysExitInvalid`) when invalid.
+    - Flags: `--config <path>`, `--keyring-file <path>`, `--keyring-file-allow-world-readable`.
 
 ## Administration
 
@@ -1628,10 +1686,15 @@ available inside agent containers.
 **Sections:**
 
 - **General**: Git and tmux on this machine.
-- **Hub Health**: Hub reachability (`/healthz`), authentication, unmapped GCP service accounts of
+- **Hub Health**: Hub reachability (`/healthz`), authentication, where the Hub credential came
+  from (`hub-credential`, see the credential sources below), unmapped GCP service accounts of
   the linked project, and checks of this machine's settings (NFS mounts, Kubernetes profiles,
-  the deprecated server hub endpoint source on hosts configured as a server, telemetry, container
-  images, broker credentials).
+  `flat-placement-preflight` for existing agents pinned to flat Kubernetes Runtime Brokers in
+  `server.broker.instances` whose stored pod placement disagrees with their instance's
+  `runtime_target`, `legacy-placement-preflight` on hosts without flat instances for `runtimes`
+  and `profiles` placement settings and existing agents whose stored pod placement disagrees
+  with the resolved operator policy, the deprecated server hub endpoint source on hosts
+  configured as a server, telemetry, container images, broker credentials).
 - **Platform Health**: The Hub's health summary (`GET /api/v1/admin/health/summary`), the same
   data as the [health dashboard](/scion/workstation/dashboard/). It shows the overall status, then
   every "Needs attention" item in the Hub's order (critical items as failures, warnings as
@@ -1659,29 +1722,143 @@ fails; read the results from the text output or from `status` in the JSON output
 non-zero only when the command itself fails, for example on an invalid flag or when it cannot
 write its output.
 
-**JSON output:** `--format json` prints a single object for every runtime:
+**JSON output:** `--format json` prints a single object, and nothing else, on stdout, for every
+runtime. This is format version 2 (see "Changes from the earlier format" below):
 
 ```json
 {
+  "formatVersion": 2,
+  "generatedAt": "2026-10-22T10:15:04Z",
   "status": "warn",
-  "general": [{"name": "git", "status": "pass", "message": "git version 2.43.0"}],
-  "hubChecks": [{"name": "hub-connectivity", "status": "pass", "message": "..."}],
-  "platformHealth": [{"name": "health-summary", "status": "warn", "message": "Platform is degraded (1 item(s) need attention)"}],
-  "healthSummary": {"status": "degraded", "attention": [], "...": "..."},
-  "runtime": "docker",
-  "checks": [{"name": "runtime", "status": "pass", "message": "Active runtime: docker"}]
+  "hub": {
+    "endpoint": "https://hub.example.com",
+    "source": "healthSummary",
+    "version": "1.4.0",
+    "instanceId": "7f3c9a2e-1b4d-4e8a-9c1f-0a2b3c4d5e6f",
+    "summaryGeneratedAt": "2026-10-22T10:15:03.512Z",
+    "auth": {"source": "env_hub_token"}
+  },
+  "platformHealth": {
+    "state": "ok",
+    "status": "warn",
+    "checks": [
+      {"name": "health-summary", "status": "warn", "message": "Platform is degraded (1 item(s) need attention)"},
+      {"name": "attention", "status": "warn", "message": "Runtime broker \"gpu-1\" is offline"}
+    ]
+  },
+  "general": {"checks": [{"name": "git", "status": "pass", "message": "git version 2.43.0"}]},
+  "hubHealth": {"checks": [{"name": "hub-connectivity", "status": "pass", "message": "Hub at https://hub.example.com is healthy"}]},
+  "runtime": {"name": "docker", "checks": [{"name": "runtime", "status": "pass", "message": "Active runtime: docker"}]},
+  "healthSummary": {"status": "degraded", "generated_at": "2026-10-22T10:15:03.512Z", "...": "..."}
 }
 ```
 
-`status` is `fail` when any check failed, `warn` when any check warned, and `pass` otherwise. It
-does not affect the exit status. `healthSummary` is the Hub's summary response unchanged, and is
-omitted when it could not be read. `runtime` is omitted when no project was found.
+When the summary cannot be read, for example without `hub.health.read`:
+
+```json
+{
+  "hub": {"endpoint": "https://hub.example.com", "source": "healthz", "version": "1.4.0", "auth": {"source": "env_hub_token"}},
+  "platformHealth": {
+    "state": "skipped",
+    "reason": "permission_denied",
+    "httpStatus": 403,
+    "message": "requires hub.health.read",
+    "checks": [{"name": "health-summary", "status": "skip", "message": "requires hub.health.read", "remediation": "..."}]
+  }
+}
+```
+
+Doctor's own keys are camelCase. Each check has `name`, `status` (`pass`, `warn`, `fail`, `skip`
+or `info`), `message` and, when there is one, `remediation`; messages and remediations are always
+on one line. Every `checks` value is an array, empty when there is nothing to report. A value
+doctor did not learn is omitted, never filled in with a guess.
+
+| Key | Meaning |
+|---|---|
+| `formatVersion` | `2`. Raised when the shape changes in a way that breaks consumers. |
+| `generatedAt` | When doctor wrote the report, from this machine's clock, UTC (RFC 3339). |
+| `status` | `fail` when any check in any section failed, `warn` when any warned, `pass` otherwise. It includes the local checks (for example a missing Docker), and does not affect the exit status. |
+| `hub` | The Hub that answered. Omitted when no Hub endpoint is configured. |
+| `hub.endpoint` | The configured endpoint's scheme, host, port and path, or `(endpoint not shown: it contains @)` (see "Hub endpoint credentials" below). Its query and fragment are never shown. |
+| `hub.source` | `healthSummary` when `version`, `instanceId` and `summaryGeneratedAt` come from the health summary; `healthz` when the summary could not be read and `version` comes from `/healthz`. Omitted when the Hub gave neither. |
+| `hub.version` | From the summary: the version every live Hub instance reports, or `mixed` when they differ. From `/healthz`: the version of the Hub process that answered. |
+| `hub.instanceId` | The Hub instance that served the summary. Only from the summary: `/healthz` does not report an instance. |
+| `hub.summaryGeneratedAt` | When the Hub generated the summary, from the Hub's clock. |
+| `hub.auth.source` | Where doctor's Hub credential came from (table below). Never the credential, a file path or an identity. Omitted when doctor could not set up a Hub client, since no request was sent. |
+| `platformHealth.state` | `ok` when the summary was read; `skipped` when doctor did not get it and knows of nothing wrong with the Hub's ability to produce it; `unavailable` when the Hub was asked and could not produce it. Any state other than `ok` means the platform was **not checked**, never that it is healthy. |
+| `platformHealth.status` | Only when `state` is `ok`: the summary's verdict as a check status, `pass` (healthy), `warn` (degraded) or `fail` (unhealthy). Unlike the top-level `status`, it ignores this machine's checks. |
+| `platformHealth.reason` | Only when `state` is not `ok`: a reason code (table below). |
+| `platformHealth.message` | Only when `state` is not `ok`: the reason in one human-readable line. |
+| `platformHealth.httpStatus` | Only when the Hub answered the summary request with an HTTP error. |
+| `general`, `hubHealth`, `runtime` | The checks of the General, Hub Health and Runtime sections. `runtime.name` is the active runtime, omitted when no project was found. |
+| `healthSummary` | The Hub's summary response body, byte for byte (the Hub's own snake_case keys); omitted when it was not read. |
+
+Platform Health reason codes. They are stable; a new code may be added, so treat an unknown code
+like `error`:
+
+| `state` | `reason` | When |
+|---|---|---|
+| `skipped` | `no_hub_endpoint` | No Hub endpoint is configured. |
+| `skipped` | `hub_unreachable` | The Hub did not answer `/healthz` (connection refused, DNS, TLS or timeout), or answered it with an HTTP error. |
+| `skipped` | `client_unavailable` | Reserved: doctor could not set up a Hub client. Not normally expected. |
+| `skipped` | `permission_denied` | HTTP 403: the caller lacks `hub.health.read`, or is not a user identity (an agent token). |
+| `skipped` | `not_supported` | HTTP 404: the Hub predates the health summary. |
+| `unavailable` | `hub_unavailable` | HTTP 503: the Hub instance cannot read its database. |
+| `unavailable` | `error` | Anything else: another HTTP status, a timeout, or a response that is not a summary. |
+
+Hub credential sources (`hub.auth.source`), in the order doctor, like every Hub command, picks
+them:
+
+| Source | Credential |
+|---|---|
+| `stored_login` | The login stored by `scion hub auth login` for this Hub. |
+| `agent_token_file` | The agent token file of an agent container, whatever kind of token it holds. It **takes precedence over `SCION_HUB_TOKEN`**: inside an agent container doctor uses the agent's identity even when `SCION_HUB_TOKEN` is set. |
+| `env_auth_token` | `SCION_AUTH_TOKEN` (an agent token). |
+| `env_hub_token` | `SCION_HUB_TOKEN`, for example a hub-boundary access token. |
+| `dev` | A development token (`SCION_DEV_TOKEN`, `SCION_DEV_TOKEN_FILE` or `~/.scion/dev-token`). Reported only when that credential is sent; otherwise the source is `transport` or `none`. For a localhost Hub it is also preferred over an agent token file, except in a Hub-managed agent. |
+| `transport` | No Hub credential was found; only the transport (proxy) credential configured in the environment, for example for IAP, is attached, when its token can be obtained. If fetching that token fails at request time, the request is sent without it. |
+| `none` | No credential was found; requests are sent without one. |
+
+The text output shows the same source as the `hub-credential` line of Hub Health.
+
+**Hub endpoint credentials.** The Hub endpoint (from `--hub` or `SCION_HUB_ENDPOINT`) can carry a
+credential, for example in user info or a query parameter. Doctor does not try to recognise one;
+it applies a fixed rule, in the text and the JSON output alike:
+
+- An endpoint that contains `@` anywhere is never shown, not even in part. Every mention of it,
+  including `hub.endpoint`, reads `(endpoint not shown: it contains @)`. This also applies to an
+  `@` that is not user info, such as one in the path.
+- For an endpoint that contains `@`, `?` or `#`, no error text from the Hub client or the network
+  (which can quote the request URL) appears in any check message or in `platformHealth.message`.
+  The message ends with "error details not shown because the Hub endpoint contains @, ? or #"
+  instead.
+- For any other endpoint, no user info, query or fragment is shown either: the endpoint is shown
+  as scheme, host, port and path, and error text is shown with the shared URL redaction applied
+  (credential parameters of any URL in it are masked).
+
+**Changes from the earlier format.** The JSON output before format version 2 had no
+`formatVersion`. Version 2 breaks it, with no compatibility keys:
+
+| Before | Version 2 |
+|---|---|
+| `general` (array) | `general.checks` |
+| `hubChecks` (array) | `hubHealth.checks` |
+| `platformHealth` (array of checks) | `platformHealth.checks`, plus `state`, `status`, `reason`, `message` and `httpStatus` |
+| `runtime` (runtime name) | `runtime.name` |
+| `checks` (runtime checks) | `runtime.checks` |
+| `healthSummary` re-indented | `healthSummary` exactly as the Hub sent it |
+| - | new: `formatVersion`, `generatedAt`, `hub` |
+| - | new `hubHealth` check `hub-credential` (also in the text output) |
+
+`status` and the exit status are unchanged. The text output and the check names are unchanged
+except for the new `hub-credential` line in Hub Health and the endpoint rules above.
 
 **Platform Health for an assistant agent:** an assistant agent that a hub admin has authorized
 to monitor the platform runs `scion doctor` from an environment a person owns, not from inside an
 agent container (agent containers do not offer the command, and the Hub accepts the health
 summary only from user credentials). A hub admin mints a hub-boundary token and the environment
-uses it with no stored login:
+uses it with no stored login and no agent token file (either one takes precedence over
+`SCION_HUB_TOKEN`; check `hub.auth.source` in the output):
 
 ```bash
 scion hub token create --boundary hub --name health-check \

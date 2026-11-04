@@ -39,8 +39,12 @@ func countGitClones(t *testing.T) func() int {
 	require.NoError(t, err)
 	binDir := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "clones.log")
+	// The clone runs with host-git hardening args (-c key=value) before the
+	// subcommand, so scan every argument for "clone" rather than only $1.
 	script := "#!/bin/sh\n" +
-		"if [ \"$1\" = clone ]; then echo clone >> '" + logPath + "'; fi\n" +
+		"for a in \"$@\"; do\n" +
+		"  if [ \"$a\" = clone ]; then echo clone >> '" + logPath + "'; break; fi\n" +
+		"done\n" +
 		"exec '" + realGit + "' \"$@\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0755))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -141,6 +145,7 @@ func TestProvisionShared_SharedPlain_FailedCloneWritesNoMarker(t *testing.T) {
 	bareRepo := initBareGitRepo(t)
 	hostPath := t.TempDir()
 	missing := filepath.Join(t.TempDir(), "missing.git")
+	AllowLocalCloneFixture(t, missing)
 
 	err := ProvisionShared(sharedPlainInput(hostPath, missing))
 	require.Error(t, err)

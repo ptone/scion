@@ -21,7 +21,7 @@
  * via the session registry and Hub PTY endpoint.
  */
 
-import { LitElement, html, css, nothing, unsafeCSS } from 'lit';
+import { LitElement, html, css, nothing, unsafeCSS, type PropertyValues } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import type {
@@ -46,7 +46,10 @@ import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
 import { buildAgentDMKey, chatConversationPath } from '../../client/chat-routes.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
-import { TERMINAL_DRAG_MIME } from '../../client/terminal-workspace-events.js';
+import {
+  TERMINAL_DRAG_MIME,
+  TERMINAL_PANE_DIALOG_OPEN_EVENT,
+} from '../../client/terminal-workspace-events.js';
 import { navigateTo } from '../../client/navigation.js';
 
 /** Back to Agent in a compact pane header (U+1F916 ROBOT FACE). */
@@ -203,7 +206,7 @@ export class ScionTerminalPane extends LitElement {
   @state() private uploadEnabled = false;
   @state() private uploadDisabledReason = '';
   @state() private uploadTargetDir = ''; // shared dir name (e.g. "scratchpad")
-  @state() private uploadBasePath = ''; // container path (e.g. "/scion-volumes/scratchpad")
+  @state() private uploadBasePath = ''; // container path of the target dir, from the hub (SharedDir.target)
   @state() private isDragOver = false;
   @state() private isUploading = false;
   @state() private uploadStatus = ''; // progress/error message in overlay
@@ -870,6 +873,22 @@ export class ScionTerminalPane extends LitElement {
     this.cancelResize();
   }
 
+  /**
+   * Announces each capture-auth dialog as it opens, with
+   * TERMINAL_PANE_DIALOG_OPEN_EVENT. The dialogs render already open, so
+   * they fire no `sl-show` a surface outside the pane could observe.
+   */
+  protected override updated(changed: PropertyValues): void {
+    super.updated(changed);
+    const opened = (key: 'captureAuthConflicts' | 'captureAuthScopeDialogOpen'): boolean =>
+      changed.has(key) && !changed.get(key) && Boolean(this[key]);
+    if (opened('captureAuthConflicts') || opened('captureAuthScopeDialogOpen')) {
+      this.dispatchEvent(
+        new CustomEvent(TERMINAL_PANE_DIALOG_OPEN_EVENT, { bubbles: true, composed: true })
+      );
+    }
+  }
+
   /** Recompute and push the combined frontmost signal. */
   private _onDocumentVisibilityChange = (): void => {
     this.updateFrontmost();
@@ -1467,13 +1486,14 @@ export class ScionTerminalPane extends LitElement {
       }
       const data = (await resp.json()) as { sharedDirs?: SharedDir[] };
       const dirs = data.sharedDirs ?? [];
-      // Filter: writable, non-in_workspace
-      const candidates = dirs.filter((d) => !d.read_only && !d.in_workspace);
+      // Filter: writable, non-in_workspace, with a container path from the
+      // hub (the layout authority computes it; the UI never builds one).
+      const candidates = dirs.filter((d) => !d.read_only && !d.in_workspace && !!d.target);
       const target = candidates.find((d) => d.name === 'scratchpad') || candidates[0];
-      if (target) {
+      if (target && target.target) {
         this.uploadEnabled = true;
         this.uploadTargetDir = target.name;
-        this.uploadBasePath = `/scion-volumes/${target.name}`;
+        this.uploadBasePath = target.target;
       } else {
         this.uploadEnabled = false;
         this.uploadDisabledReason = 'No writable shared directory available for file upload';

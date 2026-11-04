@@ -110,6 +110,7 @@ var expectedSelectorRegistry = map[string][]string{
 	"project:update":                  {"project.update"},
 	"project:list":                    {"project.list"},
 	"project:create":                  {"project.create"},
+	"project:chat_post":               {"project.chat_post"},
 	"skill:create":                    {"skill.create"},
 	"skill:create_global":             {"skill.create_global"},
 	"skill:delete":                    {"skill.delete"},
@@ -129,6 +130,8 @@ var expectedSelectorRegistry = map[string][]string{
 	"user:read":                       {"user.read"},
 	"user:update":                     {"user.update"},
 	"user:suspend":                    {"user.suspend"},
+	"user:promote":                    {"user.promote"},
+	"user:delete":                     {"user.delete"},
 	"user_skill_injection:update":     {"user_skill_injection.update"},
 
 	// Project messaging policy (owner rule applies on top of the selector).

@@ -12,7 +12,7 @@ The step-by-step order is in [docs/gcp-setup.md](../docs/gcp-setup.md) and the
 | `bootstrap-gcp.sh` | Enable APIs; create the 4 service accounts, the Artifact Registry repo, the Cloud Build staging bucket and the 2 secret containers (no versions); IAM bindings C4, C6, C7, C11, C19 | C1-C7, C11, C19 |
 | `set-secrets.sh` | Add secret versions from a file (0600, outside the checkout) or stdin: App private key, webhook secret, or a generated webhook secret | C5, C9 |
 | `build-runner-image.sh` | Build `runner/` with Cloud Build (or `--local` docker) as `BUILD_SA_NAME` and push it to `ARTIFACT_REPO` | C7 |
-| `deploy-job.sh` | Create or update the Cloud Run Job `RUNNER_JOB_NAME` (shape, `/scratch` ephemeral disk, no retries, task timeout, `EXEC_SA_NAME`); binding C10 | C8, C10 |
+| `deploy-job.sh` | Create or update the Cloud Run Job `RUNNER_JOB_NAME` (shape, ephemeral disk mounted at HOME, no retries, task timeout, `EXEC_SA_NAME`); binding C10 | C8, C10 |
 | `deploy-mediator.sh` | Refuse the placeholder `GITHUB_APP_ID=1`; build `mediator/Dockerfile` (upload limited by the `.gcloudignore` allowlist) and deploy `MEDIATOR_SERVICE_NAME` (`max-instances=1`, env from the config, secrets by name); binding C13; prints the URL for `MEDIATOR_URL` | C12, C13 |
 | `deploy-scheduler.sh` | Create or update `RECONCILER_JOB_NAME` (POST `/reconcile`, OIDC as `SCHEDULER_SA_NAME`, audience `MEDIATOR_URL`) | C14 |
 | `set-routing-variable.sh` | Set or clear `ROUTING_VARIABLE_NAME` on `TARGET_REPOS` (gh only; `--repo`, `--clear`, `--value`) (P5) | G10, G11 |
@@ -66,8 +66,26 @@ The step-by-step order is in [docs/gcp-setup.md](../docs/gcp-setup.md) and the
   source at HEAD (`runner/`; `mediator/` plus `go.mod`), so an unchanged source
   keeps its tag. With `--apply`, uncommitted changes there are refused; pass
   `--tag TAG` to override (and to build outside a git checkout).
-- **Shell:** bash >= 4, `set -euo pipefail`, `shellcheck --norc -x` clean,
-  `--help` on every script.
+- **Shell:** bash >= 4, `set -euo pipefail`, `--help` on every script, and
+  shellcheck clean under both of these (see [Static checks](#static-checks)).
+
+## Static checks
+
+Every cr-ci shell file must pass two shellcheck runs, because they disagree on
+some codes (0.9.0 reports a trap-invoked function's body as SC2317, 0.11.0 as
+SC2329; a directive must name both):
+
+- **Upstream CI's invocation**, which is what blocks a PR: ubuntu-latest's apt
+  shellcheck (0.9.0), from the repository root, on every `*.sh` file:
+  `shellcheck -x --source-path=SCRIPTDIR ./cr-ci/scripts/deploy-job.sh` (no
+  `--norc`, so a repository `.shellcheckrc` would apply). Outside Ubuntu, the
+  same 0.9.0 binary comes in the PyPI wheel `shellcheck-py` 0.9.0.6
+  (`shellcheck_py-0.9.0.6-py2.py3-none-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl`,
+  sha256 `730235c4f92657884f8b343d5426e4dc28e9a6ba9ad54d469cd038e340ea5be0`;
+  the binary is `shellcheck_py-0.9.0.6.data/scripts/shellcheck` inside it).
+- **A current release** (0.11.0) with `shellcheck --norc -x`, on the `*.sh` files
+  and the extension-less test stubs in [`testdata/stubs/`](testdata/stubs/),
+  which upstream CI does not check.
 
 ## Tests
 

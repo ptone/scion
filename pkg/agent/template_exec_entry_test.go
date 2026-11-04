@@ -28,7 +28,8 @@ import (
 
 // TestProvisionAgent_ExecTemplateCacheEntryKeepsHashAndName provisions from
 // a hub template with an executable file, hydrated into the cache under its
-// executable-aware entry key (ptone/scion#5652). agent-info.json must record
+// entry key, which covers paths and modes (ptone/scion#5652,
+// ptone/scion#5658). agent-info.json must record
 // the slug as the template name and the entry key as the template hash, as
 // for any hydrated template, and the key must find the cached directory
 // again (the start and cleared-fields paths look it up by that hash).
@@ -51,14 +52,19 @@ func TestProvisionAgent_ExecTemplateCacheEntryKeepsHashAndName(t *testing.T) {
 		"scion-agent.json":        transfer.ModeRegular,
 		"plugins/demo/bin/server": transfer.ModeExecutable,
 	}
-	key := templatecache.EntryKey(testContentHash, modes)
+	files := map[string][]byte{
+		"scion-agent.json":        []byte(`{"default_harness_config":"claude"}`),
+		"plugins/demo/bin/server": []byte("#!/bin/sh\n"),
+	}
+	var infos []transfer.FileInfo
+	for p, data := range files {
+		infos = append(infos, transfer.FileInfo{Path: p, Hash: transfer.HashBytes(data), Mode: transfer.FormatMode(modes[p])})
+	}
+	key := templatecache.EntryKey(infos)
 	if key == testContentHash || !transfer.IsContentHash(key) {
 		t.Fatalf("precondition: exec entry key %q must differ from the content hash and keep its form", key)
 	}
-	cacheDir, err := cache.PutWithModes(key, map[string][]byte{
-		"scion-agent.json":        []byte(`{"default_harness_config":"claude"}`),
-		"plugins/demo/bin/server": []byte("#!/bin/sh\n"),
-	}, modes)
+	cacheDir, err := cache.PutWithModes(key, files, modes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,6 +72,7 @@ func TestProvisionAgent_ExecTemplateCacheEntryKeepsHashAndName(t *testing.T) {
 	scionDir := filepath.Join(tmpDir, "project", ".scion")
 	_ = os.MkdirAll(scionDir, 0o755)
 	ctx := api.ContextWithTemplateName(context.Background(), "plugin-template")
+	allowHydratedTemplate(t, cacheDir)
 	agentHome, _, _, err := ProvisionAgent(ctx, "exec-agent", cacheDir, "", "", scionDir, "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent: %v", err)

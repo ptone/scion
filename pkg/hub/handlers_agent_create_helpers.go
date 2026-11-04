@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -293,8 +294,8 @@ func deepCopyScionConfig(cfg *api.ScionConfig) *api.ScionConfig {
 // sets template ID, hash, and hub access scopes from the resolved template.
 //
 // It returns an error only when the project workspace path could not be
-// resolved because workspace storage did not respond (wraps
-// errWorkspaceContentTimeout). Creating the agent anyway would leave
+// resolved because workspace storage is unavailable (wraps
+// errWorkspaceStorageUnavailable). Creating the agent anyway would leave
 // Workspace empty, and the broker would fall back to the legacy local
 // project path: the agent would run against the wrong workspace. Every other
 // failure here stays best-effort.
@@ -323,16 +324,41 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// verbatim -- the broker will resolve it against its own project root.
 	// Empty-per-agent projects are skipped: Workspace stays empty and the
 	// broker provisions a private per-agent directory (design #2703 §2.1).
-	if syncsHubProjectWorkspace(project) {
+	if mountsHubProjectWorkspace(project) {
 		existingWorkspace := agent.AppliedConfig.Workspace
 		if existingWorkspace == "" {
-			workspacePath, err := s.hubManagedProjectPath(project.Slug)
-			if err != nil {
-				if errors.Is(err, errWorkspaceContentTimeout) {
+			resolved, err := s.projectWorkspaceResolved(project)
+			switch {
+			case err != nil:
+				if errors.Is(err, errWorkspaceStorageUnavailable) {
 					return err
 				}
-			} else {
-				agent.AppliedConfig.Workspace = workspacePath
+			case s.remoteBrokerWithoutProjectPath(ctx, project, agent.RuntimeBrokerID):
+				// A remote broker with no local path for the project
+				// resolves the workspace itself: on the hub's shared
+				// storage through its own mount of the share (its
+				// workspace backend places the agent on the project's
+				// leaf); for a non-git project on a local-backend hub in
+				// its own project directory, populated by the CLI
+				// workspace bootstrap (the linked non-git exception). The hub's path
+				// need not exist on that broker, so it is not recorded;
+				// later dispatches are built from this row.
+			default:
+				// On a shared backend the workspace leaf is created here
+				// if missing (the same O_NOFOLLOW EnsureLeaf the brokers
+				// use), so the co-located broker given this path finds
+				// it. The hub used to create its own copy at project
+				// create.
+				if resolved.Backend.Shared() {
+					root, openErr := resolved.Open(true)
+					if openErr != nil {
+						s.projectsLogger().Warn("failed to create the project workspace on shared storage",
+							"project_id", project.ID, "error", openErr)
+						return fmt.Errorf("project workspace: %w", errWorkspaceStorageUnavailable)
+					}
+					_ = root.Close()
+				}
+				agent.AppliedConfig.Workspace = resolved.HostPath
 			}
 		}
 	}
@@ -351,6 +377,16 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	return nil
 }
 
+// remoteBrokerWithoutProjectPath reports whether brokerID names a remote
+// (non-embedded) runtime broker that has no local path for project.
+func (s *Server) remoteBrokerWithoutProjectPath(ctx context.Context, project *store.Project, brokerID string) bool {
+	if brokerID == "" || s.isEmbeddedBroker(brokerID) {
+		return false
+	}
+	provider, err := s.store.GetProjectProvider(ctx, project.ID, brokerID)
+	return err != nil || provider.LocalPath == ""
+}
+
 // projectCloneSource returns the URL and branch to clone a git-anchored
 // project from: the clone-url label (or the git remote), and the
 // default-branch label (or "main").
@@ -366,7 +402,9 @@ func projectCloneSource(project *store.Project) (cloneURL, branch string) {
 // sharedWorkspaceCloneConfig returns the clone settings for the workspace of
 // a shared-plain git project, or nil for any other project. They describe
 // the same full clone of the default branch the hub makes for the project's
-// own workspace (cloneSharedWorkspaceProject).
+// own workspace (cloneSharedWorkspaceProject), with TokenRemote set to the
+// project's recorded git remote so the git token is offered only to a clone
+// of that remote.
 //
 // They are sent to the broker separately from AppliedConfig.GitClone, which
 // stays nil for these projects: GitClone would make the broker clone into a
@@ -383,7 +421,7 @@ func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
 		return nil
 	}
 	fullClone := 0
-	return &api.GitCloneConfig{URL: cloneURL, Branch: branch, Depth: &fullClone}
+	return &api.GitCloneConfig{URL: cloneURL, Branch: branch, Depth: &fullClone, TokenRemote: project.GitRemote}
 }
 
 // deriveAgentConfig is create's whole config-resolution pipeline, run after
@@ -425,18 +463,26 @@ func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
 //     item 2), so a harness-type-only template leaves the slot to the hub
 //     default.
 //
-// It returns populateAgentConfig's error: non-nil only on a workspace storage
-// timeout (errWorkspaceContentTimeout). Callers must not create the agent then.
+// It returns populateAgentConfig's error: non-nil only when workspace
+// storage is unavailable (errWorkspaceStorageUnavailable). Callers must not create the agent then.
 func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) error {
 	// Harness-config resolution: request (already on AppliedConfig.HarnessConfig
 	// from the explicit-inputs setup) > project annotation > template default.
+	// A default that is not a harness-config name is dropped with a warning
+	// naming its tier (dropUnusableDefaultHarnessConfig), so it is never
+	// stored or dispatched. So is an explicit value replayed from an agent's
+	// recorded create inputs (reincarnate) that predates the request check.
+	dropUnusableDefaultHarnessConfig(ctx, agent, harnessConfigTierRecorded)
 	if agent.AppliedConfig.HarnessConfig == "" && project != nil && project.Annotations != nil {
 		agent.AppliedConfig.HarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
+		dropUnusableDefaultHarnessConfig(ctx, agent, harnessConfigTierProject)
 	}
 	if agent.AppliedConfig.HarnessConfig == "" {
 		if name := templateHarnessConfigName(resolvedTemplate); name != "" {
 			agent.AppliedConfig.HarnessConfig = name
-			ctx = withTemplateDefaultHarnessConfig(ctx)
+			if !dropUnusableDefaultHarnessConfig(ctx, agent, harnessConfigTierTemplate) {
+				ctx = withTemplateDefaultHarnessConfig(ctx)
+			}
 		}
 	}
 
@@ -444,7 +490,9 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 	// HarnessAuth/Model/ThinkingLevel/Profile the rungs above left empty. Its
 	// own harness-config fill is a no-op here in practice (the rung above
 	// already applied the same annotation), kept for parity with the
-	// non-harness-config fields it also fills.
+	// non-harness-config fields it also fills. It never fills a value that
+	// is not a harness-config name, so a project default the rung above
+	// dropped stays dropped.
 	// A pinned (flat) agent takes no default Runtime Broker Profile: the
 	// project active profile is dropped with a dispatch warning.
 	priorProfile := agent.AppliedConfig.Profile
@@ -488,7 +536,9 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 	// running it before the template rungs above would let the hub default
 	// beat the template for HarnessConfig, Model and ThinkingLevel.
 	if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
-		ctx = withHubDefaultHarnessConfig(ctx)
+		if !dropUnusableDefaultHarnessConfig(ctx, agent, harnessConfigTierHub) {
+			ctx = withHubDefaultHarnessConfig(ctx)
+		}
 	}
 
 	return s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
@@ -644,7 +694,11 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	hcFromTemplateDefault := hcName != "" && !hcFromProjectAnnotation && !hcFromHubDefault &&
 		templateDefaultHarnessConfigFromContext(ctx)
 	if hcName == "" && resolvedTemplate != nil {
-		hcName = templateHarnessConfigName(resolvedTemplate)
+		// A template default that is not a harness-config name was dropped
+		// by deriveAgentConfig; it is not looked up here either.
+		if name := templateHarnessConfigName(resolvedTemplate); harnessConfigNameAllowed(name) {
+			hcName = name
+		}
 		hcFromTemplateDefault = hcName != ""
 	}
 	// resolvedHC is the hub harness config resolved below, if any; the
@@ -1491,6 +1545,8 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
+			case s.relayProjectPathRefusal(ctx, w, existingAgent, err):
+				// The broker's project path is not initialized (ptone/scion#6647).
 			case relayBrokerRefusal(w, err):
 				// Broker refusal relayed with the broker's status.
 			case relayIdentityMappingError(w, err):
@@ -1649,6 +1705,8 @@ func (s *Server) handleExistingAgent(
 					// 412 already written (design #2703 D3).
 				case relayDispatchRefusal(w, err):
 					// Required-skill resolution failure relayed with the broker's status.
+				case s.relayProjectPathRefusal(ctx, w, existingAgent, err):
+					// The broker's project path is not initialized (ptone/scion#6647).
 				case relayBrokerRefusal(w, err):
 					// Broker refusal relayed with the broker's status.
 				case relayIdentityMappingError(w, err):
@@ -1762,7 +1820,7 @@ func (s *Server) handleExistingAgent(
 		// failed delete, or a deleting row whose lease lapsed, does not hold
 		// the row, so it is removed as before.
 		actor := auditActorFromContext(ctx)
-		n, err := s.store.FinalizeAgentDeletion(ctx, existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+		n, err := s.store.FinalizeAgentDeletion(lifecycleCreateRollback(ctx, "env_gather_recreate"), existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
 			createRowHeldCheck(func(tx store.Store) error {
 				return s.hardDeleteAgentTx(ctx, tx, existingAgent, actor)
 			}))
@@ -1901,6 +1959,8 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
+			case s.relayProjectPathRefusal(ctx, w, existingAgent, err):
+				// The broker's project path is not initialized (ptone/scion#6647).
 			case relayBrokerRefusal(w, err):
 				// Broker refusal relayed with the broker's status.
 			case relayIdentityMappingError(w, err):
@@ -2721,7 +2781,27 @@ func (s *Server) projectHasVerifiedGCPSA(ctx context.Context, projectID string) 
 // agent's env, or in the hub's env/secret stores at user, project, or hub scope.
 // For progeny agents (those with ancestry len > 1), it also checks for
 // allowProgeny secrets and env vars inherited through the ancestry chain.
+//
+// A project- or hub-scope record counts only if it would be delivered to the
+// agent at start: once the agent's own record exists, each such record is
+// authorized under the delivery credential (Decide *.deliver, no value
+// read; deliverySelector.probe). Before that (the create-time probe)
+// there is no target to authorize against and the record counts by
+// existence, as the start still authorizes every item before delivery.
 func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []string) (bool, error) {
+	var sel *deliverySelector
+	selReady := false
+	probe := func(kind MaterialKind, record materialRecordKind, id, key, scope, scopeID string) (bool, error) {
+		if !selReady {
+			var err error
+			sel, err = s.newProbeDeliverySelector(ctx, agent)
+			if err != nil {
+				return false, err
+			}
+			selReady = true
+		}
+		return sel.probe(ctx, kind, record, id, key, scope, scopeID)
+	}
 	for _, key := range keys {
 		if agent.AppliedConfig != nil && agent.AppliedConfig.Env != nil {
 			if _, ok := agent.AppliedConfig.Env[key]; ok {
@@ -2744,36 +2824,38 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 				return true, nil
 			}
 		}
-		if agent.ProjectID != "" {
-			ev, err := s.store.GetEnvVar(ctx, key, "project", agent.ProjectID)
+		for _, sc := range []struct{ scope, scopeID string }{
+			{store.ScopeProject, agent.ProjectID},
+			{store.ScopeHub, s.hubID},
+		} {
+			if sc.scopeID == "" {
+				continue
+			}
+			ev, err := s.store.GetEnvVar(ctx, key, sc.scope, sc.scopeID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
 			if ev != nil {
-				return true, nil
+				ok, err := probe(envVarDeliveryKind(*ev), materialRecordEnvVar, ev.ID, ev.Key, sc.scope, sc.scopeID)
+				if err != nil {
+					return false, err
+				}
+				if ok {
+					return true, nil
+				}
 			}
-			sec, err := s.store.GetSecret(ctx, key, "project", agent.ProjectID)
+			sec, err := s.store.GetSecret(ctx, key, sc.scope, sc.scopeID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
 			if sec != nil {
-				return true, nil
-			}
-		}
-		if s.hubID != "" {
-			ev, err := s.store.GetEnvVar(ctx, key, store.ScopeHub, s.hubID)
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				return false, err
-			}
-			if ev != nil {
-				return true, nil
-			}
-			sec, err := s.store.GetSecret(ctx, key, store.ScopeHub, s.hubID)
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				return false, err
-			}
-			if sec != nil {
-				return true, nil
+				ok, err := probe(MaterialKindSecret, materialRecordSecret, sec.ID, sec.Key, sc.scope, sc.scopeID)
+				if err != nil {
+					return false, err
+				}
+				if ok {
+					return true, nil
+				}
 			}
 		}
 	}

@@ -953,13 +953,13 @@ func TestFixturePurge_ProjectPathUnreachableFromRequests(t *testing.T) {
 // carry no stamp, so a purge could not remove one). A human member can.
 func TestTestIdentity_BrokerCreateRefused(t *testing.T) {
 	e := newFPEnv(t, "fpp-broker")
-	rec := doRequestWithToken(t, e.srv, e.fx.AccessToken, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "fpp-fixture-broker"})
+	rec := doRequestWithTokenLoopback(t, e.srv, e.fx.AccessToken, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "fpp-fixture-broker"})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), testIdentityReasonFixtureBroker)
 	_, err := e.store.GetRuntimeBrokerByName(context.Background(), "fpp-fixture-broker")
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
-	rec = doRequestWithToken(t, e.srv, e.humanTok, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "fpp-human-broker"})
+	rec = doRequestWithTokenLoopback(t, e.srv, e.humanTok, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "fpp-human-broker"})
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
@@ -1024,7 +1024,7 @@ func fpAddProvider(t *testing.T, s store.Store, projectID string) {
 	ctx := context.Background()
 	broker := &store.RuntimeBroker{ID: tid("fpp-broker-" + projectID), Name: "fpp broker", Slug: "fpp-broker-" + projectID[:8], Status: store.BrokerStatusOnline, Endpoint: "http://localhost:9800"}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: projectID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: projectID, BrokerID: broker.ID, BrokerName: broker.Name, LocalPath: fixtureProviderCheckout(t), Status: store.BrokerStatusOnline}))
 }
 
 // fpFinalizingSoftAgent creates a stamped agent and leaves it finalizing

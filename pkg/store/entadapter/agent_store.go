@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/lifecycleevents"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
 )
@@ -66,11 +67,17 @@ type AgentStore struct {
 	// afterRunIDRead, when set (tests only), runs between SetAgentRunID's
 	// read and its swap, to simulate a concurrent writer.
 	afterRunIDRead func(agentID string)
+
+	// lifecycle is the agent-write observer slot, shared with the
+	// transactional copies of this store; entTx is the ambient transaction
+	// when there is one (lifecycle_outbox_store.go).
+	lifecycle *lifecycleObserverSlot
+	entTx     *ent.Tx
 }
 
 // NewAgentStore creates a new Ent-backed AgentStore.
 func NewAgentStore(client *ent.Client) *AgentStore {
-	return &AgentStore{client: client}
+	return &AgentStore{client: client, lifecycle: newLifecycleObserverSlot()}
 }
 
 // usesRowLocks reports whether the backend supports SELECT ... FOR UPDATE.
@@ -125,6 +132,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		ReincarnationState:  a.ReincarnationState,
 		LaunchAsyncOptIn:    a.LaunchAsyncOptIn,
 		LaunchID:            a.LaunchID,
+		LaunchRunID:         a.LaunchRunID,
 		LaunchState:         a.LaunchState,
 		LaunchEndReason:     a.LaunchEndReason,
 		LaunchKind:          a.LaunchKind,
@@ -222,6 +230,18 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		}
 		sa.AppliedConfig = cfg
 	}
+	sa.EffectiveConfig = parseEffectiveConfig(sa.ID, a.EffectiveConfig)
+	if a.PendingConfig != nil {
+		pending, err := store.UnmarshalPendingConfigFromStorage(*a.PendingConfig)
+		if err != nil {
+			// Logged rather than returned, as for applied_config above: one
+			// corrupt row must not break a listing. The agent reads as having
+			// no pending edits.
+			slog.Error("agent store: pending_config could not be used as stored; ignoring it",
+				"agent_id", sa.ID, "error", err)
+		}
+		sa.PendingConfig = pending
+	}
 	return sa
 }
 
@@ -272,7 +292,22 @@ func parseAppliedConfig(raw string) (*store.AgentAppliedConfig, error) {
 }
 
 // CreateAgent creates a new agent record.
-func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
+func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) (err error) {
+	// With an observer installed outside a transaction, write through a
+	// copy of s on a new transaction (rolled back unless committed below),
+	// so the row and its lifecycle rows commit together; the same idiom as
+	// DeleteAgent.
+	obs := s.lifecycle.load()
+	ambient := s.entTx
+	client, tx, done, err := s.lifecycleWriteTx(ctx, obs)
+	if err != nil {
+		return err
+	}
+	defer done()
+	defer markOwnTxErr(&err, tx, ambient)
+	if tx != ambient {
+		s = &AgentStore{client: client, inTx: true, afterRunIDRead: s.afterRunIDRead, lifecycle: s.lifecycle, entTx: tx}
+	}
 	uid, err := parseUUID(a.ID)
 	if err != nil {
 		return err
@@ -361,6 +396,13 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	if cfg := marshalAppliedConfig(a.AppliedConfig); cfg != "" {
 		create.SetAppliedConfig(cfg)
 	}
+	pending, err := store.MarshalPendingConfigForStorage(a.PendingConfig)
+	if err != nil {
+		return fmt.Errorf("encode pending config: %w", err)
+	}
+	if pending != "" {
+		create.SetPendingConfig(pending)
+	}
 	// Always set, never leave NULL, even when harnessConfigOf returns "" (no
 	// harness configured). NULL is reserved to mean "never written by a
 	// binary that knows this column exists" — see
@@ -399,7 +441,15 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	if err != nil {
 		return mapError(err)
 	}
+	if err := observeAgentWrite(ctx, obs, s.client, s.entTx, store.AgentWrite{
+		Op: store.AgentWriteCreate, After: entAgentToStore(created), Now: now,
+	}); err != nil {
+		return err
+	}
 
+	if err := commitLifecycleWriteTx(tx, ambient); err != nil {
+		return err
+	}
 	a.Created = created.Created
 	a.Updated = created.Updated
 	return nil
@@ -524,6 +574,18 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 	now := time.Now()
 	expectedVersion := a.StateVersion
 	newVersion := expectedVersion + 1
+
+	if obs := s.lifecycle.load(); obs != nil {
+		// WP1 design 5.2 (N11): while an observer is installed, both fast
+		// paths take the transactional route, so the observer sees the
+		// locked before row and runs in the write's transaction.
+		if err := s.updateAgentObserved(ctx, obs, uid, a, expectedVersion, newVersion, now); err != nil {
+			return err
+		}
+		a.Updated = now
+		a.StateVersion = newVersion
+		return nil
+	}
 
 	if a.Phase != "running" {
 		// Fast path, unchanged from before T1: one statement, no
@@ -782,6 +844,53 @@ func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Clien
 	return err
 }
 
+// updateAgentObserved is UpdateAgent while a lifecycle observer is
+// installed: one transaction (or the caller's, when s runs in one) with a
+// locked read of the before row, the same CAS as the untransacted paths,
+// the running write's conditional launch end, a read of the after row and
+// the observer. A CAS miss returns ErrNotFound / ErrVersionConflict and
+// observes nothing.
+func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWriteObserver, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time) (err error) {
+	client, tx, done, err := s.lifecycleWriteTx(ctx, obs)
+	if err != nil {
+		return err
+	}
+	defer done()
+	defer markOwnTxErr(&err, tx, s.entTx)
+	before, err := lifecycleBeforeRow(ctx, client, obs, uid)
+	if err != nil {
+		return err
+	}
+	if a.Phase == "running" {
+		err = s.updateAgentRunningTx(ctx, client, uid, a, expectedVersion, newVersion, now)
+	} else {
+		var update *ent.AgentUpdate
+		if update, err = buildAgentUpdate(client.Agent, uid, a, expectedVersion, newVersion, now); err == nil {
+			var affected int
+			if affected, err = update.Save(ctx); err != nil {
+				err = mapError(err)
+			} else if affected == 0 {
+				err = agentUpdateConflictError(ctx, client.Agent, uid)
+			}
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if before != nil {
+		after, err := lifecycleAfterRow(ctx, client, uid)
+		if err != nil {
+			return err
+		}
+		if err := observeAgentWrite(ctx, obs, client, tx, store.AgentWrite{
+			Op: store.AgentWriteUpdate, Before: before, After: after, Now: now,
+		}); err != nil {
+			return err
+		}
+	}
+	return commitLifecycleWriteTx(tx, s.entTx)
+}
+
 // buildAgentUpdate constructs the CAS update statement shared by both the
 // fast path and the running-write transactional path. ac is either
 // s.client.Agent or a tx-scoped client's Agent — both are *ent.AgentClient.
@@ -839,6 +948,9 @@ func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expect
 	} else {
 		update.ClearAppliedConfig()
 	}
+	if err := setPendingConfig(update.Mutation(), a.PendingConfig); err != nil {
+		return nil, err
+	}
 	// Always set, never clear to NULL — see CreateAgent's identical comment
 	// and ReconcileHarnessConfigColumn's doc (ptone/scion#2146).
 	// AppliedConfig=nil (cleared above) still yields "" here, which is
@@ -895,16 +1007,34 @@ func agentUpdateConflictError(ctx context.Context, ac *ent.AgentClient, uid uuid
 }
 
 // DeleteAgent permanently removes an agent by ID (hard delete).
-func (s *AgentStore) DeleteAgent(ctx context.Context, id string) error {
+func (s *AgentStore) DeleteAgent(ctx context.Context, id string) (err error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	err = s.client.Agent.DeleteOneID(uid).Exec(ctx)
+	obs := s.lifecycle.load()
+	client, tx, done, err := s.lifecycleWriteTx(ctx, obs)
+	if err != nil {
+		return err
+	}
+	defer done()
+	defer markOwnTxErr(&err, tx, s.entTx)
+	before, err := lifecycleBeforeRow(ctx, client, obs, uid)
+	if err != nil {
+		return err
+	}
+	err = client.Agent.DeleteOneID(uid).Exec(ctx)
 	if err != nil {
 		return mapError(err)
 	}
-	return nil
+	if before != nil {
+		if err := observeAgentWrite(ctx, obs, client, tx, store.AgentWrite{
+			Op: store.AgentWriteHardDelete, Before: before, Now: time.Now(),
+		}); err != nil {
+			return err
+		}
+	}
+	return commitLifecycleWriteTx(tx, s.entTx)
 }
 
 // lockAgentRowsBatch bounds the IDs locked by one statement. Batches are
@@ -1048,7 +1178,7 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 	// than ignore it, so a caller that passes one (alone or alongside
 	// SortCursor) gets an error instead of a silently different page.
 	if opts.Cursor != "" {
-		return nil, fmt.Errorf("ListAgents: legacy cursor is not valid in sorted mode: %w", store.ErrInvalidInput)
+		return nil, fmt.Errorf("ListAgents: legacy cursor is not valid in sorted mode: %w", store.ErrInvalidCursor)
 	}
 	if opts.SortCursor != nil {
 		query.Where(agentAfterCursor(opts.SortBy, opts.SortDir, *opts.SortCursor))
@@ -1491,6 +1621,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	}
 
 	useLock := s.usesRowLocks()
+	obs := s.lifecycle.load()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -1505,6 +1636,21 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	current, err := q.Only(ctx)
 	if err != nil {
 		return mapError(err)
+	}
+	// observe runs the lifecycle observer for this write (every branch
+	// that writes, the timestamps-only one included: design 5.2, r5 N3).
+	hints := statusWriteHints(su)
+	observe := func(now time.Time) error {
+		if obs == nil {
+			return nil
+		}
+		after, err := lifecycleAfterRow(ctx, tx.Client(), uid)
+		if err != nil {
+			return err
+		}
+		return observeAgentWrite(ctx, obs, tx.Client(), tx, store.AgentWrite{
+			Op: store.AgentWriteStatus, Before: entAgentToStore(current), After: after, Now: now, Hints: hints,
+		})
 	}
 
 	if su.IfPhase != "" && current.Phase != su.IfPhase {
@@ -1582,6 +1728,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	if isAgentReport(su) && su.ReportRunID != "" && su.ReportRunID != current.RunID {
 		if err := tx.Agent.UpdateOneID(uid).SetUpdated(now).SetLastSeen(now).Exec(ctx); err != nil {
 			return mapError(err)
+		}
+		if err := observe(now); err != nil {
+			return err
 		}
 		return tx.Commit()
 	}
@@ -1773,6 +1922,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	if err := upd.Exec(ctx); err != nil {
 		return mapError(err)
 	}
+	if err := observe(now); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -1780,6 +1932,25 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		*su.Result = store.AgentStatusResult{Halted: halting, HaltedFrom: haltedFrom}
 	}
 	return nil
+}
+
+// statusWriteHints are the lifecycle facts of a status write (WP1 design
+// 2.4a K and E): a stop record (IfRunID), a broker heartbeat, a start
+// path's own write, a report and the run it names, a rollback.
+func statusWriteHints(su store.AgentStatusUpdate) store.AgentWriteHints {
+	h := store.AgentWriteHints{
+		StartWrite:  su.StartWrite,
+		AgentReport: isAgentReport(su),
+		ReportRunID: su.ReportRunID,
+		Restore:     su.Restore,
+	}
+	switch {
+	case su.IfRunID != "":
+		h.Kind = store.WriteKindStopRecord
+	case isBrokerHeartbeat(su):
+		h.Kind = store.WriteKindStatusHeartbeat
+	}
+	return h
 }
 
 // isAgentReport reports whether su is a status report about the agent's
@@ -1967,6 +2138,80 @@ func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, pl
 	return nil
 }
 
+// UpdateAgentConfig implements store.AgentStore.UpdateAgentConfig. With a
+// lifecycle observer installed, the write is observed in its own
+// transaction (or the caller's), like UpdateAgent: a change to a snapshot
+// field (applied_config) gives metadata_changed, never configured (the
+// write carries no config-resolution mark), and a pending_config-only
+// change gives no event (it is not a snapshot field). A compare-and-set
+// that matches no row writes nothing and observes nothing.
+func (s *AgentStore) UpdateAgentConfig(ctx context.Context, agentID string, expectedVersion int64, applied *store.AgentAppliedConfig, pending *store.AgentPendingConfig) (int64, error) {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return 0, err
+	}
+	newVersion := expectedVersion + 1
+	write := func(ac *ent.AgentClient) (int, error) {
+		update := ac.Update().
+			Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), agent.DeletedAtIsNil()).
+			SetStateVersion(newVersion).
+			SetUpdated(time.Now()).
+			// Always set, never NULL: see buildAgentUpdate.
+			SetHarnessConfig(harnessConfigOf(applied))
+		if cfg := marshalAppliedConfig(applied); cfg != "" {
+			update.SetAppliedConfig(cfg)
+		} else {
+			update.ClearAppliedConfig()
+		}
+		if err := setPendingConfig(update.Mutation(), pending); err != nil {
+			return 0, err
+		}
+		n, err := update.Save(ctx)
+		return n, mapError(err)
+	}
+	var affected int
+	if obs := s.lifecycle.load(); obs != nil {
+		// Never config resolution, whatever the caller's context carries:
+		// a held edit is a requested value (metadata_changed, never
+		// configured; WP1 upmerge-2 ruling A).
+		octx := lifecycleevents.WithoutResolution(ctx)
+		affected, err = s.observedAgentWrite(octx, obs, uid, store.AgentWriteUpdate, store.AgentWriteHints{},
+			func(c *ent.Client) (int, error) { return write(c.Agent) })
+	} else {
+		affected, err = write(s.client.Agent)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if affected == 0 {
+		row, err := s.client.Agent.Get(ctx, uid)
+		if err != nil {
+			return 0, mapError(err)
+		}
+		if row.DeletedAt != nil {
+			return 0, store.ErrNotFound
+		}
+		return 0, store.ErrVersionConflict
+	}
+	return newVersion, nil
+}
+
+// setPendingConfig sets the pending_config column of an agent update to
+// pending's storage encoding, or clears it to NULL when pending holds no
+// edit.
+func setPendingConfig(m *ent.AgentMutation, pending *store.AgentPendingConfig) error {
+	raw, err := store.MarshalPendingConfigForStorage(pending)
+	if err != nil {
+		return fmt.Errorf("encode pending config: %w", err)
+	}
+	if raw == "" {
+		m.ClearPendingConfig()
+	} else {
+		m.SetPendingConfig(raw)
+	}
+	return nil
+}
+
 // UpdateAgentExposedPorts applies a partial exposed-port update without using
 // the whole-record optimistic-lock path. Port registration must not race with
 // high-frequency status writes.
@@ -2127,6 +2372,13 @@ func (s *AgentStore) markAgentContainerMissing(ctx context.Context, id, brokerID
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	obs := s.lifecycle.load()
+	// The full before row, locked, for the lifecycle observer (design 2.8:
+	// the predicate-only updates below read only the after row).
+	before, err := lifecycleBeforeRow(ctx, tx.Client(), obs, uid)
+	if err != nil {
+		return nil, err
+	}
 
 	guards := func(phase state.Phase, reason predicate.Agent) *ent.AgentUpdate {
 		u := tx.Agent.Update().
@@ -2206,6 +2458,13 @@ func (s *AgentStore) markAgentContainerMissing(ctx context.Context, id, brokerID
 	updated, err := tx.Agent.Get(ctx, uid)
 	if err != nil {
 		return nil, mapError(err)
+	}
+	if before != nil {
+		if err := observeAgentWrite(ctx, obs, tx.Client(), tx, store.AgentWrite{
+			Op: store.AgentWriteContainerMissing, Before: before, After: entAgentToStore(updated), Now: time.Now(),
+		}); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -2942,12 +3201,42 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 		return upd.Save(ctx)
 	}
 	var n int
-	if cred == nil {
+	switch obs := s.lifecycle.load(); {
+	case obs != nil:
+		// Observed: the swap (and the credential) commit together with the
+		// lifecycle cursor (design 2.4a step 0, run_mint).
+		// Errors keep the unobserved path's classes (review r1 O5): a swap
+		// error is returned as is; a credential failure, or any failure
+		// after the credential was created (the observer, the commit), rolls
+		// the credential back and wraps store.ErrCredentialNotRecorded.
+		credCreated := false
+		n, err = s.observedAgentWrite(ctx, obs, uid, store.AgentWriteRunID,
+			store.AgentWriteHints{Kind: store.WriteKindRunMint}, func(c *ent.Client) (int, error) {
+				n, err := swap(c.Agent)
+				if err != nil || n == 0 || cred == nil {
+					return n, mapError(err)
+				}
+				cred.RunID = runID
+				if err := createAgentCredential(ctx, c.AgentCredential, cred); err != nil {
+					cred.ID = ""
+					return 0, fmt.Errorf("%w: %w", store.ErrCredentialNotRecorded, err)
+				}
+				credCreated = true
+				return n, nil
+			})
+		if err != nil {
+			if credCreated && !errors.Is(err, store.ErrCredentialNotRecorded) {
+				cred.ID = ""
+				err = fmt.Errorf("%w: %w", store.ErrCredentialNotRecorded, err)
+			}
+			return "", false, err
+		}
+	case cred == nil:
 		n, err = swap(s.client.Agent)
 		if err != nil {
 			return "", false, mapError(err)
 		}
-	} else {
+	default:
 		n, err = s.swapWithCredential(ctx, swap, runID, cred)
 		if err != nil {
 			return "", false, err
@@ -3055,46 +3344,81 @@ func (s *AgentStore) SetAgentSSHHostKey(ctx context.Context, agentID, runID, pub
 // CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.
 // The swap also clears previous_run_ids: the run has settled.
 func (s *AgentStore) CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error) {
-	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true)
+	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true,
+		store.AgentWriteHints{Kind: store.WriteKindRunAdopt, AdoptionSource: store.AdoptionSourceCAS})
 }
 
 // RevertAgentRunID implements store.AgentStore.RevertAgentRunID: the same
 // swap, leaving previous_run_ids as they are.
 func (s *AgentStore) RevertAgentRunID(ctx context.Context, agentID, mintedRunID, previousRunID string) (bool, error) {
-	return s.swapAgentRunID(ctx, agentID, mintedRunID, previousRunID, false)
+	return s.swapAgentRunID(ctx, agentID, mintedRunID, previousRunID, false,
+		store.AgentWriteHints{Kind: store.WriteKindRunRevert})
 }
 
 // AdoptAgentRunID implements store.AgentStore.AdoptAgentRunID: the
 // settling swap, refused while a delete holds the row or when run_id
 // changed after unchangedSince (run_id_updated_at is checked in the same
-// statement as the write).
+// statement as the write). Its adoption_source is the context's
+// (store.RunAdoptionSourceFrom): cas for the launch-report settle,
+// heartbeat_adopt for the heartbeat adoption.
 func (s *AgentStore) AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, unchangedSince time.Time) (bool, error) {
 	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true,
+		store.AgentWriteHints{Kind: store.WriteKindRunAdopt, AdoptionSource: store.RunAdoptionSourceFrom(ctx)},
 		runIDWritable(time.Now()),
 		agent.RunIDUpdatedAtNotNil(),
 		agent.RunIDUpdatedAtLTE(unchangedSince.UTC()))
 }
 
+// SettleLaunchedRun implements store.AgentStore.SettleLaunchedRun:
+// AdoptAgentRunID's swap with the launch, launch run, broker and
+// generation also checked in the same statement (WP1 slice 3b), so a
+// newer run, launch, broker or generation that landed after the caller's
+// read refuses it. An empty launch, run or broker never settles.
+func (s *AgentStore) SettleLaunchedRun(ctx context.Context, agentID string, f store.LaunchSettleFence) (bool, error) {
+	if f.LaunchID == "" || f.FromRunID == "" || f.ToRunID == "" || f.BrokerID == "" {
+		return false, nil
+	}
+	return s.swapAgentRunID(ctx, agentID, f.FromRunID, f.ToRunID, true,
+		store.AgentWriteHints{Kind: store.WriteKindRunAdopt, AdoptionSource: store.AdoptionSourceCAS},
+		runIDWritable(time.Now()),
+		agent.RunIDUpdatedAtNotNil(),
+		agent.RunIDUpdatedAtLTE(f.UnchangedSince.UTC()),
+		agent.LaunchIDEQ(f.LaunchID),
+		agent.LaunchRunIDEQ(f.FromRunID),
+		agent.RuntimeBrokerIDEQ(f.BrokerID),
+		agent.GenerationEQ(f.Generation))
+}
+
 // swapAgentRunID swaps run_id from expectedRunID to newRunID, under any
 // extra predicates, and reports whether it did. A swap that changes the
 // value also sets run_id_updated_at; a same-value swap (a settle) leaves it.
-func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool, extra ...predicate.Agent) (bool, error) {
+func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool, hints store.AgentWriteHints, extra ...predicate.Agent) (bool, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return false, err
 	}
-	upd := s.client.Agent.Update().
-		Where(append([]predicate.Agent{agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)}, extra...)...).
-		SetRunID(newRunID)
-	if newRunID != expectedRunID {
-		upd = upd.SetRunIDUpdatedAt(time.Now().UTC())
+	write := func(ac *ent.AgentClient) (int, error) {
+		upd := ac.Update().
+			Where(append([]predicate.Agent{agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)}, extra...)...).
+			SetRunID(newRunID)
+		if newRunID != expectedRunID {
+			upd = upd.SetRunIDUpdatedAt(time.Now().UTC())
+		}
+		if clearPrevious {
+			upd = upd.ClearPreviousRunIds()
+		}
+		n, err := upd.Save(ctx)
+		return n, mapError(err)
 	}
-	if clearPrevious {
-		upd = upd.ClearPreviousRunIds()
+	var n int
+	if obs := s.lifecycle.load(); obs != nil {
+		n, err = s.observedAgentWrite(ctx, obs, uid, store.AgentWriteRunID, hints,
+			func(c *ent.Client) (int, error) { return write(c.Agent) })
+	} else {
+		n, err = write(s.client.Agent)
 	}
-	n, err := upd.Save(ctx)
 	if err != nil {
-		return false, mapError(err)
+		return false, err
 	}
 	return n > 0, nil
 }

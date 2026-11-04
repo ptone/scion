@@ -202,6 +202,10 @@ const (
 	// Either way the effective caller is a dev-auth identity, not an agent
 	// token.
 	CredentialKindDevAuto CredentialKind = "dev_auto"
+	// CredentialKindNone means no credential is sent: none is configured
+	// for the hub, and it is not a loopback hub, the only kind a dev token
+	// is sent to.
+	CredentialKindNone CredentialKind = "none"
 )
 
 // EnsureHubReadyOptions configures the behavior of EnsureHubReady.
@@ -328,7 +332,7 @@ func notConfiguredError(projectPath string, isGlobal bool) error {
 func ProjectLinkedSetting(projectPath string, isGlobal bool) *bool {
 	var linked *bool
 	for _, dir := range projectSettingsDirs(projectPath, isGlobal) {
-		own, err := config.LoadSettingsFromDir(dir)
+		own, err := loadOwnSettings(dir, isGlobal)
 		if err != nil || own == nil || own.Hub == nil || own.Hub.Linked == nil {
 			continue
 		}
@@ -801,7 +805,7 @@ func projectSettingsDirs(projectPath string, isGlobal bool) []string {
 func StaleModeKeys(projectPath string, isGlobal bool) []string {
 	var enabled, localOnly *bool
 	for _, dir := range projectSettingsDirs(projectPath, isGlobal) {
-		own, err := config.LoadSettingsFromDir(dir)
+		own, err := loadOwnSettings(dir, isGlobal)
 		if err != nil || own == nil || own.Hub == nil {
 			continue
 		}
@@ -1960,7 +1964,8 @@ func ReadAgentTokenFile() string {
 // observational — it never changes auth priority or behavior.
 //
 // Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
-// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > auto dev auth.
+// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env >
+// auto dev auth, which applies to a loopback hub only (IsLocalhostEndpoint).
 // Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
 // to avoid stale scion-token files from previous remote hub connections. This exception
 // is suppressed for hub-managed agents (config.IsHubManagedAgent(), i.e. SCION_AGENT_ID
@@ -1980,13 +1985,25 @@ func ReadAgentTokenFile() string {
 // for this change — tracked as https://github.com/ptone/scion/issues/2213.
 func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, CredentialKind, error) {
 	authOpt, kind := selectHubCredential(endpoint)
-	client, err := hubclient.New(endpoint, authOpt, hubclient.WithTimeout(30*time.Second))
+	// The broker-injected agent token to the broker-injected endpoint is
+	// the only exception to the transport rule (NewInjectedAgentHubClient).
+	if kind == CredentialKindAgentToken {
+		if client, ok := NewInjectedAgentHubClient(endpoint, 30*time.Second); ok {
+			return client, kind, nil
+		}
+	}
+	opts := []hubclient.Option{hubclient.WithTimeout(30 * time.Second)}
+	if authOpt != nil {
+		opts = append(opts, authOpt)
+	}
+	client, err := NewUserHubClient(endpoint, opts...)
 	return client, kind, err
 }
 
 // selectHubCredential picks the authentication option createHubClient uses
 // for endpoint, in the priority order documented on createHubClient, and
-// reports which kind of credential it is. It makes no network calls.
+// reports which kind of credential it is. It makes no network calls. The
+// option is nil when no credential is sent (CredentialKindNone).
 func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 	// 1. Check for OAuth credentials from scion hub auth login
 	if accessToken := credentials.GetAccessToken(endpoint); accessToken != "" {
@@ -1995,7 +2012,7 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 
 	// 2. Check for agent token from canonical token file, then bootstrap env var
 	if token := ReadAgentTokenFile(); token != "" {
-		if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
+		if !apiclient.IsDevToken(token) && IsLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 			if devToken := apiclient.ResolveDevToken(); devToken != "" {
 				return hubclient.WithBearerToken(devToken), CredentialKindDevAuto
 			}
@@ -2010,7 +2027,11 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 		return hubclient.WithBearerToken(token), CredentialKindHubToken
 	}
 
-	// 4. Fallback to auto dev auth
+	// 4. Fallback to auto dev auth, for a loopback hub only: a dev token
+	// is valid only on the local workstation server that wrote it.
+	if !IsLocalhostEndpoint(endpoint) {
+		return nil, CredentialKindNone
+	}
 	return hubclient.WithAutoDevAuth(), CredentialKindDevAuto
 }
 
@@ -2039,7 +2060,7 @@ func LinkedProjectLabels(endpoint, gitRemote string) map[string]string {
 // credential (OAuth login, agent token, SCION_HUB_TOKEN) is not one.
 // It makes no network calls.
 func IsLocalWorkstationEndpoint(endpoint string) bool {
-	if !isLocalhostEndpoint(endpoint) {
+	if !IsLocalhostEndpoint(endpoint) {
 		return false
 	}
 	if _, kind := selectHubCredential(endpoint); kind != CredentialKindDevAuto {
@@ -2078,7 +2099,25 @@ func ScopedTokenProjectNotFoundError(projectID string) error {
 		ErrScopedTokenProjectNotFound, projectID)
 }
 
-func isLocalhostEndpoint(endpoint string) bool {
+// ScopedTokenProjectLookupEmptyError explains a project reference (slug,
+// name or git URL) that matched nothing under a user access token. The hub
+// lists projects to a token only with project:list (and reads them with
+// project:read), so an empty result is most likely a missing scope. The
+// message is the same whether or not the project exists. ref is the
+// reference the CLI looked up.
+func ScopedTokenProjectLookupEmptyError(ref string) error {
+	return fmt.Errorf("%w: the Hub found no project matching '%s' while using the user access token in SCION_HUB_TOKEN\n\n"+
+		"The token most likely lacks the project:read and project:list scopes, which the CLI needs to look up the project.\n"+
+		"project:manage does not include them. Create a token that includes them, for example:\n"+
+		"  scion hub token create --project <project> --name <name> --scopes project:read,project:list,agent:list,agent:read\n\n"+
+		"If the token already has both, check that the reference names the project the token is scoped to",
+		ErrScopedTokenProjectNotFound, ref)
+}
+
+// IsLocalhostEndpoint reports whether endpoint is a loopback hub: its host is
+// localhost, 127.0.0.1 or ::1. It is the one rule for where a dev credential
+// may go: the CLI reports one only for such a hub and sends one only to it.
+func IsLocalhostEndpoint(endpoint string) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return false
@@ -2120,8 +2159,9 @@ func wrapHubError(endpoint string, err error) error {
 		return fmt.Errorf("authentication failed, login to hub with 'scion hub auth login'")
 	}
 	// No hint without an endpoint: the error already says how to configure
-	// one, and there is no hub to check.
-	if config.IsHubManagedAgent() || endpoint == "" {
+	// one, and there is no hub to check. A transport refusal sent nothing,
+	// and its text already names the fix.
+	if config.IsHubManagedAgent() || endpoint == "" || errors.Is(err, config.ErrPlaintextNonLoopback) {
 		return err
 	}
 	return fmt.Errorf("%w\n\n%s", err, HubCheckHint(endpoint))
@@ -2281,4 +2321,14 @@ func resolveHubGlobalProjectID(ctx context.Context, client hubclient.Client, end
 			"Ask a hub admin to create it or grant access, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, config.RedactURL(endpoint))
 	}
 	return resp.Projects[0].ID, nil
+}
+
+// loadOwnSettings loads one of projectSettingsDirs' directories: the global
+// directory as the user's own (links allowed), a project directory as a
+// project settings layer (config.LoadProjectSettingsFromDir).
+func loadOwnSettings(dir string, isGlobal bool) (*config.Settings, error) {
+	if isGlobal {
+		return config.LoadSettingsFromDir(dir)
+	}
+	return config.LoadProjectSettingsFromDir(dir)
 }

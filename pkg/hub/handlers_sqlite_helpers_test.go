@@ -20,8 +20,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -42,6 +40,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -51,7 +50,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"github.com/knadh/koanf/v2"
@@ -200,6 +198,7 @@ func attachAutoProvideBroker(t *testing.T, f *projectAgentAuthzFixture) {
 		ProjectID:  f.project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}))
 	f.project.DefaultRuntimeBrokerID = broker.ID
@@ -346,8 +345,6 @@ func def49Setup(t *testing.T) (srv *Server, s store.Store, projectID string, tar
 	srv.SetDispatcher(&recordingDispatcher{})
 	return srv, s, projectID, targetAgent, userID
 }
-
-func strPtr(s string) *string { return &s }
 
 // alwaysDropUserBus is an eventbus.EventBus whose Publish always reports a
 // subscriber-buffer-full drop, simulating InProcessEventBus.Publish when a
@@ -572,6 +569,11 @@ type reincarnateTestDispatcher struct {
 	// HarnessAuth, Image, Profile).
 	reprovisionEcho func(cfg *store.AgentAppliedConfig)
 	startEcho       func(cfg *store.AgentAppliedConfig)
+	// startAgentEcho, when set, runs on a successful start against the
+	// dispatched agent itself, simulating the agent-level echo
+	// applyBrokerResponse writes in place (Template, Runtime,
+	// RuntimeState, ContainerStatus).
+	startAgentEcho func(agent *store.Agent)
 
 	// rerenderErr is returned by every reprovision call after the first:
 	// the worker's best-effort re-render of the previous config
@@ -1013,17 +1015,40 @@ func setupCreateAgentProject(t *testing.T, s store.Store) *store.Project {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
+	// The broker has the hub-managed workspace at a local path (a
+	// co-located broker): since ptone/scion#5813 a remote broker that cannot reach the hub's
+	// workspace storage is refused with 409. Tests of that
+	// refusal, and of the CLI workspace bootstrap, clear it
+	// (clearCreateAgentProviderPath).
+	localPath, err := localProjectPath(project.Slug)
+	require.NoError(t, err)
 	provider := &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
 		Status:     store.BrokerStatusOnline,
+		LocalPath:  localPath,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
 	project.DefaultRuntimeBrokerID = broker.ID
 	require.NoError(t, s.UpdateProject(ctx, project))
 	return project
+}
+
+// clearCreateAgentProviderPath makes the setupCreateAgentServer broker a
+// remote broker without a local path for project: the topology of the CLI
+// workspace bootstrap and of the remote-broker refusal.
+func clearCreateAgentProviderPath(t *testing.T, s store.Store, project *store.Project) {
+	t.Helper()
+	ctx := context.Background()
+	provider, err := s.GetProjectProvider(ctx, project.ID, project.DefaultRuntimeBrokerID)
+	require.NoError(t, err)
+	provider.LocalPath = ""
+	require.NoError(t, s.AddProjectProvider(ctx, provider))
+	got, err := s.GetProjectProvider(ctx, project.ID, project.DefaultRuntimeBrokerID)
+	require.NoError(t, err)
+	require.Empty(t, got.LocalPath, "fixture check: the provider must have no local path")
 }
 
 // postAgentStatusAsAgent POSTs a status update for agent using an agent
@@ -1607,6 +1632,14 @@ type routedTestEnv struct {
 func setupRoutedTestEnv(t *testing.T) routedTestEnv {
 	t.Helper()
 	srv, s := testServer(t)
+	return setupRoutedTestEnvOn(t, srv, s)
+}
+
+// setupRoutedTestEnvOn builds the routed test fixtures on an existing server
+// and its raw store, for a test that installs a store fault wrapper
+// (testServerWithStoreFault) before any setup.
+func setupRoutedTestEnvOn(t *testing.T, srv *Server, s store.Store) routedTestEnv {
+	t.Helper()
 	ctx := context.Background()
 
 	// Wire a recording dispatcher so dispatch tests exercise the full path.
@@ -1744,7 +1777,7 @@ func doBrokerSignedRequest(t *testing.T, srv *Server, brokerID string, key []byt
 	if onBehalfOfEmail != "" {
 		req.Header.Set(HeaderOnBehalfOf, "user:"+onBehalfOfEmail)
 	}
-	require.NoError(t, srv.brokerAuthService.SignRequest(req, brokerID, key))
+	require.NoError(t, (&apiclient.HMACAuth{BrokerID: brokerID, SecretKey: key}).ApplyAuth(req))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	return rec
@@ -1846,10 +1879,11 @@ func rotateSecretAsUser(t *testing.T, srv *Server, user *store.User, brokerID st
 	rec := httptest.NewRecorder()
 	if user == nil {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+brokerID+"/rotate-secret", nil)
+		req.RemoteAddr = tpLoopbackPeer // the transport policy admits a client on the hub host
 		srv.handleBrokerRotateSecret(rec, req, brokerID)
 		return rec
 	}
-	return doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/brokers/"+brokerID+"/rotate-secret", nil)
+	return doRequestAsUserLoopback(t, srv, user, http.MethodPost, "/api/v1/brokers/"+brokerID+"/rotate-secret", nil)
 }
 
 // setupMutePinTest builds a server with a web chat store, one project and one
@@ -3382,10 +3416,14 @@ func setupProjectWithBroker(t *testing.T, s store.Store, projectID, projectName 
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
+	// The broker is remote and serves the hub-managed project from its own
+	// checkout (LocalPath); a remote broker without one is refused at
+	// create (ptone/scion#5813).
 	provider := &store.ProjectProvider{
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
+		LocalPath:  fixtureProviderCheckout(t),
 		Status:     store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
@@ -3397,35 +3435,18 @@ const testOIDCIssuerURL = "https://scion.example.com"
 
 // installTestOIDCKeyManager sets an OIDCKeyManager with a fresh RS256 key and
 // the testOIDCIssuerURL issuer on srv. Routes that New() registers only when
-// the OIDC provider is enabled stay unregistered.
+// the OIDC provider is enabled stay unregistered. The manager is built by
+// NewOIDCKeyManager with no store and no secret backend, so it generates
+// an RSA-2048 key in memory and persists nothing.
 func installTestOIDCKeyManager(t *testing.T, srv *Server) {
 	t.Helper()
 
-	// Generate a test RSA key pair.
-	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	mgr, err := NewOIDCKeyManager(context.Background(), OIDCKeyManagerConfig{
+		IssuerURL:   testOIDCIssuerURL,
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ValueCipher: secret.NewLegacyValueCipher(""),
+	})
 	require.NoError(t, err)
-
-	kid := computeKeyID(&privKey.PublicKey)
-	signingKey := &OIDCSigningKey{
-		KeyID:      kid,
-		PrivateKey: privKey,
-		PublicKey:  &privKey.PublicKey,
-		Active:     true,
-	}
-
-	// Create the RS256 signer (needed by identity token endpoint).
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: privKey},
-		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
-	)
-	require.NoError(t, err)
-
-	mgr := &OIDCKeyManager{
-		activeKey: signingKey,
-		allKeys:   []*OIDCSigningKey{signingKey},
-		signer:    signer,
-		issuerURL: testOIDCIssuerURL,
-	}
 
 	srv.oidcKeyManager = mgr
 	srv.oidcIssuerURL = testOIDCIssuerURL
@@ -5284,7 +5305,11 @@ func (d *reincarnateTestDispatcher) moveSnapshot() (provisions, localDeletes, st
 }
 func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
 	d.mu.Lock()
-	if d.runStore != nil {
+	// A start the hub refused before sending (its run not begun, the hub
+	// shutting down, or its pending config fold refused) records no run,
+	// as in production.
+	if d.runStore != nil && !errors.Is(d.startErr, errStartRunNotBegun) && !errors.Is(d.startErr, ErrHubShuttingDown) &&
+		!errors.Is(d.startErr, errPendingConfigFold) {
 		runID := fmt.Sprintf("run-%s-%d", agent.RuntimeBrokerID, len(d.startBrokers)+1)
 		if _, err := d.runStore.SetAgentRunID(ctx, agent.ID, runID, nil); err == nil {
 			agent.RunID = runID
@@ -5300,12 +5325,16 @@ func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agen
 	err := d.startErr
 	image := d.startImage
 	echo := d.startEcho
+	agentEcho := d.startAgentEcho
 	d.mu.Unlock()
 	if err == nil && image != "" && agent.AppliedConfig != nil {
 		agent.AppliedConfig.Image = image
 	}
 	if err == nil && echo != nil && agent.AppliedConfig != nil {
 		echo(agent.AppliedConfig)
+	}
+	if err == nil && agentEcho != nil {
+		agentEcho(agent)
 	}
 	return err
 }
@@ -6072,6 +6101,20 @@ func (g *getProjectErrStore) GetProject(ctx context.Context, id string) (*store.
 func (s *countingBrokerLoadStore) UpdateRuntimeBroker(ctx context.Context, broker *store.RuntimeBroker) error {
 	s.updateRuntimeBrokerCalls++
 	return s.Store.UpdateRuntimeBroker(ctx, broker)
+}
+
+// RefreshRuntimeBrokerState is the heartbeat's broker write; a refresh that
+// reports a change and is stored counts as one broker row write.
+func (s *countingBrokerLoadStore) RefreshRuntimeBrokerState(ctx context.Context, id string, refresh func(*store.RuntimeBroker) bool) error {
+	wrote := false
+	err := s.Store.RefreshRuntimeBrokerState(ctx, id, func(b *store.RuntimeBroker) bool {
+		wrote = refresh(b)
+		return wrote
+	})
+	if err == nil && wrote {
+		s.updateRuntimeBrokerCalls++
+	}
+	return err
 }
 
 func (s *countingBrokerLoadStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {

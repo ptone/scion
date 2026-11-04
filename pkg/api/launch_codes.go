@@ -90,6 +90,13 @@ const (
 	LaunchCodeHarnessConfigUnusable = BrokerErrCodeHarnessConfigUnusable
 	LaunchCodeAgentStateUnavailable = "agent_state_unavailable"
 	LaunchCodeAgentStateConflict    = "agent_state_conflict"
+	// LaunchCodeProjectPathNotInitialized: the project path on the broker
+	// holds no .scion directory or marker (BrokerErrCodeProjectPathNotInitialized).
+	LaunchCodeProjectPathNotInitialized = BrokerErrCodeProjectPathNotInitialized
+	// LaunchCodeGitConfigRefused: the repository's git config sets keys
+	// agents may not be given. The broker's synchronous refusal uses the
+	// same value (BrokerErrCodeGitConfigRefused).
+	LaunchCodeGitConfigRefused = "git_config_refused"
 
 	// LaunchCodeImagePullFailed: the agent image could not be pulled
 	// (Kubernetes ImagePullBackOff or ErrImagePull).

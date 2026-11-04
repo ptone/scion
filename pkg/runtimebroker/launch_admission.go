@@ -66,6 +66,15 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 	// from computing the directory is left to runLaunch's download step,
 	// which reports it as before.
 	if req.WorkspaceStoragePath != "" {
+		// A download mode this broker does not know is refused here with the
+		// synchronous path's 422, before a launch is accepted.
+		signed, modeErr := selectWorkspaceDownloadMode(req)
+		if modeErr != nil {
+			span.SetStatus(codes.Error, modeErr.Error())
+			markAttemptFailed(http.StatusUnprocessableEntity, "workspace download mode not supported")
+			writeWorkspaceDownloadModeUnsupported(w)
+			return false
+		}
 		if _, attemptMsg, httpMessage, err := s.resolveGCSWorkspaceDir(req); errors.Is(err, errInvalidWorkspaceDir) {
 			span.SetStatus(codes.Error, err.Error())
 			markAttemptFailed(http.StatusBadRequest, attemptMsg)
@@ -75,7 +84,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		// Likewise a broker with no bucket for the upload refuses here with
 		// the synchronous path's 422, before accepting a launch that could
 		// only fail (ptone/scion#3422).
-		if s.workspaceStorageBucket(req) == "" {
+		if !signed && s.workspaceStorageBucket(req) == "" {
 			span.SetStatus(codes.Error, errWorkspaceStorageUnconfigured.Error())
 			markAttemptFailed(http.StatusUnprocessableEntity, "storage bucket not configured")
 			writeWorkspaceStorageUnconfigured(w)
@@ -231,6 +240,16 @@ func (s *Server) acceptAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx c
 	rec := newLaunchRecord(a.launchID, a.agentID, a.kind, s.resolveHubNameForLaunch(r), deadline, cancel)
 	rec.RunID = a.runID
 	rec.shutdown = func() { cancelCause(errBrokerShutdown) }
+	// A flat create's run is this launch's from the start, so that a
+	// failure before Manager.Start, and boot recovery from the first
+	// journal write on, finish that run (ptone/scion#5768). A start or
+	// restart launch records its run when it reaches Manager.Start, as
+	// before.
+	if a.kind == store.LaunchKindCreate && a.lc.owned != nil {
+		rec.ownedRunMu.Lock()
+		rec.ownedRun = ownedRunKey{projectID: a.lc.owned.projectID, agentID: a.lc.owned.agentID, runID: a.lc.owned.runID}
+		rec.ownedRunMu.Unlock()
+	}
 	// A drain that began after the handler's own check refuses here, before
 	// the launch is accepted; once tracked, the drain cancels it instead.
 	if !s.trackAsyncLaunch(rec) {

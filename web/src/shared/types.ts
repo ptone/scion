@@ -83,7 +83,8 @@ export interface AdminUser {
   displayName: string;
   avatarUrl?: string;
   role: UserRole;
-  status: 'active' | 'suspended' | 'invited';
+  /** deleting: a forced deletion of the user is in progress. */
+  status: 'active' | 'suspended' | 'invited' | 'deleting';
   created: string;
   lastLogin?: string;
   lastSeen?: string;
@@ -144,6 +145,11 @@ export interface PageData {
   data?: Record<string, unknown> | undefined;
   /** Hub profiling readiness_marks setting; present (true) only when on, for a signed-in user */
   readinessMarks?: boolean | undefined;
+  /**
+   * The `experiments` map of GET /api/v1/experiments, as the hub answered
+   * the session user (ptone/scion#2489); present only for a signed-in shell
+   */
+  experiments?: Record<string, boolean> | undefined;
 }
 
 /**
@@ -873,8 +879,19 @@ export interface AgentFieldEditState {
   sessionSensitive?: boolean;
   /** "session" for a session-sensitive field of a suspended agent. */
   note?: string;
-  /** Clearing or zeroing the field takes effect only at the next reincarnation. */
+  /** Clearing the field takes effect only at the next reincarnation. */
   clearNeedsReincarnate?: boolean;
+  /**
+   * On a count limit: the agent's broker cannot apply Unlimited (0), so the
+   * hub refuses a change to it (unlimitedCountLimits capability).
+   */
+  unlimitedUnsupported?: boolean;
+  /**
+   * On config.resources: the agent's broker does not apply a removed
+   * resources sub-field at a start (clearedResourceSubfields capability), so
+   * the removal takes effect only at the next reincarnation.
+   */
+  subfieldClearUnsupported?: boolean;
   /** Why a locked field is locked. */
   reason?: string;
 }
@@ -1231,6 +1248,11 @@ export interface SharedDir {
   name: string;
   read_only?: boolean;
   in_workspace?: boolean;
+  /**
+   * Container path agents mount the dir at, computed by the hub's layout
+   * authority. Present in GET /projects/{id}/shared-dirs responses only.
+   */
+  target?: string;
 }
 
 export type BrokerStatus = 'online' | 'offline' | 'degraded';
@@ -1299,6 +1321,11 @@ export interface PresentedTarget {
   nodeSelector?: Record<string, string>;
   tolerations?: PresentedToleration[];
   runtimeClassName?: string;
+  /**
+   * True only when the instance reports placement. Absent or false means
+   * "not reported" (an older instance), not "no placement".
+   */
+  placementReported?: boolean;
 }
 
 /**
@@ -1390,6 +1417,12 @@ export interface RuntimeBroker {
    * Read-only and display-only; absent otherwise.
    */
   hostedByThisServer?: boolean;
+  /**
+   * The broker's version against the fleet hub version, compared by the
+   * hub: match, mismatch or unknown. Absent for a plugin record or from an
+   * older hub (shown as unknown).
+   */
+  versionStatus?: 'match' | 'mismatch' | 'unknown';
   autoProvide: boolean;
   endpoint?: string;
   labels?: Record<string, string>;
@@ -1448,6 +1481,41 @@ export interface RuntimeBroker {
    * for callers allowed to update the broker.
    */
   hostIdentity?: BrokerHostIdentity;
+  /**
+   * Where the broker places project storage, as it last reported it.
+   * Mirrors Go api.BrokerWorkspaceStorage (pkg/api/workspace_storage.go).
+   * Absent when the broker never reported it (an older broker).
+   */
+  workspaceStorage?: BrokerWorkspaceStorage;
+}
+
+/** Mirrors Go api.BrokerWorkspaceStorage (pkg/api/workspace_storage.go). */
+export interface BrokerWorkspaceStorage {
+  /** local, nfs, cloudrun-volume or gke-shared-volume. */
+  backend: string;
+  /** Set only for the nfs backend with a valid share. */
+  nfs?: BrokerNFSWorkspaceStorage;
+  /** Set only for the volume backends. */
+  volume?: BrokerVolumeWorkspaceStorage;
+  /** Where shared dirs are placed when that differs from backend; empty means with the workspace. */
+  sharedDirs?: string;
+  /** Where agent homes are placed: local or nfs; empty when the broker predates the field. */
+  homes?: string;
+}
+
+/** Mirrors Go api.BrokerNFSWorkspaceStorage. */
+export interface BrokerNFSWorkspaceStorage {
+  server: string;
+  export: string;
+  subPathRoot: string;
+  healthy: boolean;
+  exportId?: string;
+}
+
+/** Mirrors Go api.BrokerVolumeWorkspaceStorage. */
+export interface BrokerVolumeWorkspaceStorage {
+  claimName?: string;
+  subPathRoot: string;
 }
 
 /** Mirrors Go store.HostIdentityStatus (pkg/store/models.go). */
@@ -1579,6 +1647,14 @@ export interface Message {
   senderProjectId?: string;
   /** Server-derived recipient project ID for cross-project provenance. */
   recipientProjectId?: string;
+  /**
+   * The user who authorized a message sent with an agent delegated
+   * credential (.design/agent-delegation.md §14.5). The sender is still the
+   * agent. Absent on every other message.
+   */
+  authorizingUserId?: string;
+  /** The delegation grant of a message sent with an agent delegated credential. */
+  delegationGrantId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1600,6 +1676,12 @@ export interface Notification {
   dispatched: boolean;
   acknowledged: boolean;
   createdAt: string;
+  /** What produced the notification (for example "artifact_grant"); absent when not classified. */
+  kind?: string;
+  /** The kind of thing the notification is about (for example "artifact"); absent otherwise. */
+  resourceType?: string;
+  /** The id of the thing the notification is about; absent otherwise. */
+  resourceId?: string;
 }
 
 // ---------------------------------------------------------------------------

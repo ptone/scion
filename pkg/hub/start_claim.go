@@ -87,7 +87,7 @@ func startOutcomeOf(err error) startOutcome {
 		return startReleased
 	case errors.Is(err, ErrLaunchInFlight), errors.As(err, &incomplete), errors.As(err, &stillMissing),
 		errors.Is(err, ErrLaunchInvalidPhase),
-		errors.Is(err, errStartRunNotBegun),
+		errors.Is(err, errStartRunNotBegun), errors.Is(err, errPendingConfigFold),
 		errors.As(err, &tokenErr), errors.Is(err, errBrokerLacksEmptyPerAgent),
 		isBrokerRuntimeUnavailable(err), isBrokerDraining(err), errors.Is(err, errStartClaimLost), errors.Is(err, store.ErrDeleteInProgress):
 		return startReleased
@@ -341,6 +341,7 @@ func (r *startClaimRun) releaseSlotIfIdle() {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), 10*time.Second)
 	defer cancel()
 	r.s.releaseSlotIfIdleOn(ctx, r.agent, r.broker)
+	r.s.releaseProjectSlotIfIdle(ctx, r.agent)
 }
 
 // claimedDispatch runs a start under its claim's context. fence reports
@@ -503,11 +504,16 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	// (ptone/scion#3819). A provisioned agent has no previous run, and a
 	// start of a running agent (other than a restart's start leg) keeps
 	// the running pod, so its workspace is not re-cloned.
-	hadEphemeral := !provisioned && hasEphemeralWorkspace(agent) &&
-		(agent.Phase != string(state.PhaseRunning) || opts.Kind == store.StartClaimRestart)
+	createsContainer := agent.Phase != string(state.PhaseRunning) || opts.Kind == store.StartClaimRestart
+	hadEphemeral := !provisioned && hasEphemeralWorkspace(agent) && createsContainer
 	supersedesQueuedStop := agent.ContainerStatus == containerStatusStopQueued
 	sd := opts.Dispatch
 	callerDeadline, hasCallerDeadline := ctx.Deadline()
+	// stillPending is what a container-creating start's fold left: the
+	// keys held for reincarnation, the keys dropped by the saver re-check
+	// and the keys maintenance mode deferred, reported once the start
+	// succeeded.
+	var stillPending startPendingOutcome
 	// accepted: a broker accepted the start as an asynchronous launch.
 	accepted := false
 	err := s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
@@ -522,6 +528,20 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		if err := fence(); err != nil {
 			sd.rollback(ctx)
 			return false, err
+		}
+		// Held config edits (ptone/scion#3976) are applied here, under the
+		// claim and after the fence, so the dispatch below sends them; a
+		// save racing this fold fails its compare-and-set. Only a start
+		// that creates a container applies them: a start of a running
+		// agent (other than a restart's start leg) keeps the running
+		// container, so its held edits stay held.
+		if createsContainer {
+			outcome, err := s.foldPendingConfigAtStart(ctx, agent, startFoldTrigger(opts))
+			if err != nil {
+				sd.rollback(ctx)
+				return false, err
+			}
+			stillPending = outcome
 		}
 		dctx := ctx
 		if opts.KeepCallerDeadline && hasCallerDeadline {
@@ -601,6 +621,7 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	}
 	if err == nil || errors.Is(err, errStartedStatusWrite) {
 		s.addEphemeralWorkspaceStartWarning(ctx, agent, hadEphemeral)
+		s.noteStartPendingOutcome(ctx, agent, stillPending)
 	}
 	if supersedesQueuedStop && (err == nil || errors.Is(err, errStartedStatusWrite)) {
 		// A start handed off to an asynchronous launch is still launching:
@@ -718,7 +739,9 @@ func (s *Server) publishAgentStatusByID(ctx context.Context, agentID string) {
 // environment, a credential that could not be issued, a run that could not
 // be begun before the request was sent (errStartRunNotBegun; not when a
 // delete refused the run-ID write, since the delete then owns the row), a
-// broker without the required capability, a create left incomplete, a phase
+// pending config fold that refused the start (errPendingConfigFold; not
+// under a delete either), a broker without the required capability, a
+// create left incomplete, a phase
 // that no longer allows a launch, or a broker that confirmed it did not
 // act. Anything else, including a start that succeeded but whose status
 // write failed, an ambiguous dispatch error, a claim refusal (the earlier
@@ -739,8 +762,30 @@ func startDidNotHappen(err error) bool {
 	var incomplete *AgentCreateIncompleteError
 	return errors.As(err, &quotaErr) || errors.As(err, &stillMissing) || errors.As(err, &tokenErr) ||
 		errors.Is(err, errBrokerLacksEmptyPerAgent) || errors.As(err, &incomplete) ||
-		(errors.Is(err, errStartRunNotBegun) && !errors.Is(err, store.ErrDeleteInProgress)) ||
+		startRunNotBegunOutsideDelete(err) || pendingFoldRefusedOutsideDelete(err) ||
 		errors.Is(err, ErrLaunchInvalidPhase) || isConfirmedStartNotActedOnError(err)
+}
+
+// pendingFoldRefusedOutsideDelete reports whether err is a start refused by
+// its pending config fold (errPendingConfigFold), for a reason other than a
+// delete holding the agent row (store.ErrDeleteInProgress), which then owns
+// the row. The outcome is definitive: the fold returns before any request
+// leaves the hub, and a compare-and-set conflict or a saver that could not
+// be re-checked has already been retried pendingFoldAttempts times inside
+// the fold, so no container was created. Whether to start again is the
+// caller's policy. Both startDidNotHappen and
+// reincarnationStartLeftNoContainer use it.
+func pendingFoldRefusedOutsideDelete(err error) bool {
+	return errors.Is(err, errPendingConfigFold) && !errors.Is(err, store.ErrDeleteInProgress)
+}
+
+// startRunNotBegunOutsideDelete reports whether err is a start whose run
+// could not be begun before the request was sent (errStartRunNotBegun), for
+// a reason other than a delete holding the agent row
+// (store.ErrDeleteInProgress), which then owns the row. Both
+// startDidNotHappen and reincarnationStartLeftNoContainer use it.
+func startRunNotBegunOutsideDelete(err error) bool {
+	return errors.Is(err, errStartRunNotBegun) && !errors.Is(err, store.ErrDeleteInProgress)
 }
 
 // settleFailedProvisionedStart returns an agent whose start did not happen
@@ -927,16 +972,16 @@ var errStartedStatusWrite = errors.New("agent started but its status could not b
 // not unconfirmed.
 var errStartRunNotBegun = errors.New("start not sent: its run could not be begun")
 
-// startQuotaError is a start refused because the broker is at capacity (or
-// the capacity check failed); nothing was dispatched.
+// startQuotaError is a start refused because the broker or project agent
+// limit is full (or the capacity check failed); nothing was dispatched.
 type startQuotaError struct{ err error }
 
-func (e *startQuotaError) Error() string { return "start refused by broker capacity: " + e.err.Error() }
+func (e *startQuotaError) Error() string { return "start refused by capacity: " + e.err.Error() }
 func (e *startQuotaError) Unwrap() error { return e.err }
 
-// reserveStartCapacity takes the broker capacity hold a start needs: it
-// reserves max_agents_per_broker (idempotent for an agent that already
-// holds it) and marks an agent in an uncounted phase starting for the
+// reserveStartCapacity takes the capacity hold a start needs: it reserves
+// max_agents_per_broker and max_agents_per_project (each idempotent for an
+// agent that already holds it) and marks an agent in an uncounted phase starting for the
 // dispatch (beginStartDispatch). The caller must hold a lifecycle op. A
 // capacity refusal is a startQuotaError; a failed starting write wraps
 // errStartingWrite (and store.ErrDeleteInProgress when a delete now holds
@@ -952,9 +997,10 @@ func (s *Server) reserveStartCapacity(ctx context.Context, agent *store.Agent) (
 	return sd, nil
 }
 
-// writeStartQuotaError writes the answer for a start refused by broker
-// capacity, as the create path's quota check does, and reports whether it
-// did.
+// writeStartQuotaError writes the answer for a start refused by capacity, as
+// the create path's quota check does, and reports whether it did. The limit
+// named in the answer is the one the error carries; max_agents_per_broker is
+// only the fallback.
 func writeStartQuotaError(w http.ResponseWriter, err error) bool {
 	var qe *startQuotaError
 	if !errors.As(err, &qe) {
@@ -1098,6 +1144,11 @@ func (s *Server) writeStartClaimError(ctx context.Context, w http.ResponseWriter
 		return true
 	case errors.Is(err, store.ErrClaimPredicate):
 		Conflict(w, "the agent cannot be started now: it is being deleted or reincarnated")
+		return true
+	case errors.Is(err, errPendingReauthIndeterminate):
+		// The fold could not re-check a held edit's saver (a lookup or
+		// authorization fault): nothing was dropped, written or sent.
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "start not sent: "+pendingReauthUnavailableMessage, nil)
 		return true
 	case errors.Is(err, errStartClaimLost):
 		// A delete that won while the start was dispatching (a hard delete

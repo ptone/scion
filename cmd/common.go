@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -84,7 +85,38 @@ var (
 	messageModeFlag       string
 	serviceAccountFlag    string
 	agentLogLevelFlag     string
+	sendEnvFlag           bool
 )
+
+// sendEnvFlagName is the start/resume flag that allows a non-interactive
+// CLI, which cannot show the confirmation prompt, to send values from its
+// local environment to the hub when the hub asks for them.
+const sendEnvFlagName = "send-env"
+
+const sendEnvFlagUsage = "Allow sending values from the local environment that the Hub asks for to provision the agent (required when the confirmation prompt cannot be shown: no terminal, --non-interactive, or agent mode)"
+
+// envSendNeedsOptIn reports whether sending local environment values
+// requires the explicit --send-env opt-in: the CLI is non-interactive
+// (no terminal, --non-interactive, cli.interactive_disabled or agent
+// mode), so no confirmation prompt can be shown.
+func envSendNeedsOptIn() bool {
+	return nonInteractive || !isInteractiveTerminal()
+}
+
+// envSendOptInError names the keys (never their values) that the hub
+// asked for and the flag that allows sending them.
+func envSendOptInError(gathered map[string]string) error {
+	sorted := slices.Sorted(maps.Keys(gathered))
+	return fmt.Errorf("the Hub asked for %d environment value(s) found in the local environment (%s); a non-interactive start or resume sends local environment values only with --%s: rerun with --%s, or store them on the Hub with 'scion hub secret set' or 'scion hub env set'",
+		len(sorted), strings.Join(sorted, ", "), sendEnvFlagName, sendEnvFlagName)
+}
+
+// envSendNamesLine names the keys (never their values), sorted, that the
+// CLI sends to the hub.
+func envSendNamesLine(gathered map[string]string) string {
+	sorted := slices.Sorted(maps.Keys(gathered))
+	return fmt.Sprintf("Sending %d environment value(s) to the Hub: %s", len(sorted), strings.Join(sorted, ", "))
+}
 
 // agentLogLevelFlagName is the start/resume flag that sets SCION_LOG_LEVEL
 // in the agent's environment. Agents never inherit debug settings from the
@@ -302,7 +334,10 @@ func getHubAccessToken(endpoint string) string {
 		return token
 	}
 
-	// Priority 3: Dev auth token
+	// Priority 3: Dev auth token, for a loopback hub only (see scopeDevAuth)
+	if !isLocalhostEndpoint(endpoint) {
+		return ""
+	}
 	return apiclient.ResolveDevToken()
 }
 
@@ -387,7 +422,7 @@ func requireHubWith(projectPath string, skipProjectLink bool) (*HubContext, erro
 
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)
 	if err != nil {
-		return nil, err
+		return nil, hubTransportRefusal(invocationHubEndpoint(), err)
 	}
 
 	// Convert hubsync.HubContext to cmd.HubContext
@@ -470,7 +505,7 @@ func CheckAgentsGitignore(projectPath string) error {
 		return nil
 	}
 
-	rel, err := filepath.Rel(root, projectDir)
+	rel, err := filepath.Rel(root, projectDir) //winsec:not-containment only RunAgent (start, create, resume) reaches it, and those are gated on Windows
 	if err != nil || strings.HasPrefix(rel, "..") {
 		return nil
 	}
@@ -715,6 +750,12 @@ func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bo
 	}
 
 	if len(resp.Projects) == 0 {
+		// Under a user access token the hub lists nothing without
+		// project:list, whether or not the project exists: name the
+		// likely missing scopes (ptone/scion#7068).
+		if hubsync.UsesUserAccessToken(hubCtx.CredentialKind) {
+			return "", hubsync.ScopedTokenProjectLookupEmptyError(gitRemote)
+		}
 		return "", fmt.Errorf("no project found for git remote: %s\n\nRun 'scion hub link' to link this project with the Hub", gitRemote)
 	}
 
@@ -1058,12 +1099,14 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	// Check if this is a git-based project. When hub is enabled, all git-based
 	// projects use clone-based provisioning (HTTPS + GitHub token) rather than
 	// local worktrees. Inform the user and validate early.
+	projectIsGit := false
 	if !isJSONOutput() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		project, projectErr := hubCtx.Client.Projects().Get(ctx, projectID)
 		cancel()
 		if projectErr == nil && project != nil {
 			printHubWorkspaceSource(project)
+			projectIsGit = project.GitRemote != ""
 		}
 	}
 
@@ -1202,24 +1245,27 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	// every file in the project directory, which is extremely expensive for
 	// large workspaces.
 	var workspaceFiles []transfer.FileInfo
+	var workspaceRoot *os.Root // opened at the collected directory; uploads read through it
 	if hubCtx.ProjectPath != "" && !hubCtx.IsGlobal && !config.IsHubContext() {
-		projectDir := filepath.Dir(hubCtx.ProjectPath) // parent of .scion
-		if _, statErr := os.Stat(projectDir); statErr == nil && !util.IsGitRepoDir(projectDir) {
-			if debugMode {
-				util.Debugf("[workspace-scan] non-git project detected at %s, collecting files...", projectDir)
-			}
-			scanStart := time.Now()
-			files, err := collectWorkspaceFiles(projectDir, nil)
-			if debugMode {
-				util.Debugf("[workspace-scan] collected %d files in %s", len(files), time.Since(scanStart))
-			}
+		scanStart := time.Now()
+		projectDir, files, rootFound, err := collectBootstrapWorkspace(hubCtx.ProjectPath, projectPath)
+		if err != nil {
+			return fmt.Errorf("failed to collect workspace files: %w", err)
+		}
+		if !rootFound && !projectIsGit && !isLocalWorkstationEndpoint(hubCtx.Endpoint) {
+			statusln(noWorkspaceRootWarning)
+		}
+		if debugMode && projectDir != "" {
+			util.Debugf("[workspace-scan] non-git project at %s: collected %d files in %s", projectDir, len(files), time.Since(scanStart))
+		}
+		if len(files) > 0 {
+			workspaceRoot, err = os.OpenRoot(projectDir)
 			if err != nil {
-				return fmt.Errorf("failed to collect workspace files: %w", err)
+				return fmt.Errorf("failed to open workspace directory %s: %w", projectDir, err)
 			}
-			if len(files) > 0 {
-				req.WorkspaceFiles = files
-				workspaceFiles = files
-			}
+			defer func() { _ = workspaceRoot.Close() }()
+			req.WorkspaceFiles = files
+			workspaceFiles = files
 		}
 	} else if debugMode && config.IsHubContext() {
 		util.Debugf("[workspace-scan] skipped: running in hub context (broker has workspace access)")
@@ -1409,30 +1455,64 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		statusln(line)
 	}
 	if len(resp.UploadURLs) > 0 && len(workspaceFiles) > 0 {
+		agentID := ""
+		if resp.Agent != nil {
+			agentID = resp.Agent.ID
+		}
+		if agentID == "" {
+			return fmt.Errorf("failed to finalize workspace bootstrap: the hub returned no agent ID for '%s'", agentName)
+		}
+		// An agent this start created is removed when its workspace
+		// bootstrap fails, so it is not left provisioning. An agent that
+		// existed before the start (same ID) is left in place, and so is
+		// one whose existence before the start could not be checked.
+		createdByStart, existenceUnknown := false, false
+		switch {
+		case existing != nil:
+			createdByStart = existing.ID != agentID
+		case apiclient.IsNotFoundError(getErr):
+			createdByStart = true
+		default:
+			existenceUnknown = true
+		}
+		removeProvisioningAgent := func() {
+			if existenceUnknown {
+				fmt.Fprintf(os.Stderr, "Warning: provisioning agent '%s' was not removed after the failed workspace bootstrap: could not check whether it existed before this start; if it is not wanted, remove it with 'scion delete %s'\n", agentName, agentName)
+				return
+			}
+			if !createdByStart {
+				return
+			}
+			delCtx, delCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer delCancel()
+			if delErr := hubCtx.Client.ProjectAgents(projectID).Delete(delCtx, agentID, &hubclient.DeleteAgentOptions{DeleteFiles: true}); delErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to clean up provisioning agent '%s': %v\n", agentName, delErr)
+				return
+			}
+			statusf("Removed provisioning agent '%s' after the failed workspace bootstrap.\n", agentName)
+		}
+
 		statusf("Uploading workspace (%d files)...\n", len(workspaceFiles))
 		tc := transfer.NewClient(nil)
-		uploadErr := tc.UploadFiles(ctx, workspaceFiles, resp.UploadURLs, func(file transfer.FileInfo, bytesTransferred int64) error {
+		uploadErr := tc.UploadFiles(ctx, workspaceRoot, workspaceFiles, resp.UploadURLs, func(file transfer.FileInfo, bytesTransferred int64) error {
 			if bytesTransferred == file.Size {
 				statusf("  Uploaded: %s\n", file.Path)
 			}
 			return nil
 		})
 		if uploadErr != nil {
+			removeProvisioningAgent()
 			return fmt.Errorf("failed to upload workspace files: %w", uploadErr)
 		}
 
-		// Finalize: triggers broker dispatch
+		// Finalize: triggers broker dispatch. The route takes the agent ID.
 		manifest := transfer.BuildManifest(workspaceFiles)
-		agentSlug := agentName
-		if resp.Agent != nil && resp.Agent.Slug != "" {
-			agentSlug = resp.Agent.Slug
-		}
-
-		finalizeResp, err := hubCtx.Client.Workspace().FinalizeSyncTo(ctx, agentSlug, manifest)
+		finalizeResp, err := hubCtx.Client.Workspace().FinalizeSyncTo(ctx, agentID, manifest)
 		if err != nil {
 			if apiErr, ok := asIncompleteCreate(err); ok {
 				return incompleteCreateError(agentName, apiErr)
 			}
+			removeProvisioningAgent()
 			return fmt.Errorf("failed to finalize workspace bootstrap: %w", err)
 		}
 		for _, line := range workspaceFinalizeNotice(finalizeResp.FilesApplied, finalizeResp.Warnings) {
@@ -1717,8 +1797,10 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 // the hub answers only once the runtime has created the agent, which can
 // take well over hubClientTimeout (a Cloud Run instance create, for
 // example), so these requests get a longer timeout. Other hub requests keep
-// theirs.
-var hubCreateRequestTimeout = 3 * time.Minute
+// theirs. It must outlast the hub's synchronous create: one dispatch of up
+// to the hub-to-broker request limit (180s, ptone/scion#6829) plus the
+// hub's 30s response write slack, about 210s.
+var hubCreateRequestTimeout = 4 * time.Minute
 
 func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, projectID string, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
 	createCtx := apiclient.WithRequestTimeout(ctx, hubCreateRequestTimeout)
@@ -2068,10 +2150,17 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 		return resp, nil
 	}
 
+	// A non-interactive CLI sends local environment values only with the
+	// explicit --send-env opt-in; without it nothing is sent.
+	if envSendNeedsOptIn() && !sendEnvFlag {
+		return nil, envSendOptInError(gatheredEnv)
+	}
+
 	// In interactive mode, confirm before sending env vars
-	if isInteractiveTerminal() && !autoConfirm {
+	prompted := isInteractiveTerminal() && !autoConfirm
+	if prompted {
 		reader := bufio.NewReader(os.Stdin)
-		fmt.Fprintf(os.Stderr, "\nSend %d environment variable(s) to use in provisioning this agent? (will not be stored) [Y/n]: ", len(gatheredEnv))
+		fmt.Fprintf(os.Stderr, "\nSend %d environment value(s) to use in provisioning this agent? (will not be stored) [Y/n]: ", len(gatheredEnv))
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			return nil, fmt.Errorf("failed to read input: %w", err)
@@ -2082,7 +2171,14 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 		}
 	}
 
-	statusf("Submitting %d gathered environment variable(s)...\n", len(gatheredEnv))
+	// The text-mode prompt follows the list of keys found locally. In
+	// every other case (--yes, --format json, a non-interactive send
+	// with --send-env) the keys are named here, on stderr only.
+	if prompted && !isJSONOutput() {
+		statusf("Submitting %d gathered environment value(s)...\n", len(gatheredEnv))
+	} else {
+		fmt.Fprintln(os.Stderr, envSendNamesLine(gatheredEnv))
+	}
 
 	// Submit gathered env to Hub. From here the Hub may launch the agent.
 	// A context that already ended sends nothing: report it as a failure

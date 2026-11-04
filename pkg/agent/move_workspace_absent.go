@@ -105,16 +105,16 @@ func (m *AgentManager) moveNFSOwnAgentDir(ctx context.Context, opts api.StartOpt
 	if err != nil {
 		return "", fmt.Errorf("%w: load settings: %v", ErrMoveWorkspaceUnconfirmed, err)
 	}
-	if settings == nil || settings.Server == nil || settings.Server.WorkspaceStorage == nil {
+	if settings == nil || settings.Server == nil || settings.Server.EffectiveWorkspaceStorage() == nil {
 		return "", nil
 	}
-	ws := settings.Server.WorkspaceStorage
+	ws := settings.Server.EffectiveWorkspaceStorage()
 	runtimeName := ""
 	if m.Runtime != nil {
 		runtimeName = m.Runtime.Name()
 	}
 	emptyPerAgent := isEmptyPerAgentStart(opts)
-	emptyDirName, cloneDirName, _, err := nfsOwnAgentDirSelection(runtimeName, ws, emptyPerAgent, opts.Env, opts.GitClone, opts.Name)
+	emptyDirName, cloneDirName, _, err := nfsOwnAgentDirSelection(runtimeName, projectDir, ws, emptyPerAgent, opts.Env, opts.GitClone, opts.Name)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrMoveWorkspaceUnconfirmed, err)
 	}

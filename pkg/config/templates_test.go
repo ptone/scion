@@ -269,20 +269,20 @@ func TestMergeScionConfig(t *testing.T) {
 	})
 
 	t.Run("max_turns override replaces base", func(t *testing.T) {
-		base := &api.ScionConfig{MaxTurns: 10}
-		override := &api.ScionConfig{MaxTurns: 50}
+		base := &api.ScionConfig{MaxTurns: api.IntPtr(10)}
+		override := &api.ScionConfig{MaxTurns: api.IntPtr(50)}
 		got := MergeScionConfig(base, override)
-		if got.MaxTurns != 50 {
-			t.Errorf("expected MaxTurns=50, got %d", got.MaxTurns)
+		if !api.IntPtrEqual(got.MaxTurns, api.IntPtr(50)) {
+			t.Errorf("expected MaxTurns=50, got %s", api.FormatCountLimit(got.MaxTurns))
 		}
 	})
 
 	t.Run("max_turns zero override keeps base", func(t *testing.T) {
-		base := &api.ScionConfig{MaxTurns: 10}
+		base := &api.ScionConfig{MaxTurns: api.IntPtr(10)}
 		override := &api.ScionConfig{}
 		got := MergeScionConfig(base, override)
-		if got.MaxTurns != 10 {
-			t.Errorf("expected MaxTurns=10, got %d", got.MaxTurns)
+		if !api.IntPtrEqual(got.MaxTurns, api.IntPtr(10)) {
+			t.Errorf("expected MaxTurns=10, got %s", api.FormatCountLimit(got.MaxTurns))
 		}
 	})
 
@@ -577,7 +577,19 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 		}
 	})
 
-	t.Run("absolute path bypasses project resolution", func(t *testing.T) {
+	t.Run("absolute path outside the hydration roots is refused", func(t *testing.T) {
+		// A project-scoped lookup does not accept an arbitrary absolute
+		// directory: the request's template value is never a host path.
+		withHydrationRoots(t)
+		if _, err := FindTemplateInProjectPath(globalTplDir, projectPath); !errors.Is(err, ErrTemplateRefNotAllowed) {
+			t.Fatalf("FindTemplateInProjectPath(absolute, no roots) error = %v, want ErrTemplateRefNotAllowed", err)
+		}
+	})
+
+	t.Run("absolute path below a hydration root bypasses project resolution", func(t *testing.T) {
+		// Below a registered hydration root (the broker's template cache),
+		// an absolute directory is the template, without project lookup.
+		withHydrationRoots(t, filepath.Dir(globalTplDir))
 		tpl, err := FindTemplateInProjectPath(globalTplDir, projectPath)
 		if err != nil {
 			t.Fatalf("FindTemplateInProjectPath failed: %v", err)
@@ -1384,27 +1396,27 @@ func TestMergeScionConfig_InlineConfigFields(t *testing.T) {
 	})
 
 	t.Run("max_model_calls override replaces base", func(t *testing.T) {
-		base := &api.ScionConfig{MaxModelCalls: 100}
-		override := &api.ScionConfig{MaxModelCalls: 200}
+		base := &api.ScionConfig{MaxModelCalls: api.IntPtr(100)}
+		override := &api.ScionConfig{MaxModelCalls: api.IntPtr(200)}
 		got := MergeScionConfig(base, override)
-		if got.MaxModelCalls != 200 {
-			t.Errorf("expected MaxModelCalls=200, got %d", got.MaxModelCalls)
+		if !api.IntPtrEqual(got.MaxModelCalls, api.IntPtr(200)) {
+			t.Errorf("expected MaxModelCalls=200, got %s", api.FormatCountLimit(got.MaxModelCalls))
 		}
 	})
 
 	t.Run("max_model_calls zero override keeps base", func(t *testing.T) {
-		base := &api.ScionConfig{MaxModelCalls: 150}
+		base := &api.ScionConfig{MaxModelCalls: api.IntPtr(150)}
 		override := &api.ScionConfig{}
 		got := MergeScionConfig(base, override)
-		if got.MaxModelCalls != 150 {
-			t.Errorf("expected MaxModelCalls=150, got %d", got.MaxModelCalls)
+		if !api.IntPtrEqual(got.MaxModelCalls, api.IntPtr(150)) {
+			t.Errorf("expected MaxModelCalls=150, got %s", api.FormatCountLimit(got.MaxModelCalls))
 		}
 	})
 
 	t.Run("full inline config merge over template", func(t *testing.T) {
 		template := &api.ScionConfig{
 			Model:         "claude-sonnet-4-6",
-			MaxTurns:      100,
+			MaxTurns:      api.IntPtr(100),
 			HarnessConfig: "claude-default",
 			User:          "root",
 		}
@@ -1418,8 +1430,8 @@ func TestMergeScionConfig_InlineConfigFields(t *testing.T) {
 		if got.Model != "claude-opus-4-6" {
 			t.Errorf("expected Model='claude-opus-4-6', got %q", got.Model)
 		}
-		if got.MaxTurns != 100 {
-			t.Errorf("expected MaxTurns=100 (from template), got %d", got.MaxTurns)
+		if !api.IntPtrEqual(got.MaxTurns, api.IntPtr(100)) {
+			t.Errorf("expected MaxTurns=100 (from template), got %s", api.FormatCountLimit(got.MaxTurns))
 		}
 		if got.HarnessConfig != "claude-default" {
 			t.Errorf("expected HarnessConfig='claude-default' (from template), got %q", got.HarnessConfig)
@@ -1585,8 +1597,10 @@ func TestMergeScionConfigTelemetry(t *testing.T) {
 		if got.Telemetry.Cloud.TLS.CertFile != "/etc/ssl/certs/override-client.pem" {
 			t.Errorf("expected CertFile override, got %q", got.Telemetry.Cloud.TLS.CertFile)
 		}
-		if got.Telemetry.Cloud.TLS.KeyFile != "/etc/ssl/private/base-client-key.pem" {
-			t.Errorf("expected KeyFile preserved from base, got %q", got.Telemetry.Cloud.TLS.KeyFile)
+		// cert_file and key_file merge as a pair: the override sets only
+		// the certificate, so the base key is not carried over.
+		if got.Telemetry.Cloud.TLS.KeyFile != "" {
+			t.Errorf("expected KeyFile not mixed in from base, got %q", got.Telemetry.Cloud.TLS.KeyFile)
 		}
 		// Batch max_size overridden, timeout preserved
 		if got.Telemetry.Cloud.Batch.MaxSize != 256 {
@@ -2272,6 +2286,8 @@ func TestFindTemplateContentHashDirHasNoName(t *testing.T) {
 	finders := map[string]func(string) (*Template, error){
 		"FindTemplate": FindTemplate,
 		"FindTemplateInProjectPath": func(name string) (*Template, error) {
+			// root is a registered hydration root, as the broker's cache.
+			withHydrationRoots(t, root)
 			return FindTemplateInProjectPath(name, projectPath)
 		},
 	}
@@ -2331,5 +2347,54 @@ func TestModelSizeAlias(t *testing.T) {
 				t.Errorf("ModelSizeAlias(%q) = %q disagrees with ResolveModelAlias -> %q", tt.input, ModelSizeAlias(tt.input), resolved)
 			}
 		})
+	}
+}
+
+// TestTemplateFromDir: an existing directory yields a template named after
+// its base name (empty for a content-hash directory); a missing path or a
+// file is refused. FindTemplateWithContext resolves absolute paths with it.
+func TestTemplateFromDir(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "planner")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hashDir := filepath.Join(root, strings.Repeat("ab", 32))
+	if err := os.MkdirAll(hashDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tpl, err := TemplateFromDir(dir)
+	if err != nil {
+		t.Fatalf("TemplateFromDir(%s): %v", dir, err)
+	}
+	if tpl.Name != "planner" || tpl.Path != dir {
+		t.Errorf("TemplateFromDir(%s) = {%q, %q}, want {planner, %s}", dir, tpl.Name, tpl.Path, dir)
+	}
+
+	tpl, err = TemplateFromDir(hashDir)
+	if err != nil {
+		t.Fatalf("TemplateFromDir(hash dir): %v", err)
+	}
+	if tpl.Name != "" {
+		t.Errorf("hash dir name = %q, want empty", tpl.Name)
+	}
+
+	for _, bad := range []string{filepath.Join(root, "missing"), file} {
+		if _, err := TemplateFromDir(bad); err == nil || !strings.Contains(err.Error(), "not found or not a directory") {
+			t.Errorf("TemplateFromDir(%s) err = %v, want not found or not a directory", bad, err)
+		}
+	}
+
+	viaFind, err := FindTemplate(dir)
+	if err != nil {
+		t.Fatalf("FindTemplate(%s): %v", dir, err)
+	}
+	if viaFind.Name != "planner" || viaFind.Path != dir {
+		t.Errorf("FindTemplate(%s) = {%q, %q}, want {planner, %s}", dir, viaFind.Name, viaFind.Path, dir)
 	}
 }

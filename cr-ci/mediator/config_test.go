@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -63,6 +64,7 @@ func TestLoadDefaults(t *testing.T) {
 		AppPrivateKeySecretName: "cr-runner-gh-app-private-key",
 		WebhookSecretName:       "cr-runner-gh-webhook-secret",
 		ClaimTTL:                300 * time.Second,
+		RunnerIdleTimeout:       10 * time.Minute,
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("Load defaults:\n got %+v\nwant %+v", c, want)
@@ -98,6 +100,24 @@ func TestLoadOwnerLength(t *testing.T) {
 	}
 }
 
+// TARGET_REPOS is capped at 100, the runner entrypoint's GH_REPOS cap: in org scope
+// every runner's allowlist carries all of them.
+func TestLoadTargetReposCap(t *testing.T) {
+	env := validEnv()
+	repos := make([]string, 101)
+	for i := range repos {
+		repos[i] = fmt.Sprintf("example-owner/repo-%d", i)
+	}
+	env[EnvTargetRepos] = strings.Join(repos[:100], ",")
+	if _, err := Load(getenvFrom(env)); err != nil {
+		t.Fatalf("100 repositories should load: %v", err)
+	}
+	env[EnvTargetRepos] = strings.Join(repos, ",")
+	if _, err := Load(getenvFrom(env)); err == nil || !strings.Contains(err.Error(), "at most 100") {
+		t.Fatalf("101 repositories: err = %v, want the cap error", err)
+	}
+}
+
 func TestLoadMediatorURL(t *testing.T) {
 	env := validEnv()
 	env[EnvMediatorURL] = "https://cr-runner-mediator-abc123-uc.a.run.app/"
@@ -124,12 +144,26 @@ func TestLoadOrgScope(t *testing.T) {
 	}
 }
 
+// GITHUB_APP_INSTALLATION_SCOPE defaults to repo, the common case (and the
+// only one for a personal account).
+func TestLoadInstallScopeDefault(t *testing.T) {
+	env := validEnv()
+	delete(env, EnvGitHubInstallScope)
+	c, err := Load(getenvFrom(env))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.InstallScope != ScopeRepo {
+		t.Errorf("InstallScope = %q, want %q by default", c.InstallScope, ScopeRepo)
+	}
+}
+
 func TestLoadRequired(t *testing.T) {
 	_, err := Load(getenvFrom(nil))
 	if err == nil {
 		t.Fatal("Load with empty env succeeded")
 	}
-	for _, k := range []string{EnvTargetRepos, EnvGitHubAppID, EnvGitHubInstallScope, EnvGCPProject, EnvRegion} {
+	for _, k := range []string{EnvTargetRepos, EnvGitHubAppID, EnvGCPProject, EnvRegion} {
 		if !strings.Contains(err.Error(), k+": required") {
 			t.Errorf("error does not report %s as required: %v", k, err)
 		}
@@ -176,8 +210,15 @@ var invalidCases = []struct {
 	{EnvRunnerMemory, "99999999999999999999Mi"},
 	{EnvRunnerMemory, "2Gi"}, // below the 8-CPU floor of 4Gi
 	{EnvRunnerDiskGi, "0"},
-	{EnvRunnerDiskGi, "11"},
-	{EnvRunnerDiskGi, "20"}, // the old default; above the 10 GiB Cloud Run accepted in P6
+	{EnvRunnerDiskGi, "101"}, // above Cloud Run's 100 GiB per volume
+	{EnvRunnerBuildCacheInRAM, "yes"},
+	{EnvRunnerIdleTimeout, "30s"}, // below 1m
+	{EnvRunnerIdleTimeout, "30m"}, // more than half of the default TASK_TIMEOUT (45m)
+	{EnvRunnerIdleTimeout, "10"},  // not a duration
+	{EnvRunnerBuildCacheInRAM, "TRUE"},
+	{EnvMediatorMinInstances, "2"}, // max-instances is 1
+	{EnvMediatorMinInstances, "-1"},
+	{EnvMediatorMinInstances, "one"},
 	{EnvMaxConcurrentRunners, "-1"},
 	{EnvTaskTimeout, "45"},
 	{EnvTaskTimeout, "30s"},
@@ -311,6 +352,25 @@ var validCases = []map[string]string{
 	{EnvGitHubAppID: "+0042", EnvRunnerGroupID: "007"},
 	{EnvReconcileSchedule: "0 */2 * * 1-5"},
 	{EnvBuildStagingBucket: "my-org_cr-ci-staging"},
+	{EnvRunnerDiskGi: "25"},  // needs the per-instance quota raised; the loader allows 1-100
+	{EnvRunnerDiskGi: "100"}, // Cloud Run's per-volume maximum
+	{EnvRunnerBuildCacheInRAM: "true"},
+	{EnvRunnerBuildCacheInRAM: "true", EnvRunnerMemory: "32768Mi"},
+	{EnvGitHubInstallScope: ""},      // defaults to repo
+	{EnvRunnerIdleTimeout: "22m30s"}, // exactly half of 45m
+	{EnvMediatorMinInstances: "1"},
+	{EnvRunnerIdleTimeout: "30m", EnvTaskTimeout: "2h"}, // fine with a longer TASK_TIMEOUT
+}
+
+// invalidComboCases are multi-key changes to validEnv that Load must reject,
+// naming key.
+var invalidComboCases = []struct {
+	env map[string]string
+	key string
+}{
+	// The RAM build cache needs the 32 GiB shape.
+	{map[string]string{EnvRunnerBuildCacheInRAM: "true", EnvRunnerMemory: "30Gi"}, EnvRunnerBuildCacheInRAM},
+	{map[string]string{EnvRunnerBuildCacheInRAM: "true", EnvRunnerCPU: "6", EnvRunnerMemory: "24Gi"}, EnvRunnerBuildCacheInRAM},
 }
 
 // TestScriptValidatorMatchesLoad keeps scripts/lib.sh's config validation
@@ -366,8 +426,59 @@ func TestScriptValidatorMatchesLoad(t *testing.T) {
 			t.Errorf("%s=%q: check-config.sh does not name the key:\n%s", tt.key, tt.value, out)
 		}
 	}
+	for _, tt := range invalidComboCases {
+		env := merge(tt.env)
+		if _, err := Load(getenvFrom(env)); err == nil || !strings.Contains(err.Error(), tt.key) {
+			t.Fatalf("%v: Load err = %v, want a %s error", tt.env, err, tt.key)
+		}
+		if ok, out := check(env); ok || !strings.Contains(out, tt.key) {
+			t.Errorf("%v: check-config.sh ok=%v, want a %s error:\n%s", tt.env, ok, tt.key, out)
+		}
+	}
 	// Required keys.
 	if ok, out := check(map[string]string{}); ok || !strings.Contains(out, EnvGitHubAppID+": required") {
 		t.Errorf("empty config: ok=%v\n%s", ok, out)
+	}
+}
+
+// TestOwnerRuleWithinRunnerPattern (cr-ci-rev-12 O3): the runner's shell checks of
+// GH_REPOS (entrypoint.sh, and the job guard's served list) share one owner/name
+// entry pattern, and it is looser than config's owner and repo rules, so every
+// TARGET_REPOS entry config accepts passes them. Config is the strict side: it also
+// refuses the owners only the shell would take (edge or double hyphens, more than
+// 39 characters).
+func TestOwnerRuleWithinRunnerPattern(t *testing.T) {
+	const entry = "[A-Za-z0-9-]+/[A-Za-z0-9._-]+"
+	for _, f := range []string{"entrypoint.sh", "cr-ci-job-guard.sh"} {
+		b, err := os.ReadFile(filepath.Join("..", "runner", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), "^"+entry+"(,"+entry+")") {
+			t.Errorf("runner/%s no longer checks GH_REPOS entries as %s; re-check this relation", f, entry)
+		}
+	}
+	shell := regexp.MustCompile("^" + entry + "$")
+	accepted := []string{
+		"a/b", "example-owner/example-repo", "A1-b2-C3/repo.one_two-3",
+		strings.Repeat("a", 39) + "/r", strings.Repeat("a-", 19) + "a/" + strings.Repeat("r", 100),
+	}
+	for _, r := range accepted {
+		if got := parseRepos(r, func(format string, args ...any) { t.Errorf("config refused %q: %s", r, fmt.Sprintf(format, args...)) }); len(got) != 1 {
+			continue
+		}
+		if !shell.MatchString(r) {
+			t.Errorf("config accepts %q but the runner's shell pattern does not", r)
+		}
+	}
+	for _, r := range []string{"-a/r", "a-/r", "a--b/r", strings.Repeat("a", 40) + "/r"} {
+		if !shell.MatchString(r) {
+			t.Fatalf("test assumption: the shell pattern takes %q", r)
+		}
+		refused := false
+		parseRepos(r, func(string, ...any) { refused = true })
+		if !refused {
+			t.Errorf("config accepts %q, which GitHub does not allow as an owner", r)
+		}
 	}
 }

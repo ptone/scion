@@ -634,6 +634,16 @@ func (s *Server) dispatchStandingCheck(ctx context.Context, agent *store.Agent) 
 	return s.agentStanding(ctx, agent.ID)
 }
 
+// heldLookupFaultDMError is the refusal of a send whose target's hold
+// could not be read: a lookup fault refuses.
+func heldLookupFaultDMError() *AgentDMError {
+	return &AgentDMError{
+		Code:       ErrCodeInternalError,
+		Message:    "could not verify the target agent's status",
+		HTTPStatus: http.StatusInternalServerError,
+	}
+}
+
 // heldTargetDMError is the refusal for a message to a held agent: the same
 // code and status as a suspended target.
 func heldTargetDMError(agent *store.Agent) *AgentDMError {
@@ -642,6 +652,20 @@ func heldTargetDMError(agent *store.Agent) *AgentDMError {
 		Message:    fmt.Sprintf("agent %q is suspended. A hub admin can lift the hold.", agent.Slug),
 		HTTPStatus: http.StatusConflict,
 	}
+}
+
+// heldTargetRefusal is the refusal of a send to target when it is held:
+// heldTargetDMError for a held target, heldLookupFaultDMError when the hold
+// could not be read, and nil otherwise.
+func (s *Server) heldTargetRefusal(ctx context.Context, target *store.Agent) *AgentDMError {
+	held, err := s.agentHeld(ctx, target.ID)
+	if err != nil {
+		return heldLookupFaultDMError()
+	}
+	if held {
+		return heldTargetDMError(target)
+	}
+	return nil
 }
 
 // agentStandingForbidden runs agentStanding for an agent caller and writes

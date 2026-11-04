@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 349
+**Operations:** 376
 
 ## Table of Contents
 
@@ -16,8 +16,9 @@
 - [agent.hold.lift](#agentholdlift) — Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
 - [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
 - [agent.read](#agentread) — Read a single agent's metadata by ID
-- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
+- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub form only: its scope is the authorizing user's list scope within the grant boundary, and each item is also decided for agent.read
 - [agent.update](#agentupdate) — Update agent configuration or metadata
+- [agent.update.pendingconfig.delete](#agentupdatependingconfigdelete) — Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
 - [agent.workspace.read](#agentworkspaceread) — Read an agent's workspace sync status
 - [agent.workspace.sync](#agentworkspacesync) — Sync an agent's workspace from or to the agent
@@ -107,9 +108,10 @@
 - [project.template.set](#projecttemplateset) — Mark or unmark a project as a template. The caller needs project.update and project.clone on the project
 - [template.project.import](#templateprojectimport) — Discover or import templates into a project
 - [harnessconfig.project.import](#harnessconfigprojectimport) — Discover or import harness configs into a project
-- [project.workspace.read](#projectworkspaceread) — Read a project's workspace: sync status, cache status, archive and file reads
-- [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: cache refresh and notify, file upload, write and delete, and git pull
+- [project.workspace.read](#projectworkspaceread) — Read a project's workspace: archive and file reads
+- [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: file upload, write and delete, and git pull
 - [project.github.read](#projectgithubread) — Read a project's GitHub status, GitHub permissions and git identity
+- [project.github.installation.bind](#projectgithubinstallationbind) — Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)
 - [project.github.write](#projectgithubwrite) — Change a project's GitHub installation, status check, GitHub permissions and git identity
 - [project.members.assignableroles](#projectmembersassignableroles) — List the roles the caller may assign in a project
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
@@ -153,9 +155,9 @@
 - [chat.topic.read](#chattopicread) — Read a chat thread. Needs project:read on the thread's project
 - [chat.topic.update](#chattopicupdate) — Rename a chat thread or set its default agent. Needs project:read on the thread's project; a token also needs inbox:write for it
 - [chat.topic.delete](#chattopicdelete) — Delete a chat thread (soft delete; the last thread of a space stays). Needs project:read on the thread's project; a token also needs inbox:write for it
-- [chat.conversation.history.topic](#chatconversationhistorytopic) — Read the messages of a chat thread. Needs project:read on the thread's project
+- [chat.conversation.history.topic](#chatconversationhistorytopic) — Read the messages of a chat thread. Needs project:read on the thread's project; canPost reports whether the caller's account holds project.chat_post on it
 - [chat.conversation.history.dm](#chatconversationhistorydm) — Read the messages of one of the caller's DMs. A token needs inbox:read: a DM with an agent needs the agent's project inside its boundary and agent:read on the agent; a DM between users needs a hub boundary
-- [chat.conversation.send.topic](#chatconversationsendtopic) — Post a message to a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it. Agent recipients need agent:message
+- [chat.conversation.send.topic](#chatconversationsendtopic) — Post a message to a chat thread. Needs project:read and project.chat_post on the thread's project; a caller that reads the thread but lacks project.chat_post gets 403 chat_post_denied. A token also needs inbox:write for it; project.chat_post is checked on the token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message
 - [chat.conversation.send.dmagent](#chatconversationsenddmagent) — Post a message to one of the caller's DMs with an agent. Needs agent:message on the agent; a token also needs inbox:write for the agent's project
 - [chat.conversation.send.dmuser](#chatconversationsenddmuser) — Post a message to one of the caller's DMs with another user. Every caller needs read access to the peer user record; a token also needs inbox:write on a hub boundary
 - [chat.message.edit](#chatmessageedit) — Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM
@@ -181,12 +183,19 @@
 - [chat.search.project](#chatsearchproject) — Search the messages of one project's chat. Needs project:read on the project; a token keeps a DM row only when the DM rule lets it read the DM under inbox:read
 - [chat.search.unscoped](#chatsearchunscoped) — Search the messages of every project the caller can read. A project token searches only its boundary project; a token keeps a DM row only when the DM rule lets it read the DM under inbox:read
 - [chat.search.dm](#chatsearchdm) — Search the messages of one of the caller's DMs. A token needs inbox:read under the DM rule
+- [chat.star.add](#chatstaradd) — Star a message for the caller (private). The message must be a live message of the conversation named in the body. A thread needs project:read on its project; a DM needs the caller in a user slot of its key. A token also needs inbox:write: a thread's project, or an agent DM's peer agent project with agent:read on the agent, inside its boundary; a DM between users needs a hub boundary. 404 while web.chat_starred_messages is off
+- [chat.star.read](#chatstarread) — Read the current detail of one of the caller's stars. Needs read access to the star's conversation now (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+- [chat.star.state](#chatstarstate) — Report which of up to 200 messages the caller starred, keeping only live messages in conversations the caller can read now (threads by project:read, DMs by participation); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+- [chat.star.list](#chatstarlist) — List the caller's stars in one conversation (a thread or a DM), newest first, with a sealed cursor. Needs read access to it (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+- [chat.star.conversations](#chatstarconversations) — List the conversations in which the caller has at least one live star (the Starred rail): one row per conversation with its current name, activity and project, no excerpt or count, sorted by activity or name, with a sealed cursor. Each conversation is kept only while the caller can read it now (project:read for a thread; the caller in a user slot of a DM key); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). An optional projectId must be a project the caller can read. 404 while web.chat_starred_messages is off
+- [chat.conversation.history.starred](#chatconversationhistorystarred) — Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred. 404 while web.chat_starred_messages is off, never unfiltered history
+- [chat.star.remove](#chatstarremove) — Remove the caller's own star of a message; always 204. No message or conversation lookup; a project token removes only a star whose stored project is inside its boundary. 404 while web.chat_starred_messages is off
 - [chat.attachment.upload.project](#chatattachmentuploadproject) — Upload chat attachments to a space. Needs project:read on the space's project; a token also needs inbox:write for it
 - [chat.attachment.upload.noproject](#chatattachmentuploadnoproject) — Upload project-less chat attachments, reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
 - [chat.attachment.upload.agent](#chatattachmentuploadagent) — Upload attachments as the calling agent, stored as artifacts in the agent's own upload scope (ptone/scion#4596). The agent must be in good standing (agentMaySend); the upload is readable only by the agent until a send binds it
 - [chat.attachment.probe](#chatattachmentprobe) — Answer where the caller's attachment uploads go (artifact or legacy) and the delivery budget (ptone/scion#4596). Reads and writes nothing
 - [chat.attachment.download.project](#chatattachmentdownloadproject) — Download a chat attachment of a project. Needs project:read on the project; a session also reads its own uploads and files attached to messages it can read
-- [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation and project:read on the agent's project; a token also needs inbox:write under the DM rule
+- [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, and project:read and project.chat_post on the agent's project (403 chat_post_denied without project.chat_post); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
@@ -205,9 +214,11 @@
 - [federation.token.mint](#federationtokenmint) — Obtain a short-lived user access credential for the caller, signed with the hub's OIDC key, for one peer hub audience listed in server.oidc.user_token_audiences. Only a local human user with status active; a user access token needs federation_token:mint on a hub boundary. 404 while federation.project_visitors is off
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present). A token needs user:suspend on a hub boundary, checked on the hub-level user record. The caller's own status and activating an invited user are refused for every credential
 - [user.admin.invite](#useradmininvite) — Invite users to the platform (single or bulk) and manage invitation codes (list, create, read stats, read, revoke, delete). The invited record has status invited, the placeholder role member and no role binding or group membership; an invitation code names no role. A token needs user:invite on the hub boundary and the holder's live user.invite authority
-- [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
-- [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
-- [user.admin.delete](#useradmindelete) — Delete a user account
+- [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants. A token needs user:invite on the hub boundary and the holder's live user.invite authority, checked at the hub user collection; the user_provision audit records the token as the credential. Refused for every caller on a hub running with dev authentication
+- [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present). A token needs user:promote on a hub boundary, checked on the hub-level user record. CanDelegate applies to every change that involves a super-admin binding, so a token never creates or removes one; the last super-admin, self-demotion, invited-user and binding-drift guards apply to every credential, and a token's own role is session-only
+- [user.admin.delete](#useradmindelete) — Delete a user account. A token needs user:delete on a hub boundary, checked on the hub-level user record, and is refused while the user holds a direct system-scope role binding of any lifecycle state (403 forbidden, details.reason system_role_binding_held; judged again in the transaction on the bindings the delete removes, 409 conflict with details.reason binding_state_drift), with or without force. The completion of a forced deletion a token requested applies the same rule
+- [user.admin.deleteblockers](#useradmindeleteblockers) — List what blocks deleting a user (agents and active delegations), without deleting. A token needs user:delete on a hub boundary, checked on the hub-level user record
+- [user.admin.deletion](#useradmindeletion) — Read the forced deletion of a user: its state and the outcome of each of the user's agents. A token needs user:delete on a hub boundary, checked on the hub-level user record
 - [group.read](#groupread) — Read group details
 - [group.list](#grouplist) — List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
 - [group.create](#groupcreate) — Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
@@ -233,7 +244,7 @@
 - [hub.audit.explain](#hubauditexplain) — Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted
 - [user.self.explain](#userselfexplain) — Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project
 - [user.self.profile](#userselfprofile) — Read the caller's own profile and preferences. Any token reads its holder's own profile. A visitor reads its own federated account; an unlinked federated user is refused
-- [user.self.scopes](#userselfscopes) — List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
+- [user.self.scopes](#userselfscopes) — List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads the selector list. Eligibility needs an interactive session: a token request naming a boundary or project is refused
 - [user.self.adminstatus](#userselfadminstatus) — Read the caller's own admin status and system-scope permissions. For a token the permission list holds only the permissions its ceiling allows that are eligible for its boundary kind
 - [user.self.groups](#userselfgroups) — List the caller's own effective groups. A project-boundary token lists groups that belong to no project and the groups of its boundary project, the latter only while its holder is a current member of that project
 - [user.invite.redeem](#userinviteredeem) — Redeem an invitation code for the caller's identity. Session-only: a token does not bind an invitation to its holder
@@ -245,6 +256,7 @@
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections. The route guard checks hub.config.read, so a token needs hub_config:read and hub_config:update, and writes configuration keys only
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
 - [hub.profiling.update](#hubprofilingupdate) — Read and update the profiling switches (session only)
+- [hub.chatretention.update](#hubchatretentionupdate) — Read and update the chat message retention settings (session only)
 - [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
 - [hub.conduitgrantkeys.rotate](#hubconduitgrantkeysrotate) — Rotate the conduit grant signing key (kids and timestamps only in the response)
 - [hub.conduitgrantkeys.revoke](#hubconduitgrantkeysrevoke) — Revoke a conduit grant key at once (the kid only in the response)
@@ -276,6 +288,11 @@
 - [quota.brokersettings.update](#quotabrokersettingsupdate) — Replace a runtime broker's settings document. Requires broker.read on the broker and quota.update on the hub-scoped quota target for every write, including one that changes no key, and each changed key's declared permission (maxAgents declares quota.update)
 - [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:delete
 - [quota.usage.self.read](#quotausageselfread) — Read the caller's own quota usage: each limit's effective value and active count for the caller only
+- [hub.experiments.read](#hubexperimentsread) — Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them
+- [hub.profiling.read](#hubprofilingread) — Read the client profiling switch. Any signed-in identity (user, agent or broker) reads it, and any user access token reads it
+- [hub.injectedskills.read](#hubinjectedskillsread) — Read the hub injected skill references. Any signed-in identity reads them, and any token reads them
+- [hub.conduitgrantkeys.read](#hubconduitgrantkeysread) — Read the conduit grant verification keys (public halves only). Any signed-in identity reads them, and any token reads them; 404 while the hub.conduit experiment is off
+- [hub.prestarthooks.read](#hubprestarthooksread) — Read hub pre-start hooks. Any signed-in user reads them; the script body is returned only to a holder of hub.lifecycle_hooks.read on an interactive session or dev credential; every other credential, a user access token included, gets it redacted
 - [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
 - [skill.list](#skilllist) — List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read
 - [skill.read](#skillread) — Read a skill, its versions, its download URLs, its resolved version and its files. A record the caller may not read answers as not found
@@ -323,19 +340,28 @@
 - [broker.delete](#brokerdelete) — Deregister a runtime broker: unlink it from every project, clear project defaults that name it, and remove its credentials. A user needs an interactive session and broker.delete on the broker
 - [broker.heartbeat](#brokerheartbeat) — Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker from a role binding (the owner relationship does not apply)
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
+- [broker.agent.workspacedownload](#brokeragentworkspacedownload) — Issue signed download URLs for the uploaded workspace files of an agent the broker runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
 - [broker.attachment.redeem](#brokerattachmentredeem) — Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home
 - [broker.controlchannel.call](#brokercontrolchannelcall) — Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
 - [gcp.identity.create](#gcpidentitycreate) — Create a GCP service account binding
 - [gcp.identity.delete](#gcpidentitydelete) — Delete a GCP service account binding
 - [gcp.identity.assign](#gcpidentityassign) — Assign a GCP service account to an agent
-- [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access token for a service account
-- [secret.read](#secretread) — Read project secrets or environment variables containing secrets
-- [secret.write](#secretwrite) — Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated caller is refused (requireProfileWriter)
+- [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access or identity token for the agent's assigned service account
+- [secret.read](#secretread) — Read project or broker secrets (scope=project or runtime_broker). User and hub scope are the session-only operations secret.user.read and secret.hub.read
+- [secret.write](#secretwrite) — Create, update or delete project or broker secrets (scope=project or runtime_broker). User and hub scope are the session-only operations secret.user.write and secret.hub.write
 - [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts. A project's list requires project.read on it (members, and agents of that project only); the hub-scoped list requires gcp_service_account.list at hub scope (hub members)
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
-- [env.read](#envread) — Read project environment variables
-- [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub), without secret entries
+- [env.read](#envread) — Read project or broker environment variables (scope=project or runtime_broker). User and hub scope are the session-only operations env.user.read, env.hub.read and env.hub.list
+- [env.hub.list](#envhublist) — List hub-level environment variables (scope=hub). Session only: an unscoped admin lists every entry, and a session holder of hub.env_vars.read lists them without secret entries; every user access token is refused
+- [env.user.read](#envuserread) — Read the caller's own user-level environment variables (scope=user, the default). A federated caller reads its own (retained prior behaviour)
+- [env.user.write](#envuserwrite) — Create, update or delete the caller's own user-level environment variables (scope=user, the default). A federated caller is refused (requireProfileWriter)
+- [secret.user.read](#secretuserread) — Read the caller's own user-level secrets (scope=user, the default). A federated caller reads its own (retained prior behaviour)
+- [secret.user.write](#secretuserwrite) — Create, update or delete the caller's own user-level secrets (scope=user, the default). A federated caller is refused (requireProfileWriter)
+- [env.hub.read](#envhubread) — Read one hub-level environment variable (scope=hub). Agents may read; a user must be an unscoped admin
+- [env.hub.write](#envhubwrite) — Create, update or delete hub-level environment variables (scope=hub). A user must be an unscoped admin
+- [secret.hub.read](#secrethubread) — Read hub-level secrets (scope=hub). Agents may read; a user must be an unscoped admin
+- [secret.hub.write](#secrethubwrite) — Create, update or delete hub-level secrets (scope=hub). A user must be an unscoped admin
 - [testidentity.create](#testidentitycreate) — Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
 - [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
 - [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session; an admin-kind identity's token is re-issued only through the admin-scope workload delegation that issued it (phase X4b)
@@ -355,6 +381,7 @@
 - [agent.delegation.credential.revoke](#agentdelegationcredentialrevoke) — Revoke one delegated credential exchanged from an agent delegation grant
 - [agent.delegation.list](#agentdelegationlist) — List agent delegation grants: those bound to one agent, or those the caller issued; grants outside the caller's authority are left out
 - [agent.delegation.read](#agentdelegationread) — Read one agent delegation grant; a grant outside the caller's authority answers as missing
+- [agent.delegation.revokeall](#agentdelegationrevokeall) — Revoke every unrevoked agent delegation grant the caller issued, or every one bound to an agent, with the credentials exchanged from them; grants outside the caller's authority are skipped and reported
 
 ---
 
@@ -720,7 +747,7 @@
 
 **Domain:** agent
 
-**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
+**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub form only: its scope is the authorizing user's list scope within the grant boundary, and each item is also decided for agent.read
 
 ### Entry Points
 
@@ -729,9 +756,9 @@
 | http_route | GET | `/api/v1/agents` |
 | http_route | GET | `/api/v1/projects/{id}/agents` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `list_scope`; boundaries `project`, `hub`)
 
@@ -750,7 +777,7 @@
 | no-broad-query-on-none | security | ScopeSetNone produces empty list without issuing any resource query | Yes |
 | slug-not-oracle | security | Project slug lookup for agent list filter must not distinguish unauthorized from nonexistent | Yes |
 
-**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`
+**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`, `credential_not_admitted`, `delegated_list_sort_unsupported`
 
 ### Tests
 
@@ -772,6 +799,8 @@
 - `pkg/hub:TestListCaveats_ProjectBoundaryRequiresListPermissionInCeiling`
 - `pkg/hub:TestProjectAgentListToken_RequiresAgentListOnTheProject`
 - `pkg/hub:TestListFilters_CannotEnlargeTokenResults`
+- `pkg/hub:TestAgentDelegatedAgentList_ExplicitScopeAcrossProjects`
+- `pkg/hub:TestAgentDelegatedAgentList_MixedItemsAndCounts`
 
 ---
 
@@ -807,6 +836,39 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestAgentUpdateToken_PassthroughGateStillApplies`
 - `pkg/hub:TestAgentUpdateToken_ServiceAccountAssignRequiresAssignSelector`
+
+---
+
+## agent.update.pendingconfig.delete
+
+**Domain:** agent
+
+**Description:** Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/agents/{id}/pending-config` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.update`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+- `pkg/hub:TestAgentPendingConfig_DiscardClearsAndAudits`
 
 ---
 
@@ -1061,9 +1123,9 @@
 | http_route | POST | `/api/v1/agents/{id}/message` |
 | http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/message` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
@@ -1109,9 +1171,9 @@
 |------|--------|---------|
 | websocket | GET | `/api/v1/agents/{id}/pty` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
@@ -3169,7 +3231,7 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles and the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds
+- A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles, the delegating user recorded on the artifact and, when none is recorded, the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds
 
 ### Audit
 
@@ -4344,15 +4406,13 @@
 
 **Domain:** project
 
-**Description:** Read a project's workspace: sync status, cache status, archive and file reads
+**Description:** Read a project's workspace: archive and file reads
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/projects/{id}/sync/status` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/archive` |
-| http_route | GET | `/api/v1/projects/{id}/workspace/cache/status` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/files` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/files/{path}` |
 
@@ -4380,14 +4440,12 @@
 
 **Domain:** project
 
-**Description:** Change a project's workspace: cache refresh and notify, file upload, write and delete, and git pull
+**Description:** Change a project's workspace: file upload, write and delete, and git pull
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/projects/{id}/workspace/cache/notify` |
-| http_route | POST | `/api/v1/projects/{id}/workspace/cache/refresh` |
 | http_route | POST | `/api/v1/projects/{id}/workspace/files` |
 | http_route | PUT | `/api/v1/projects/{id}/workspace/files/{path}` |
 | http_route | DELETE | `/api/v1/projects/{id}/workspace/files/{path}` |
@@ -4454,6 +4512,47 @@
 
 ---
 
+## project.github.installation.bind
+
+**Domain:** project
+
+**Description:** Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}/github-installation` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+### Audit
+
+- **Event Type:** `project.github.installation.bind`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** setting
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+- `pkg/hub:TestGitHubInstallationBind_RequiresHubGitHubAppUpdate`
+- `pkg/hub:TestGitHubInstallationBind_HubBearerBoundaryOnly`
+
+---
+
 ## project.github.write
 
 **Domain:** project
@@ -4464,7 +4563,6 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/projects/{id}/github-installation` |
 | http_route | DELETE | `/api/v1/projects/{id}/github-installation` |
 | http_route | POST | `/api/v1/projects/{id}/github-status` |
 | http_route | PUT | `/api/v1/projects/{id}/github-permissions` |
@@ -4545,7 +4643,9 @@
 
 **Principals:** `user`, `agent`, `broker`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
+**Credentials:** `session_jwt`, `agent_jwt`, `broker_token`
+
+**Bearer:** `non_user`
 
 **Base Permission:** `agent.message`
 
@@ -5915,7 +6015,7 @@
 
 **Domain:** chat
 
-**Description:** Read the messages of a chat thread. Needs project:read on the thread's project
+**Description:** Read the messages of a chat thread. Needs project:read on the thread's project; canPost reports whether the caller's account holds project.chat_post on it
 
 ### Entry Points
 
@@ -5980,7 +6080,7 @@
 
 **Domain:** chat
 
-**Description:** Post a message to a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it. Agent recipients need agent:message
+**Description:** Post a message to a chat thread. Needs project:read and project.chat_post on the thread's project; a caller that reads the thread but lacks project.chat_post gets 403 chat_post_denied. A token also needs inbox:write for it; project.chat_post is checked on the token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message
 
 ### Entry Points
 
@@ -6021,6 +6121,7 @@
 ### Tests
 
 - `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+- `pkg/hub:TestChatSendTopic_RequiresChatPost`
 
 ---
 
@@ -6842,6 +6943,241 @@
 
 ---
 
+## chat.star.add
+
+**Domain:** chat
+
+**Description:** Star a message for the caller (private). The message must be a live message of the conversation named in the body. A thread needs project:read on its project; a DM needs the caller in a user slot of its key. A token also needs inbox:write: a thread's project, or an agent DM's peer agent project with agent:read on the agent, inside its boundary; a DM between users needs a hub boundary. 404 while web.chat_starred_messages is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/chat/stars/{messageId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStars_TokenSelectors`
+- `pkg/hub:TestChatStars_PutIdempotentAndPrivate`
+- `pkg/hub:TestChatStars_DMTokenBoundaries`
+
+---
+
+## chat.star.read
+
+**Domain:** chat
+
+**Description:** Read the current detail of one of the caller's stars. Needs read access to the star's conversation now (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/stars/{messageId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStars_TokenSelectors`
+- `pkg/hub:TestChatStars_DetailAndListHideUnreadable`
+- `pkg/hub:TestChatStars_DMTokenBoundaries`
+
+---
+
+## chat.star.state
+
+**Domain:** chat
+
+**Description:** Report which of up to 200 messages the caller starred, keeping only live messages in conversations the caller can read now (threads by project:read, DMs by participation); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/stars/state` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStars_TokenSelectors`
+- `pkg/hub:TestChatStars_StateFiltersByAccess`
+- `pkg/hub:TestChatStars_DMTokenBoundaries`
+
+---
+
+## chat.star.list
+
+**Domain:** chat
+
+**Description:** List the caller's stars in one conversation (a thread or a DM), newest first, with a sealed cursor. Needs read access to it (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/stars` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStars_TokenSelectors`
+- `pkg/hub:TestChatStars_ListPaginates`
+- `pkg/hub:TestChatStars_DMTokenBoundaries`
+
+---
+
+## chat.star.conversations
+
+**Domain:** chat
+
+**Description:** List the conversations in which the caller has at least one live star (the Starred rail): one row per conversation with its current name, activity and project, no excerpt or count, sorted by activity or name, with a sealed cursor. Each conversation is kept only while the caller can read it now (project:read for a thread; the caller in a user slot of a DM key); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). An optional projectId must be a project the caller can read. 404 while web.chat_starred_messages is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/starred-conversations` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStarredConversations_TokenSelectors`
+- `pkg/hub:TestChatStarredConversations_GroupsAndPaginates`
+
+---
+
+## chat.conversation.history.starred
+
+**Domain:** chat
+
+**Description:** Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred. 404 while web.chat_starred_messages is off, never unfiltered history
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/conversations/{id}/messages` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStarredHistory_TokenSelectors`
+- `pkg/hub:TestChatStarredHistory_GateAndValidation`
+
+---
+
+## chat.star.remove
+
+**Domain:** chat
+
+**Description:** Remove the caller's own star of a message; always 204. No message or conversation lookup; a project token removes only a star whose stored project is inside its boundary. 404 while web.chat_starred_messages is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/chat/stars/{messageId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStars_TokenSelectors`
+- `pkg/hub:TestChatStars_DeleteAlways204`
+
+---
+
 ## chat.attachment.upload.project
 
 **Domain:** chat
@@ -7012,7 +7348,7 @@
 
 **Domain:** chat
 
-**Description:** Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation and project:read on the agent's project; a token also needs inbox:write under the DM rule
+**Description:** Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, and project:read and project.chat_post on the agent's project (403 chat_post_denied without project.chat_post); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)
 
 ### Entry Points
 
@@ -7861,7 +8197,7 @@
 
 **Domain:** user.admin
 
-**Description:** Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
+**Description:** Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants. A token needs user:invite on the hub boundary and the holder's live user.invite authority, checked at the hub user collection; the user_provision audit records the token as the credential. Refused for every caller on a hub running with dev authentication
 
 ### Entry Points
 
@@ -7871,9 +8207,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
 **Base Permission:** `user.invite`
 
@@ -7893,12 +8229,16 @@
 - **After Fields:** target_user_id, email, status, display_name
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `user_suspended`, `conflict`, `role_assignment_forbidden`
+**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`, `conflict`, `role_assignment_forbidden`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestHandleProvisionUser`
+- `pkg/hub:TestProvisionToken_RequiresInviteSelectorAndHubBoundary`
+- `pkg/hub:TestProvisionToken_DetailViewNeedsReadSelector`
+- `pkg/hub:TestProvisionToken_RecordOutlivesTokenAndHolderAuthority`
+- `pkg/hub:TestInvitationToken_CreatesNoRoleBindingOrGroupMembership`
 
 ---
 
@@ -7906,7 +8246,7 @@
 
 **Domain:** user.admin
 
-**Description:** Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
+**Description:** Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present). A token needs user:promote on a hub boundary, checked on the hub-level user record. CanDelegate applies to every change that involves a super-admin binding, so a token never creates or removes one; the last super-admin, self-demotion, invited-user and binding-drift guards apply to every credential, and a token's own role is session-only
 
 ### Entry Points
 
@@ -7916,9 +8256,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`; pinned by `TestUserRoleToken_PromotionToAdminDenied`)
 
 **Base Permission:** `user.promote`
 
@@ -7941,11 +8281,14 @@
 - **After Fields:** new_level
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `conflict`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserRoleToken_PromotionToAdminDenied`
+- `pkg/hub:TestUserRoleToken_LastSuperAdminProtected`
+- `pkg/hub:TestUserPatchToken_MixedRoleAndStatusAllOrNothing`
 
 ---
 
@@ -7953,7 +8296,7 @@
 
 **Domain:** user.admin
 
-**Description:** Delete a user account
+**Description:** Delete a user account. A token needs user:delete on a hub boundary, checked on the hub-level user record, and is refused while the user holds a direct system-scope role binding of any lifecycle state (403 forbidden, details.reason system_role_binding_held; judged again in the transaction on the bindings the delete removes, 409 conflict with details.reason binding_state_drift), with or without force. The completion of a forced deletion a token requested applies the same rule
 
 ### Entry Points
 
@@ -7963,9 +8306,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `user.delete`
 
@@ -7980,11 +8323,87 @@
 - **Before Fields:** target_user_id, email, role, status
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `last_owner`, `conflict`
+**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`, `user_delete_force_forbidden`, `user_delete_blockers_changed`, `user_deletion_in_progress`, `not_found`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestDeleteUser_GuardOrder`
+- `pkg/hub:TestForceDeleteUser_ForbiddenWritesNothing`
+- `pkg/hub:TestUserDeleteToken_LastProjectOwnerProtected`
+- `pkg/hub:TestUserDeleteToken_SystemBindingHolderRefused`
+- `pkg/hub:TestUserDeleteToken_ForceUsesTokenAgentDelete`
+- `pkg/hub:TestUserDeleteToken_BindingAddedAfterPreCheckRefused`
+- `pkg/hub:TestUserDeleteToken_ForcedCompletionKeepsSystemBinding`
+- `pkg/hub:TestUserDeleteToken_ConcurrentlyDeletedUserNotFound`
+
+---
+
+## user.admin.deleteblockers
+
+**Domain:** user.admin
+
+**Description:** List what blocks deleting a user (agents and active delegations), without deleting. A token needs user:delete on a hub boundary, checked on the hub-level user record
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/{id}/delete-blockers` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `user.delete`
+
+**Resource Resolver:** user-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserDeleteBlockers_RequiresUserDelete`
+- `pkg/hub:TestUserDeleteReadsToken_RequireDeleteSelectorAndHubBoundary`
+
+---
+
+## user.admin.deletion
+
+**Domain:** user.admin
+
+**Description:** Read the forced deletion of a user: its state and the outcome of each of the user's agents. A token needs user:delete on a hub boundary, checked on the hub-level user record
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/{id}/deletion` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `user.delete`
+
+**Resource Resolver:** user-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserDeletion_RequiresUserDelete`
+- `pkg/hub:TestUserDeleteReadsToken_RequireDeleteSelectorAndHubBoundary`
 
 ---
 
@@ -8860,7 +9279,7 @@
 
 **Domain:** user
 
-**Description:** List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
+**Description:** List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads the selector list. Eligibility needs an interactive session: a token request naming a boundary or project is refused
 
 ### Entry Points
 
@@ -8883,6 +9302,7 @@
 ### Tests
 
 - `pkg/hub:TestSelfIdentityReadsToken_AnyTokenReads`
+- `pkg/hub:TestAuthScopes_TokenCannotRequestBoundaryEligibility`
 
 ### Exemptions
 
@@ -9320,6 +9740,39 @@
 
 ---
 
+## hub.chatretention.update
+
+**Domain:** hub
+
+**Description:** Read and update the chat message retention settings (session only)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/chat-retention` |
+| http_route | PUT | `/api/v1/admin/chat-retention` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `IRREVERSIBLE_CASCADE`)
+
+**Base Permission:** `hub.config.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAdminChatRetention_TokenRefused`
+
+---
+
 ## hub.experiments.update
 
 **Domain:** hub
@@ -9436,6 +9889,8 @@
 | http_route | POST | `/api/v1/admin/maintenance/migrations/{id}/run` |
 | http_route | GET | `/api/v1/admin/maintenance/update-available` |
 | http_route | DELETE | `/api/v1/admin/maintenance/update-available` |
+| http_route | GET | `/api/v1/admin/maintenance/update-status` |
+| http_route | GET | `/api/v1/admin/maintenance/releases` |
 
 **Principals:** `user`
 
@@ -9575,7 +10030,7 @@
 
 **Effects:** `update-resource`
 
-**Denial Codes:** `forbidden`, `last_owner`, `conflict`
+**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`
 
 ### Tests
 
@@ -10362,6 +10817,183 @@
 ### Exemptions
 
 - **authentication_only:** Returns only the caller's own usage; carries no other user's records (scope: caller's own quota usage only) — waives: `base_permission`
+
+---
+
+## hub.experiments.read
+
+**Domain:** hub
+
+**Description:** Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/experiments` |
+
+**Principals:** `user`, `agent`, `broker`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestExperimentsRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestExperimentsRead_AnyTokenReads`
+- `pkg/hub:TestAuthenticatedReads_AgentTokenReads`
+- `pkg/hub:TestAuthenticatedReads_BrokerReads`
+
+### Exemptions
+
+- **authentication_only:** Resolved web-layer experiment flags; carries no authority and no other user's records (scope: resolved experiment flags) — waives: `base_permission`
+
+---
+
+## hub.profiling.read
+
+**Domain:** hub
+
+**Description:** Read the client profiling switch. Any signed-in identity (user, agent or broker) reads it, and any user access token reads it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/profiling` |
+
+**Principals:** `user`, `agent`, `broker`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestProfilingRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProfilingRead_AnyTokenReads`
+- `pkg/hub:TestAuthenticatedReads_AgentTokenReads`
+- `pkg/hub:TestAuthenticatedReads_BrokerReads`
+
+### Exemptions
+
+- **authentication_only:** One client profiling boolean; carries no authority and no other user's records (scope: client profiling switch) — waives: `base_permission`
+
+---
+
+## hub.injectedskills.read
+
+**Domain:** hub
+
+**Description:** Read the hub injected skill references. Any signed-in identity reads them, and any token reads them
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/hub/settings/injected-skills` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestHubInjectedSkillsRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubInjectedSkillsRead_AnyTokenReads`
+
+### Exemptions
+
+- **authentication_only:** Hub skill references every user and agent reads at provision time; carries no authority (scope: hub injected skill references) — waives: `base_permission`
+
+---
+
+## hub.conduitgrantkeys.read
+
+**Domain:** hub
+
+**Description:** Read the conduit grant verification keys (public halves only). Any signed-in identity reads them, and any token reads them; 404 while the hub.conduit experiment is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/conduit/grant-keys` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestConduitGrantKeysRead_AnyTokenReads`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestConduitGrantKeysRead_AnyTokenReads`
+- `pkg/hub:TestConduitGrantKeysEndpoint`
+
+### Exemptions
+
+- **authentication_only:** Public verification key halves only; carries no authority (scope: conduit grant public keys) — waives: `base_permission`
+
+---
+
+## hub.prestarthooks.read
+
+**Domain:** hub
+
+**Description:** Read hub pre-start hooks. Any signed-in user reads them; the script body is returned only to a holder of hub.lifecycle_hooks.read on an interactive session or dev credential; every other credential, a user access token included, gets it redacted
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/pre-start-hooks` |
+| http_route | GET | `/api/v1/pre-start-hooks/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestHubPreStartHookRead_MemberAndProjectTokensRead`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubPreStartHookRead_TokenGetsRedactedScript`
+- `pkg/hub:TestHubPreStartHookRead_MemberAndProjectTokensRead`
+
+### Exemptions
+
+- **authentication_only:** Hook metadata for the inherited-hook banner; the script is redacted for every token and non-admin (scope: hub pre-start hook metadata) — waives: `base_permission`
 
 ---
 
@@ -11754,6 +12386,7 @@
 | http_route | GET | `/api/v1/runtime-brokers/{id}` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}/settings` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}/projects` |
+| http_route | GET | `/api/v1/runtime-brokers/{id}/conversion-plan` |
 
 **Principals:** `user`
 
@@ -11995,6 +12628,40 @@
 
 ---
 
+## broker.agent.workspacedownload
+
+**Domain:** broker
+
+**Description:** Issue signed download URLs for the uploaded workspace files of an agent the broker runs
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download` |
+
+**Principals:** `broker`
+
+**Credentials:** `broker_token`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The broker authenticates with its own HMAC credential for an agent assigned to it in a project it still provides for; no user permission applies (scope: broker self access) — waives: `base_permission`
+
+---
+
 ## broker.messagefailures.report
 
 **Domain:** broker
@@ -12076,9 +12743,9 @@
 |------|--------|---------|
 | broker_call | — | `TunnelRequest:controlchannel` |
 | broker_call | — | `OpenStream:controlchannel` |
-| broker_call | — | `SendStreamData:controlchannel` |
-| broker_call | — | `ResizeStream:controlchannel` |
-| broker_call | — | `CloseStream:controlchannel` |
+| broker_call | — | `SendStreamData:brokerconnection` |
+| broker_call | — | `ResizeStream:brokerconnection` |
+| broker_call | — | `CloseStream:brokerconnection` |
 | broker_call | — | `handleResponse:controlchannel` |
 | broker_call | — | `handleStreamData:controlchannel` |
 | broker_call | — | `handleStreamClose:controlchannel` |
@@ -12232,19 +12899,22 @@
 
 **Domain:** gcp.identity
 
-**Description:** Mint a GCP access token for a service account
+**Description:** Mint a GCP access or identity token for the agent's assigned service account
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/agent/gcp-token` |
+| http_route | POST | `/api/v1/agent/gcp-identity-token` |
 
 **Principals:** `agent`
 
 **Credentials:** `agent_jwt`
 
-**Base Permission:** `gcp_service_account.mint`
+**Bearer:** `non_user`
+
+**Base Permission:** `gcp_service_account.use`
 
 **Resource Resolver:** agent-gcp-service-account
 
@@ -12253,7 +12923,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Agent mints GCP tokens scoped to its assigned service account
+- Agent mints GCP tokens for its assigned service account while the principal recorded as the assignment's source holds gcp_service_account.assign on it (and passes actAs in enforce mode)
 
 ### Audit
 
@@ -12275,7 +12945,7 @@
 
 **Domain:** secret
 
-**Description:** Read project secrets or environment variables containing secrets
+**Description:** Read project or broker secrets (scope=project or runtime_broker). User and hub scope are the session-only operations secret.user.read and secret.hub.read
 
 ### Entry Points
 
@@ -12312,7 +12982,7 @@
 
 **Domain:** secret
 
-**Description:** Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated caller is refused (requireProfileWriter)
+**Description:** Create, update or delete project or broker secrets (scope=project or runtime_broker). User and hub scope are the session-only operations secret.user.write and secret.hub.write
 
 ### Entry Points
 
@@ -12343,8 +13013,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
-- `pkg/hub:TestUserEnvSecretWrites_SessionAndTokenUnchanged`
 
 ---
 
@@ -12426,7 +13094,7 @@
 
 **Domain:** env
 
-**Description:** Read project environment variables
+**Description:** Read project or broker environment variables (scope=project or runtime_broker). User and hub scope are the session-only operations env.user.read, env.hub.read and env.hub.list
 
 ### Entry Points
 
@@ -12457,7 +13125,7 @@
 
 **Domain:** env
 
-**Description:** List hub-level environment variables (scope=hub), without secret entries
+**Description:** List hub-level environment variables (scope=hub). Session only: an unscoped admin lists every entry, and a session holder of hub.env_vars.read lists them without secret entries; every user access token is refused
 
 ### Entry Points
 
@@ -12467,7 +13135,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
 
 **Base Permission:** `hub.env_vars.read`
 
@@ -12480,6 +13150,363 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHubEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestHubEnvSecret_HubBoundaryTokenWithoutHubMaterialScopeRefused`
+
+---
+
+## env.user.read
+
+**Domain:** env
+
+**Description:** Read the caller's own user-level environment variables (scope=user, the default). A federated caller reads its own (retained prior behaviour)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/env` |
+| http_route | GET | `/api/v1/env/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `federated_user`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_SessionAllowedTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
+- `pkg/hub:TestUserEnvSecretReads_FederatedOwnScopeAllowed`
+
+### Exemptions
+
+- **authentication_only:** User-level env and secret material is the caller's own record, so no resource permission applies; a session credential is required (scope: caller's own user-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## env.user.write
+
+**Domain:** env
+
+**Description:** Create, update or delete the caller's own user-level environment variables (scope=user, the default). A federated caller is refused (requireProfileWriter)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/env/{key}` |
+| http_route | DELETE | `/api/v1/env/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `env.write`
+- **Context Fields:** actor_id
+- **Before Fields:** env_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_SessionAllowedTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
+
+### Exemptions
+
+- **authentication_only:** User-level env and secret material is the caller's own record, so no resource permission applies; a session credential is required (scope: caller's own user-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## secret.user.read
+
+**Domain:** secret
+
+**Description:** Read the caller's own user-level secrets (scope=user, the default). A federated caller reads its own (retained prior behaviour)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/secrets` |
+| http_route | GET | `/api/v1/secrets/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `federated_user`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-secret`
+
+### Audit
+
+- **Event Type:** `secret.read`
+- **Context Fields:** actor_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_SessionAllowedTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
+- `pkg/hub:TestUserEnvSecretReads_FederatedOwnScopeAllowed`
+
+### Exemptions
+
+- **authentication_only:** User-level env and secret material is the caller's own record, so no resource permission applies; a session credential is required (scope: caller's own user-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## secret.user.write
+
+**Domain:** secret
+
+**Description:** Create, update or delete the caller's own user-level secrets (scope=user, the default). A federated caller is refused (requireProfileWriter)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/secrets/{key}` |
+| http_route | PATCH | `/api/v1/secrets/{key}` |
+| http_route | DELETE | `/api/v1/secrets/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `secret.write`
+- **Context Fields:** actor_id
+- **Before Fields:** secret_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_SessionAllowedTokenRefused`
+- `pkg/hub:TestUserEnvSecretWrites_FederatedUserRefused`
+
+### Exemptions
+
+- **authentication_only:** User-level env and secret material is the caller's own record, so no resource permission applies; a session credential is required (scope: caller's own user-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## env.hub.read
+
+**Domain:** env
+
+**Description:** Read one hub-level environment variable (scope=hub). Agents may read; a user must be an unscoped admin
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/env/{key}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `agent_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHubEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestHubEnvSecret_HubBoundaryTokenWithoutHubMaterialScopeRefused`
+- `pkg/hub:TestHubEnvSecret_SessionAdminAllowed`
+- `pkg/hub:TestHubEnvSecret_NonAdminSessionRefused`
+- `pkg/hub:TestHubEnvSecret_TestAdminSessionRefused`
+
+### Exemptions
+
+- **hub_admin:** Unscoped local platform admin on a session credential (IsUnscopedLocalPlatformAdmin); no registered permission covers hub-level env and secret material (scope: hub-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## env.hub.write
+
+**Domain:** env
+
+**Description:** Create, update or delete hub-level environment variables (scope=hub). A user must be an unscoped admin
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/env/{key}` |
+| http_route | DELETE | `/api/v1/env/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `env.write`
+- **Context Fields:** actor_id
+- **Before Fields:** env_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHubEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestHubEnvSecret_HubBoundaryTokenWithoutHubMaterialScopeRefused`
+- `pkg/hub:TestHubEnvSecret_SessionAdminAllowed`
+- `pkg/hub:TestHubEnvSecret_NonAdminSessionRefused`
+- `pkg/hub:TestHubEnvSecret_TestAdminSessionRefused`
+
+### Exemptions
+
+- **hub_admin:** Unscoped local platform admin on a session credential (IsUnscopedLocalPlatformAdmin); no registered permission covers hub-level env and secret material (scope: hub-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## secret.hub.read
+
+**Domain:** secret
+
+**Description:** Read hub-level secrets (scope=hub). Agents may read; a user must be an unscoped admin
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/secrets` |
+| http_route | GET | `/api/v1/secrets/{key}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `agent_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-secret`
+
+### Audit
+
+- **Event Type:** `secret.read`
+- **Context Fields:** actor_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHubEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestHubEnvSecret_HubBoundaryTokenWithoutHubMaterialScopeRefused`
+- `pkg/hub:TestHubEnvSecret_SessionAdminAllowed`
+- `pkg/hub:TestHubEnvSecret_NonAdminSessionRefused`
+- `pkg/hub:TestHubEnvSecret_TestAdminSessionRefused`
+
+### Exemptions
+
+- **hub_admin:** Unscoped local platform admin on a session credential (IsUnscopedLocalPlatformAdmin); no registered permission covers hub-level env and secret material (scope: hub-level environment variables and secrets) — waives: `base_permission`
+
+---
+
+## secret.hub.write
+
+**Domain:** secret
+
+**Description:** Create, update or delete hub-level secrets (scope=hub). A user must be an unscoped admin
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/secrets/{key}` |
+| http_route | PATCH | `/api/v1/secrets/{key}` |
+| http_route | DELETE | `/api/v1/secrets/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `secret.write`
+- **Context Fields:** actor_id
+- **Before Fields:** secret_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHubEnvSecret_ProjectBoundaryTokenRefused`
+- `pkg/hub:TestHubEnvSecret_HubBoundaryTokenWithoutHubMaterialScopeRefused`
+- `pkg/hub:TestHubEnvSecret_SessionAdminAllowed`
+- `pkg/hub:TestHubEnvSecret_NonAdminSessionRefused`
+- `pkg/hub:TestHubEnvSecret_TestAdminSessionRefused`
+
+### Exemptions
+
+- **hub_admin:** Unscoped local platform admin on a session credential (IsUnscopedLocalPlatformAdmin); no registered permission covers hub-level env and secret material (scope: hub-level environment variables and secrets) — waives: `base_permission`
 
 ---
 
@@ -12695,7 +13722,7 @@
 - **Before Fields:** user_id, role, issued_by, purpose, expires_at
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `not_found`, `conflict`
+**Denial Codes:** `forbidden`, `not_found`, `user_delete_blocked`, `conflict`
 
 ### Tests
 
@@ -13313,6 +14340,53 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestAgentDelegationManagement_ControlAuthority`
 - `pkg/hub:TestAgentDelegationManagement_NoSecretFieldsInResponses`
+
+---
+
+## agent.delegation.revokeall
+
+**Domain:** agent.delegation
+
+**Description:** Revoke every unrevoked agent delegation grant the caller issued, or every one bound to an agent, with the credentials exchanged from them; grants outside the caller's authority are skipped and reported
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users/me/delegations/revoke-all` |
+| http_route | POST | `/api/v1/agents/{id}/delegations/revoke-all` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `agent.delegation.revoke_all`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Session only. On /users/me/delegations/revoke-all, the caller's own issued grants. On /agents/{id}/delegations/revoke-all, per grant: the issuer; the agent's current owner; holders of agent.delegation.revoke_all on the hub (hub admins), for any grant; holders of it on project P, for project(P)-bounded grants only. A dev session counts only as hub authority. Grants outside the caller's authority are skipped and reported, never revoked. Delegated credentials, agent tokens and user access tokens are refused
+
+### Audit
+
+- **Event Type:** `agent_delegation_grant_revoke`
+- **Context Fields:** actor_id, grant_id
+- **Before Fields:** grant_id, revoke_reason, revoked_credential_ids
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `credential_not_admitted`, `audit_failed`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAgentDelegationRevokeAll_CallerGrants`
+- `pkg/hub:TestAgentDelegationRevokeAll_AgentGrantsSkipsOutsideAuthority`
 
 ---
 

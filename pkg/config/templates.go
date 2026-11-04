@@ -68,71 +68,51 @@ type Template struct {
 	Name  string
 	Path  string
 	Scope string // "global" or "project"
+
+	// root and rel, when set (templateBelow), record the trusted directory
+	// the template was found from and the template's path below it
+	// (Path == filepath.Join(root, rel)); content files are then read
+	// through a walk from root that follows no link (openDir).
+	root, rel string
 }
 
-// ResolveContent resolves a template field value to its content bytes.
-// If field is empty, returns nil, nil.
-// If a file at t.Path/field exists, reads and returns its content.
-// Otherwise, returns field as inline content bytes.
+// ResolveContent resolves a template content field value (agent_instructions
+// or system_prompt) in this template alone, with the rules of
+// ResolveContentInChain.
 func (t *Template) ResolveContent(field string) ([]byte, error) {
-	if field == "" {
-		return nil, nil
-	}
-
-	filePath := filepath.Join(t.Path, field)
-	if _, err := os.Stat(filePath); err == nil {
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read content file %s: %w", filePath, err)
-		}
-		return data, nil
-	}
-
-	return []byte(field), nil
+	return resolveContentInTemplates([]*Template{t}, field)
 }
 
-// ResolveContentInChain resolves a template field value by searching the
-// template chain in reverse order (most specific first). This ensures that
-// when a custom template inherits a file reference like "agents.md" from a
-// parent template's config, the file is found in the parent template even
-// if it doesn't exist in the custom template's directory. Only falls back
-// to treating the field as inline content if no template in the chain
-// contains the file.
+// ResolveContentInChain resolves a template content field value
+// (agent_instructions or system_prompt) by searching the template chain in
+// reverse order (most specific first), so a custom template that inherits a
+// file reference like "agents.md" from a parent's config finds the file in
+// the parent. A value with a line break is inline content. A single-line
+// value must be a relative path inside the template directory; the file is
+// read only from inside a template directory, without following a symbolic
+// link, and a file that exists but is refused is an error
+// (ErrTemplateContentRefused). Only when no template in the chain holds the
+// file is the value treated as inline content.
 func ResolveContentInChain(chain []*Template, field string) ([]byte, error) {
-	if field == "" {
-		return nil, nil
-	}
-
-	// Walk chain in reverse (most specific first) looking for the file
-	for i := len(chain) - 1; i >= 0; i-- {
-		filePath := filepath.Join(chain[i].Path, field)
-		if _, err := os.Stat(filePath); err == nil {
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read content file %s: %w", filePath, err)
-			}
-			return data, nil
-		}
-	}
-
-	// No template had the file; treat as inline content
-	return []byte(field), nil
+	return resolveContentInTemplates(chain, field)
 }
 
+// LoadConfig loads the template's (or agent directory's) scion-agent config
+// file: scion-agent.yaml, then .yml, then .json. The directory is opened
+// without following a symbolic link (from the trusted directory the
+// template was found from, or below its parent), and the file is read
+// without following one either: a config file that is a link, sits below
+// one, is not a plain single-link regular file or is larger than 4 MiB is
+// refused with an error wrapping ErrAgentConfigRefused, never read and never
+// treated as "no config". A missing directory or file is an empty config.
 func (t *Template) LoadConfig() (*api.ScionConfig, error) {
-	// Try YAML first, then JSON
-	configPath := GetScionAgentConfigPath(t.Path)
+	configPath, data, err := t.readAgentConfigFile()
+	if err != nil {
+		return nil, err
+	}
 	if configPath == "" {
 		// No config file found, return empty config
 		return &api.ScionConfig{}, nil
-	}
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &api.ScionConfig{}, nil
-		}
-		return nil, err
 	}
 
 	var cfg api.ScionConfig
@@ -251,10 +231,13 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 
 	// 1. Check if name is an absolute path
 	if filepath.IsAbs(name) {
-		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: templateNameFromDir(name), Path: name}, nil
-		}
-		return nil, fmt.Errorf("template path %s not found or not a directory", name)
+		return TemplateFromDir(name)
+	}
+
+	// Any other name is a template name: one path component, joined under
+	// a templates directory.
+	if err := checkLookupName(name); err != nil {
+		return nil, err
 	}
 
 	// 2. Check project-local templates
@@ -262,7 +245,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 	if err == nil {
 		path := filepath.Join(projectTemplatesDir, name)
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return &Template{Name: name, Path: path}, nil
+			return templateBelow(name, filepath.Dir(projectTemplatesDir), filepath.Join(filepath.Base(projectTemplatesDir), name), ""), nil
 		}
 	}
 
@@ -271,7 +254,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 	if err == nil {
 		path := filepath.Join(globalTemplatesDir, name)
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return &Template{Name: name, Path: path}, nil
+			return templateBelow(name, globalTemplatesDir, name, ""), nil
 		}
 	}
 
@@ -284,8 +267,12 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 }
 
 // FindTemplateInScope finds a template by name in a specific scope only.
-// Scope must be "global" or "project". Returns nil if not found in that scope.
+// Scope must be "global" or "project". Returns nil if not found in that scope,
+// or when name is not a single path component (checkLookupName).
 func FindTemplateInScope(name, scope string) *Template {
+	if checkLookupName(name) != nil {
+		return nil
+	}
 	var dir string
 	var err error
 
@@ -304,10 +291,24 @@ func FindTemplateInScope(name, scope string) *Template {
 
 	path := filepath.Join(dir, name)
 	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		return &Template{Name: name, Path: path, Scope: scope}
+		if scope == "project" {
+			return templateBelow(name, filepath.Dir(dir), filepath.Join(filepath.Base(dir), name), scope)
+		}
+		return templateBelow(name, dir, name, scope)
 	}
 
 	return nil
+}
+
+// TemplateFromDir returns the template stored in dir, an absolute directory
+// path. The directory must exist. The template's name is derived from the
+// directory's base name with templateNameFromDir, so it is "" for a
+// content-addressed cache directory.
+func TemplateFromDir(dir string) (*Template, error) {
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return &Template{Name: templateNameFromDir(dir), Path: dir}, nil
+	}
+	return nil, fmt.Errorf("template path %s not found or not a directory", dir)
 }
 
 // templateNameFromDir derives a template name from a template directory path.
@@ -465,22 +466,27 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 		return FindTemplate(name)
 	}
 
-	// Remote URIs and absolute paths bypass project resolution
+	// A project-scoped lookup runs on a Runtime Broker for a template value
+	// that came with a request (or from an agent's records). It never fetches
+	// a remote source (those come only from operator settings, through
+	// FindOperatorTemplateInProjectPath), and accepts an absolute directory
+	// only below a registered hydration root: a directory the broker wrote
+	// itself.
 	if IsRemoteURI(name) {
-		return FindTemplateWithContext(context.Background(), name)
+		return nil, templateRefNotAllowed("a remote template source is not accepted from a request")
 	}
 	if filepath.IsAbs(name) {
-		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: templateNameFromDir(name), Path: name}, nil
-		}
-		return nil, NewTemplateNotFoundError(name, fmt.Sprintf("template path %s not found or not a directory", name))
+		return hydratedTemplateDir(name)
+	}
+	if err := checkLookupName(name); err != nil {
+		return nil, err
 	}
 
 	// Check project-specific templates directory (in-repo .scion/templates/ for git projects)
 	if root := projectTemplatesRoot(projectPath); root != "" {
 		path := filepath.Join(root, "templates", name)
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return &Template{Name: name, Path: path, Scope: "project"}, nil
+			return templateBelow(name, root, filepath.Join("templates", name), "project"), nil
 		}
 	}
 
@@ -489,11 +495,22 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	if err == nil {
 		path := filepath.Join(globalTemplatesDir, name)
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return &Template{Name: name, Path: path, Scope: "global"}, nil
+			return templateBelow(name, globalTemplatesDir, name, "global"), nil
 		}
 	}
 
 	return nil, NewTemplateNotFoundError(name, fmt.Sprintf("template %s not found", name))
+}
+
+// FindOperatorTemplateInProjectPath is FindTemplateInProjectPath for a
+// template reference from operator configuration (a settings
+// default_template): a remote source is fetched as FindTemplateWithContext
+// does. Every other reference resolves as FindTemplateInProjectPath.
+func FindOperatorTemplateInProjectPath(name, projectPath string) (*Template, error) {
+	if projectPath != "" && IsRemoteURI(name) {
+		return FindTemplateWithContext(context.Background(), name)
+	}
+	return FindTemplateInProjectPath(name, projectPath)
 }
 
 // projectTemplatesRoot returns the directory whose templates/ subdirectory
@@ -528,6 +545,13 @@ func projectTemplatesRoot(projectPath string) string {
 // isHubWorkspaceRootWithoutScion reports whether p is a hub-managed
 // workspace root (below the hub projects directory, not a .scion path)
 // that has no .scion entry: it then has no project configuration tier.
+//
+// "Below the hub projects directory" is isUnderHubProjectsDir
+// (hub_projects_dir_other.go and hub_projects_dir_windows.go): p lies below
+// the global directory's projects/ directory, where hub-managed workspaces
+// live. It is the only containment decision for the project layer of a hub
+// workspace root: settings, project templates and harness-configs all read
+// it through this function.
 func isHubWorkspaceRootWithoutScion(p string) bool {
 	if p == "" || filepath.Base(p) == DotScion {
 		return false
@@ -536,28 +560,6 @@ func isHubWorkspaceRootWithoutScion(p string) bool {
 		return false
 	}
 	return isUnderHubProjectsDir(p)
-}
-
-// isUnderHubProjectsDir reports whether p lies below the global
-// directory's projects/ directory, where hub-managed workspaces live.
-func isUnderHubProjectsDir(p string) bool {
-	globalDir, err := GetGlobalDir()
-	if err != nil {
-		return false
-	}
-	projects := filepath.Join(globalDir, "projects")
-	if resolved, err := filepath.EvalSymlinks(projects); err == nil {
-		projects = resolved
-	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return false
-	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = resolved
-	}
-	rel, err := filepath.Rel(projects, abs)
-	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // LegacyProjectTemplatesWarning returns a start warning when projectPath is
@@ -651,7 +653,7 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 	// MkdirTemp creates 0700 and SeedAgnosticTemplate's MkdirAll is a no-op on an
 	// existing dir, so without this the published default diverges from every other
 	// seeding path, which yields 0755.
-	_ = os.Chmod(staging, 0755)
+	_ = os.Chmod(staging, 0755) //winsec:not-protection mode 0755 is not a privacy mode
 
 	if sErr := SeedAgnosticTemplate(staging, false); sErr != nil {
 		util.Debugf("failed to hydrate embedded default template: %v", sErr)
@@ -671,6 +673,18 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 // For non-default templates, the default template is automatically prepended
 // to the chain so that common home files and config are inherited.
 func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
+	return templateChainInProject(name, projectPath, FindTemplateInProjectPath)
+}
+
+// GetOperatorTemplateChainInProject is GetTemplateChainInProject for a
+// template reference from operator configuration (a settings
+// default_template), which may be a remote source
+// (FindOperatorTemplateInProjectPath).
+func GetOperatorTemplateChainInProject(name, projectPath string) ([]*Template, error) {
+	return templateChainInProject(name, projectPath, FindOperatorTemplateInProjectPath)
+}
+
+func templateChainInProject(name, projectPath string, find func(name, projectPath string) (*Template, error)) ([]*Template, error) {
 	if name == "default" {
 		tpl, err := findOrHydrateDefaultTemplate(projectPath)
 		if err != nil {
@@ -690,7 +704,7 @@ func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
 	}
 	// If the default template cannot be resolved, proceed without it
 
-	tpl, err := FindTemplateInProjectPath(name, projectPath)
+	tpl, err := find(name, projectPath)
 	if err != nil {
 		return nil, err
 	}
@@ -1067,8 +1081,11 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 		}
 		result.MCPServers = merged
 	}
-	if override.MaxTurns > 0 {
-		result.MaxTurns = override.MaxTurns
+	// Count limits are *int (ptone/scion#5605): a set override wins, 0
+	// ("no limit") included, so an explicit Unlimited overrides an
+	// inherited limit. Copy the pointee, as for ThinkingLevel.
+	if override.MaxTurns != nil {
+		result.MaxTurns = api.CloneIntPtr(override.MaxTurns)
 	}
 	if override.MaxDuration != "" {
 		result.MaxDuration = override.MaxDuration
@@ -1111,8 +1128,8 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	if override.Branch != "" {
 		result.Branch = override.Branch
 	}
-	if override.MaxModelCalls > 0 {
-		result.MaxModelCalls = override.MaxModelCalls
+	if override.MaxModelCalls != nil {
+		result.MaxModelCalls = api.CloneIntPtr(override.MaxModelCalls)
 	}
 	if override.Info != nil {
 		if result.Info == nil {
@@ -1318,10 +1335,12 @@ func mergeTelemetryConfig(base, override *api.TelemetryConfig) *api.TelemetryCon
 			if override.Cloud.TLS.CAFile != "" {
 				result.Cloud.TLS.CAFile = override.Cloud.TLS.CAFile
 			}
-			if override.Cloud.TLS.CertFile != "" {
+			// The client certificate and its key are one setting: a layer
+			// that sets either replaces both, so the pair never mixes
+			// files from different layers. A layer that sets only one
+			// leaves the other empty, which ValidateTelemetryTLS reports.
+			if override.Cloud.TLS.CertFile != "" || override.Cloud.TLS.KeyFile != "" {
 				result.Cloud.TLS.CertFile = override.Cloud.TLS.CertFile
-			}
-			if override.Cloud.TLS.KeyFile != "" {
 				result.Cloud.TLS.KeyFile = override.Cloud.TLS.KeyFile
 			}
 		}

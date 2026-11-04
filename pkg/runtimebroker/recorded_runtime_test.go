@@ -84,9 +84,9 @@ func (m *rrManager) Delete(ctx context.Context, agentID string, deleteFiles bool
 	return m.listCountingManager.Delete(ctx, agentID, deleteFiles, projectPath, projectID, removeBranch)
 }
 
-func (m *rrManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *rrManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	m.acts.Add(1)
-	return m.listCountingManager.DeleteTarget(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
+	return m.listCountingManager.DeleteTarget(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch)
 }
 
 func (m *rrManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
@@ -140,7 +140,7 @@ func newRecordedRuntimeServer(t *testing.T, withK8s bool) (*Server, *rrManager, 
 	defaultMgr := &rrManager{}
 	defaultMgr.agents = []api.AgentInfo{rrAgentInfo("docker-container")}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	srv := New(cfg, defaultMgr, newRRRuntime("docker", defaultMgr), config.RuntimeBuildRecord{})
@@ -226,7 +226,14 @@ func TestRecordedRuntime_RecordedTypeServesEveryRoute(t *testing.T) {
 					want, wantID, other = defaultMgr, "docker-container", k8sMgr
 				}
 
-				w := serveRR(srv, tc.method, "/api/v1/agents/"+rrAgent+tc.action+rrQuery(recorded), tc.body)
+				body := tc.body
+				if tc.name == "restart" && recorded != "docker" {
+					// A restart on the Kubernetes runtime names the agent's
+					// project, so its stored config (none yet) is checked
+					// before the stop.
+					body = projectBody(cwdDotScion(t), "")
+				}
+				w := serveRR(srv, tc.method, "/api/v1/agents/"+rrAgent+tc.action+rrQuery(recorded), body)
 
 				if w.Code >= 400 {
 					t.Fatalf("status = %d; body = %s", w.Code, w.Body.String())

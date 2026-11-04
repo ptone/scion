@@ -193,6 +193,7 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// skipped here too.
 		if !reportOfOtherRun(presentedAgentTokenRunID(ctx), agent.RunID) {
 			s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
+			s.reconcileProjectQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
 		}
 	}
 
@@ -545,7 +546,6 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	dispatcher := s.GetDispatcher()
 	stopRunID := agent.RunID
 	if dispatcher != nil && agent.RuntimeBrokerID != "" {
-		s.syncWorkspaceOnStop(ctx, agent)
 		// As for stop: warn about, and record, work in an ephemeral
 		// workspace that the suspend discards (ptone/scion#3819).
 		s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
@@ -588,14 +588,21 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	}
 
 	s.revokeSuspendedCredentials(ctx, agent.ID)
+	// The agent's delegation grants end with the suspension, best effort:
+	// exchange and use already deny a suspended agent
+	// (.design/agent-delegation.md §16.3). A newer run started since the
+	// status write keeps its own grants (ptone/scion#6403).
+	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
 	agent.Phase = newPhase
 	agent.ContainerStatus = "stopped"
 	agent.Activity = ""
 	// A suspended agent has no running container: release its
 	// max_agents_per_broker reservation so it stops consuming broker
-	// capacity until it is resumed (ptone/scion#1963).
+	// capacity until it is resumed (ptone/scion#1963), and its
+	// max_agents_per_project one (ptone/scion#6033).
 	s.releaseBrokerQuota(ctx, agent)
+	s.releaseProjectQuota(ctx, agent)
 	s.events.PublishAgentStatus(ctx, agent)
 	return nil
 }
@@ -698,7 +705,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// success.
 		if deleteStopNoop(agent) {
 			respAgent := *agent
-			respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+			respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 			respAgent.Deletion = deletionViewForCaller(agent, time.Now(), callerSeesDeletionDetail(ctx))
 			writeJSON(w, http.StatusOK, &respAgent)
 			return
@@ -877,13 +884,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		s.clearExposedPortsForAgent(ctx, agent.ID)
 		stopRunID = agent.RunID
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
-			// The response waits on the workspace sync-back, the ephemeral
-			// workspace check and the stop dispatch: extend this request's
+			// The response waits on the ephemeral workspace check and the
+			// stop dispatch: extend this request's
 			// write deadline to cover them (ptone/scion#4178).
 			extendWriteDeadline(ctx, w, s.config.WriteTimeout, stopWriteBudget())
-			// Before stopping, sync workspace back for hub-managed projects on remote brokers.
-			// This is best-effort: failures are logged but don't block the stop.
-			s.syncWorkspaceOnStop(ctx, agent)
 			// Warn (never block) when an ephemeral workspace holds work
 			// the stop is about to discard (ptone/scion#3819).
 			s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
@@ -950,7 +954,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			}
 		}
 		respAgent := *agent
-		respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+		respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 		writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 		return
 	case api.AgentActionRestart:
@@ -1085,6 +1089,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				slog.Info("Restart: agent not running on broker, proceeding with start",
 					"agent_id", id, "error", stopErr)
 			}
+			// The stop leg is confirmed: close the old run's lifecycle
+			// segment before the start leg mints the next run (WP1 r5 B1).
+			s.recordRestartStopLeg(ctx, agent.ID, agent.RunID)
 			// The dying container's own status report (phase stopped)
 			// may have released the slot during the stop leg; the restart
 			// held it throughout, so put it back without the cap check.
@@ -1158,6 +1165,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// step with it. A run from another caller still misses.
 					if restartStoppedRecordable(agent.RunID) && s.recordRestartStopped(ctx, agent.ID, agent.RunID) {
 						s.releaseBrokerQuota(ctx, agent)
+						s.releaseProjectQuota(ctx, agent)
 					}
 				}
 			}
@@ -1211,6 +1219,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 		if relayIdentityMappingError(w, dispatchErr) {
+			return
+		}
+		if s.relayProjectPathRefusal(ctx, w, agent, dispatchErr) {
 			return
 		}
 		if relayBrokerRefusal(w, dispatchErr) {
@@ -1287,14 +1298,16 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				return
 			}
 			respAgent := *current
-			respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(current.AppliedConfig, canViewAgentEnv(ctx, s, current))
+			respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(current.AppliedConfig, current.PendingConfig, canViewAgentEnv(ctx, s, current))
 			respAgent.Deletion = deletionViewForCaller(current, time.Now(), callerSeesDeletionDetail(ctx))
 			writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 			return
 		}
 		// A stopped agent has no running container: release its
-		// max_agents_per_broker reservation (ptone/scion#1963).
+		// max_agents_per_broker reservation (ptone/scion#1963) and its
+		// max_agents_per_project one (ptone/scion#6033).
 		s.releaseBrokerQuota(ctx, agent)
+		s.releaseProjectQuota(ctx, agent)
 	} else if !startStatusWritten {
 		// A start or restart run by startAgentCore wrote its status while
 		// its claim was held.
@@ -1352,11 +1365,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	if action == api.AgentActionRestart && sd != nil && reloaded &&
 		isBrokerQuotaCountedPhase(agent.Phase) && agent.DeletedAt.IsZero() && !deletionActive(agent) {
 		s.reassertBrokerReservation(ctx, agent)
+		s.reassertProjectReservation(ctx, agent, backstopSiteRestart)
 	}
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent
-	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 	respAgent.Deletion = deletionViewForCaller(agent, time.Now(), callerSeesDeletionDetail(ctx))
 	writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 }
@@ -1425,7 +1439,7 @@ func (s *Server) queueOfflineStop(ctx context.Context, w http.ResponseWriter, ag
 	s.wakeBrokerDrain(ctx, agent.RuntimeBrokerID)
 
 	respAgent := *agent
-	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 	writeJSON(w, http.StatusAccepted, agentLifecycleResponse{Agent: &respAgent, Warnings: []string{offlineStopMessage}})
 }
 
@@ -1511,7 +1525,7 @@ func restartStoppedRecordable(runID string) bool {
 
 func (s *Server) recordRestartStopped(ctx context.Context, id, runID string) bool {
 	zero := 0
-	recorded, err := s.recordStopStatus(ctx, id, runID, "restart", store.AgentStatusUpdate{
+	recorded, err := s.recordStopStatus(lifecycleRestartFailed(ctx), id, runID, "restart", store.AgentStatusUpdate{
 		Phase:           string(state.PhaseStopped),
 		ContainerStatus: "stopped",
 		ExitCode:        &zero,
@@ -1805,7 +1819,6 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 				// Each agent collects its own warnings, reported on its
 				// result as a single stop reports them on its response.
 				opCtx, agentWarns := withDispatchWarnings(opCtx)
-				s.syncWorkspaceOnStop(opCtx, agent)
 				// As for a single stop: warn about, and record, work in an
 				// ephemeral workspace that the stop discards
 				// (ptone/scion#3819, ptone/scion#4246). The check runs
@@ -1851,9 +1864,11 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 					// and publish the row as stored.
 					// A failed re-read is logged inside; the stop's result stands.
 					_ = s.settleLifecycleWrite(ctx, agent, string(state.PhaseStopped))
-					// Release the per-broker reservation, same as a single
-					// explicit stop (ptone/scion#1963).
+					// Release the per-broker and per-project reservations,
+					// same as a single explicit stop (ptone/scion#1963,
+					// ptone/scion#6033).
 					s.releaseBrokerQuota(ctx, agent)
+					s.releaseProjectQuota(ctx, agent)
 					// settleLifecycleWrite reloaded DeletedAt: a delete that
 					// soft-finished meanwhile gets no stale stopped status.
 					if agent.DeletedAt.IsZero() {

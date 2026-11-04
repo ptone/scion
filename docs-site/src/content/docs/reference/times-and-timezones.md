@@ -27,6 +27,7 @@ Each user picks a zone with the **Display timezone** card on the profile setting
 - **Auto**, the default, follows the browser's zone.
 - The value is stored as the `timezone` user preference, an IANA name; empty means Auto. `PATCH /api/v1/users/:id` with an invalid name returns `400` (see the [Users API](/scion/reference/api/)).
 - The display zone never changes an agent's `TZ`.
+- When a user with a non-empty `timezone` preference sends a message to an agent, the Hub attaches `sender_timezone` to the message's `metadata` (see [Inbound Message Type Discrimination](/scion/hosted/user/messaging/#3-inbound-message-type-discrimination)).
 
 ### Metrics dashboard day buckets
 
@@ -106,7 +107,7 @@ A pin is the agent's explicit timezone. It is set in three ways:
   - an IANA name pins the agent; an invalid name, or `Local`, returns `400`;
   - `""` unpins it, and the agent follows steps 2-5 from then on.
 
-  The field is accepted in any phase except on a deleted agent (`409`). A running container keeps its `TZ` until the next start, and the response warns `explicitTimezone applies at the agent's next start`. The response also carries `resolvedTimezone` (the `TZ` the next start sends, `""` when none) and `timezoneSource` (the step in the table above). See the [Agents API](/scion/reference/api/).
+  The field is accepted in any phase except on a deleted agent (`409`). A running container keeps its `TZ` until the next start, and the response warns `explicitTimezone applies at the agent's next start`. The response also carries `resolvedTimezone` (the `TZ` the next start sends, `""` when none) and `timezoneSource` (the step in the table above). `GET /api/v1/agents/:id` carries the same two fields when the caller can view the agent's env, since the zone can come from a `TZ` environment variable. See the [Agents API](/scion/reference/api/).
 - **Later, in the web dashboard.** The agent's **Edit** page has a **Timezone** field (in the **General** section of the by-function view). Pick a zone to pin it, or press **Clear** to unpin it; either is saved with the page's **Save**, like any other field, and applies at the agent's next start.
 
 An agent created by an older Hub may have a `TZ` saved in its applied config env. The Hub converts that value to a pin (source `legacy`) the first time it reads the agent's timezone. The `applied-config-tz-cleanup` operation does the same for every agent in one pass (see [Operator steps](#operator-steps)).
@@ -119,12 +120,13 @@ An agent created by an older Hub may have a `TZ` saved in its applied config env
 - an unpin is carried too, so a create-time `TZ` does not come back;
 - an agent with neither re-derives its pin from its original create inputs, else from the Hub harness config.
 
-## Cron schedules are UTC only
+## Cron schedules and time zones
 
-Recurring schedules are evaluated in UTC, and there is no schedule timezone setting.
+Recurring schedules are evaluated in UTC unless the schedule has a time zone (`timeZone` in the API, an IANA name; empty means UTC). With a zone, the cron expression is matched against local wall-clock time there, so the local run time stays the same across daylight saving changes. A local time skipped by a change runs once at the change; a local time that happens twice runs once, at its first occurrence. `nextRunAt` is still a UTC instant. See [Scheduling](/scion/hosted/user/scheduling/#time-zones).
 
-- An expression that starts with `CRON_TZ=` or `TZ=` is rejected with `400`.
-- Schedules saved with such a prefix by an older Hub are paused with `statusReason` `cron_zone_unsupported` at Hub start (and if the evaluator encounters one at run time), with one warning per schedule in the Hub log. To resume one, edit its expression to UTC first.
+- An expression that starts with `CRON_TZ=` or `TZ=` is rejected with `400`; use the schedule's time zone instead.
+- Schedules saved with such a prefix by an older Hub are paused with `statusReason` `cron_zone_unsupported` at Hub start (and if the evaluator encounters one at run time), with one warning per schedule in the Hub log. To resume one, remove the prefix (setting the schedule's time zone instead) first.
+- A Hub version from before schedule time zones ignores the zone and evaluates every schedule in UTC.
 
 See [Scheduling](/scion/hosted/user/scheduling/#schedules-paused-by-the-hub).
 
