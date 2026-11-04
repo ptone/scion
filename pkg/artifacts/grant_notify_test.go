@@ -348,10 +348,11 @@ func TestGrantNotifyWithoutNotifier(t *testing.T) {
 
 // TestGrantNotifyRaise (v4 3.2, K5, K7, K13, K34n): a grant with notify
 // sends only when it raises the user's level (created counts): a raise
-// sends, a lowering or a no-op answers not_raised, a grant to the caller
-// answers self, and a concurrent change that turns the raise into a
-// lowering or a no-op under the lock sends nothing although the limiter
-// token is spent.
+// sends, a lowering or a no-op answers not_raised without charging the
+// limiter (the one token left before the lowering still serves the final
+// raise), a grant to the caller answers self, and a concurrent change that
+// turns the raise into a lowering or a no-op under the lock sends nothing
+// although the limiter token is spent.
 func TestGrantNotifyRaise(t *testing.T) {
 	f := newNotifyFixture(t)
 	type step struct {
@@ -361,18 +362,21 @@ func TestGrantNotifyRaise(t *testing.T) {
 		notified bool
 		skipped  string
 		event    bool // a new grant event is written
+		refill   bool // the requester's one token is refilled first
 	}
 	steps := []step{
-		{"create", GrantRead, http.StatusCreated, true, "", true},
-		{"raise to write", GrantWrite, http.StatusOK, true, "", true},
-		{"lower to read", GrantRead, http.StatusOK, false, NotifySkippedNotRaised, true},
-		{"no-op read", GrantRead, http.StatusOK, false, NotifySkippedNotRaised, false},
-		{"raise to admin", GrantAdmin, http.StatusOK, true, "", true},
+		{"create", GrantRead, http.StatusCreated, true, "", true, true},
+		{"raise to write", GrantWrite, http.StatusOK, true, "", true, true},
+		{"lower to read", GrantRead, http.StatusOK, false, NotifySkippedNotRaised, true, true},
+		{"no-op read", GrantRead, http.StatusOK, false, NotifySkippedNotRaised, false, false},
+		// No refill: the token refilled before the lowering must still be
+		// there, because neither the lowering nor the no-op charged it.
+		{"raise to admin", GrantAdmin, http.StatusOK, true, "", true, false},
 	}
 	for _, st := range steps {
-		// A fresh requester token for each raise: the limiter is not under
-		// test here.
-		*f.now = f.now.Add(2 * time.Hour)
+		if st.refill {
+			*f.now = f.now.Add(2 * time.Hour)
+		}
 		before := len(grantEvents(t, f.store, f.id, notifySubjectID))
 		sentBefore := len(f.n.sent())
 		rec, resp := f.notifyGrant(userU, f.id, SubjectPrincipal, notifySubjectID, st.perm)
