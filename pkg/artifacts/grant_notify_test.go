@@ -847,3 +847,42 @@ func TestPutGrantWrapperIdentical(t *testing.T) {
 		t.Fatal("no source files scanned")
 	}
 }
+
+// TestGrantNotifyNoticeFailure (O5): when NotifyGrant fails after the
+// commit, the grant stands, the response says notified false and
+// notifySkipped unavailable, the append-only event keeps notified true,
+// and the decision log records notify_failed.
+func TestGrantNotifyNoticeFailure(t *testing.T) {
+	f := newNotifyFixture(t)
+	logs := captureLog(f.fixture, slog.LevelInfo)
+	f.n.notifyErr = errors.New("insert failed")
+	rec, resp := f.notifyGrant(userU, f.id, SubjectPrincipal, notifySubjectID, GrantWrite)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if resp.Notified || resp.NotifySkipped != NotifySkippedUnavailable {
+		t.Errorf("notified=%v skipped=%q, want false unavailable", resp.Notified, resp.NotifySkipped)
+	}
+	if g := f.grantOf(f.id, notifySubjectID); g == nil || g.Permission != GrantWrite {
+		t.Errorf("grant rolled back: %+v", g)
+	}
+	if v, ok := lastNotified(t, f.store, f.id, notifySubjectID); !ok || v != true {
+		t.Errorf("event notified = %v %v, want true (append-only)", v, ok)
+	}
+	entries, _ := logs.take(t)
+	var failed, grant bool
+	for _, e := range entries {
+		if e[logKeyReason] == logReasonNotifyFailed {
+			failed = true
+		}
+		if e[logKeyAction] == logActionGrantCreated {
+			grant = true
+			if e[logKeyNotified] != false {
+				t.Errorf("grant entry notified = %v, want false", e[logKeyNotified])
+			}
+		}
+	}
+	if !failed || !grant {
+		t.Errorf("decision log: notify_failed %v, grant entry %v: %v", failed, grant, entries)
+	}
+}
