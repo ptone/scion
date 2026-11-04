@@ -26,7 +26,6 @@ import (
 	"go/ast"
 	"go/token"
 	"net/http"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -161,12 +160,16 @@ func TestArtifactHostSponsorReadsHomeChecks(t *testing.T) {
 		faulty := hostOverStore(fault, false)
 		ok, err := faulty.sponsorReadsHomeThroughRole(ctx, f.delegator, f.home)
 		assert.False(t, ok, name)
+		// Fired control: only the injected fault returns errSponsorStoreFault.
 		assert.ErrorIs(t, err, errSponsorStoreFault, name)
 	}
 	// A role-binding fault makes CheckAccess's decision indeterminate: it is
 	// a lookup failure, not "no role".
 	ok, err = hostOverStore(&sponsorFaultStore{Store: f.s, failBindings: true}, false).sponsorReadsHomeThroughRole(ctx, f.delegator, f.home)
 	assert.False(t, ok, "role bindings")
+	// Fired control: with the project and user lookups unfaulted, the helper
+	// returns an error only for an indeterminate CheckAccess decision, which
+	// only the injected binding fault produces here.
 	assert.Error(t, err, "role bindings: reported as a lookup failure")
 	ok, err = hostOverStore(f.s, false).sponsorReadsHomeThroughRole(ctx, f.delegator, f.home)
 	require.NoError(t, err)
@@ -391,6 +394,8 @@ func TestArtifactHostSponsorInactiveRefusedByHelper(t *testing.T) {
 	ok, err := host.sponsorReadsHomeThroughRole(ctx, f.delegator, f.home)
 	require.NoError(t, err)
 	require.True(t, ok, "control: active member")
+	// Fired control: the count is on the production path (the helper's read
+	// plus CheckAccess's account-status read).
 	require.Greater(t, counting.count(f.delegator), 1, "control: CheckAccess reads the user too")
 
 	ok, err = host.sponsorReadsHomeThroughRole(ctx, suspended, f.home)
@@ -399,26 +404,46 @@ func TestArtifactHostSponsorInactiveRefusedByHelper(t *testing.T) {
 	assert.Equal(t, 1, counting.count(suspended), "the helper refuses before CheckAccess")
 }
 
-// homeBindingFaultStore fails role-binding reads that ask about home.
-type homeBindingFaultStore struct {
+// principalBindingFaultStore fails every role-binding load whose principal
+// list names the user userID. Production loads a principal's bindings for
+// every scope at once (ListRoleBindingsForPrincipals with nil scope
+// arguments; authz_request_inputs.go), so the fault is keyed on the
+// principal, the argument production passes, and fired counts each fault.
+type principalBindingFaultStore struct {
 	store.Store
-	home string
+	userID string
+	mu     sync.Mutex
+	fired  int
 }
 
-func (s *homeBindingFaultStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes, scopeIDs []string) ([]*store.RoleBinding, error) {
-	if slices.Contains(scopeIDs, s.home) {
-		return nil, errSponsorStoreFault
+func (s *principalBindingFaultStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes, scopeIDs []string) ([]*store.RoleBinding, error) {
+	for _, p := range principals {
+		if p.Type == store.RoleBindingPrincipalUser && p.ID == s.userID {
+			s.mu.Lock()
+			s.fired++
+			s.mu.Unlock()
+			return nil, errSponsorStoreFault
+		}
 	}
 	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
+}
+
+func (s *principalBindingFaultStore) firedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fired
 }
 
 // TestArtifactSponsorReviewAutomaticFormOnHub: through the hub's own
 // Authorize, an automatic grant counts only while its holder reads the home
 // project through a role. The delegating user also reads the artifact
 // through a grant to another project they belong to, so only the
-// automatic-form rule decides: leaving the home project refuses the review,
-// re-joining restores it, and a role-lookup fault on the home project
-// refuses it.
+// automatic-form rule decides: leaving the home project refuses the review
+// and re-joining restores it. A role-lookup fault for the delegating user
+// is shown to fire and to make the hub's decision deny (CheckAccess with a
+// resolution error, Authorize false), and the review is refused under it:
+// every read path of a user loads the same bindings, so the artifact
+// answers 404.
 func TestArtifactSponsorReviewAutomaticFormOnHub(t *testing.T) {
 	f := newReviewGrantFixture(t)
 	st, _ := enableArtifactsForTest(t, f.srv)
@@ -465,12 +490,35 @@ func TestArtifactSponsorReviewAutomaticFormOnHub(t *testing.T) {
 	createDCUser(t, f.s, f.delegator, "rg-delegator@test.com", f.home, store.ProjectRoleMember)
 	assert.Equal(t, http.StatusCreated, review(), "re-joined the home project")
 
+	readPerm, ok := artifactPermission(artifacts.PermissionRead)
+	require.True(t, ok)
+	homeRead := func() Decision {
+		t.Helper()
+		return f.srv.authzService.CheckAccess(context.Background(), delegator, Resource{
+			Type: permissions.ResourceArtifact, ParentType: permissions.ResourceProject, ParentID: f.home,
+		}, Action(readPerm.Action))
+	}
+	host := newArtifactHost(f.srv)
+	asDelegator := contextWithIdentity(context.Background(), delegator)
+	require.True(t, homeRead().Allowed, "control without the fault: CheckAccess allows the home read")
+	require.True(t, host.Authorize(asDelegator, f.home, artifacts.PermissionRead), "control without the fault: Authorize allows")
+
 	orig := f.srv.authzService.store
-	f.srv.authzService.store = &homeBindingFaultStore{Store: orig, home: f.home}
+	fault := &principalBindingFaultStore{Store: orig, userID: f.delegator}
+	f.srv.authzService.store = fault
 	t.Cleanup(func() { f.srv.authzService.store = orig })
-	require.Equal(t, http.StatusOK, read(), "fault on home only: still reads through the other project's grant")
-	assert.Equal(t, http.StatusForbidden, review(), "role lookup fault on the home project: refused")
+	decision := homeRead()
+	require.Positive(t, fault.firedCount(), "the fault fired")
+	require.False(t, decision.Allowed, "under the fault: CheckAccess denies")
+	require.Equal(t, DenyCauseResolutionError, decision.DenyCause, "under the fault: the deny is a resolution error")
+	assert.False(t, host.Authorize(asDelegator, f.home, artifacts.PermissionRead), "under the fault: Authorize answers false")
+	// 404, not 403: the read through the other project's grant needs the same
+	// faulted binding load, so the artifact is unreadable and answers as a
+	// missing one before any write decision.
+	assert.Equal(t, http.StatusNotFound, review(), "role lookup fault: the review is refused (the read fails closed)")
+
 	f.srv.authzService.store = orig
+	assert.True(t, host.Authorize(asDelegator, f.home, artifacts.PermissionRead), "control: fault cleared, Authorize allows")
 	assert.Equal(t, http.StatusCreated, review(), "control: fault cleared")
 }
 
