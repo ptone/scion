@@ -266,7 +266,9 @@ func TestGrantNotifyOrder(t *testing.T) {
 			if resp.Notified || resp.NotifySkipped != tc.skipped {
 				t.Errorf("response notified=%v skipped=%q, want false %q", resp.Notified, resp.NotifySkipped, tc.skipped)
 			}
-			if g := f.grantOf(f.id, subject); g == nil || (tc.skipped != NotifySkippedNotRaised && g.Permission != tc.perm) {
+			// Every row writes the asked permission (not raised lowers
+			// write to read).
+			if g := f.grantOf(f.id, subject); g == nil || g.Permission != tc.perm {
 				t.Errorf("grant not made as asked: %+v", g)
 			}
 			calls := f.take()
@@ -337,6 +339,9 @@ func TestGrantNotifyOrder(t *testing.T) {
 		rec, resp := f.notifyGrant(userU, f.id, SubjectPrincipal, "user:order-limited", GrantRead)
 		if rec.Code != http.StatusCreated || resp.Notified || resp.NotifySkipped != NotifySkippedRateLimited {
 			t.Fatalf("status %d notified=%v skipped=%q, want 201 false rate_limited", rec.Code, resp.Notified, resp.NotifySkipped)
+		}
+		if g := f.grantOf(f.id, "user:order-limited"); g == nil || g.Permission != GrantRead {
+			t.Errorf("grant not made as asked: %+v", g)
 		}
 		want := []string{"may order-limited", "put notify=false"}
 		if calls := f.take(); strs(calls) != strs(want) {

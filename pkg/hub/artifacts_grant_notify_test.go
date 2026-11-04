@@ -533,10 +533,10 @@ func TestGrantNoticeLabelEmail(t *testing.T) {
 
 // TestNamedUserSubjectNeverEntersAContext (carry-forward C1, K29n): the
 // check-only identity namedUserSubject builds is called for only from the
-// allow-listed functions; each binds it by a 3-name assignment, and when it
-// keeps the identity (not "_") it passes it exactly once, as the subject
-// argument of CheckAccess; no function of the files that build or use it
-// puts any identity into a context.
+// allow-listed functions; each binds it by an assignment to three plain
+// identifiers, keeps at most one identity (not "_"), and passes it exactly
+// once, as the subject argument of CheckAccess; no function of the files
+// that build or use it puts any identity into a context.
 func TestNamedUserSubjectNeverEntersAContext(t *testing.T) {
 	allowed := map[string]bool{
 		"artifacts_review_subject.go:ReviewSubjectAuthorize": true,
@@ -568,18 +568,36 @@ func TestNamedUserSubjectNeverEntersAContext(t *testing.T) {
 			key := name + ":" + fd.Name.Name
 			// The identity is the second result of namedUserSubject. Every
 			// call must be the single right-hand side of a 3-name := or =
-			// assignment, so the scanner always knows the identity's name
-			// ("_" when it is discarded); any other form fails.
+			// assignment whose three left-hand sides are plain identifiers,
+			// so the scanner always knows the identity's name ("_" when it
+			// is discarded); any other form fails, and a function may keep
+			// at most one identity.
 			var identity string
 			bound := map[*ast.CallExpr]bool{}
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				if st, ok := n.(*ast.AssignStmt); ok && len(st.Rhs) == 1 && len(st.Lhs) == 3 {
-					if call, ok := st.Rhs[0].(*ast.CallExpr); ok && extractCallSymbol(call) == "namedUserSubject" {
-						bound[call] = true
-						if id, ok := st.Lhs[1].(*ast.Ident); ok && id.Name != "_" {
-							identity = id.Name
-						}
+				st, ok := n.(*ast.AssignStmt)
+				if !ok || len(st.Rhs) != 1 {
+					return true
+				}
+				call, ok := st.Rhs[0].(*ast.CallExpr)
+				if !ok || extractCallSymbol(call) != "namedUserSubject" {
+					return true
+				}
+				if len(st.Lhs) != 3 {
+					return true
+				}
+				for _, l := range st.Lhs {
+					if _, ok := l.(*ast.Ident); !ok {
+						t.Errorf("%s binds a namedUserSubject result to a non-identifier; the C1 scanner cannot follow it", key)
+						return true
 					}
+				}
+				bound[call] = true
+				if id := st.Lhs[1].(*ast.Ident); id.Name != "_" {
+					if identity != "" {
+						t.Errorf("%s keeps more than one namedUserSubject identity (%s, %s)", key, identity, id.Name)
+					}
+					identity = id.Name
 				}
 				return true
 			})
@@ -587,7 +605,7 @@ func TestNamedUserSubjectNeverEntersAContext(t *testing.T) {
 				if call, ok := n.(*ast.CallExpr); ok && extractCallSymbol(call) == "namedUserSubject" {
 					callers[key] = true
 					if !bound[call] {
-						t.Errorf("%s calls namedUserSubject outside a 3-name assignment; the C1 scanner cannot follow the identity", key)
+						t.Errorf("%s calls namedUserSubject outside a 3-identifier assignment; the C1 scanner cannot follow the identity", key)
 					}
 				}
 				return true
