@@ -495,3 +495,35 @@ func TestArtifactGrantCalls(t *testing.T) {
 		t.Errorf("requests = %q", seen)
 	}
 }
+
+// TestArtifactCreateLinkShareURL: CreateLink decodes the hub's shareUrl
+// (ptone/scion#7107 phase 2b) next to the hub-relative url, and leaves it
+// empty when the hub sends none.
+func TestArtifactCreateLinkShareURL(t *testing.T) {
+	for _, tc := range []struct{ body, wantURL, wantShare string }{
+		{`{"link":{"id":"l1"},"url":"/api/v1/artifacts/shared/tok","shareUrl":"https://links.example.net/api/v1/artifacts/shared/tok"}`,
+			"/api/v1/artifacts/shared/tok", "https://links.example.net/api/v1/artifacts/shared/tok"},
+		{`{"link":{"id":"l1"},"url":"/api/v1/artifacts/shared/tok"}`, "/api/v1/artifacts/shared/tok", ""},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/api/v1/artifacts/a1/links" {
+				t.Errorf("request %s %s", r.Method, r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, tc.body)
+		}))
+		c, err := New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := c.Artifacts().CreateLink(context.Background(), "a1", 0)
+		srv.Close()
+		if err != nil {
+			t.Fatalf("CreateLink: %v", err)
+		}
+		if got.URL != tc.wantURL || got.ShareURL != tc.wantShare || got.Link.ID != "l1" {
+			t.Errorf("CreateLink = %+v, want url %q shareUrl %q", got, tc.wantURL, tc.wantShare)
+		}
+	}
+}
