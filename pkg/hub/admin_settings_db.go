@@ -137,6 +137,13 @@ type ServerConfigUpdateDBRequest struct {
 	// transaction that also compares the revision of the one the body
 	// leaves out (placementPairForSave).
 	ExpectedRevisions map[string]int64 `json:"expected_revisions,omitempty"`
+
+	// Artifacts is the DB-only artifacts section (admin session only; see
+	// admin_settings_artifacts.go), kept raw: the handler takes it out of
+	// the body after the token check and builds, validates and writes it
+	// as a section of its own. For the token check it is one key,
+	// "artifacts", refused as a whole.
+	Artifacts json.RawMessage `json:"artifacts,omitempty"`
 }
 
 // handleGetServerConfigDB handles GET /api/v1/admin/server-config
@@ -1127,6 +1134,13 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
 		return
 	}
+	// The DB-only artifacts section is built and written as a section of
+	// its own below (buildArtifactsSectionDoc); the koanf classification
+	// and the file routing that follow never see it.
+	artifactsRaw, artifactsSent := artifactsBodyMember(rawBody)
+	if artifactsSent {
+		rawBody = dropTopLevelMember(rawBody, artifactsSection)
+	}
 	// GCP permission-check keys: a sent key must carry a recognised value.
 	if !validateGCPIAMRequest(w, rawBody) {
 		return
@@ -1374,6 +1388,26 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if sec == "endpoints" && sameAsFilteredBase(merged, filteredBase) && !fp.has("public_url") && !fp.has("hub_name") {
 			noopRevs[sec] = rev
 		}
+	}
+
+	// artifacts: merged on the current row (only the keys the body sends
+	// change); the row revision read is the CAS base, and the base is kept
+	// for the per-key audit below.
+	var artifactsBefore json.RawMessage
+	if artifactsSent {
+		doc, before, rev, bad, err := buildArtifactsSectionDoc(r.Context(), ops, artifactsRaw)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build artifacts document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		if bad != "" {
+			writeSettingsFieldError(w, artifactsSection, bad)
+			return
+		}
+		sectionDocs[artifactsSection] = doc
+		mergedBaseRevs[artifactsSection] = rev
+		artifactsBefore = before
 	}
 
 	// A save that sends authorized_domains or admin_emails may not leave
@@ -1752,6 +1786,20 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		writeSettingsValidation(w, "", sortedSectionValidationEntries(allValidationErrors), nil)
 		return
 	}
+	// artifacts.link_origin: stored normalized, refused when it is the
+	// hub's own public origin, warned about when it shares the hub's
+	// registrable domain (security review condition 5).
+	if doc, ok := sectionDocs[artifactsSection]; ok {
+		out, warning, refusal := s.checkArtifactsLinkOriginSave(doc)
+		if refusal != "" {
+			writeSettingsFieldError(w, opsettings.ArtifactsLinkOriginKey, refusal)
+			return
+		}
+		sectionDocs[artifactsSection] = out
+		if warning != "" {
+			saveWarnings = append(saveWarnings, warning)
+		}
+	}
 
 	// Workstation: validate and prepare the settings.yaml part before any DB
 	// write, so a bad file-routed value or a file that cannot be edited
@@ -1978,9 +2026,26 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			}
 		}
 
+		// Every artifacts key the save changes is recorded before it is
+		// written; if a record cannot be written, the change is not made.
+		var artifactsChanges []artifactsKeyChange
+		if secName == artifactsSection {
+			artifactsChanges = artifactsKeyChanges(artifactsBefore, doc)
+			if err := s.auditArtifactsSettingsChanges(r.Context(), gcpIAMSurfaceSave, artifactsChanges); err != nil {
+				slog.Error("PUT server-config: failed to record artifacts settings change", "error", err)
+				fileTxn.abort()
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+				return
+			}
+		}
+
 		newRev, inEffect, err := ops.update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
 		if publicURLChange && err != nil {
 			s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceSave, publicURLBefore, publicURLAfter, err)
+		}
+		if err != nil {
+			s.auditArtifactsSettingsNotApplied(r.Context(), gcpIAMSurfaceSave, artifactsChanges, err)
 		}
 		if secName == gcpIAMSection {
 			// The approval covers only this write's own self-apply.
@@ -3415,7 +3480,7 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"gcp_iam":           settingsTokenRefused,       // service account permission check
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
-	"artifacts":         settingsTokenConfiguration, // artifact limits
+	"artifacts":         settingsTokenRefused,       // link origin, link lifetimes and retention (admin session only)
 
 	"agent_delegation_policy": settingsTokenRefused, // which permissions may be delegated to agents
 	"chat_retention":          settingsTokenRefused, // written through PUT /api/v1/admin/chat-retention
@@ -3461,6 +3526,11 @@ var projectDefaultsTokenKeys = map[string]settingsTokenClass{
 // on.
 func serverConfigKeyTokenClass(koanfKey string) settingsTokenClass {
 	section := opsettings.OwningSection(koanfKey)
+	if section == "" {
+		// The DB-only artifacts section (no koanf paths) is sent as a
+		// top-level object named after it: its table entry decides.
+		section = dbOnlyBodySection(koanfKey)
+	}
 	switch serverConfigTokenSections[section] {
 	case settingsTokenConfiguration:
 		return settingsTokenConfiguration
@@ -3470,6 +3540,17 @@ func serverConfigKeyTokenClass(koanfKey string) settingsTokenClass {
 		}
 	}
 	return settingsTokenRefused
+}
+
+// dbOnlyBodySection returns the DB-only section a server-config body key
+// belongs to, by its first path element, or "" when there is none. Only
+// the artifacts section is written through the server-config body; the
+// other DB-only sections have write routes of their own.
+func dbOnlyBodySection(bodyKey string) string {
+	if head, _, _ := strings.Cut(bodyKey, "."); head == artifactsSection {
+		return artifactsSection
+	}
+	return ""
 }
 
 // serverConfigSectionTokenResettable reports whether a token may reset the
@@ -3512,6 +3593,11 @@ func tokenRefusedServerConfigKeys(rawBody []byte) []string {
 		if serverConfigKeyTokenClass(serverConfigBodyKoanfKey(l.path)) != settingsTokenConfiguration {
 			refused[strings.Join(l.path, ".")] = true
 		}
+	}
+	// The artifacts object counts by its presence, so an empty object or
+	// one with only unknown members is classified too.
+	if _, ok := artifactsBodyMember(rawBody); ok && serverConfigKeyTokenClass(artifactsSection) != settingsTokenConfiguration {
+		refused[artifactsSection] = true
 	}
 	return sortedSettingsKeys(refused)
 }
