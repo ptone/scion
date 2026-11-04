@@ -467,6 +467,14 @@ func TestGrantNoticeLabelEmail(t *testing.T) {
 	g.DisplayName, g.Email = "", fits
 	require.NoError(t, f.s.UpdateUser(ctx, g))
 	assert.Equal(t, fits, f.srv.grantNoticeLabel(ctx, f.reader, f.granter), "no name, 79-rune email")
+
+	// An email that cleaning would change is left out, so it never displays
+	// as a different-looking address.
+	for _, odd := range []string{"gn-gr\u200banter@test.com", "gn-granter@test\u202e.com", " gn-granter@test.com"} {
+		g.Email = odd
+		require.NoError(t, f.s.UpdateUser(ctx, g))
+		assert.Equal(t, "a user", f.srv.grantNoticeLabel(ctx, f.reader, f.granter), "email %q", odd)
+	}
 }
 
 // TestNamedUserSubjectNeverEntersAContext (carry-forward C1, K29n): the

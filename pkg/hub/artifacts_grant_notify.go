@@ -139,8 +139,9 @@ func grantNoticeMessage(label, permission, artifactID string) string {
 // its email in parentheses only when policy lets the subject read the
 // granter's user record (CheckAccess with the subject's check-only
 // identity, under maskAllAuthzMemo). Any lookup failure or denial leaves the
-// email out, and so does an email or a name and email longer than the cap:
-// an email is shown whole or not at all. With no usable name the label is
+// email out, and so does an email that cleaning would change or that is
+// longer than the cap (alone or with the name): an email is shown exactly
+// as stored, whole, or not at all. With no usable name the label is
 // the email when it may be shown and fits, else "a user". It never refuses
 // the notice.
 func (s *Server) grantNoticeLabel(ctx context.Context, subjectUserID, granterUserID string) string {
@@ -152,11 +153,12 @@ func (s *Server) grantNoticeLabel(ctx context.Context, subjectUserID, granterUse
 		return noticeLabelFallback
 	}
 	name := sanitizeNoticeLabel(granter.DisplayName)
-	// The email is cleaned but never capped, so its length decides whether
-	// it can be shown whole.
+	// The email is shown only as stored: cleaning must change nothing (a
+	// stored control, format or bidi rune would make it display as another
+	// address), and it is never capped, so it is shown whole or not at all.
 	email := cleanNoticeText(granter.Email, -1)
 	showEmail := false
-	if email != "" && utf8.RuneCountInString(email) <= noticeLabelMaxRunes && s.authzService != nil {
+	if email != "" && email == granter.Email && utf8.RuneCountInString(email) <= noticeLabelMaxRunes && s.authzService != nil {
 		if _, subject, err := s.namedUserSubject(ctx, subjectUserID); err == nil && subject != nil {
 			showEmail = s.authzService.CheckAccess(maskAllAuthzMemo(ctx), subject, userResource(granter), ActionRead).Allowed
 		}
