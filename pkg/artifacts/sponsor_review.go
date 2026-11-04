@@ -97,7 +97,7 @@ func (s *Service) SponsorReviewSkips() int64 {
 // refusal other than "off" is counted and logged with a fixed reason code:
 // the general log line carries the reason and the artifact id; the
 // decision log entry carries the reason with the usual request and artifact
-// fields (route, the calling agent, the home project, the owner). Neither
+// fields (route, the calling agent, the home project, owner_kind). Neither
 // ever carries the delegating user's id or the policy's error text.
 func (s *Service) sponsorReviewGrant(r *http.Request, a *Artifact, now time.Time) (Grant, bool) {
 	if a.OwnerKind != PrincipalKindAgent || a.ScopeKind != ScopeKindProject || a.ScopeRef == "" || a.SponsorRef == "" {
