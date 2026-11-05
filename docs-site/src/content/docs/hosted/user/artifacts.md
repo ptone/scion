@@ -164,6 +164,15 @@ On the current version of a Markdown artifact, choose **Review**. An editor open
 2. **Save review** publishes your marked-up copy as a version of kind *review*, with an optional note. It stays disabled until there is at least one mark, and while text outside your marks differs from the version you started from.
 3. If someone publishes a newer version while you review, your review is not saved. The editor restarts from the current version, and your text is shown read-only with **Copy** so you can redo your marks.
 
+:::note[Graphical review editor (experimental)]
+When the `web.artifact_review_editor` [experiment](/scion/reference/experiments/) is on (in addition to `hub.artifacts`), **Review** opens a graphical review editor with a **Graphical** and **Source** view toggle:
+- In **Graphical** view (**Track changes** is always on), you edit the rendered document directly — including prose inside paragraphs, headings, blockquotes, list items, and table cells — and typing, deleting, and replacing text are recorded inline as CriticMarkup suggestions, while **Comment** (`Ctrl+Alt+M` or `Cmd+Alt+M`) adds a note on the selection (`Enter` edits a comment you added in this review; comments from earlier reviews are read-only). Unedited list items, table rows, bullet markers, list numbering, alignment colons, and cell padding stay byte-for-byte as written.
+- Structural changes that cannot be recorded in the graphical view — formatting, adding or removing list items or table rows/columns, code blocks, paragraph breaks, multi-paragraph paste, or edits that would alter CriticMarkup token pairing or move an earlier comment — show a hint to switch to **Source** view.
+- **Large documents**: Markdown documents over **200 KB** (`200,000` UTF-8 bytes) or **4,000** top-level blocks open directly in **Source** view with a notice ("This document is large, so it opened in the Source view."), though you can still switch to **Graphical** view after confirming a prompt. Documents over **500 KB** (`500,000` bytes) or **10,000** top-level blocks open in **Source** view with the **Graphical** toggle disabled ("Too large for the graphical view.").
+- **Source** view uses the CriticMarkup source editor and toolbar (**Comment**, **Suggest**, **Insert**, **Delete**). Suggestions you made in the graphical view become read-only in the graphical view after you switch to **Source**, though you can still edit them in **Source**. Undo history is kept per view and resets when you switch, and your last chosen view is remembered in the browser.
+- Every save goes through the same review publish and Hub checks whether or not `web.artifact_review_editor` is on.
+:::
+
 While a review is the current version, the artifact shows a *Review pending* badge (also in the Artifacts list), and a banner names the reviewer and counts the marks. On a review, the preview's **Marks · Clean · Accepted** switch shows the marks, the text with every mark rejected, or the text with every mark accepted.
 
 **Review** is shown to people who may publish versions of the artifact and to people given review access (see [Share an artifact](#share-an-artifact)). Use **Edit** for a plain edit instead of a review.
@@ -180,9 +189,10 @@ As with `--version-of`, a reference with `@<n>` must name the current version. T
 
 ### Act on a review (owner)
 
-When an agent owns the artifact, the Hub sends it a message when someone else's review is published, with the commands to read it. A user owner gets no message; check for the *Review pending* badge instead. To read a review:
+When an agent owns the artifact, the Hub sends it a message when someone else's review is published, with the commands to read it. A user owner gets no message; check for the *Review pending* badge instead. To read a review or list its comments, suggested changes and highlights as entries without parsing CriticMarkup:
 
 ```bash
+scion artifact comments scion://artifact/5f1c2d3e-...        # list the newest review's entries (@<seq> for a specific review, --format json for JSON)
 scion artifact get scion://artifact/5f1c2d3e-...             # with the marks
 scion artifact get scion://artifact/5f1c2d3e-... --clean     # every mark rejected
 scion artifact get scion://artifact/5f1c2d3e-... --accept    # every mark accepted
@@ -230,7 +240,7 @@ A grant to a project covers its members and its agents. The home project is list
 
 An agent cannot share what it publishes, so the people accountable for it can. For an artifact **owned by an agent**, these users are its **stewards**:
 
-- the user who delegated to the agent (or to the agent that started it), while they hold a role in the artifact's home project;
+- the user who delegated to the agent (or to the agent that started it), while that user is active and holds a role that reads in the artifact's home project. The Hub records this delegating user on the artifact when the artifact is created, so stewardship survives agent deletion or purge;
 - the owners of the artifact's home project (and super-admins).
 
 Project admins who are not owners, and other members, are not stewards.
@@ -244,9 +254,9 @@ A steward can:
 
 A steward cannot give *Can manage* or move the artifact to another project. The Hub refuses both with `steward_action_not_allowed`. A user with *Can manage* on the artifact can do both. For full control of your own copy, fetch it and publish it as your own artifact (see [What agents cannot do](#what-agents-cannot-do)).
 
-Steward rights follow the artifact as it is now. They end when you lose your role in the home project, when the delegation to the agent is revoked, or when the artifact moves to a project where you no longer qualify: as a project owner, one you do not own; as the delegating user, one where you hold no role. Grants and links you created stay until someone removes them. Every grant, change and link you create is recorded with the reason you were allowed.
+Steward rights follow the artifact as it is now. They end when you lose your role in the home project, when the delegation to the agent is revoked (for an artifact whose delegating user was not recorded on the artifact at creation), or when the artifact moves to a project where you no longer qualify: as a project owner, one you do not own; as the delegating user, one where you hold no role. Grants and links you created stay until someone removes them. Every grant, change and link you create is recorded with the reason you were allowed.
 
-For now, stewards share from the CLI: the artifact page does not show **Share** to them yet.
+When the `web.artifact_manage_access` experiment is on, the artifact page replaces **Share**, **Grant review access** and **Retention…** with a single **Manage access** dialog, where stewards can create and revoke share links, give a user *Can review*, remove grants, and change the artifact's expiry; giving *Can view* or *Can edit* still uses `scion artifact grants`. With `web.artifact_manage_access` off, stewards share from the CLI:
 
 ```bash
 scion artifact grants scion://artifact/5f1c2d3e-... --add user:<id> --permission read
@@ -255,11 +265,11 @@ scion artifact share scion://artifact/5f1c2d3e-... --ttl 3d
 
 ### Grant review access to an agent's artifact
 
-For an artifact **owned by an agent**, admins of its home project who are not stewards may still give a person review access, even though they cannot otherwise manage the artifact. The stewards (the user who delegated to the agent, and the project's owners) can do this too, and more; see [Share an agent's artifact](#share-an-agents-artifact).
+For an artifact **owned by an agent**, admins of its home project who are not stewards may still give a person review access, even though they cannot otherwise manage the artifact. The stewards (the user who delegated to the agent, and the project's owners) can do this too, and more; see [Share an agent's artifact](#share-an-agents-artifact). When the `hub.artifact_sponsor_review_grant` [experiment](/scion/reference/experiments/#server-experiments-with-notes) is on (off by default), the Hub automatically gives the recorded delegating user a *Can review* grant (`user:<id>`) when an agent creates a new artifact in a project, if that user is active and holds a role that reads in the artifact's home project; that automatic grant gives review access while the user keeps a role that reads in the home project, until its permission is changed or it is removed.
 
-They see **Grant review access** on the artifact page instead of **Share**. Stewards see it too, for now. Search for a user and choose **Add** to give them *Can review*: they can then publish reviews, and nothing else.
+With `web.artifact_manage_access` off, non-owner project admins and stewards see **Grant review access** on the artifact page instead of **Share** (with `web.artifact_manage_access` on, they use **Manage access**). Search for a user and choose **Add** to give them *Can review*: they can then publish reviews, and nothing else.
 
-Review access does not give read access. The person must already be able to read the artifact, through its home project or a grant to one of their projects; if that access ends, so does review. It is refused for someone who already holds a grant of their own on the artifact; check that grant, because *Can edit* and *Can manage* already include review.
+Review access added by a non-steward project admin (or created automatically by `hub.artifact_sponsor_review_grant`) does not give read access: the person must already be able to read the artifact, through its home project or a grant to one of their projects, and if that access ends, so does review. A non-steward project admin's review grant is refused for someone who already holds a grant of their own on the artifact; check that grant, because *Can edit* and *Can manage* already include review. A *Can review* grant added by the artifact's owner, a user with *Can manage*, or a steward also gives read access on its own (see [Grants](/scion/reference/artifacts/#grants)).
 
 ## Attach artifacts in chat
 
@@ -331,7 +341,7 @@ While `hub.artifacts` is off:
 - **CLI:** every artifact request answers `404`. `scion artifact publish` adds a hint that the experiment may be off; `get` lists it among the possible causes. Messages sent with `--artifact` lose their references, with a warning.
 - **Check.** Inside an agent, `scion whoami --full` lists the experiments that are on now, on its `Experiments:` line. A Hub admin turns the experiment on under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)).
 
-If the experiment is on but artifacts are disabled in the Hub's settings, the web controls still appear, but every artifact request behind them, and every `scion artifact` command, answers `404` (ptone/scion#4932). Messages sent with `--artifact` lose their references, with a warning. Ask a Hub admin to check the Hub's `artifacts` settings.
+If the experiment is on but artifacts are disabled in the Hub's settings, the web controls still appear, but every artifact request behind them, and every `scion artifact` command, answers `404`. Messages sent with `--artifact` lose their references, with a warning. Ask a Hub admin to check the Hub's `artifacts` settings.
 
 ### A review is refused
 

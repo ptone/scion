@@ -20,6 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 )
 
 // nfsBackend resolves workspace and shared-dir paths onto an NFS-backed
@@ -77,6 +78,8 @@ func (b *nfsBackend) Resolve(in ResolveInput) (ResolvedWorkspace, error) {
 		HostBase:           ws.HostBase,
 		Backend:            "nfs",
 		SharedDirs:         make(map[string]ResolvedSharedDir, len(in.SharedDirNames)),
+		OwnerUID:           provision.DefaultOwnerID(ws.OwnerUID),
+		OwnerGID:           provision.DefaultOwnerID(ws.OwnerGID),
 	}
 
 	// Shared dirs: <SubPathRoot>/<projectID>/shared-dirs/<name>.
@@ -120,9 +123,13 @@ func (b *nfsBackend) Realize(in RealizeInput) (MountDescriptor, error) {
 		SubPath:  in.Resolved.ServerRelativePath,
 	}
 
-	// Populate K8s PVC info from the first share if available.
-	if b.cfg != nil && len(b.cfg.Shares) > 0 && b.cfg.Shares[0].PVName != "" {
+	// Populate K8s PVC info from the first share if available, and the
+	// share's server and export (a Kubernetes pod mounts the share inline
+	// when it has no claim).
+	if b.cfg != nil && len(b.cfg.Shares) > 0 {
 		desc.PVClaimName = b.cfg.Shares[0].PVName
+		desc.NFSServer = b.cfg.Shares[0].Server
+		desc.NFSExportPath = b.cfg.Shares[0].Export
 	}
 
 	return desc, nil

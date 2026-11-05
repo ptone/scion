@@ -268,6 +268,11 @@ func New(cfg Config) (*Host, error) {
 		}
 		return nil, fmt.Errorf("server.broker.instances: %s", strings.Join(msgs, "; "))
 	}
+	// No instance default volume may reach a Runtime Broker control path:
+	// refuse the whole process, as for any other invalid instance setting.
+	if err := checkInstanceDefaultVolumes(cfg.Instances); err != nil {
+		return nil, err
+	}
 	if cfg.Mode != ModeColocated && cfg.Mode != ModeRemote {
 		return nil, fmt.Errorf("brokerhost: unknown mode %q", cfg.Mode)
 	}
@@ -443,17 +448,16 @@ func (h *Host) Prepare(ctx context.Context) error {
 	return nil
 }
 
-// ScopeKey is the identity part of an execution scope (contract section 5):
-// the Docker daemon ID, or the Kubernetes cluster UID plus namespace.
+// ScopeKey is the identity part of an execution scope (contract section 5
+// and amendment P5-CR, CR3): brokeridentity.ScopeIdentity, the one source of
+// the scope identity for every target type. A scope without an identity
+// gives "<type>:"; Prepare only groups scopes that passed LoadOrCreate,
+// which verified their identity.
 func ScopeKey(s brokeridentity.ExecutionScope) string {
-	switch {
-	case s.Docker != nil:
-		return "docker:" + s.Docker.DaemonID
-	case s.Kubernetes != nil:
-		return "kubernetes:" + s.Kubernetes.ClusterUID + "/" + s.Kubernetes.Namespace
-	default:
-		return s.Type + ":"
+	if id, err := brokeridentity.ScopeIdentity(s); err == nil {
+		return id
 	}
+	return s.Type + ":"
 }
 
 // Status returns every configured instance's state, in configuration order.
@@ -887,4 +891,30 @@ func ReasonCode(err error) string {
 		return "runtime_build_failed"
 	}
 	return "refused"
+}
+
+// checkInstanceDefaultVolumes applies runtime.CheckVolumeSources to every
+// instance's agent_defaults volumes and harness override volumes.
+func checkInstanceDefaultVolumes(instances []config.V1RuntimeBrokerInstanceConfig) error {
+	for i, inst := range instances {
+		d := inst.AgentDefaults
+		if d == nil {
+			continue
+		}
+		p := fmt.Sprintf("server.broker.instances[%d].agent_defaults", i)
+		if err := runtime.CheckVolumeSources(d.Volumes); err != nil {
+			return fmt.Errorf("%s.%w", p, err)
+		}
+		names := make([]string, 0, len(d.HarnessOverrides))
+		for name := range d.HarnessOverrides {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if err := runtime.CheckVolumeSources(d.HarnessOverrides[name].Volumes); err != nil {
+				return fmt.Errorf("%s.harness_overrides.%s.%w", p, name, err)
+			}
+		}
+	}
+	return nil
 }

@@ -202,6 +202,43 @@ func TestProjectStorageMigrate_NFSMovesAndIsIdempotent(t *testing.T) {
 	assert.Contains(t, log, "moves=0")
 }
 
+// A workspace the storage migration moves in may hold an older image's
+// workspace-root provisioning marker (lock-drop note §3.4). A real run
+// promotes it at once, without a hub restart: afterwards the state-directory
+// sentinel exists and the workspace-root marker is gone. A dry run promotes
+// nothing.
+func TestProjectStorageMigrate_PromotesMigratedWorkspaceMarker(t *testing.T) {
+	f := newStorageMigrateFixture(t)
+	share := f.useNFS(t)
+	writeFiles(t, legacyHubProjects(t, share), map[string]string{
+		"migrate-me/README.md":                          "readme",
+		"migrate-me/" + provision.ProvisionSentinelFile: "provisioned by an older image\n",
+		"migrate-me/.scion/settings.yaml":               seedSettings(f.project.ID),
+	})
+	root := filepath.Join(share, "projects", f.project.ID)
+	stateSentinel := filepath.Join(root, provision.ProvisionStateDirName, provision.ProvisionSentinelFile)
+	rootMarker := filepath.Join(root, "workspace", provision.ProvisionSentinelFile)
+
+	log, err := runStorageMigrate(t, f.srv, true)
+	require.NoError(t, err, log)
+	assert.NoFileExists(t, stateSentinel, "a dry run promotes nothing")
+	assert.NotContains(t, log, "provisioning state promotion")
+
+	log, err = runStorageMigrate(t, f.srv, false)
+	require.NoError(t, err, log)
+	got, err := os.ReadFile(filepath.Join(root, "workspace", "README.md"))
+	require.NoError(t, err, log)
+	assert.Equal(t, "readme", string(got))
+	assert.FileExists(t, stateSentinel, "the migrated workspace is promoted without a restart\n%s", log)
+	assert.NoFileExists(t, rootMarker, "the workspace-root marker is removed")
+	assert.Contains(t, log, "provisioning state promotion: project "+f.project.ID+": promoted")
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, "provisioning state promotion") {
+			assert.NotContains(t, line, share, "the promotion's log line names no host path")
+		}
+	}
+}
+
 // the object-storage cleanup through the hub's object storage: the project's legacy copy goes once
 // the migration succeeded; per-agent objects stay.
 func TestProjectStorageMigrate_M3DeletesOnlyLegacyCopy(t *testing.T) {
@@ -364,4 +401,61 @@ func TestAdoptUnverifiedParam(t *testing.T) {
 	assert.True(t, some("a"))
 	assert.True(t, some("b"))
 	assert.False(t, some("c"))
+}
+
+// Step 5 (ptone/scion#5825) through the hub's maintenance operation: a
+// stopped agent's legacy Cloud Run home and secrets move to
+// agents/<slug>/{home-,secrets-}<agent ID>; a running agent's are deferred
+// (the project stays pending) and move once it is stopped.
+func TestProjectStorageMigrate_CloudRunHomes(t *testing.T) {
+	f := newStorageMigrateFixture(t)
+	share := f.useNFS(t)
+	ctx := context.Background()
+	stopped := &store.Agent{ID: uuid.NewString(), Slug: "dev", Name: "dev", ProjectID: f.project.ID, Phase: "stopped"}
+	running := &store.Agent{ID: uuid.NewString(), Slug: "ops", Name: "ops", ProjectID: f.project.ID, Phase: "running"}
+	for _, a := range []*store.Agent{stopped, running} {
+		require.NoError(t, f.srv.store.CreateAgent(ctx, a))
+	}
+	root := filepath.Join(share, "projects", f.project.ID)
+	for _, a := range []*store.Agent{stopped, running} {
+		writeFiles(t, root, map[string]string{
+			filepath.Join("agents", a.ID, "home", ".bashrc"):  "home " + a.Slug,
+			filepath.Join("agents", a.ID, "secrets", "token"): "secret " + a.Slug,
+		})
+	}
+
+	log, err := runStorageMigrate(t, f.srv, false)
+	require.NoError(t, err, log)
+	for p, want := range map[string]string{
+		filepath.Join("agents", "dev", "home-"+stopped.ID, ".bashrc"):  "home dev",
+		filepath.Join("agents", "dev", "secrets-"+stopped.ID, "token"): "secret dev",
+		filepath.Join("agents", running.ID, "home", ".bashrc"):         "home ops",
+	} {
+		got, err := os.ReadFile(filepath.Join(root, p))
+		require.NoError(t, err, "%s\n%s", p, log)
+		assert.Equal(t, want, string(got))
+	}
+	assert.Contains(t, log, "step 5-cloudrun-homes deferred")
+	_, statErr := os.Stat(filepath.Join(root, "agents", "ops", "home-"+running.ID))
+	assert.True(t, os.IsNotExist(statErr), "nothing is created for a running agent")
+
+	running.Phase = "stopped"
+	require.NoError(t, f.srv.store.UpdateAgent(ctx, running))
+	log, err = runStorageMigrate(t, f.srv, false)
+	require.NoError(t, err, log)
+	got, err := os.ReadFile(filepath.Join(root, "agents", "ops", "home-"+running.ID, ".bashrc"))
+	require.NoError(t, err, log)
+	assert.Equal(t, "home ops", string(got))
+
+	log, err = runStorageMigrate(t, f.srv, false)
+	require.NoError(t, err, log)
+	assert.Contains(t, log, "moves=0")
+}
+
+// Step 5 moves only agents whose instance is gone: an agent in phase error
+// may still have one, and is deferred like a running agent.
+func TestStorageMigrateAgentStopped(t *testing.T) {
+	for phase, want := range map[string]bool{"stopped": true, "halted": true, "error": false, "running": false, "starting": false, "suspended": false, "": false} {
+		assert.Equal(t, want, storageMigrateAgentStopped(phase), phase)
+	}
 }

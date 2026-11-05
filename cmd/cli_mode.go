@@ -144,6 +144,7 @@ var agentAllowed = map[string]bool{
 	"artifact.versions":             true,
 	"artifact.list":                 true,
 	"artifact.view":                 true,
+	"artifact.comments":             true,
 	// artifact share, artifact grants and artifact delete are human-only
 	// and deliberately absent (ptone/scion#4529, ptone/scion#4579): agents
 	// may not share or delete artifacts, or manage their grants.
@@ -186,6 +187,12 @@ var agentAllowed = map[string]bool{
 	"conversation.group.rename": true,
 	"conversation.group.add":    true,
 	"conversation.group.remove": true,
+
+	// Project-scoped secret reads as the calling agent (ptone/scion#5013).
+	// secret.set stays out: agents write secrets with sciontool secret set.
+	"secret":      true,
+	"secret.get":  true,
+	"secret.list": true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

@@ -510,6 +510,12 @@ func runDoctor() error {
 				opts.Namespace = rtConfig.Namespace
 				opts.GKEMode = rtConfig.GKE
 			}
+			var srv *config.V1ServerConfig
+			if gs, _, gErr := config.LoadGlobalSettings(); gErr == nil && gs != nil {
+				srv = gs.Server
+			}
+			opts.SharedDirStorageClass, opts.SharedDirStorageShared = doctorSharedDirStorage(vs, srv, profile)
+			opts.Server = srv
 		}
 	}
 	r.runtimeSection(rt.Name(), diag, opts)
@@ -677,6 +683,17 @@ func (r *doctorReport) localSettingsChecks() {
 	// D12: inotify limits (local check, read-only): the per-user limits
 	// that a Docker or Podman broker's agents share, and their current use.
 	r.add(&r.HubChecks, checkDoctorInotifyLimitsHere())
+
+	// D13: flat instance placement pre-upgrade scan (local check,
+	// read-only, counts only). Reported only on a host with flat instances.
+	if d13, ok := checkDoctorFlatPlacementPreflightHere(); ok {
+		r.add(&r.HubChecks, d13)
+	}
+	// D14: legacy placement pre-upgrade scan (local check, read-only,
+	// counts only). Reported on every host without flat instances.
+	if d14, ok := checkDoctorLegacyPlacementPreflightHere(); ok {
+		r.add(&r.HubChecks, d14)
+	}
 
 	// D6: Telemetry Pipeline (local check)
 	r.add(&r.HubChecks, checkDoctorTelemetry())

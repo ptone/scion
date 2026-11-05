@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -374,6 +375,34 @@ func TestFlatRuntimeBrokersExperimentRegistered(t *testing.T) {
 	}
 }
 
+// TestFlatCloudRunTargetExperimentRegistered pins the hub.flat_cloudrun_target
+// entry: a server-only alpha experiment that ships off, whose description
+// names its GA gate.
+func TestFlatCloudRunTargetExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(FlatCloudRunTarget)
+	if !ok {
+		t.Fatalf("%s is not registered", FlatCloudRunTarget)
+	}
+	if FlatCloudRunTarget != "hub.flat_cloudrun_target" {
+		t.Fatalf("frozen name changed: %q", FlatCloudRunTarget)
+	}
+	if e.Default {
+		t.Fatal("the flat Cloud Run target must default to off")
+	}
+	if e.Stage != StageAlpha {
+		t.Fatalf("must stay alpha until its GA gate is met, got %q", e.Stage)
+	}
+	if len(e.Layers) != 1 || !e.HasLayer(LayerServer) {
+		t.Fatalf("must be a server-only experiment, got %v", e.Layers)
+	}
+	if !strings.Contains(e.Description, "ptone/scion#7309") {
+		t.Fatalf("description must name the GA gate issue: %q", e.Description)
+	}
+	if e.Title == "" || e.Issue != "ptone/scion#7308" || e.Owner != "runtime-broker" {
+		t.Fatalf("incomplete registration: %+v", e)
+	}
+}
+
 // TestArtifactsExperiment_Registered pins the hub.artifacts entry: it gates
 // both the web surfaces and the hub routes, so it needs both layers, and it
 // ships off.
@@ -483,7 +512,7 @@ func TestAttachmentArtifacts_RegisteredDefaultOff(t *testing.T) {
 
 // TestAsyncAgentLaunchExperimentRegistered pins hub.async_agent_launch: it
 // changes what the hub sends to brokers, so it is server-layer only (the
-// web form opts in unconditionally), and it ships off.
+// web form opts in unconditionally), and it ships on (ptone/scion#6640).
 func TestAsyncAgentLaunchExperimentRegistered(t *testing.T) {
 	e, ok := Default().Lookup(AsyncAgentLaunch)
 	if !ok {
@@ -492,8 +521,8 @@ func TestAsyncAgentLaunchExperimentRegistered(t *testing.T) {
 	if AsyncAgentLaunch != "hub.async_agent_launch" {
 		t.Fatalf("frozen name changed: %q", AsyncAgentLaunch)
 	}
-	if e.Default {
-		t.Fatal("async agent launch must default to off")
+	if !e.Default {
+		t.Fatal("async agent launch must default to on")
 	}
 	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
 		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
@@ -505,7 +534,7 @@ func TestAsyncAgentLaunchExperimentRegistered(t *testing.T) {
 
 // TestAsyncAgentStartExperimentRegistered pins hub.async_agent_start
 // (ptone/scion#4669): it gates hub behaviour only, so it is server-layer
-// only, and it ships off.
+// only, and it ships on (ptone/scion#7250).
 func TestAsyncAgentStartExperimentRegistered(t *testing.T) {
 	e, ok := Default().Lookup(AsyncAgentStart)
 	if !ok {
@@ -514,8 +543,8 @@ func TestAsyncAgentStartExperimentRegistered(t *testing.T) {
 	if AsyncAgentStart != "hub.async_agent_start" {
 		t.Fatalf("frozen name changed: %q", AsyncAgentStart)
 	}
-	if e.Default {
-		t.Fatal("async agent start must default to off")
+	if !e.Default {
+		t.Fatal("async agent start must default to on")
 	}
 	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
 		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
@@ -566,6 +595,50 @@ func TestSecretRotationExperimentRegistered(t *testing.T) {
 		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
 	}
 	if e.Issue != "ptone/scion#1530" || e.Stage != StageAlpha {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}
+
+// TestLifecycleEventsExperimentRegistered pins hub.lifecycle_events (WP1
+// slice 2): it gates hub behaviour only, so it is server-layer only, and
+// it ships off.
+func TestLifecycleEventsExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(LifecycleEvents)
+	if !ok {
+		t.Fatalf("%s is not registered", LifecycleEvents)
+	}
+	if LifecycleEvents != "hub.lifecycle_events" {
+		t.Fatalf("frozen name changed: %q", LifecycleEvents)
+	}
+	if e.Default {
+		t.Fatal("lifecycle events must default to off")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#5900" || e.Stage != StageAlpha || e.Owner != "telemetry" {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}
+
+// TestImageTagSettingExperimentRegistered pins hub.image_tag_setting
+// (ptone/scion#6625): the hub decides whether image_tag applies, so it is
+// server-layer only, and it ships off.
+func TestImageTagSettingExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(ImageTagSetting)
+	if !ok {
+		t.Fatalf("%s is not registered", ImageTagSetting)
+	}
+	if ImageTagSetting != "hub.image_tag_setting" {
+		t.Fatalf("frozen name changed: %q", ImageTagSetting)
+	}
+	if e.Default {
+		t.Fatal("the image tag setting must default to off")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#6625" || e.Stage != StageAlpha || e.Owner != "hub" {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }

@@ -16,7 +16,9 @@ package util
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -24,6 +26,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // Deny-by-default repository config policy.
@@ -63,21 +66,354 @@ const (
 	RepoPolicyLinked
 )
 
+// Audience is who reads the errors a host-side git command returns.
+type Audience int
+
+const (
+	// AudienceLocal is the user at the local CLI. A refusal names the
+	// repository directory.
+	AudienceLocal Audience = iota
+	// AudienceRemote is anyone else: an agent, the Hub, a Hub log. A
+	// RepoConfigRefusedError, and the errors HostGitCommand returns for
+	// repository discovery and its bound, carry no host path. Other errors,
+	// such as a failure to locate, read or parse the repository config, can
+	// still name one.
+	AudienceRemote
+)
+
 // RepoConfigRefusedError reports that a repository config key (or an
-// include directive) is not allowed for a host-side git command.
+// include directive) is not allowed for a host-side git command or an agent
+// start.
+//
+// Error never includes Value: a refused value can carry a secret. Every fmt
+// verb and every slog handler prints Error() (Format, LogValue), never the
+// fields.
 type RepoConfigRefusedError struct {
 	Dir    string
 	Key    string
 	Value  string
 	Reason string
+	// Seeded marks a refusal from an agent-start (seed) check rather than
+	// from a host-side git command. Error then names the remedy for that case.
+	Seeded bool
+	// Layer names, by a fixed or relative label, the config file, submodule
+	// or combined layers the refusal concerns (never a raw path).
+	Layer string
+	// Audience selects the host-side wording. For AudienceRemote the
+	// constructor leaves Dir empty and Error() names no directory. A seeded
+	// refusal prints no Dir either way.
+	Audience Audience
+}
+
+// newRepoConfigRefusedError is the only constructor of RepoConfigRefusedError.
+// key is the raw dotted key (section.subsection.name, as git prints it); the
+// error carries refusalKeyName(key), so no refusal prints userinfo carried in
+// a subsection.
+//
+// For AudienceRemote it drops dir, so a remote refusal carries no host path
+// in any field.
+func newRepoConfigRefusedError(dir, layer, key, value, reason string, seeded bool, audience Audience) *RepoConfigRefusedError {
+	if audience == AudienceRemote {
+		dir = ""
+	}
+	return &RepoConfigRefusedError{Dir: dir, Key: refusalKeyName(key), Value: value, Reason: reason, Seeded: seeded, Layer: layer, Audience: audience}
+}
+
+// refusalKeyName returns the name a refusal prints for a raw dotted key. A key
+// without a subsection is returned unchanged. Otherwise the key is split as git
+// prints it (sections and names never contain a dot, so the first and last dots
+// delimit the subsection) and named by notedKeyName, the one producer of
+// printed key names.
+func refusalKeyName(key string) string {
+	first := strings.Index(key, ".")
+	last := strings.LastIndex(key, ".")
+	if first < 0 || first == last {
+		return key
+	}
+	return notedKeyName(gitConfigVar{Section: key[:first], Subsection: key[first+1 : last], HasSubsection: true, Name: key[last+1:]})
 }
 
 func (e *RepoConfigRefusedError) Error() string {
+	if e.Seeded {
+		return "agent git config refused: repository config sets " + e.seededEntry()
+	}
 	reason := e.Reason
 	if reason == "" {
 		reason = "not on the host-side git allow-list"
 	}
-	return fmt.Sprintf("git in %s refused: repository config sets %s, which is %s; remove it from the repository's .git/config (or config.worktree)", e.Dir, e.Key, reason)
+	where := e.Dir
+	if e.Audience == AudienceRemote {
+		where = "the project repository"
+	}
+	msg := fmt.Sprintf("git in %s refused: repository config sets %s, which is %s; remove it from the repository's .git/config (or config.worktree)", where, e.Key, reason)
+	if e.Layer != "" {
+		msg += " (in " + e.Layer + ")"
+	}
+	return msg
+}
+
+// seededEntry is the text a single seeded refusal prints after "repository
+// config sets ": the key, why it is refused, the remedy and, when set, the
+// layer.
+func (e *RepoConfigRefusedError) seededEntry() string {
+	reason := e.Reason
+	if reason == "" {
+		reason = "not on the host-side git allow-list"
+	}
+	msg := fmt.Sprintf("%s, which is %s; %s", e.Key, reason, seededRemedy(e.Key, e.Layer, false))
+	if e.Layer != "" {
+		msg += " (in " + e.Layer + ")"
+	}
+	return msg
+}
+
+// seededRemedy is the remedy for a seeded refusal of key in layer. The agent
+// reads no host global git config, so the only remedy is to remove the
+// setting from the layer that sets it. A structural refusal (a <placeholder>
+// key) names a submodule directory or git link, and a ".git/<name>" key names
+// a file, not a setting. No config key starts with either: a section name
+// starts with a letter, digit or '-' (isConfigNameChar), and a legacy
+// [section.sub] header cannot start with '.' (parseSection). each words the
+// remedy for a list of keys.
+func seededRemedy(key, layer string, each bool) string {
+	it := "it"
+	if each {
+		it = "each"
+	}
+	switch {
+	case strings.HasPrefix(key, "<"):
+		return "remove or repair the submodule directory or git link " + it + " names"
+	case strings.HasPrefix(key, ".git/"):
+		if each {
+			return "remove each file from the repository's .git directory"
+		}
+		return "remove that file from the repository's .git directory"
+	case layer != "":
+		return "remove " + it + " from the git config file that sets it"
+	}
+	return "remove " + it + " from the repository's .git/config"
+}
+
+// maxRefusalsTextBytes bounds a RepoConfigRefusals text. The Hub keeps at
+// most 512 bytes of a launch report's message (sanitizeFailureReason in
+// pkg/hub) and stores it as "<step>: <message>"; the 32 bytes left are
+// headroom for that prefix (step names are short constants). Within the
+// bound the list is shortened with "and N more", and a single over-long key
+// with an ellipsis, so the count and the note always survive.
+const maxRefusalsTextBytes = 480
+
+// refusalsGitChecksNote ends a RepoConfigRefusals text when the checks that
+// run git were skipped.
+const refusalsGitChecksNote = " The git-based checks (the cross-check and the submodule check) run once these are fixed and can report more."
+
+// NeverCarriedNotice is the agent status text naming the repository config
+// keys a start left out of the agent's private copy of .git/config because
+// they name a command or a hook location. names are already redacted
+// (refusalKeyName). It is "" for no names, and is shortened with "and N more"
+// to fit maxRefusalsTextBytes.
+func NeverCarriedNotice(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	render := func(listed int) string {
+		t := "agent git config: left out " + strings.Join(names[:listed], ", ")
+		if rest := len(names) - listed; rest > 0 {
+			t += fmt.Sprintf(" and %d more", rest)
+		}
+		return t + " from the agent's copy of .git/config; settings that name a command or a hook location are never given to agents"
+	}
+	for listed := len(names); listed >= 1; listed-- {
+		if t := render(listed); len(t) <= maxRefusalsTextBytes {
+			return t
+		}
+	}
+	first := names[0]
+	over := len(render(1)) - maxRefusalsTextBytes
+	return strings.Replace(render(1), first, shortenKey(first, len(first)-over), 1)
+}
+
+// RepoConfigRefusals reports every key an agent-start (seed) check refused in
+// the config files it read as data, so one start names them all rather than
+// one per attempt. It holds two or more seeded refusals; one refusal is
+// returned as a plain *RepoConfigRefusedError (joinSeedRefusals).
+//
+// Its text names each key and, per config layer, the remedy, with each key's
+// reason when the whole list fits maxRefusalsTextBytes (the reasons are left
+// out otherwise). Like
+// RepoConfigRefusedError, it never includes a value: every fmt verb and every
+// slog handler prints Error() (Format, LogValue). Unwrap returns the
+// refusals, so errors.As finds the first *RepoConfigRefusedError.
+type RepoConfigRefusals struct {
+	Refusals []*RepoConfigRefusedError
+	// GitChecksPending marks that the checks that run git (the cross-check
+	// against git's own reading and the submodule check) were not run,
+	// because git must not run on a config that was refused. Fixing the
+	// listed keys can make a later start report more.
+	GitChecksPending bool
+}
+
+func (e *RepoConfigRefusals) Error() string {
+	if e == nil || len(e.Refusals) == 0 {
+		return "agent git config refused"
+	}
+	n := len(e.Refusals)
+	// With each key's reason when the whole list fits.
+	if text := e.text(n, true, ""); len(text) <= maxRefusalsTextBytes {
+		return text
+	}
+	// Otherwise keys and remedies only, dropping whole keys from the end.
+	for listed := n; listed >= 1; listed-- {
+		if text := e.text(listed, false, ""); len(text) <= maxRefusalsTextBytes {
+			return text
+		}
+	}
+	// One key alone is too long: shorten its name.
+	over := len(e.text(1, false, "")) - maxRefusalsTextBytes
+	return e.text(1, false, shortenKey(e.Refusals[0].Key, len(e.Refusals[0].Key)-over))
+}
+
+// shortenKey cuts key to at most limit bytes on a rune boundary and marks the
+// cut with an ellipsis (counted in limit).
+func shortenKey(key string, limit int) string {
+	const ellipsis = "\u2026"
+	if len(key) <= limit {
+		return key
+	}
+	cut := max(limit-len(ellipsis), 0)
+	for cut > 0 && !utf8.RuneStart(key[cut]) {
+		cut--
+	}
+	return key[:cut] + ellipsis
+}
+
+// text renders the first listed refusals, grouped in first-seen order by
+// remedy and layer as "<keys>: <remedy>", and counts the rest as "and N
+// more". withReasons adds each key's reason; firstKey, when set, replaces
+// the first key's name (a shortened one).
+func (e *RepoConfigRefusals) text(listed int, withReasons bool, firstKey string) string {
+	type group struct {
+		remedy string
+		keys   []string
+	}
+	var groups []*group
+	byRemedy := map[string]*group{}
+	for i, r := range e.Refusals[:listed] {
+		remedy := seededRemedy(r.Key, r.Layer, true)
+		if r.Layer != "" {
+			remedy += ", in " + r.Layer
+		}
+		g := byRemedy[remedy]
+		if g == nil {
+			g = &group{remedy: remedy}
+			byRemedy[remedy] = g
+			groups = append(groups, g)
+		}
+		key := r.Key
+		if i == 0 && firstKey != "" {
+			key = firstKey
+		}
+		if withReasons {
+			reason := r.Reason
+			if reason == "" {
+				reason = "not on the host-side git allow-list"
+			}
+			key += " (" + reason + ")"
+		}
+		g.keys = append(g.keys, key)
+	}
+	parts := make([]string, len(groups))
+	for i, g := range groups {
+		parts[i] = strings.Join(g.keys, ", ") + ": " + g.remedy
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "agent git config refused: repository config sets %d keys that are not allowed: %s", len(e.Refusals), strings.Join(parts, "; "))
+	if rest := len(e.Refusals) - listed; rest > 0 {
+		fmt.Fprintf(&b, "; and %d more", rest)
+	}
+	b.WriteString(".")
+	if e.GitChecksPending {
+		b.WriteString(refusalsGitChecksNote)
+	}
+	return b.String()
+}
+
+// Unwrap returns each refusal, so errors.As(err, **RepoConfigRefusedError)
+// matches the first.
+func (e *RepoConfigRefusals) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	errs := make([]error, len(e.Refusals))
+	for i, r := range e.Refusals {
+		errs[i] = r
+	}
+	return errs
+}
+
+// Format prints Error() for every verb and flag, as RepoConfigRefusedError's
+// does.
+func (e RepoConfigRefusals) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, e.Error())
+}
+
+// LogValue makes every slog handler log Error(), never the fields.
+func (e RepoConfigRefusals) LogValue() slog.Value {
+	return slog.StringValue(e.Error())
+}
+
+// joinSeedRefusals returns nil for no refusals, the refusal itself for one
+// (its text is unchanged), and a *RepoConfigRefusals for more. A refusal of
+// the same key in the same layer is listed once.
+func joinSeedRefusals(refusals []*RepoConfigRefusedError, gitChecksPending bool) error {
+	type id struct{ layer, key string }
+	seen := make(map[id]bool, len(refusals))
+	var uniq []*RepoConfigRefusedError
+	for _, r := range refusals {
+		k := id{r.Layer, r.Key}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		uniq = append(uniq, r)
+	}
+	switch len(uniq) {
+	case 0:
+		return nil
+	case 1:
+		return uniq[0]
+	}
+	return &RepoConfigRefusals{Refusals: uniq, GitChecksPending: gitChecksPending}
+}
+
+// StartRefusalText returns the text of an agent-start git config refusal in
+// err's chain, and whether there is one. Only a refusal that names no host
+// directory qualifies (a seeded refusal, or a host-side one for the remote
+// audience), so the text can be shown to whoever started the agent. The text
+// is the refusal's own, without whatever err wraps it in.
+func StartRefusalText(err error) (string, bool) {
+	var many *RepoConfigRefusals
+	if errors.As(err, &many) {
+		return many.Error(), true
+	}
+	var one *RepoConfigRefusedError
+	if errors.As(err, &one) && one.Dir == "" && (one.Seeded || one.Audience == AudienceRemote) {
+		return one.Error(), true
+	}
+	return "", false
+}
+
+// Format prints Error() for every verb and flag (%v, %+v, %#v, %s, %q, ...),
+// so no format string can print the fields, Dir and Value among them. It has
+// a value receiver so a dereferenced copy formats the same way; fmt prints a
+// nil pointer as "<nil>".
+func (e RepoConfigRefusedError) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, e.Error())
+}
+
+// LogValue makes every slog handler log Error(), never the fields. It has a
+// value receiver for the same reason as Format.
+func (e RepoConfigRefusedError) LogValue() slog.Value {
+	return slog.StringValue(e.Error())
 }
 
 // standardLFSFilter is the exact filter.lfs.* command set `git lfs install`
@@ -134,6 +470,22 @@ type repoConfigAllowOptions struct {
 	// worktreePath, when set, is the one broker-known path core.worktree
 	// may equal. Empty refuses any core.worktree.
 	worktreePath string
+	// seed marks a check of an agent's seeded copy of the repository config.
+	// The agent's git reads that copy without the HostGitArgs pins, so the
+	// keys in seedUnpinnedRefuse are refused too.
+	seed bool
+	// audience is the host-side refusal's audience. A seed refusal always
+	// uses AudienceRemote.
+	audience Audience
+}
+
+// refusalAudience is the audience of a refusal: AudienceRemote for a seeded
+// one (it reaches the agent), else audience.
+func refusalAudience(seeded bool, audience Audience) Audience {
+	if seeded {
+		return AudienceRemote
+	}
+	return audience
 }
 
 // allowVar reports whether v is allowed under policy, with a reason when it
@@ -267,6 +619,17 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 				return true, ""
 			case "uploadpack", "receivepack", "proxy", "vcs":
 				return false, "a remote command or proxy override"
+			case "promisor":
+				// Partial clone: lazy fetches go to the remote's own url.
+				if isGitBool(v.Value) {
+					return true, ""
+				}
+				return false, "a remote promisor setting that is not a boolean"
+			case "partialclonefilter":
+				if validFilterSpec(v.Value) {
+					return true, ""
+				}
+				return false, "a partial-clone filter outside the accepted filter forms"
 			}
 		}
 	case "branch":
@@ -274,10 +637,23 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 			switch name {
 			case "description", "pushremote", "mergeoptions", "autosetuprebase":
 				return true, ""
+			case "vscode-merge-base":
+				// Editor metadata: the branch a feature branch merges into.
+				if validRefName(v.Value) {
+					return true, ""
+				}
+				return false, "an editor merge-base setting that is not a valid ref name"
 			}
 		}
 		if topLevel && name == "autosetuprebase" {
 			return true, ""
+		}
+	case "grep":
+		if topLevel && name == "threads" {
+			if validGrepThreads(v.Value) {
+				return true, ""
+			}
+			return false, "a grep.threads that is not a non-negative integer"
 		}
 	case "pull":
 		if topLevel && (name == "rebase" || name == "ff" || name == "octopus" || name == "twohead") {
@@ -496,28 +872,259 @@ func set(keys ...string) map[string]bool {
 // if git resolves any entry the parser did not, so a parser divergence fails
 // closed. It fails closed on anything it cannot locate, read or parse.
 func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy RepoConfigPolicy, opts repoConfigAllowOptions) error {
-	if err := refuseRootCommonDirRedirect(dir); err != nil {
+	if err := refuseRootCommonDirRedirect(dir, false, opts.audience); err != nil {
 		return err
 	}
 	parsed, err := parseRepoConfig(dir, env)
 	if err != nil {
 		return err
 	}
-	for _, v := range parsed {
-		if v.Section == "include" || v.Section == "includeif" {
-			return &RepoConfigRefusedError{Dir: dir, Key: v.Key(), Value: v.Value, Reason: "an include directive"}
-		}
-		if ok, reason := allowVar(policy, v, opts); !ok {
-			return &RepoConfigRefusedError{Dir: dir, Key: v.Key(), Value: v.Value, Reason: reason}
-		}
+	if err := checkRepoConfigVars(dir, "", parsed, policy, opts, nil); err != nil {
+		return err
 	}
-	return crossCheckAgainstGit(ctx, dir, env, parsed)
+	return crossCheckAgainstGit(ctx, dir, env, parsed, "", false, opts.audience)
 }
 
-// refuseRootCommonDirRedirect refuses a host-side git command when the
-// repository's `.git` directory carries a root-level `commondir` or `gitdir`
-// file. A normal repository never has one there (a `commondir`/`gitdir` belongs
-// inside a worktree admin dir, `.git/worktrees/<name>/`); at the `.git` root it
+// checkRepoConfigVars applies policy to already-parsed config variables and
+// returns a *RepoConfigRefusedError for the first one it refuses. It reads no
+// file and runs no git. For each variable, in this order:
+//   - an include or includeIf directive is refused;
+//   - with opts.seed, a key in seedUnpinnedRefuse is refused;
+//   - a variable for which exempt returns true skips the allow-list (the seed
+//     passes isDroppedKey: those keys are removed from the copy, not refused);
+//   - allowVar decides.
+//
+// The include and seedUnpinnedRefuse checks come before the exemption, so no
+// exemption can let either through. exempt may be nil.
+//
+// A refusal names the key by refusalKeyName (newRepoConfigRefusedError),
+// seeded or not: a subsection that may carry userinfo, or a credential.<url>
+// subsection, is never printed verbatim. A key whose subsection has no '@' and
+// is not credential.<url> is named exactly as v.Key().
+func checkRepoConfigVars(dir, layer string, vars []gitConfigVar, policy RepoConfigPolicy, opts repoConfigAllowOptions, exempt func(gitConfigVar) bool) error {
+	for _, v := range vars {
+		if reason, refused := refuseConfigVar(v, policy, opts, exempt); refused {
+			return newRepoConfigRefusedError(dir, layer, v.Key(), v.Value, reason, opts.seed, refusalAudience(opts.seed, opts.audience))
+		}
+	}
+	return nil
+}
+
+// collectSeedRefusals applies the seed rules of checkRepoConfigVars to every
+// variable and returns a refusal for each one refused, in order, rather than
+// stopping at the first. It reads no file and runs no git.
+//
+// With strip set (the agent's private copy of .git/config, on a runtime that
+// binds that copy), a variable refused only because it names a command or a
+// hook location (seedNeverCarry) is returned in stripped instead: it is left
+// out of the copy and the start goes on. Everything else is refused as
+// without strip.
+func collectSeedRefusals(layer string, vars []gitConfigVar, policy RepoConfigPolicy, exempt func(gitConfigVar) bool, strip bool) (refusals []*RepoConfigRefusedError, stripped []gitConfigVar) {
+	opts := repoConfigAllowOptions{seed: true}
+	for _, v := range vars {
+		reason, refused := refuseConfigVar(v, policy, opts, exempt)
+		if !refused {
+			continue
+		}
+		if strip && reason == neverCarryReason {
+			stripped = append(stripped, v)
+			continue
+		}
+		refusals = append(refusals, newRepoConfigRefusedError("", layer, v.Key(), v.Value, reason, true, AudienceRemote))
+	}
+	return refusals, stripped
+}
+
+// neverCarryReason is the refusal reason for a seedNeverCarry key.
+const neverCarryReason = "a command or hook-location setting, never given to agents"
+
+// refuseConfigVar is the per-variable decision checkRepoConfigVars and
+// collectSeedRefusals share, in the order checkRepoConfigVars documents, with
+// one seed-only step after seedUnpinnedRefuse: a seedNeverCarry key is
+// refused with neverCarryReason (collectSeedRefusals may strip it instead).
+func refuseConfigVar(v gitConfigVar, policy RepoConfigPolicy, opts repoConfigAllowOptions, exempt func(gitConfigVar) bool) (string, bool) {
+	if v.Section == "include" || v.Section == "includeif" {
+		return "an include directive", true
+	}
+	if opts.seed && (seedKeyMatchesAny(seedUnpinnedRefuse, v) || seedNeverCarry(v)) {
+		return neverCarryReason, true
+	}
+	if exempt != nil && exempt(v) {
+		return "", false
+	}
+	if ok, reason := allowVar(policy, v, opts); !ok {
+		return reason, true
+	}
+	return "", false
+}
+
+// seedNeverCarry reports whether v names a command or a hook location: keys
+// an agent's git must never get from the repository config. The seed strips
+// them from the agent's private copy of .git/config (where the runtime binds
+// that copy) and refuses them in every layer bound raw. The keys in
+// seedUnpinnedRefuse are treated the same way. The exact standard git-lfs
+// filter is not a never-carry key (allowVar allows it).
+func seedNeverCarry(v gitConfigVar) bool {
+	top, sub := !v.HasSubsection, v.HasSubsection
+	if v.Name == "program" { // gpg.program, gpg.<format>.program, any *.program
+		return true
+	}
+	switch v.Section {
+	case "core":
+		switch v.Name {
+		case "editor", "hookspath", "fsmonitor", "pager", "sshcommand", "askpass", "gitproxy":
+			return top
+		}
+	case "sequence":
+		return top && v.Name == "editor"
+	case "pager", "alias": // pager.<cmd>; alias.<name> ("!" runs a shell command)
+		return top
+	case "diff":
+		return (sub && (v.Name == "textconv" || v.Name == "command")) || (top && v.Name == "external")
+	case "merge":
+		return sub && v.Name == "driver"
+	case "filter":
+		if !sub {
+			return false
+		}
+		switch v.Name {
+		case "clean", "smudge", "process":
+			want, std := standardLFSFilter[v.Name]
+			return v.Subsection != "lfs" || !std || v.Value != want
+		}
+	case "remote":
+		return sub && (v.Name == "uploadpack" || v.Name == "receivepack" || v.Name == "vcs")
+	case "uploadpack":
+		return top && v.Name == "packobjectshook"
+	}
+	return false
+}
+
+// seedKeyRule names one config key exactly: section and variable name
+// (lower-cased) and, when HasSubsection is set, the subsection (case kept). A
+// rule without a subsection matches only the key without one.
+type seedKeyRule struct {
+	Section       string
+	Subsection    string
+	HasSubsection bool
+	Name          string
+}
+
+// matches reports whether v is exactly the key r names.
+func (r seedKeyRule) matches(v gitConfigVar) bool {
+	if v.Section != r.Section || v.Name != r.Name || v.HasSubsection != r.HasSubsection {
+		return false
+	}
+	return !r.HasSubsection || v.Subsection == r.Subsection
+}
+
+// seedKeyMatchesAny reports whether v is named by any rule in rules.
+func seedKeyMatchesAny(rules []seedKeyRule, v gitConfigVar) bool {
+	for _, r := range rules {
+		if r.matches(v) {
+			return true
+		}
+	}
+	return false
+}
+
+// seedUnpinnedRefuse are the keys RepoPolicyLinked allows only because a
+// HostGitArgs pin overrides them on every host-side call. An agent's git reads
+// its seeded copy of the repository config without those pins, and repository
+// config overrides the agent's global config, so in the copy each of these
+// would run a command: the seed refuses them.
+var seedUnpinnedRefuse = []seedKeyRule{
+	{Section: "core", Name: "hookspath"}, // runs hooks from a directory the config chooses
+	{Section: "core", Name: "fsmonitor"}, // a command run by status and other index reads
+	{Section: "core", Name: "pager"},     // a command run for paged output
+}
+
+// seedUnpinnedSafe are the other HostGitArgs pin keys RepoPolicyLinked allows.
+// Each is seeded unchanged: without the pin its repository value still runs no
+// command the config chooses and redirects nothing. The guard test requires
+// every pin key Linked allows to be in exactly one of seedUnpinnedRefuse and
+// seedUnpinnedSafe.
+var seedUnpinnedSafe = []seedKeyRule{
+	// A boolean that makes checkout, pull and similar recurse into submodules.
+	// In the repository config, every submodule.<name>.url Linked allows is
+	// https or ssh, and every submodule.<name>.update it allows is a built-in
+	// mode, never "!command". Residual: the seed does not check a submodule's
+	// own config (.git/modules/<name>/config), which git reads when it works
+	// inside a populated submodule, with or without this key.
+	{Section: "submodule", Name: "recurse"},
+	// A boolean that signs commits with git's default signing program. Linked
+	// refuses every *.program key and every gpg.* key except gpg.format, so the
+	// repository cannot choose the program (or gpg.ssh.defaultKeyCommand).
+	{Section: "commit", Name: "gpgsign"},
+	// As commit.gpgsign, for annotated tags.
+	{Section: "tag", Name: "gpgsign"},
+}
+
+// PrepareSeededGitConfig builds the agent's seeded copy of a repository
+// config from raw. It parses raw exactly once and then, on those parsed
+// variables only:
+//   - checks them against policy (the seed rules of checkRepoConfigVars and
+//     the isDroppedKey exemption), returning one error that names every
+//     refused key (a *RepoConfigRefusedError for one, a *RepoConfigRefusals
+//     for more);
+//   - removes credential-bearing material (redactGitConfigVars, as
+//     RedactGitConfigSecrets does);
+//   - with stripNeverCarry, leaves out every key that names a command or a hook
+//     location (seedNeverCarry) instead of refusing it, and returns those keys'
+//     redacted names in neverCarried; without it such keys are refused;
+//   - removes every variable for which strip returns true (strip may be nil);
+//     section and name are lower-cased, subsection keeps its case;
+//   - serializes what survives.
+//
+// What was checked is what is written: the result is re-serialized from the
+// checked variables, never copied from raw. stripped lists the redacted names of
+// the keys the redaction changed or dropped. A parse error is returned so the
+// caller can fail closed.
+func PrepareSeededGitConfig(raw []byte, policy RepoConfigPolicy, strip func(section, subsection string, hasSubsection bool, name string) bool, stripNeverCarry bool) (out []byte, stripped, neverCarried []string, err error) {
+	return prepareSeededGitConfig(raw, parseGitConfigFile, policy, strip, stripNeverCarry)
+}
+
+// prepareSeededGitConfig is PrepareSeededGitConfig with the parser passed in,
+// so a test can observe that raw is parsed exactly once and that the written
+// bytes come from the variables that parse returned.
+func prepareSeededGitConfig(raw []byte, parse func([]byte) ([]gitConfigVar, error), policy RepoConfigPolicy, strip func(section, subsection string, hasSubsection bool, name string) bool, stripNeverCarry bool) (out []byte, stripped, neverCarried []string, err error) {
+	vars, err := parse(raw)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	refusals, never := collectSeedRefusals("", vars, policy, isDroppedKey, stripNeverCarry)
+	if err := joinSeedRefusals(refusals, false); err != nil {
+		return nil, nil, nil, err
+	}
+	for _, v := range never {
+		if n := refusalKeyName(v.Key()); !slices.Contains(neverCarried, n) {
+			neverCarried = append(neverCarried, n)
+		}
+	}
+	if len(never) > 0 {
+		vars = slices.DeleteFunc(vars, func(v gitConfigVar) bool {
+			return seedNeverCarry(v) || seedKeyMatchesAny(seedUnpinnedRefuse, v)
+		})
+	}
+	kept, stripped := redactGitConfigVars(vars)
+	if strip != nil {
+		filtered := kept[:0]
+		for _, v := range kept {
+			if strip(v.Section, v.Subsection, v.HasSubsection, v.Name) {
+				continue
+			}
+			filtered = append(filtered, v)
+		}
+		kept = filtered
+	}
+	return serializeGitConfig(kept), stripped, neverCarried, nil
+}
+
+// refuseRootCommonDirRedirect refuses a host-side git command or, when seeded
+// is true, an agent start, when the repository's `.git` directory carries a
+// root-level `commondir` or `gitdir` file. A normal repository never has one
+// there (a `commondir`/`gitdir` belongs inside a worktree admin dir,
+// `.git/worktrees/<name>/`); at the `.git` root it
 // makes git treat the repository itself as a linked worktree and resolve the
 // common dir — the place it reads config, hooks and refs from — through an
 // agent-writable path. The container-side read-only `.git` root closes this for
@@ -525,7 +1132,10 @@ func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy
 // read-only (shared-plain and any pre-existing state). A linked worktree, whose
 // `.git` is a gitfile pointing at its admin dir, legitimately resolves a
 // commondir and is not the target here, so only a `.git` directory is checked.
-func refuseRootCommonDirRedirect(dir string) error {
+// The seeded form is an agent-start (seed) refusal with the remote audience,
+// so the constructor leaves Dir empty and it prints no host path; the
+// host-side form keeps dir for the local audience.
+func refuseRootCommonDirRedirect(dir string, seeded bool, audience Audience) error {
 	gitPath := filepath.Join(dir, ".git")
 	fi, err := os.Lstat(gitPath)
 	if err != nil || !fi.IsDir() {
@@ -533,11 +1143,8 @@ func refuseRootCommonDirRedirect(dir string) error {
 	}
 	for _, name := range []string{"commondir", "gitdir"} {
 		if _, err := os.Lstat(filepath.Join(gitPath, name)); err == nil {
-			return &RepoConfigRefusedError{
-				Dir:    dir,
-				Key:    ".git/" + name,
-				Reason: "a root-level " + name + " would redirect the repository's common git directory",
-			}
+			reason := "a root-level " + name + " would redirect the repository's common git directory"
+			return newRepoConfigRefusedError(dir, "", ".git/"+name, "", reason, seeded, refusalAudience(seeded, audience))
 		}
 	}
 	return nil
@@ -658,8 +1265,9 @@ func verifyConfigStable(ctx context.Context, dir string, env []string, policy Re
 // (local and worktree scope) and refuses if git resolves any entry that is not
 // in the parsed set, so any divergence between the as-data parser and git
 // fails closed. git runs with the same host-side pins and scrubbed
-// environment.
-func crossCheckAgainstGit(ctx context.Context, dir string, env []string, parsed []gitConfigVar) error {
+// environment. dir is where git runs; a seeded refusal has the remote
+// audience, so the constructor leaves its Dir empty.
+func crossCheckAgainstGit(ctx context.Context, dir string, env []string, parsed []gitConfigVar, layer string, seeded bool, audience Audience) error {
 	args := append(HostGitArgs(), "config", "--show-scope", "-z", "--list")
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
@@ -693,7 +1301,7 @@ func crossCheckAgainstGit(ctx context.Context, dir string, env []string, parsed 
 		}
 		k := e.key + "\x00" + value
 		if parsedSet[k] <= 0 {
-			return &RepoConfigRefusedError{Dir: dir, Key: e.key, Reason: "read differently by the config parser and by git; refusing to be safe"}
+			return newRepoConfigRefusedError(dir, layer, e.key, "", "read differently by the config parser and by git; refusing to be safe", seeded, refusalAudience(seeded, audience))
 		}
 		parsedSet[k]--
 	}

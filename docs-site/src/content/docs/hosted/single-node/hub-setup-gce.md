@@ -67,6 +67,18 @@ Run these one at a time instead of `gce-demo-deploy.sh` when you need to skip or
 
 The `settings.yaml` that step 5 writes turns on telemetry export and sets `telemetry.cloud.gcp_project_id` to the deployment project (`PROJECT_ID`), so the metrics dashboard in the web UI queries Cloud Monitoring in that project. Step 1 grants the VM's service account `roles/monitoring.viewer` so the Hub can read those metrics. A Hub deployed before this setting existed picks it up at the next `gce-start-hub.sh --full`; re-run `gce-demo-provision.sh` first so the VM's service account has `roles/monitoring.viewer`. See [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) for the `telemetry` settings.
 
+The same `settings.yaml` sets `image_registry`, the registry the Hub's runtime broker pulls agent images from. Without a registry the broker refuses to start, and so does the Hub. The value is `localhost/scion`, the VM's local image store (the value the [single-node VM deploy script](https://github.com/GoogleCloudPlatform/scion/blob/main/scripts/single-node-vm/deploy.sh) uses), or `IMAGE_REGISTRY` if you set it when running `gce-start-hub.sh --full`. `SCION_IMAGE_REGISTRY` in `hub.env` takes precedence over `settings.yaml`.
+
+The starter scripts do not build agent images, so agents cannot start until the images exist. Either build them on the VM, from the repository checkout (see [`image-build/README.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/image-build/README.md)):
+
+```bash
+sudo bash image-build/scripts/build-images.sh --builder local-docker --registry localhost/scion --target all
+```
+
+`--target all` also builds the Hub image and every catalog harness. To build less, build `core-base`, then `scion-base`, then `harnesses` or a single harness step ID such as `scion-claude`, with the same `--builder` and `--registry` flags.
+
+or set `SCION_IMAGE_REGISTRY` in `hub.env` to a registry that already holds the images. With `ENABLE_GKE=true`, GKE nodes cannot pull from the VM's local store, so `gce-demo-preflight.sh` and `gce-start-hub.sh --full` refuse a loopback registry (`localhost`, `127.*`, `0.0.0.0` or `::1`, with or without a port). Set `SCION_IMAGE_REGISTRY` or `IMAGE_REGISTRY` to a registry the cluster can pull from.
+
 :::note[Internal or private deployments]
 If your VM has no external IP, or TLS is terminated upstream by a load balancer, reverse proxy, or similar appliance, skip step 4 and see [Internal Deployments (BYO TLS)](#internal-deployments-byo-tls) below.
 :::
@@ -156,6 +168,8 @@ For ongoing Hub administration (auth, permissions, observability), see the other
 
 If you don't need to build from source, `scripts/single-node-vm/deploy.sh` stands up a Hub from a published GitHub Release instead. It creates a GCE VM with no public IP that runs the `scion` binary under systemd with embedded SQLite, plus a Cloud Run reverse proxy protected by Identity-Aware Proxy (IAP). The proxy image is built on the VM, pushed to the `cloud-run-source-deploy` Artifact Registry repository, and deployed with `--image`. The deployment does not upload source to Cloud Storage, so it works in organizations whose policies block `storage.googleapis.com`. Re-running the script is idempotent.
 
+**CLI from a workstation.** IAP fronts the proxy URL, so the CLI needs an IAP transport token and a user access token instead of `scion hub auth login`. See [Workstation CLI access](/scion/hosted/ha/auth-proxy-iap/#workstation-cli-access-a-person).
+
 **IAP SSH firewall rule.** The `scion-hub-HUB_NAME-allow-iap-ssh` rule targets only the hub VM's network tag, not every VM on the network. Deployments made before this scoping have an unscoped rule. Re-running `deploy.sh` narrows that rule in place, but only once it confirms the tag is on the hub VM. Any other VM that relied on the old rule for IAP SSH loses that access and needs its own firewall rule.
 
 ```bash
@@ -180,13 +194,31 @@ Fields in the file skip their prompt. Missing fields fall back to a prompt when 
 
 Agents on the `antigravity` harness detect the metadata-server identity and select Vertex AI auth without a `gcloud-adc` file, so a fresh Hub runs Vertex AI inference with no manual credential setup.
 
-**Automatic updates.** The script writes a `server.maintenance` section with `deployment_tier: binary`, so the Hub checks GitHub Releases on a schedule. It installs updates automatically (`auto`), shows an update banner in the admin UI (`notify`), or does neither (`disabled`). The release channel defaults to `nightly` unless you set it. See [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance) for all fields.
+**Versioned `/opt/scion` layout.** `deploy.sh` installs the binary into a versioned layout owned by the `scion` service user under `/opt/scion`:
+
+- `/opt/scion/releases/<tag>/scion` — the installed release binary
+- `/opt/scion/current` and `/opt/scion/previous` — symlinks owned by `scion` pointing to the active and previous release directories
+- `/usr/local/bin/scion` — symlink to `/opt/scion/current/scion`
+- `scion-hub.service` runs `/opt/scion/current/scion` and `settings.yaml` sets `server.maintenance.install_root: "/opt/scion"`
+- a boot-failure guard: `scion-hub.service` has `StartLimitIntervalSec=300`, `StartLimitBurst=5` and `OnFailure=scion-hub-rollback.service`. When a newly installed release keeps crashing on startup, the root oneshot `scion-hub-rollback.service` runs the root-owned `/usr/local/libexec/scion/scion-hub-rollback.sh`, which swaps `current` and `previous`, records the rollback in `/opt/scion/rollback.marker`, and starts the Hub on the previous release. The Maintenance page then reports the update as rolled back. It acts only when the newly switched release has failed at least one restart (counted in `/opt/scion/start-attempts` by an `ExecStartPre=-` helper), and decides from `/opt/scion/update-state.json`: it leaves the Hub stopped when the update was already verified (the crash has another cause), when the new release migrated the database past what the previous release supports, or when the release was switched more than 30 minutes ago. It swaps binaries only and never swaps back; the database is restored by hand from the snapshot. Four residual cases are documented in the full guide's boot-failure guard section: (a) a crash loop right after the previous release used most of systemd's start limit leaves the Hub stopped instead of rolling back; (b) for a target release older than the update-state file and (c) when that file is missing or unreadable, a failed `systemctl stop` within 30 minutes of a switch and after at least two starts is rolled back like a crash loop; (d) the same applies to a stop that lands while the target is still starting up (for example during migrations), when that target predates the guard. Hub releases that include the guard exit 0 when a requested shutdown interrupts startup, so for them such a stop never reaches the guard.
+
+**Automatic updates.** The script writes a `server.maintenance` section with `deployment_tier: binary`, so the Hub checks GitHub Releases on a schedule. `update_policy` defaults to `notify` (shows an update banner in the admin UI, where an admin applies or dismisses it); set `auto` for unattended installation or `disabled` to turn off scheduled checks. The release channel defaults to `nightly` unless you set it. When an update runs (`update-binary` with a `target_version`, or scheduled `auto`), the Hub runs an installer preflight, resolves pinned GitHub release asset URLs, verifies per-asset SHA256 checksums against `SHA256SUMS` and the binary's `version` output, switches the `current`/`previous` symlinks atomically, and exits so systemd restarts it on the new binary. Pending updates are reconciled at boot and reported via `GET /api/v1/admin/maintenance/update-status`. See [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance) for all fields.
 
 **Verified downloads.** Releases publish a `SHA256SUMS` file. `deploy.sh` checks that the chosen release has one before creating any GCP resources, and verifies the `scion` binary and chat plugins against it before installing them. The Hub's automatic updater also verifies downloads and refuses to install a release that has no `SHA256SUMS` file. To deploy an older release built before checksums were published, set `ALLOW_UNVERIFIED_RELEASE=true` when running `deploy.sh`.
 
+**Converting an existing VM (`migrate-layout`).** Single-node VMs deployed before the `/opt/scion` layout (which had no repository path and relied on blanket `sudo` for updates) now report self-update as `unsupported`. Convert an existing VM in place with:
+
+```bash
+./scripts/single-node-vm/deploy.sh migrate-layout [--config my-deploy-config.json] [--update-policy notify|auto|disabled]
+```
+
+`migrate-layout` moves the installed binary into `/opt/scion/releases/<version>/scion`, creates the `current` and `/usr/local/bin/scion` symlinks, updates `settings.yaml` (setting `install_root: "/opt/scion"` and rewriting `update_policy: "auto"` to `"notify"` unless `auto` was explicitly requested), installs the boot-failure guard, re-renders `scion-hub.service`, and restarts the Hub. Re-run it on a VM converted before the guard existed to add the guard.
+
 **Optional GKE runtime (hybrid tier).** Set `gke_target.name` and `gke_target.location` in the config file to attach an existing GKE cluster as a second, Kubernetes-based runtime alongside the VM's co-located Docker broker. The script also serves an NFS export from the VM and creates a PersistentVolumeClaim in the cluster, so agents on both runtimes share the same project [shared directories](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) (see the hybrid tier guide for moving such a deployment to `server.project_storage`). The tier is off by default. The script attaches to the cluster but never creates or deletes it, and the cluster must be in the same project. With the tier enabled, `container_images.source: build` is refused (GKE nodes cannot pull from the VM's local Docker store), and `user_access_mode` must be `invite_only` (the default) or `domain_restricted`. See [`docs/deploy/hybrid-tier.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/hybrid-tier.md) for the full field list and teardown behavior.
 
-For the full guide, including architecture, access patterns, and troubleshooting, see [`docs/deploy/single-node-vm.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md). If an AI agent is running the deployment for you, point it at the step-by-step [agent deployment runbook](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/agent-runbook-single-node-vm.md). The runbook covers GCP preflight checks, the questions to ask the user, config file generation, and troubleshooting.
+The Hub snapshots its SQLite database (`VACUUM INTO`, requiring at least 2× the database size in free disk space) and `settings.yaml` into `/opt/scion/snapshots/` before every update and keeps the five most recent snapshots. Installing an older release than the running one is supported on SQLite down to the downgrade floor (`nightly-20261009`) and requires explicit confirmation (`confirm_downgrade` matching the resolved target tag in the API, or the downgrade confirmation dialog on the Maintenance page). To return to the state before an update (stop the Hub, copy the snapshot over the database, copy the settings back if needed, point `current` at the earlier release, start the Hub), follow [Restoring after a failed update](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md#restoring-after-a-failed-update) in the full guide.
+
+For the full guide, including architecture, access patterns, and troubleshooting, see [`docs/deploy/single-node-vm.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md). Teardown (`deploy.sh --delete`) removes the Hub service account's project-level IAM role bindings (and any `deleted:serviceAccount:...?uid=` tombstones for those roles) before deleting the service account so re-deploying with the same name starts with a clean IAM policy. If an AI agent is running the deployment for you, point it at the step-by-step [agent deployment runbook](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/agent-runbook-single-node-vm.md). The runbook covers GCP preflight checks, the questions to ask the user, config file generation, and troubleshooting.
 
 Deploying into a GCP organization with a security-hardening baseline (no default network, Shielded VM required, etc.)? See [Deploy on a VM (Hardened Org)](/scion/hosted/single-node/hub-setup-gce-hardened-org/) for the one manual prerequisite and what the script already handles for you.
 
@@ -241,7 +273,7 @@ Then start Caddy manually (`sudo caddy start --config /etc/caddy/Caddyfile`) ins
 
 **Option B — TLS terminated upstream**
 
-If TLS is terminated by an upstream load balancer, reverse proxy, or appliance (e.g., an F5, nginx, or GCP HTTPS Load Balancer), no local TLS configuration is needed. The upstream proxy forwards plain HTTP to the Hub on port 8080. Ensure `SCION_SERVER_BASE_URL` is still set to the `https://` URL that clients use.
+If TLS is terminated by an upstream load balancer, reverse proxy, or appliance (e.g., an F5, nginx, or GCP HTTPS Load Balancer), no local TLS configuration is needed. The upstream proxy forwards plain HTTP to the Hub on port 8080. Ensure `SCION_SERVER_BASE_URL` is still set to the `https://` URL that clients use, and list the proxy's source IP addresses or CIDR ranges in [`server.trusted_proxies`](/scion/reference/server-config/#runtime-broker-transport-and-trusted-proxies) (`SCION_SERVER_TRUSTEDPROXIES`) when the proxy runs on another host so Runtime Brokers can register, join, rotate secrets, and connect through it.
 
 **Option C — Identity-Aware Proxy (GCP)**
 

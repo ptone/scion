@@ -195,7 +195,7 @@ func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *
 		}
 	}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.Debug = true
@@ -445,7 +445,7 @@ profiles:
 
 func TestCreateAgent_IdempotentByRequestID(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.Debug = true
@@ -547,7 +547,7 @@ func newTestServerWithHarnessConfig(t *testing.T, harnessConfigName, configYAML,
 		}
 	}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.Debug = true
@@ -2020,7 +2020,7 @@ profiles:
 	t.Setenv("HOME", fakeHome)
 	defer func() { _ = os.Setenv("HOME", origHome) }()
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.Debug = true
@@ -3539,6 +3539,7 @@ profiles:
 	if err != nil {
 		t.Fatalf("NewLocal: %v", err)
 	}
+	allowHydrationRoot(t, stor.ObjectFSPath(storage.ResourceRootPaths("", storage.ResourceKindTemplate)[0]))
 	hydratedDir := stor.ObjectFSPath(storage.TemplateStoragePath("", "global", "", "mytpl"))
 	hydratedHC := filepath.Join(hydratedDir, "harness-configs", "claude")
 	if err := os.MkdirAll(hydratedHC, 0o755); err != nil {
@@ -3726,6 +3727,7 @@ func TestEnvGather_CreateAgent_ScoresHydratedTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocal: %v", err)
 	}
+	allowHydrationRoot(t, stor.ObjectFSPath(storage.ResourceRootPaths("", storage.ResourceKindTemplate)[0]))
 	hydratedDir := stor.ObjectFSPath(storage.TemplateStoragePath("", "global", "", "mytpl"))
 	writeHarnessConfigDirAt(t, filepath.Join(hydratedDir, "harness-configs", "claude"),
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\nenv:\n  GOOGLE_CLOUD_PROJECT: hydrated-proj\n"+claudeAuthBlock)

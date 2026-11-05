@@ -344,6 +344,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	if cfg.RuntimeBroker.Host == "0.0.0.0" {
 		rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
 	}
+	warnColocatedBrokerEndpointTransport(rhEndpoint)
 
 	// The container Hub endpoint depends on the instance's runtime type, so
 	// it is computed per instance (once per type).
@@ -366,14 +367,18 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	var brokerNFS *config.V1NFSConfig
 	var workspaceStorageBackend string
 	brokerLayout := projectfs.Layout{Backend: projectfs.BackendLocal, Homes: projectfs.BackendLocal}
+	var brokerStorageErr error
 	if globalVS, _, gErr := config.LoadGlobalSettings(); gErr != nil {
 		log.Printf("WARNING: NFS mount checks disabled: loading global settings: %v", gErr)
 	} else {
 		workspaceStorageBackend = brokerWorkspaceStorageBackend(globalVS)
 		var layoutWarnings []string
-		brokerLayout, layoutWarnings = brokerStorageLayout(globalVS)
+		brokerLayout, layoutWarnings, brokerStorageErr = brokerStorageLayout(globalVS)
 		for _, w := range layoutWarnings {
 			log.Printf("WARNING: %s", w)
+		}
+		if brokerStorageErr != nil {
+			log.Printf("WARNING: %s", brokerStorageUnavailableWarning(brokerStorageErr))
 		}
 		var nfsWarning string
 		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
@@ -383,6 +388,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
 			log.Printf("WARNING: %s", warning)
 		}
+		_ = reportRemovedStorageOverridesIn(log.Printf, config.GlobalSettingsSource, globalVS)
 	}
 	if warning := brokerInotifyWarning(hostedMode, brokerAgentsShareHostUser(p.instances, ""), hostlimits.DefaultReader()); warning != "" {
 		log.Printf("WARNING: %s", warning)
@@ -407,6 +413,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		nfs:                     brokerNFS,
 		workspaceStorageBackend: workspaceStorageBackend,
 		storageLayout:           brokerLayout,
+		storageError:            brokerStorageErr,
 		workspaceLocks:          runtimebroker.NewWorkspaceLocks(),
 		containerHub:            containerHub,
 	}
@@ -425,6 +432,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	hostServices = append(hostServices, caches)
 	if p.hubSrv != nil {
 		shared.colocatedStorage = p.hubSrv.GetStorage()
+		shared.colocatedHubID = p.hubSrv.HubID()
 	}
 	buildServer := func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
 		rhCfg := flatInstanceServerConfig(shared, ic)
@@ -528,16 +536,20 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 		return err
 	}
 	records := runtimebroker.NewOwnershipStore(dir, c.Identity.RuntimeBrokerID)
+	// Labels are read under the keys the runtime stores them under (Cloud
+	// Run rewrites label keys), so an owned object is never read as
+	// unlabeled.
+	label := func(o api.AgentInfo, key string) string { return o.Labels[runtime.LabelKey(c.Runtime, key)] }
 	var unresolved []string
 	for _, o := range objects {
-		switch owner := o.Labels[api.LabelRuntimeBrokerID]; owner {
+		switch owner := label(o, api.LabelRuntimeBrokerID); owner {
 		case "":
 			// below: unattributable
 		case c.Identity.RuntimeBrokerID:
 			// This instance's object: make sure its record exists
 			// (reconstruction needs the complete project, agent, run and
 			// object identity; anything less is unresolved).
-			if err := records.Reconstruct(o); err != nil {
+			if err := records.Reconstruct(o, c.Runtime); err != nil {
 				unresolved = append(unresolved, fmt.Sprintf("%s (%v)", o.Name, err))
 			}
 			continue
@@ -545,7 +557,7 @@ func flatOwnershipPreflight(ctx context.Context, c brokerhost.Candidate) error {
 			continue // another instance's object
 		}
 		name := o.Name
-		if p := o.Labels["scion.project_id"]; p != "" {
+		if p := label(o, "scion.project_id"); p != "" {
 			name = p + "/" + name
 		}
 		unresolved = append(unresolved, name)
@@ -639,6 +651,7 @@ type flatServerShared struct {
 	nfs                     *config.V1NFSConfig
 	workspaceStorageBackend string
 	storageLayout           projectfs.Layout
+	storageError            error
 	// workspaceLocks is the one process-wide workspace lock service every
 	// instance shares.
 	workspaceLocks *runtimebroker.WorkspaceLocks
@@ -652,6 +665,8 @@ type flatServerShared struct {
 	// colocatedStorage is the co-located Hub's storage (nil without one);
 	// only a co-located (in-memory credentials) instance uses it.
 	colocatedStorage storage.Storage
+	// colocatedHubID is the co-located Hub's instance ID (empty without one).
+	colocatedHubID string
 }
 
 // flatInstanceServerConfig is one activated flat instance's Runtime Broker
@@ -684,6 +699,7 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       sh.workspaceStorageBackend,
 		StorageLayout:                 sh.storageLayout,
+		StorageError:                  sh.storageError,
 		WorkspaceLocks:                sh.workspaceLocks,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
@@ -713,6 +729,7 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 	}
 	if ic.Activation.InMemoryCredentials != nil && sh.colocatedStorage != nil {
 		rhCfg.ColocatedStorage = sh.colocatedStorage
+		rhCfg.ColocatedHubID = sh.colocatedHubID
 	}
 	// The host's single NFS mount owner: host-bind instances
 	// register with it instead of mounting themselves.
@@ -767,7 +784,20 @@ func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Serve
 	config.SetGlobalSettingsOverlay(overlay)
 	if ops := hubSrv.GetOperationalSettings(); ops != nil {
 		snap := ops.Snapshot()
-		overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
+		// The stored runtimes and profiles, with their Kubernetes placement
+		// findings, so invalid stored placement refuses Kubernetes starts
+		// from the first dispatch (the startup ApplySnapshot ran before
+		// this install). A concurrent apply of a newer snapshot can be
+		// overwritten by this one until the next settings change, as for the
+		// maps before; maps and findings stay one snapshot, so it never
+		// fails open. The seed does not take the Hub's settings apply lock,
+		// which is unexported Hub state that only a new Hub API could
+		// expose.
+		hub.UpdateSettingsOverlay(overlay, snap)
+		// Removed storage overrides in the stored runtimes and profiles are
+		// reported, not refused: they are fixed through the admin settings
+		// API, which needs a running hub (ptone/scion#6371).
+		_ = reportRemovedStorageOverrides(log.Printf, config.HubStoredSettingsSource, snap.Runtimes, snap.Profiles, nil)
 		// The startup ApplySnapshot ran before this install, so the
 		// image_registry layers are fed here too (ptone/scion#3916).
 		overlay.UpdateImageRegistryInputs(ops.ImageRegistryHubInputs())

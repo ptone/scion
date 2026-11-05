@@ -75,49 +75,21 @@ func (r *KubernetesRuntime) useGKESecretsPath(config RunConfig) bool {
 // k8sFileProjections lists every file that the secret and auth-file volumes
 // deliver to the agent container, in a stable order.
 func (r *KubernetesRuntime) k8sFileProjections(config RunConfig) []k8sFileProjection {
-	containerHome := util.GetHomeDir(config.UnixUsername)
+	gke := r.useGKESecretsPath(config)
 	var out []k8sFileProjection
-
-	if len(config.ResolvedSecrets) > 0 {
-		gke := r.useGKESecretsPath(config)
-		hasVariable := false
-		for _, s := range config.ResolvedSecrets {
-			switch s.Type {
-			case "file":
-				vol := k8sAgentSecretsVolume
-				if gke {
-					vol = k8sSecretsStoreVolume
-				}
-				out = append(out, k8sFileProjection{
-					Volume: vol,
-					Key:    s.Name,
-					Target: expandTildeTarget(s.Target, containerHome),
-				})
-			case "variable":
-				hasVariable = true
+	// The CSI path does not deliver variable secrets (unchanged behaviour).
+	for _, f := range stagedFiles(config, !gke) {
+		vol := k8sAuthFilesVolume
+		switch f.Kind {
+		case stagedFileSecret:
+			vol = k8sAgentSecretsVolume
+			if gke {
+				vol = k8sSecretsStoreVolume
 			}
+		case stagedVariablesFile:
+			vol = k8sAgentSecretsVolume
 		}
-		// The CSI path does not deliver variable secrets (unchanged behaviour).
-		if hasVariable && !gke {
-			out = append(out, k8sFileProjection{
-				Volume: k8sAgentSecretsVolume,
-				Key:    "secrets.json",
-				Target: path.Join(containerHome, ".scion", "secrets.json"),
-			})
-		}
-	}
-
-	if config.ResolvedAuth != nil {
-		for i, f := range config.ResolvedAuth.Files {
-			if f.SourcePath == "" {
-				continue
-			}
-			out = append(out, k8sFileProjection{
-				Volume: k8sAuthFilesVolume,
-				Key:    fmt.Sprintf("auth-file-%d", i),
-				Target: expandTildeTarget(f.ContainerPath, containerHome),
-			})
-		}
+		out = append(out, k8sFileProjection{Volume: vol, Key: f.Key, Target: f.Target})
 	}
 	return out
 }
@@ -179,20 +151,23 @@ func checkK8sHomeFileTargets(placements []k8sFilePlacement) error {
 // placement's source to its target under home. Placement requires real
 // directories and does not follow symlinks: every directory between home and
 // the directory that holds the file is checked in turn, and a symlink or a
-// non-directory there, or a symlink at the target itself, stops placement.
-// A missing directory is created by the running user: the directory that
+// non-directory there, or a symlink at the target itself, stops placement. A
+// missing directory is created by the running user: the directory that
 // directly holds the file gets 0700, any missing ancestors get the default
-// mode (0777 masked by the umask). Existing directories are left as they
-// are. The holding directory must be writable. An existing regular file at
-// the target is replaced; anything else at the target stops placement. The
-// file is copied to a temporary file in the target's directory, given its
-// mode there, and renamed over the target, so the target is always either
-// the previous file or the complete new one with its final mode, and running
-// the script again gives the same result. The temporary file has a fixed
-// name, so a run that was cut off is cleaned up by the next one; anything
-// already at that name is removed first, never written through. A failed
-// step removes the temporary file. The script stops at the first failure
-// and writes the target path and the reason (never file contents) to stderr.
+// mode (0777 masked by the umask). Each directory the script creates is
+// checked again right after mkdir: it must be a real directory, not a symlink
+// or another file type, or placement stops before any file is written.
+// Existing directories are left as they are. The holding directory must be
+// writable. An existing regular file at the target is replaced; anything else
+// at the target stops placement. The file is copied to a temporary file in
+// the target's directory, given its mode there, and renamed over the target,
+// so the target is always either the previous file or the complete new one
+// with its final mode, and running the script again gives the same result.
+// The temporary file has a fixed name, so a run that was cut off is cleaned
+// up by the next one; anything already at that name is removed first, never
+// written through. A failed step removes the temporary file. The script stops
+// at the first failure and writes the target path and the reason (never file
+// contents) to stderr.
 //
 // The fixed name relies on placements into one directory never running
 // concurrently. That holds because: the script places its files one after
@@ -223,10 +198,17 @@ place() {
 			return 1
 		elif [ -e "$cur" ]; then
 			[ -d "$cur" ] || { fail "$cur is not a directory"; return 1; }
-		elif [ "$cur" = "$dir" ]; then
-			mkdir -m 0700 "$cur" || { fail "cannot create directory $cur"; return 1; }
 		else
-			mkdir "$cur" || { fail "cannot create directory $cur"; return 1; }
+			if [ "$cur" = "$dir" ]; then
+				mkdir -m 0700 "$cur" || { fail "cannot create directory $cur"; return 1; }
+			else
+				mkdir "$cur" || { fail "cannot create directory $cur"; return 1; }
+			fi
+			if [ -L "$cur" ]; then
+				fail "created directory $cur is a symbolic link; placement requires real directories"
+				return 1
+			fi
+			[ -d "$cur" ] || { fail "created directory $cur is not a directory"; return 1; }
 		fi
 	done
 	[ -w "$dir" ] || { fail "directory $dir is not writable"; return 1; }

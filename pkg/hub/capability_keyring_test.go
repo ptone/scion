@@ -138,13 +138,16 @@ func capRollout(t *testing.T, emit string) (a, b *keyring.Keyring) {
 	if emit == "legacy" {
 		reads = []string{"legacy", "gen1", "gen2"}
 	}
-	legacy := krEntry{id: "legacy", secret: krLegacySecret}
-	a = capKeyring(t, "gen1", emit, reads, legacy,
+	legacy := []krEntry{{id: "legacy", secret: krLegacySecret}}
+	if rolloutWithoutLegacy {
+		reads, legacy = withoutLegacyID(reads), nil
+	}
+	a = capKeyring(t, "gen1", emit, reads, append(legacy,
 		krEntry{id: "gen1", secret: krGen1Secret},
-		krEntry{id: "gen2", secret: krGen2Secret})
-	b = capKeyring(t, "gen2", emit, reads, legacy,
+		krEntry{id: "gen2", secret: krGen2Secret})...)
+	b = capKeyring(t, "gen2", emit, reads, append(legacy,
 		krEntry{id: "gen1", secret: krGen1Secret, signUntil: krTime(time.Hour), verifyUntl: krTime(48 * time.Hour)},
-		krEntry{id: "gen2", secret: krGen2Secret})
+		krEntry{id: "gen2", secret: krGen2Secret})...)
 	return a, b
 }
 
@@ -159,13 +162,15 @@ func capClosing(t *testing.T) *keyring.Keyring {
 }
 
 // newCapReplica builds a real hub Server over st with keyring k (nil: a
-// legacy-mode replica of the same deployment), sharing the legacy secret
-// as every other purpose requires, and the ring clock clk.
+// legacy-mode replica of the same deployment, keyed by the legacy secret
+// that the ring's "legacy" entry holds) and the ring clock clk.
 func newCapReplica(t *testing.T, st store.Store, k *keyring.Keyring, clk *krClock) *Server {
 	t.Helper()
 	cfg := testServerConfig()
 	cfg.Keyring = k
-	cfg.SharedSigningSecret = krLegacySecret
+	if k == nil {
+		cfg.SharedSigningSecret = krLegacySecret
+	}
 	cfg.KeyringNow = clk.now
 	srv, err := newTestHubServer(t, cfg, st)
 	require.NoError(t, err)
@@ -210,7 +215,7 @@ func assertNoCapabilityKeyMaterial(t *testing.T, out string, extra ...string) {
 	t.Helper()
 	for _, secret := range []string{krLegacySecret, krGen1Secret, krGen2Secret} {
 		assert.NotContains(t, out, secret)
-		for _, name := range []string{SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey} {
+		for _, name := range []string{SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey, SecretKeyPortViewKey} {
 			k := deriveSharedSigningKey(secret, name)
 			assert.NotContains(t, out, base64.StdEncoding.EncodeToString(k))
 			assert.NotContains(t, out, base64.RawURLEncoding.EncodeToString(k))
@@ -234,10 +239,10 @@ func hmacB64(key []byte, msg string) string {
 // Seam, configuration and golden bytes
 // ---------------------------------------------------------------------------
 
-// TestKeyringReleaseCheck_DefaultIsCheckSessionPilot: production refuses
+// TestKeyringReleaseCheck_DefaultIsReleaseKeyringCheck: production refuses
 // what this release does not support.
-func TestKeyringReleaseCheck_DefaultIsCheckSessionPilot(t *testing.T) {
-	assert.Equal(t, reflect.ValueOf((*keyring.Keyring).CheckSessionPilot).Pointer(), reflect.ValueOf(keyringReleaseCheck).Pointer())
+func TestKeyringReleaseCheck_DefaultIsReleaseKeyringCheck(t *testing.T) {
+	assert.Equal(t, reflect.ValueOf(releaseKeyringCheck).Pointer(), reflect.ValueOf(keyringReleaseCheck).Pointer())
 }
 
 // TestValidateKeyringConfig_EmitLegacyActiveMustBeLegacyReader (A1): with
@@ -249,29 +254,29 @@ func TestValidateKeyringConfig_EmitLegacyActiveMustBeLegacyReader(t *testing.T) 
 	gen1 := krEntry{id: "gen1", secret: krGen1Secret}
 
 	bad := capKeyring(t, "gen1", "legacy", []string{"legacy"}, legacy, gen1)
-	err := validateKeyringConfig(ServerConfig{Keyring: bad, SharedSigningSecret: krLegacySecret})
+	err := validateKeyringConfig(ServerConfig{Keyring: bad})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "legacy_read_ids")
 	assert.NotContains(t, err.Error(), "gen1")
 	assertNoCapabilityKeyMaterial(t, err.Error())
-	_, err = New(ServerConfig{Keyring: bad, SharedSigningSecret: krLegacySecret}, nil)
+	_, err = New(ServerConfig{Keyring: bad}, nil)
 	require.Error(t, err, "New refuses before serving")
 
 	good := capKeyring(t, "gen1", "legacy", []string{"legacy", "gen1"}, legacy, gen1)
-	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: good, SharedSigningSecret: krLegacySecret}))
+	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: good}))
 	imported := capKeyring(t, "legacy", "legacy", []string{"legacy"}, legacy, gen1)
-	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: imported, SharedSigningSecret: krLegacySecret}))
+	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: imported}))
 
 	// A deadline already passed does not change membership.
 	expired := capKeyring(t, "gen1", "legacy", []string{"legacy", "gen1"}, legacy,
 		krEntry{id: "gen1", secret: krGen1Secret, signUntil: krTime(-48 * time.Hour), verifyUntl: krTime(-time.Hour)})
-	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: expired, SharedSigningSecret: krLegacySecret}))
+	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: expired}))
 
 	// Versioned emission issues key-ID-carrying values: the rule does not
 	// apply (the release check is bypassed only to reach it).
 	allowVersionedRings(t)
 	versioned := capKeyring(t, "gen1", "versioned", []string{"legacy"}, legacy, gen1)
-	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: versioned, SharedSigningSecret: krLegacySecret}))
+	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: versioned}))
 
 	// Legacy mode is unaffected.
 	assert.NoError(t, validateKeyringConfig(ServerConfig{Keyring: keyring.Legacy("s")}))
@@ -283,7 +288,7 @@ func TestValidateKeyringConfig_EmitLegacyActiveMustBeLegacyReader(t *testing.T) 
 // before serving, and the refusal names no key material.
 func TestNew_ReleaseCheckRefusesVersionedRing(t *testing.T) {
 	k := capKeyring(t, "legacy", "versioned", []string{"legacy"}, krEntry{id: "legacy", secret: krLegacySecret})
-	_, err := New(ServerConfig{Keyring: k, SharedSigningSecret: krLegacySecret}, nil)
+	_, err := New(ServerConfig{Keyring: k}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not supported in this release")
 	assertNoCapabilityKeyMaterial(t, err.Error())
@@ -296,7 +301,7 @@ func TestNew_ReleaseCheckRefusesVersionedRing(t *testing.T) {
 func TestCapabilityKeys_GoldenBytes(t *testing.T) {
 	k := capKeyring(t, "gen1", "versioned", []string{"legacy"},
 		krEntry{id: "legacy", secret: krLegacySecret}, krEntry{id: "gen1", secret: krGen1Secret})
-	for _, name := range []string{SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey} {
+	for _, name := range []string{SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey, SecretKeyPortViewKey} {
 		c := capabilityKeys{ring: k.Signing(), purpose: sharedSecretPurpose(name)}
 		legacyKeys := c.candidates("legacy")
 		require.Len(t, legacyKeys, 1)
@@ -717,13 +722,19 @@ func TestCapabilityKeyring_ArtifactViewIssuanceClosed(t *testing.T) {
 
 	const warning = "view capability not issued"
 	require.NotContains(t, logs.String(), warning)
+	// An existing session, with capability issuance closed: the user JWT is
+	// signed by the same ring, so it is minted just before sign_until (T0+1h)
+	// on the ring clock and stays valid at T0+1h (15 min on the same clock).
+	clk.t = krT0.Add(59 * time.Minute)
+	session := keyringSessionToken(t, f.a, f.owner)
 	clk.t = krT0.Add(time.Hour)
-	_, code = f.mintView(t, f.a)
+	viewPath := "/api/v1/artifacts/" + f.id + "/versions/1/view"
+	code = requestWithToken(t, f.a, session, http.MethodPost, viewPath, nil).Code
 	assert.Equal(t, http.StatusServiceUnavailable, code)
 	shared := anonymous(f.a, http.MethodGet, created.URL)
 	assert.Equal(t, http.StatusServiceUnavailable, shared.Code)
 	assert.Empty(t, shared.Header().Get("Location"))
-	_, code = f.mintView(t, f.a)
+	code = requestWithToken(t, f.a, session, http.MethodPost, viewPath, nil).Code
 	assert.Equal(t, http.StatusServiceUnavailable, code)
 	assert.Equal(t, http.StatusOK, anonymous(f.b, http.MethodGet, view).Code)
 	assert.Equal(t, 1, strings.Count(logs.String(), warning), "one warning for three refusals")
@@ -836,13 +847,20 @@ func TestCapabilityKeyring_ListCursorIssuanceClosed(t *testing.T) {
 	_, s, _, carol, _ := setupTemplateScopeTest(t)
 	setupCursorOpacityTemplates(t, s, carol.ID)
 	logs := captureLogs(t) // before the replica: its loggers bind the default at New
-	clk := &krClock{t: krT0.Add(time.Hour)}
+	// An existing session, with capability issuance closed: the user JWT is
+	// signed by the same ring, so it is minted just before sign_until (T0+1h)
+	// on the ring clock and stays valid at T0+1h (15 min on the same clock).
+	clk := &krClock{t: krT0.Add(59 * time.Minute)}
 	c := newCapReplica(t, s, capClosing(t), clk)
-	rec, _ := getTemplatesPage(t, c, carol, "scope=user&limit=1")
+	session := keyringSessionToken(t, c, carol)
+	clk.t = krT0.Add(time.Hour)
+	rec := requestWithToken(t, c, session, http.MethodGet, "/api/v1/templates?scope=user&limit=1", nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "c2.")
-	rec, all := getTemplatesPage(t, c, carol, "scope=user&limit=10")
+	rec = requestWithToken(t, c, session, http.MethodGet, "/api/v1/templates?scope=user&limit=10", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var all ListTemplatesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &all))
 	assert.Len(t, all.Templates, 2)
 	assert.Empty(t, all.NextCursor)
 	assertNoCapabilityKeyMaterial(t, logs.String()+rec.Body.String())
@@ -933,7 +951,7 @@ func TestCapabilityKeyring_RingModeKeySourceLabel(t *testing.T) {
 }
 
 // ringModeCapabilityKeys are the capability keys ring mode derives.
-var ringModeCapabilityKeys = []string{SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey}
+var ringModeCapabilityKeys = []string{SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey, SecretKeyPortViewKey}
 
 // ---------------------------------------------------------------------------
 // Attachment deliveries (addendum 01688eb9)
@@ -1344,7 +1362,7 @@ type aliasCountingStore struct {
 
 func capabilityKeyName(key string) bool {
 	switch key {
-	case SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey:
+	case SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyListCursorKey, SecretKeyAttachmentDeliveryKey, SecretKeyPortViewKey:
 		return true
 	}
 	return false
@@ -1370,7 +1388,7 @@ func (s *aliasCountingStore) GetSecretValue(ctx context.Context, key, scope, sco
 // single-key records that legacy mode persisted (they are present), and
 // without switching to legacy mode. Legacy mode does read them.
 func TestCapabilityKeyring_UnusableRingRefusesWithoutAliasReads(t *testing.T) {
-	_, s := testServer(t) // legacy mode: persists the four records
+	_, s := testServer(t) // legacy mode: persists the capability key records
 	ctx := context.Background()
 	counting := &aliasCountingStore{Store: s}
 	srv := &Server{config: ServerConfig{Keyring: &keyring.Keyring{}}, store: counting, hubID: "test-hub-id"}
@@ -1379,13 +1397,14 @@ func TestCapabilityKeyring_UnusableRingRefusesWithoutAliasReads(t *testing.T) {
 		"view":       srv.initArtifactViewKey,
 		"cursor":     srv.initListCursorSealer,
 		"attachment": srv.initAttachmentDeliveryKey,
+		"port view":  srv.initPortViewKey,
 	} {
 		err := init(ctx)
 		require.Error(t, err, name)
 		assert.Contains(t, err.Error(), "no usable active generation", name)
 	}
 	assert.Zero(t, counting.reads.Load(), "ring mode read a retained single-key record")
-	assert.False(t, srv.downloadKeys.configured() || srv.artifactViewKeys.configured() || srv.attachmentDeliveryKeys.configured())
+	assert.False(t, srv.downloadKeys.configured() || srv.artifactViewKeys.configured() || srv.attachmentDeliveryKeys.configured() || srv.portViewKeys.configured())
 	assert.Nil(t, srv.listCursorSealer)
 
 	// The control: the same inits in legacy mode do read those records.

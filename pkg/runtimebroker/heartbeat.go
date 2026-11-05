@@ -166,6 +166,11 @@ type HeartbeatService struct {
 	presentationEpoch    int64
 	nextPresentationSeq  func() int64
 
+	// conversionPlan, when set, returns a legacy broker's conversion plan
+	// snapshot (Server.heartbeatConversionPlan), sent on every heartbeat.
+	// A nil result omits the field. Never consulted in flat mode.
+	conversionPlan func() *api.ConversionPlanPresentation
+
 	mu          sync.Mutex
 	listFailing map[string]bool // target key -> last listing failed (guarded by mu)
 	// listings holds the listing in progress for each target key (guarded
@@ -259,9 +264,18 @@ func defaultListingDeadline(interval time.Duration) time.Duration {
 	return deadline
 }
 
+// SetConversionPlanSource sets the source of a legacy broker's conversion
+// plan snapshot, called once per heartbeat; a nil result omits the field.
+// It has no effect in flat mode. Call it before Start.
+func (s *HeartbeatService) SetConversionPlanSource(fn func() *api.ConversionPlanPresentation) {
+	s.conversionPlan = fn
+}
+
 // SetVersion sets the broker version reported in heartbeats.
 func (s *HeartbeatService) SetVersion(version string) {
+	s.mu.Lock()
 	s.version = version
+	s.mu.Unlock()
 }
 
 // Start begins sending heartbeats in the background.
@@ -445,10 +459,14 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 
 	s.mu.Lock()
 	defaultRuntime := s.defaultRuntime
+	brokerVersion := s.version
 	s.mu.Unlock()
 
 	heartbeat := &hubclient.BrokerHeartbeat{
 		Status: status,
+		// The build token refreshes the stored broker version on the Hub
+		// (ptone/scion#5972).
+		Version: brokerVersion,
 		// Design §3.4 Amendment A2.2(b): report capabilities on every heartbeat so the hub's
 		// `scion reincarnate` gate is never stuck on a stale join-time
 		// snapshot for an already-registered broker. The same static set is
@@ -475,6 +493,9 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 		heartbeat.PresentationTargetID = s.presentationTargetID
 		heartbeat.PresentationEpoch = s.presentationEpoch
 		heartbeat.PresentationSeq = s.nextPresentationSeq()
+	}
+	if !s.flat && s.conversionPlan != nil {
+		heartbeat.ConversionPlanPresentation = s.conversionPlan()
 	}
 
 	// Starts in flight are read BEFORE the agents are listed: a start that
