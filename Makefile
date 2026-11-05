@@ -995,6 +995,7 @@ container-sciontool:
 	@GOOS=$(CONTAINER_OS) GOARCH=$(CONTAINER_ARCH) CGO_ENABLED=0 \
 		go build -buildvcs=false -ldflags "$(SCIONTOOL_LDFLAGS)" \
 		-o $(CONTAINER_DIR)/sciontool ./cmd/sciontool
+	@bash image-build/lib/assert-no-cgo.sh $(CONTAINER_DIR)/sciontool
 	@echo "Built: $(CONTAINER_DIR)/sciontool"
 
 ## container-scion: Cross-compile scion CLI for Linux containers
