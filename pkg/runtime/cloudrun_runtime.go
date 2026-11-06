@@ -20,6 +20,10 @@ Authentication Methods:
  2. Key File (For VM-hosted brokers or local testing):
     Set the GOOGLE_APPLICATION_CREDENTIALS environment variable to point to a valid JSON key file
     downloaded from the GCP console for the target Service Account.
+
+Exec into instances requires service-account credentials (either method above,
+or an impersonated service account), and that service account needs OS Login
+access on the project.
 */
 package runtime
 
