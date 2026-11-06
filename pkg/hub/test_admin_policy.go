@@ -588,6 +588,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.UserDeleteForceCascade:       testAdminPolicyDeny,
 	experiments.ArtifactArchive:              testAdminPolicyDeny,
 	experiments.ImageTagSetting:              testAdminPolicyDeny,
+	experiments.ArtifactsOpenReviewCheck:     testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
