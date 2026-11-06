@@ -220,22 +220,29 @@ func TestCloudRunRun_EmptyIdentityAccountRefused(t *testing.T) {
 
 // No instance yet: the create carries the dispatch account and label.
 func TestCloudRunRun_IdentityCreate(t *testing.T) {
-	fake := &fakeInstancesClient{getErr: notFoundErr()}
-	rt, _ := nativeIdentityRuntime(t, fake)
-	cfg := nativeIdentityRunConfig(&api.CloudRunIdentity{ServiceAccount: nativeIDAssignedSA, Mode: "assign"})
+	for _, id := range []*api.CloudRunIdentity{
+		{ServiceAccount: nativeIDAssignedSA, Mode: "assign"},
+		{ServiceAccount: nativeIDBlockSA, Mode: "block"},
+	} {
+		t.Run(id.Mode, func(t *testing.T) {
+			fake := &fakeInstancesClient{getErr: notFoundErr()}
+			rt, _ := nativeIdentityRuntime(t, fake)
+			cfg := nativeIdentityRunConfig(id)
 
-	if _, err := rt.Run(context.Background(), cfg); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if len(fake.createReqs) != 1 || len(fake.startReqs) != 0 || len(fake.deleteReqs) != 0 {
-		t.Fatalf("create %d, start %d, delete %d; want 1, 0, 0", len(fake.createReqs), len(fake.startReqs), len(fake.deleteReqs))
-	}
-	inst := fake.createReqs[0].GetInstance()
-	if inst.GetServiceAccount() != nativeIDAssignedSA {
-		t.Errorf("ServiceAccount = %q, want the assigned account", inst.GetServiceAccount())
-	}
-	if inst.GetLabels()[cloudRunIdentityLabel] != cloudRunIdentityHash(nativeIDAssignedSA) {
-		t.Errorf("identity label = %q", inst.GetLabels()[cloudRunIdentityLabel])
+			if _, err := rt.Run(context.Background(), cfg); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(fake.createReqs) != 1 || len(fake.startReqs) != 0 || len(fake.deleteReqs) != 0 {
+				t.Fatalf("create %d, start %d, delete %d; want 1, 0, 0", len(fake.createReqs), len(fake.startReqs), len(fake.deleteReqs))
+			}
+			inst := fake.createReqs[0].GetInstance()
+			if inst.GetServiceAccount() != id.ServiceAccount {
+				t.Errorf("ServiceAccount = %q, want %q", inst.GetServiceAccount(), id.ServiceAccount)
+			}
+			if inst.GetLabels()[cloudRunIdentityLabel] != cloudRunIdentityHash(id.ServiceAccount) {
+				t.Errorf("identity label = %q", inst.GetLabels()[cloudRunIdentityLabel])
+			}
+		})
 	}
 }
 

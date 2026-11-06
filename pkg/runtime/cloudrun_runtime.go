@@ -646,8 +646,8 @@ func (r *CloudRunRuntime) clearExistingForIdentity(ctx context.Context, c cloudr
 	short := cloudRunShortInstanceID(name)
 	agentID := cfg.Labels["agent_id"]
 	// run != want is reached only if Run's check of another run's live
-	// instance changes; dropping the cached exec key there is harmless (the
-	// key is fetched again when needed).
+	// instance changes; dropping the cached exec key there is harmless (a
+	// new key is signed when next needed).
 	if run == "" || want == "" || run != want {
 		runtimeLog().Info("Cloud Run instance that cannot be matched to this start's run holds the agent's instance ID; not replacing it under a native identity",
 			"instance", short, "agent_id", agentID, "run_id", want, "instance_run_id", run)
