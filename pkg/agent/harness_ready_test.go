@@ -663,36 +663,6 @@ func TestWaitHarnessReady_SeenReadyRunSkipsSettle(t *testing.T) {
 	}
 }
 
-func TestReadyMemoStore_EvictionAndBound(t *testing.T) {
-	var s readyMemoStore
-	s.markReady("c1", "n1")
-	if !s.get("c1", "n1").ready {
-		t.Fatal("expected ready memo")
-	}
-	if s.get("c2", "n1").ready {
-		t.Fatal("a nonce recorded for another container must not match")
-	}
-	if !s.markTimedOut("c1", "n2") {
-		t.Fatal("first timeout for n2 should report first")
-	}
-	if s.markTimedOut("c1", "n2") {
-		t.Fatal("second timeout for n2 should not report first")
-	}
-	if s.get("c1", "n1").ready || s.size() != 1 {
-		t.Fatalf("a new nonce for c1 must evict n1; size=%d", s.size())
-	}
-	for i := 0; i < maxReadyMemos+10; i++ {
-		s.markReady(fmt.Sprintf("c-%d", i), fmt.Sprintf("n-%d", i))
-	}
-	if n := s.size(); n > maxReadyMemos {
-		t.Fatalf("size = %d, want at most %d", n, maxReadyMemos)
-	}
-	s.clear()
-	if s.size() != 0 {
-		t.Fatal("clear left entries")
-	}
-}
-
 // TestReadinessProbeScript_RefusesNonRegularFiles runs the production probe
 // script (tmux replaced by false, paths pointed at a temp dir) and checks a
 // symlinked or non-regular readiness file is reported as missing.

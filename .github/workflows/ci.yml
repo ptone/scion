@@ -1088,6 +1088,22 @@ jobs:
           SCION_TEST_REQUIRE_TMUX: "1"
         run: make test-sqlite-nonhub
 
+      # The real-tmux paste test in pkg/agent/tmuxdeliver also runs in the
+      # step above, but go test prints no per-test line without -v, so a pass
+      # and a skip look the same there. This step runs it by name with -v and
+      # fails unless it passed, so its conclusion proves the paste was
+      # checked against a real tmux.
+      - name: Prove real-tmux paste (TestRealTmux_PasteArrivesAsText)
+        if: ${{ !cancelled() }}
+        env:
+          SCION_TEST_REQUIRE_TMUX: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/realtmux-paste.txt"
+          go test -count=1 -run '^TestRealTmux_PasteArrivesAsText$' -v ./pkg/agent/tmuxdeliver 2>&1 | tee "$out"
+          grep -q '^--- PASS: TestRealTmux_PasteArrivesAsText' "$out"
+
       # internal/fixturegen's TestFixtureCoverage carries `//go:build
       # !no_sqlite`, so Build & Test (-tags no_sqlite) never compiles it;
       # before this step it ran only in the non-blocking Full Test Suite,
