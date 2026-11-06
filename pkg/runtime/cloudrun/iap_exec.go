@@ -21,12 +21,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"cloud.google.com/go/auth"
 	"cloud.google.com/go/auth/credentials"
+	"cloud.google.com/go/compute/metadata"
 	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
 	resourcemanagerpb "cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
 	"cloud.google.com/go/run/apiv2/runpb"
@@ -53,6 +57,10 @@ type IAPExecConnector struct {
 	// lookupProjectNumber overrides how a project ID is resolved to its
 	// number. Nil in production (fetchProjectNumber); tests inject a fake.
 	lookupProjectNumber func(ctx context.Context, projectID string) (string, error)
+	// callerEmail overrides how the email of the identity the connector
+	// authenticates as is resolved. Nil in production (resolveCallerEmail);
+	// tests inject a fake.
+	callerEmail func(ctx context.Context) (string, error)
 	// now overrides the clock used for signed key expiry. Nil in production
 	// (time.Now).
 	now func() time.Time
@@ -71,6 +79,18 @@ type IAPExecConnector struct {
 	mu             sync.Mutex
 	projectNumbers map[string]string
 	signedKeys     map[string]*signedKey
+	// lastImportOK is when a key was last imported into the caller's OS
+	// Login profile successfully; zero when none counts. Guarded by mu.
+	lastImportOK time.Time
+	// lastImportAttempt is when an import was last attempted, whatever its
+	// outcome. Guarded by mu.
+	lastImportAttempt time.Time
+
+	// importSlot holds one token while an import decision or import is in
+	// progress, so concurrent misses share one import; waiters give up when
+	// their context ends. Created on first use.
+	importSlotOnce sync.Once
+	importSlot     chan struct{}
 }
 
 // tokenSource yields OAuth2 access tokens. *auth.Credentials implements it
@@ -95,15 +115,46 @@ const (
 	// signedKeyDefaultValidity is assumed when the certificate's expiry
 	// cannot be read.
 	signedKeyDefaultValidity = 4 * time.Minute
+	// importMinGap is the least time between two import attempts by one
+	// connector, whatever triggers them. With importedKeyValidity it bounds
+	// the connector's live imported keys to about five.
+	importMinGap = 60 * time.Second
+	// importedKeyValidity is how long a public key imported into the
+	// caller's OS Login profile stays valid.
+	importedKeyValidity = 5 * time.Minute
 )
 
 // errSSHAuthFailed marks an ssh run rejected during public key
 // authentication.
 var errSSHAuthFailed = errors.New("SSH authentication failed")
 
+// importTimeout bounds one import request. Tests shorten it.
+var importTimeout = 30 * time.Second
+
 // osLoginBaseURL is the OS Login API endpoint. Tests point it at a local
 // server.
 var osLoginBaseURL = "https://oslogin.googleapis.com"
+
+// defaultCredentials builds the production token source. Tests replace it so
+// they never pick up ambient credentials.
+var defaultCredentials = detectDefaultCredentials
+
+// lookupMetadataEmail returns the metadata server's default service account
+// email. Tests replace it or point GCE_METADATA_HOST at a local server.
+var lookupMetadataEmail = metadataServiceAccountEmail
+
+// defaultServiceAccount matches, lower-cased, a project's default Compute
+// Engine and App Engine service accounts, which are never accepted as an
+// instance's runtime identity. The hub recognises the same two forms in
+// isValidServiceAccountEmail (pkg/hub/passthrough_gate.go) and
+// projectIDFromServiceAccount (pkg/hub/google_sa.go).
+var defaultServiceAccount = regexp.MustCompile(`^([0-9]+-compute@developer|[^@]+@appspot)\.gserviceaccount\.com$`)
+
+// isDefaultServiceAccount reports whether sa is a project default service
+// account.
+func isDefaultServiceAccount(sa string) bool {
+	return defaultServiceAccount.MatchString(strings.ToLower(strings.TrimSpace(sa)))
+}
 
 func NewIAPExecConnector(iapTunnelUrlOverride string) *IAPExecConnector {
 	return &IAPExecConnector{
@@ -151,20 +202,23 @@ func (c *IAPExecConnector) runOnce(ctx context.Context, project, location, insta
 // instance's cached signed key is dropped and, if retry is set, attempt runs
 // once more with a freshly signed key.
 //
-// Authentication failure is recognised from ssh's exit status 255 and
-// sshAuthFailureMarker on stderr, which the remote command shares. A remote
-// command that prints the marker and exits 255 therefore makes Connect or
-// Exec run it once more; ExecWithStdin never re-runs. Exec callers whose
-// commands are not idempotent: tmux key and paste delivery to an agent
-// (pkg/agent manager message delivery), the broker's exec endpoint, which
-// runs a caller-supplied command, and the broker's "kill -USR2 1" reload
-// signal (pkg/runtimebroker handlers).
+// Authentication failure is recognised only from the ssh client's own
+// diagnostics (see runSSHClient), never from the remote command's output or
+// exit status, so a remote command cannot make Connect or Exec re-run it or
+// reset the connector's state. ExecWithStdin never re-runs.
+//
+// An authentication failure also clears the import window, so the next
+// signed key is imported first. Caching a signed key, and importing only once
+// per window, assume that a signed cert authenticates without its key
+// remaining in the login profile; this reset covers the case where it does
+// not.
 func (c *IAPExecConnector) runWithAuthRetry(project, location, instanceName string, retry bool, attempt func() error) error {
 	err := attempt()
 	if !errors.Is(err, errSSHAuthFailed) {
 		return err
 	}
 	c.Forget(project, location, instanceName)
+	c.clearImportWindow()
 	if !retry {
 		return err
 	}
@@ -322,62 +376,82 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 	sshArgs = append(sshArgs, sshUser+"@"+sshHost)
 	sshArgs = appendRemoteCommand(sshArgs, cmdArgs)
 
-	sshCmd := exec.CommandContext(ctx, "ssh", sshArgs...)
+	slog.Debug("running SSH command", "user", sshUser, "host", sshHost, "port", localPort, "command_args", len(cmdArgs))
+	err = runSSHClient(ctx, tempDir, sshArgs, stdin, stdout, stderr)
+	slog.Debug("SSH command finished", "error", err)
+	return err
+}
+
+// sshBinary is the ssh client run for each session. Tests replace it.
+var sshBinary = "ssh"
+
+// sshClientAuthFailure matches the line the ssh client writes when the server
+// rejects public key authentication, optionally prefixed by "user@host: ".
+var sshClientAuthFailure = regexp.MustCompile(`(?m)^(?:\S+: )?Permission denied \(publickey`)
+
+// runSSHClient runs the ssh client with sshArgs. The client's own
+// diagnostics go, through -E, to a client log created fresh and exclusively
+// in a new private directory under dir, apart from the remote command's
+// stderr. An authentication failure is reported, wrapping errSSHAuthFailed,
+// only when ssh exits 255 and that log carries the client's auth-failure
+// line: the remote command can neither write the log nor make its exit
+// status count. Reading the client's result directly, rather than adding an
+// auth-only pre-flight connection or moving to the Go ssh library, keeps one
+// connection and the existing ssh behaviour. The log can name the user and
+// host, so it is never logged or returned, and it is removed afterwards.
+// Client diagnostics, including -v output, therefore no longer reach stderr.
+func runSSHClient(ctx context.Context, dir string, sshArgs []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	logDir, err := os.MkdirTemp(dir, "ssh-client-*")
+	if err != nil {
+		return fmt.Errorf("failed to create SSH client log dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(logDir) }()
+	logPath := filepath.Join(logDir, "client.log")
+	if err := createClientLog(logPath); err != nil {
+		return fmt.Errorf("failed to create SSH client log: %w", err)
+	}
+
+	sshCmd := exec.CommandContext(ctx, sshBinary, append([]string{"-E", logPath}, sshArgs...)...)
 	sshCmd.Stdin = stdin
 	sshCmd.Stdout = stdout
-	authDetector := &authFailureDetector{}
-	sshCmd.Stderr = io.MultiWriter(stderr, authDetector)
-
-	slog.Debug("running SSH command", "user", sshUser, "host", sshHost, "port", localPort, "command_args", len(cmdArgs))
+	sshCmd.Stderr = stderr
 	err = sshCmd.Run()
-	slog.Debug("SSH command finished", "error", err)
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 255 && clientLogShowsAuthFailure(logPath) {
+		slog.Debug("SSH client authentication failed")
+		return fmt.Errorf("SSH command failed: %w: %w", errSSHAuthFailed, err)
+	}
+	return fmt.Errorf("SSH command failed: %w", err)
+}
+
+// createClientLog creates an empty, private ssh client log at path, refusing
+// one that already exists so a stale log can never be read. It also returns
+// the error from closing the new file, so a log that cannot be closed fails
+// the session closed.
+func createClientLog(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 255 && authDetector.Seen() {
-			return fmt.Errorf("SSH command failed: %w: %w", errSSHAuthFailed, err)
-		}
-		return fmt.Errorf("SSH command failed: %w", err)
+		return err
 	}
-
-	return nil
+	return f.Close()
 }
 
-// sshAuthFailureMarker is what ssh prints to stderr when the server rejects
-// public key authentication.
-const sshAuthFailureMarker = "Permission denied (publickey"
-
-// authFailureDetector watches ssh's stderr for sshAuthFailureMarker, keeping
-// only enough trailing bytes to match it across write boundaries.
-type authFailureDetector struct {
-	mu   sync.Mutex
-	tail []byte
-	seen bool
-}
-
-func (d *authFailureDetector) Write(p []byte) (int, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.seen {
-		return len(p), nil
+// clientLogShowsAuthFailure reports whether the ssh client log at path holds
+// the client's auth-failure line.
+func clientLogShowsAuthFailure(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
 	}
-	buf := append(d.tail, p...)
-	if bytes.Contains(buf, []byte(sshAuthFailureMarker)) {
-		d.seen = true
-		d.tail = nil
-		return len(p), nil
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, 64<<10))
+	if err != nil {
+		return false
 	}
-	if keep := len(sshAuthFailureMarker) - 1; len(buf) > keep {
-		buf = buf[len(buf)-keep:]
-	}
-	d.tail = append([]byte(nil), buf...)
-	return len(p), nil
-}
-
-// Seen reports whether the marker was written.
-func (d *authFailureDetector) Seen() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.seen
+	return sshClientAuthFailure.Match(data)
 }
 
 // tokenSource returns the connector's token source, building it on first
@@ -390,7 +464,7 @@ func (c *IAPExecConnector) tokenSource() (tokenSource, error) {
 	}
 	detect := c.detectCredentials
 	if detect == nil {
-		detect = detectDefaultCredentials
+		detect = defaultCredentials
 	}
 	creds, err := detect()
 	if err != nil {
@@ -563,9 +637,36 @@ func (c *IAPExecConnector) signedKeyForInstance(ctx context.Context, project, lo
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate SSH keys: %v", err)
 	}
-	signedCert, err := requestSignedCertificate(ctx, project, location, shortID, serviceAccount, string(pubKeyOpenSSH), token)
+	// Signing needs the caller to have an OS Login POSIX account, which
+	// importing a key creates. The import runs at most once per validity
+	// window, and on a missing-account response, and never sooner than
+	// importMinGap after the previous attempt. It imports this call's fresh
+	// key, whose private half lives only in the in-memory cache entry until
+	// reuseUntil. A failed import fails the call. A reused signed key needs
+	// neither step.
+	used, err := c.ensureCallerAccount(ctx, project, string(pubKeyOpenSSH), token)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign SSH key: %v", err)
+		return nil, err
+	}
+	signedCert, err := requestSignedCertificate(ctx, project, location, shortID, serviceAccount, string(pubKeyOpenSSH), token)
+	if isMissingAccount(err) {
+		c.invalidateImport(used)
+		again, ierr := c.ensureCallerAccount(ctx, project, string(pubKeyOpenSSH), token)
+		if ierr != nil {
+			return nil, ierr
+		}
+		// Retry once, and only when an import newer than the one this sign
+		// relied on now counts; inside importMinGap there is none and the
+		// call fails.
+		if again.After(used) {
+			signedCert, err = requestSignedCertificate(ctx, project, location, shortID, serviceAccount, string(pubKeyOpenSSH), token)
+		}
+		if isMissingAccount(err) {
+			c.clearImportWindow()
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign SSH key: %w", err)
 	}
 
 	now = c.clock()
@@ -597,6 +698,9 @@ func (c *IAPExecConnector) instanceServiceAccount(ctx context.Context, project, 
 	}
 	if inst.GetServiceAccount() == "" {
 		return "", "", errors.New("instance reports no service account")
+	}
+	if isDefaultServiceAccount(inst.GetServiceAccount()) {
+		return "", "", errors.New("instance runs as a project default service account")
 	}
 	return inst.GetServiceAccount(), inst.GetUid(), nil
 }
@@ -681,6 +785,297 @@ func certExpiry(cert string, now time.Time) time.Time {
 	return now.Add(signedKeyDefaultValidity)
 }
 
+// importWindow is how long after a successful import no further import is
+// needed.
+const importWindow = importedKeyValidity - signedKeyMinRemaining
+
+// ensureCallerAccount imports publicKey into the caller's OS Login profile
+// unless a successful import happened within importWindow or an import was
+// attempted within importMinGap. It returns the time of the import that
+// counts, zero when none does. A failed import clears the window. The import
+// is bounded by importTimeout, and waiting for another caller's import ends
+// with ctx.
+func (c *IAPExecConnector) ensureCallerAccount(ctx context.Context, project, publicKey, token string) (time.Time, error) {
+	slot := c.importSlotChan()
+	select {
+	case slot <- struct{}{}:
+	case <-ctx.Done():
+		return time.Time{}, fmt.Errorf("failed to import SSH key into OS Login profile: %w", ctx.Err())
+	}
+	defer func() { <-slot }()
+
+	c.mu.Lock()
+	last, lastAttempt := c.lastImportOK, c.lastImportAttempt
+	c.mu.Unlock()
+	now := c.clock()
+	if !last.IsZero() && now.Before(last.Add(importWindow)) {
+		return last, nil
+	}
+	if !lastAttempt.IsZero() && now.Before(lastAttempt.Add(importMinGap)) {
+		slog.Debug("OS Login key import skipped", "reason", "rate limited")
+		return last, nil
+	}
+
+	c.mu.Lock()
+	c.lastImportAttempt = now
+	c.mu.Unlock()
+	importCtx, cancel := context.WithTimeout(ctx, importTimeout)
+	err := c.importCallerKey(importCtx, project, publicKey, token, now)
+	cancel()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err != nil {
+		c.lastImportOK = time.Time{}
+		return time.Time{}, err
+	}
+	c.lastImportOK = now
+	return now, nil
+}
+
+// importSlotChan returns the connector's one-token import slot.
+func (c *IAPExecConnector) importSlotChan() chan struct{} {
+	c.importSlotOnce.Do(func() { c.importSlot = make(chan struct{}, 1) })
+	return c.importSlot
+}
+
+// invalidateImport clears the import window if the import that counts is
+// still used, so a concurrent re-import is not repeated.
+func (c *IAPExecConnector) invalidateImport(used time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lastImportOK.Equal(used) {
+		c.lastImportOK = time.Time{}
+	}
+}
+
+// clearImportWindow makes the next signed key be imported first.
+func (c *IAPExecConnector) clearImportWindow() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastImportOK = time.Time{}
+}
+
+// isMissingAccount reports whether err is the OS Login response for a caller
+// without a POSIX account: 404 with the API status NOT_FOUND.
+func isMissingAccount(err error) bool {
+	var apiErr *osLoginAPIError
+	return errors.As(err, &apiErr) && apiErr.statusCode == http.StatusNotFound && apiErr.apiStatus == "NOT_FOUND"
+}
+
+// importCallerKey imports publicKey into the OS Login profile of the
+// identity the connector authenticates as, which creates its POSIX account
+// when it has none and otherwise adds the key to it. The key expires
+// importedKeyValidity after now. Only the outcome and the HTTP status are
+// logged; the caller's email never leaves this function except in the
+// request URL.
+func (c *IAPExecConnector) importCallerKey(ctx context.Context, project, publicKey, token string, now time.Time) error {
+	resolve := c.callerEmail
+	if resolve == nil {
+		resolve = c.resolveCallerEmail
+	}
+	email, err := resolve(ctx)
+	if err != nil || email == "" {
+		slog.Warn("OS Login key import failed", "reason", "caller identity unresolved")
+		return errors.New("failed to import SSH key into OS Login profile: caller identity could not be determined")
+	}
+	expiry := now.Add(importedKeyValidity)
+	if err := importSSHPublicKey(ctx, email, project, publicKey, token, expiry); err != nil {
+		var apiErr *osLoginAPIError
+		if errors.As(err, &apiErr) {
+			slog.Warn("OS Login key import failed", "status", apiErr.statusCode)
+		} else {
+			slog.Warn("OS Login key import failed", "reason", "request error")
+		}
+		return fmt.Errorf("failed to import SSH key into OS Login profile: %w", err)
+	}
+	slog.Debug("OS Login key import succeeded")
+	return nil
+}
+
+// importSSHPublicKey calls users.importSshPublicKey for email. The response
+// carries the login profile and is discarded unread on success. A transport
+// error is returned without detail, since it can quote the request URL, which
+// names the user.
+func importSSHPublicKey(ctx context.Context, email, projectID, publicKey, token string, expiry time.Time) error {
+	endpoint := fmt.Sprintf("%s/v1/users/%s:importSshPublicKey?projectId=%s", osLoginBaseURL, url.PathEscape(email), url.QueryEscape(projectID))
+	jsonBody, err := json.Marshal(map[string]string{
+		"key":                publicKey,
+		"expirationTimeUsec": strconv.FormatInt(expiry.UnixMicro(), 10),
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(jsonBody))
+	if err != nil {
+		return errors.New("invalid import request")
+	}
+	req.Header.Add("Authorization", "Bearer "+token)
+	req.Header.Add("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("import request failed: %w", ctxErr)
+		}
+		return errors.New("import request failed")
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return newOSLoginAPIError(resp)
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	return nil
+}
+
+// resolveCallerEmail returns the email of the identity the connector's
+// credentials authenticate as: the client email of a service account key, or
+// the target of an impersonated credential. Credentials without a JSON
+// definition come from the metadata server, which is asked for its default
+// service account. Any other credential fails, rather than importing the key
+// for an identity other than the one that signs.
+func (c *IAPExecConnector) resolveCallerEmail(ctx context.Context) (string, error) {
+	ts, err := c.tokenSource()
+	if err != nil {
+		return "", err
+	}
+	var credsJSON []byte
+	if creds, ok := ts.(*auth.Credentials); ok {
+		credsJSON = creds.JSON()
+	}
+	if len(credsJSON) > 0 {
+		if email := credentialsEmail(credsJSON); email != "" {
+			return email, nil
+		}
+		return "", errors.New("credentials do not name a service account")
+	}
+	return lookupMetadataEmail(ctx)
+}
+
+// credentialsEmail returns the service account a credentials JSON file
+// authenticates as, or "" when it names none.
+func credentialsEmail(credsJSON []byte) string {
+	var f struct {
+		Type                           string `json:"type"`
+		ClientEmail                    string `json:"client_email"`
+		ServiceAccountImpersonationURL string `json:"service_account_impersonation_url"`
+	}
+	if err := json.Unmarshal(credsJSON, &f); err != nil {
+		return ""
+	}
+	// An impersonated credential authenticates as its target, not as the
+	// source it was built from.
+	if u := f.ServiceAccountImpersonationURL; u != "" {
+		const marker = "/serviceAccounts/"
+		i := strings.LastIndex(u, marker)
+		if i < 0 {
+			return ""
+		}
+		email, _, _ := strings.Cut(u[i+len(marker):], ":")
+		if !strings.Contains(email, "@") {
+			return ""
+		}
+		return email
+	}
+	if f.Type == "service_account" {
+		return f.ClientEmail
+	}
+	return ""
+}
+
+// metadataServiceAccountEmail asks the metadata server, at GCE_METADATA_HOST
+// when set, for the email of the default service account.
+func metadataServiceAccountEmail(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	// A client on http.DefaultTransport, rather than the package's own, so
+	// tests' dial guard covers it.
+	email, err := metadata.NewClient(&http.Client{}).EmailWithContext(ctx, "default")
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("metadata server email lookup failed: %w", ctxErr)
+		}
+		return "", errors.New("metadata server email lookup failed")
+	}
+	email = strings.TrimSpace(email)
+	if !strings.Contains(email, "@") {
+		return "", errors.New("metadata server returned no service account email")
+	}
+	return email, nil
+}
+
+// osLoginAPIError is a non-2xx OS Login API response, reduced to the HTTP
+// status and the API's error status and message, with identifiers redacted.
+type osLoginAPIError struct {
+	statusCode int
+	apiStatus  string
+	message    string
+}
+
+func (e *osLoginAPIError) Error() string {
+	msg := fmt.Sprintf("OS Login API returned status %d", e.statusCode)
+	if e.apiStatus != "" {
+		msg += " " + e.apiStatus
+	}
+	if e.message != "" {
+		msg += ": " + e.message
+	}
+	return msg
+}
+
+// maxOSLoginErrorMessage caps the API error message kept in an error.
+const maxOSLoginErrorMessage = 300
+
+var (
+	// emailLike matches anything shaped like an email address, also with
+	// the @ percent-encoded.
+	emailLike = regexp.MustCompile(`(?i)[a-z0-9._%+\-]+(@|%40)[a-z0-9.\-]+`)
+	// posixNameLike matches lower-case words joined by underscores, the
+	// shape of OS Login POSIX usernames (name_domain_com, sa_<id>); API
+	// enum values such as NOT_FOUND are upper-case and kept.
+	posixNameLike = regexp.MustCompile(`\b[a-z0-9][a-z0-9.\-]*(_[a-z0-9.\-]+)+\b`)
+	// longNumber matches digit runs as long as project numbers and uids.
+	longNumber = regexp.MustCompile(`[0-9]{6,}`)
+)
+
+// newOSLoginAPIError reads resp's error body.
+func newOSLoginAPIError(resp *http.Response) *osLoginAPIError {
+	e := &osLoginAPIError{statusCode: resp.StatusCode}
+	var body struct {
+		Error struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&body); err != nil {
+		return e
+	}
+	e.apiStatus = redactIdentifiers(body.Error.Status)
+	e.message = redactIdentifiers(body.Error.Message)
+	e.message = truncateRunes(e.message, maxOSLoginErrorMessage)
+	return e
+}
+
+// redactIdentifiers replaces email-like substrings, POSIX-username-like
+// words and long digit runs.
+func redactIdentifiers(s string) string {
+	s = emailLike.ReplaceAllString(s, "[redacted]")
+	s = posixNameLike.ReplaceAllString(s, "[redacted]")
+	return longNumber.ReplaceAllString(s, "[redacted]")
+}
+
+// truncateRunes shortens s to at most limit bytes, cutting on a rune
+// boundary, and marks the cut.
+func truncateRunes(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
+}
+
 func requestSignedCertificate(ctx context.Context, projectID, region, instanceID, serviceAccount, publicKey, token string) (string, error) {
 	url := fmt.Sprintf("%s/v1beta/projects/%s/locations/%s:signSshPublicKey", osLoginBaseURL, projectID, region)
 
@@ -708,8 +1103,7 @@ func requestSignedCertificate(ctx context.Context, projectID, region, instanceID
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("OS Login API returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", newOSLoginAPIError(resp)
 	}
 
 	var resData struct {

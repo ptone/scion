@@ -88,12 +88,17 @@ func (c *testClock) advance(d time.Duration) {
 
 func (c *testClock) validBefore(d time.Duration) uint64 { return uint64(c.now().Add(d).Unix()) }
 
+// testCallerEmail is the identity test connectors authenticate as.
+const testCallerEmail = "broker-runner@my-project.iam.gserviceaccount.com"
+
 // newTestConnector returns a connector whose Instances API client is
-// newClient, whose project number is always 123456 and whose clock is clock.
+// newClient, whose project number is always 123456, whose caller is
+// testCallerEmail and whose clock is clock.
 func newTestConnector(newClient func(context.Context) (InstancesAPI, error), clock *testClock) *IAPExecConnector {
 	return &IAPExecConnector{
 		newInstancesClient:  newClient,
 		lookupProjectNumber: func(context.Context, string) (string, error) { return "123456", nil },
+		callerEmail:         func(context.Context) (string, error) { return testCallerEmail, nil },
 		now:                 clock.now,
 	}
 }
@@ -102,12 +107,87 @@ func fakeClient(f *fakeInstanceGetter) func(context.Context) (InstancesAPI, erro
 	return func(context.Context) (InstancesAPI, error) { return f, nil }
 }
 
-// osLoginServer records signSshPublicKey request bodies. When certValidity is
-// set it answers with a real OpenSSH certificate valid for that long from the
-// clock's current time; otherwise with an unparseable placeholder.
+// osLoginServer records signSshPublicKey and importSshPublicKey requests and
+// the order they arrive in. A sign is answered, when certValidity is set,
+// with a real OpenSSH certificate valid for that long from the clock's
+// current time; otherwise with an unparseable placeholder. An import is
+// answered with a login profile carrying testPosixUsername and testPosixUID.
+// failImport and failSign make the next requests fail instead.
 type osLoginServer struct {
-	mu     sync.Mutex
-	bodies []map[string]string
+	mu      sync.Mutex
+	bodies  []map[string]string
+	imports []osLoginImport
+	calls   []string
+
+	importStatus  int
+	importErrBody string
+	signStatus    int
+	signErrBody   string
+	// signFailures is how many more signs fail; negative is unlimited.
+	signFailures int
+	// hook, when set, runs for every request after it is recorded and
+	// before it is answered, with the request's context, its kind and its
+	// 1-based number among requests of that kind.
+	hook func(ctx context.Context, kind string, n int)
+}
+
+// onRequest sets the request hook.
+func (s *osLoginServer) onRequest(f func(ctx context.Context, kind string, n int)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hook = f
+}
+
+// osLoginImport is one received importSshPublicKey request.
+type osLoginImport struct {
+	path      string
+	projectID string
+	auth      string
+	body      map[string]string
+}
+
+const (
+	testPosixUsername = "broker_runner_my_project_iam_gserv"
+	testPosixUID      = "3141592653"
+)
+
+// failImport makes imports answer status with body.
+func (s *osLoginServer) failImport(status int, body string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.importStatus, s.importErrBody = status, body
+}
+
+// failSign makes every sign answer status with body.
+func (s *osLoginServer) failSign(status int, body string) { s.failSignN(-1, status, body) }
+
+// failSignN makes the next n signs (all when n is negative) answer status
+// with body.
+func (s *osLoginServer) failSignN(n, status int, body string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.signStatus, s.signErrBody, s.signFailures = status, body, n
+}
+
+// callOrder returns the kinds of requests received, in order.
+func (s *osLoginServer) callOrder() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.calls...)
+}
+
+// importCount returns how many import requests were received.
+func (s *osLoginServer) importCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.imports)
+}
+
+// importReq returns the i-th import request.
+func (s *osLoginServer) importReq(i int) osLoginImport {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.imports[i]
 }
 
 // count returns how many sign requests were received.
@@ -138,12 +218,59 @@ func startOSLoginServer(t *testing.T, clock *testClock, certValidity time.Durati
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("decode sign request body: %v", err)
+			t.Errorf("decode request body: %v", err)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if strings.HasSuffix(r.URL.Path, ":importSshPublicKey") {
+			s.mu.Lock()
+			s.calls = append(s.calls, "import")
+			s.imports = append(s.imports, osLoginImport{path: r.URL.Path, projectID: r.URL.Query().Get("projectId"), auth: r.Header.Get("Authorization"), body: body})
+			status, errBody, hook, n := s.importStatus, s.importErrBody, s.hook, len(s.imports)
+			s.mu.Unlock()
+			if hook != nil {
+				hook(r.Context(), "import", n)
+			}
+			if status != 0 {
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, errBody)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"loginProfile": map[string]any{
+				"name":          testCallerEmail,
+				"posixAccounts": []map[string]string{{"username": testPosixUsername, "uid": testPosixUID}},
+				"sshPublicKeys": map[string]any{"fp": map[string]string{"key": body["key"]}},
+			}})
+			return
+		}
+		if !strings.HasSuffix(r.URL.Path, ":signSshPublicKey") {
+			t.Errorf("unexpected OS Login request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
 		}
 		s.mu.Lock()
+		s.calls = append(s.calls, "sign")
 		s.bodies = append(s.bodies, body)
 		n := len(s.bodies)
+		status, errBody := s.signStatus, s.signErrBody
+		if status != 0 && s.signFailures != 0 {
+			if s.signFailures > 0 {
+				s.signFailures--
+			}
+		} else {
+			status = 0
+		}
+		hook := s.hook
 		s.mu.Unlock()
+		if hook != nil {
+			hook(r.Context(), "sign", n)
+		}
+		if status != 0 {
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, errBody)
+			return
+		}
 		signed := fmt.Sprintf("signed-cert-%d", n)
 		if certValidity > 0 {
 			pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(body["sshPublicKey"]))
@@ -545,7 +672,7 @@ func TestRunWithAuthRetry(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			name := testInstanceName("agent-1")
-			c := &IAPExecConnector{signedKeys: map[string]*signedKey{name: {instanceUID: "u1"}}}
+			c := &IAPExecConnector{signedKeys: map[string]*signedKey{name: {instanceUID: "u1"}}, lastImportOK: time.Unix(1_800_000_000, 0)}
 			attempts := 0
 			err := c.runWithAuthRetry(testProject, testLocation, "agent-1", tc.retry, func() error {
 				attempts++
@@ -561,31 +688,8 @@ func TestRunWithAuthRetry(t *testing.T) {
 			if cached == tc.wantForgot {
 				t.Errorf("signed key cached = %v, want %v", cached, !tc.wantForgot)
 			}
-		})
-	}
-}
-
-func TestAuthFailureDetector(t *testing.T) {
-	tests := []struct {
-		name   string
-		writes []string
-		want   bool
-	}{
-		{"one write", []string{"root@127.0.0.1: Permission denied (publickey).\r\n"}, true},
-		{"split across writes", []string{"root@127.0.0.1: Permission de", "nied (pub", "lickey).\r\n"}, true},
-		{"other failure", []string{"ssh: connect to host 127.0.0.1 port 1: Connection refused\r\n"}, false},
-		{"command output", []string{"Permission denied\n"}, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			d := &authFailureDetector{}
-			for _, w := range tc.writes {
-				if n, err := d.Write([]byte(w)); err != nil || n != len(w) {
-					t.Fatalf("Write = %d, %v", n, err)
-				}
-			}
-			if d.Seen() != tc.want {
-				t.Errorf("Seen = %v, want %v", d.Seen(), tc.want)
+			if c.lastImportOK.IsZero() != tc.wantForgot {
+				t.Errorf("import window cleared = %v, want %v", c.lastImportOK.IsZero(), tc.wantForgot)
 			}
 		})
 	}
@@ -613,7 +717,7 @@ func TestAuthRetryPerMethod(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			name := testInstanceName("agent-1")
-			c := &IAPExecConnector{signedKeys: map[string]*signedKey{name: {instanceUID: "u1"}}}
+			c := &IAPExecConnector{signedKeys: map[string]*signedKey{name: {instanceUID: "u1"}}, lastImportOK: time.Unix(1_800_000_000, 0)}
 			attempts := 0
 			c.sshRunner = func(_ context.Context, _, _, _ string, _ []string, _ io.Reader, stdout, stderr io.Writer) error {
 				attempts++
@@ -637,6 +741,9 @@ func TestAuthRetryPerMethod(t *testing.T) {
 			}
 			if _, cached := c.signedKeys[name]; cached {
 				t.Error("signed key still cached after the authentication failure")
+			}
+			if !c.lastImportOK.IsZero() {
+				t.Error("import window not cleared after the authentication failure")
 			}
 		})
 	}
