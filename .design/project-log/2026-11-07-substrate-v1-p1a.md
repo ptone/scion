@@ -16,11 +16,25 @@ template, egress translation and test fake to the v1 shapes.
   sha256 values and checks both the files and the README table against them.
   `third_party/ateapipb/` is gone; there is no alias.
 - **Lifecycle** (`pkg/runtime/substrate_runtime.go`):
-  - DeleteActor sends `DeleteOptions{Uid}` from the pre-delete GetActor, and
-    Run's failure cleanup sends the uid CreateActor returned; no options when
-    the uid is unknown. A FailedPrecondition on a delete that sent a uid is
-    `ErrSubstrateIncarnationChanged` and leaves in-memory state alone (the
-    code is an assumption the live Phase 1d observation confirms).
+  - Lifecycle invariant (design v0.5.5 §3.5): a runnable actor never
+    loses its egress policy. Run creates the policy before the only
+    ResumeActor, and a failed policy create stops the Run before the
+    resume. Delete (and Run's failure cleanup) deletes the actor first and
+    the policy only after the actor is gone; a failed or refused actor
+    delete leaves the policy in place, and a failed policy delete after the
+    actor is gone is reported as an orphan policy.
+  - Both deletes carry a `DeleteOptions{Uid}` precondition: Delete reads the
+    policy's and the actor's uids first; Run's cleanup uses the uids that
+    CreateActor and CreateActorEgressPolicy returned. A policy read in
+    Delete that fails with anything but NotFound returns an error before
+    any delete. Without a policy uid (Delete found no policy, or Run's
+    policy create failed) there is no policy delete, so every policy
+    delete is uid-conditioned. An unknown actor uid sends no options. A
+    FailedPrecondition on the actor delete is
+    `ErrSubstrateIncarnationChanged` (nothing deleted, in-memory state
+    kept); a refused policy delete after the actor is gone means the policy
+    belongs to a later incarnation and is left alone (the code is an
+    assumption the live Phase 1d observation confirms).
   - DeleteActorEgressPolicy and the created policy name it `default`.
   - List keeps the empty atespace (needs the global viewer role) and
     RecordlessActors its one atespace, both paging with `ListOptions`.

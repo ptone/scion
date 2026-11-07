@@ -491,24 +491,39 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	// Every step below cleans up the actor + policy on failure (best
 	// effort — a fresh context, since ctx may already be near its
 	// deadline/cancelled).
+	// policyUID is the uid CreateActorEgressPolicy returned, once Step 5
+	// has run.
+	var policyUID string
 	cleanup := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, _ = r.client.DeleteActorEgressPolicy(cleanupCtx, &ateapi.DeleteActorEgressPolicyRequest{
-			Actor: &ateapi.ObjectRef{Atespace: atespace, Name: actorName},
-			Name:  substrateEgressPolicyName,
-		})
-		// The uid CreateActor returned makes the delete conditional on
-		// this Run's own actor, so cleanup never removes a later
-		// incarnation created under the same name.
-		_, _ = r.client.DeleteActor(cleanupCtx, substrateDeleteActorRequest(atespace, actorName, actorUID))
+		// The actor goes first and the policy only once the actor is gone
+		// (design v0.5.5 §3.5 lifecycle invariant: a runnable actor never
+		// loses its egress policy). Each delete carries the uid this Run created
+		// (when known), so cleanup removes only this Run's actor and
+		// policy, never those of a later incarnation created under the
+		// same name. With an unknown policy uid (Step 5 failed) there is
+		// no policy delete: a partly created policy is at worst an orphan
+		// with no runnable actor.
+		_, aerr := r.client.DeleteActor(cleanupCtx, substrateDeleteActorRequest(atespace, actorName, actorUID))
+		if aerr != nil && status.Code(aerr) != codes.NotFound {
+			return
+		}
+		if policyUID == "" {
+			return
+		}
+		_, _ = r.client.DeleteActorEgressPolicy(cleanupCtx, substrateDeleteEgressPolicyRequest(atespace, actorName, policyUID))
 	}
 
-	// Step 5: egress policy, from the targets resolved before Step 1.
-	if _, err := r.client.CreateActorEgressPolicy(ctx, buildEgressPolicy(atespace, actorName, targets)); err != nil {
+	// Step 5: egress policy, from the targets resolved before Step 1. It
+	// is created before Step 6's ResumeActor (the only ResumeActor in
+	// this runtime), and a failed create stops the Run before the resume.
+	policy, err := r.client.CreateActorEgressPolicy(ctx, buildEgressPolicy(atespace, actorName, targets))
+	if err != nil {
 		cleanup()
 		return "", r.redact(cfg, fmt.Errorf("substrate: create egress policy for %s: %w", id, err))
 	}
+	policyUID = policy.GetMetadata().GetUid()
 
 	// Step 6: resume, then wait RUNNING.
 	if _, err := r.client.ResumeActor(ctx, &ateapi.ResumeActorRequest{
@@ -639,10 +654,26 @@ func (r *SubstrateRuntime) bootstrapNonce(ctx context.Context, atespace, actorNa
 	return generateControlToken()
 }
 
-// ErrSubstrateIncarnationChanged reports that DeleteActor refused a delete
-// because the actor now holding the name is not the one Delete read: a
-// different incarnation exists, and nothing was deleted.
+// ErrSubstrateIncarnationChanged reports that DeleteActorEgressPolicy or
+// DeleteActor refused a delete because the policy or actor now holding the
+// name is not the one Delete read (its uid differs): a different
+// incarnation exists, and nothing more was deleted.
 var ErrSubstrateIncarnationChanged = errors.New("substrate: a different incarnation of the actor exists; nothing deleted")
+
+// substrateDeleteEgressPolicyRequest builds a DeleteActorEgressPolicyRequest
+// for the actor's "default" policy. A non-empty uid becomes a DeleteOptions
+// precondition, so the server deletes only that policy object; an unknown
+// uid sends no options.
+func substrateDeleteEgressPolicyRequest(atespace, actorName, uid string) *ateapi.DeleteActorEgressPolicyRequest {
+	req := &ateapi.DeleteActorEgressPolicyRequest{
+		Actor: &ateapi.ObjectRef{Atespace: atespace, Name: actorName},
+		Name:  substrateEgressPolicyName,
+	}
+	if uid != "" {
+		req.Options = &ateapi.DeleteOptions{Uid: uid}
+	}
+	return req
+}
 
 // substrateDeleteActorRequest builds a DeleteActorRequest. A non-empty uid
 // becomes a DeleteOptions precondition, so the server deletes only that
@@ -655,9 +686,10 @@ func substrateDeleteActorRequest(atespace, actorName, uid string) *ateapi.Delete
 	return req
 }
 
-// isSubstrateUIDPreconditionFailure reports whether err is DeleteActor
-// refusing a uid precondition. The v1 proto does not name the code for a
-// DeleteOptions.uid mismatch; this assumes FailedPrecondition, which the
+// isSubstrateUIDPreconditionFailure reports whether err is DeleteActor or
+// DeleteActorEgressPolicy refusing a uid precondition. The v1 proto does
+// not name the code for a DeleteOptions.uid mismatch; this assumes
+// FailedPrecondition, which the
 // live Phase 1d observation (design §7 gate item 2b) confirms. Aborted is
 // deliberately not mapped: the v1 API uses it for "a concurrent write
 // landed first; retry". Only a delete that sent a uid can fail this way.
@@ -665,16 +697,24 @@ func isSubstrateUIDPreconditionFailure(err error, uidSent bool) bool {
 	return uidSent && status.Code(err) == codes.FailedPrecondition
 }
 
-// Delete implements substrate-runtime.md §9: DeleteActorEgressPolicy
-// (ignoring NotFound), then DeleteActor, then drop the in-memory control
-// token (and label record, best effort).
+// Delete implements the design v0.5.5 §3.5 lifecycle invariant (a
+// runnable actor never loses its egress policy):
+// DeleteActor first, then DeleteActorEgressPolicy (ignoring NotFound) only
+// once the actor is gone, then drop the in-memory control token (and label
+// record, best effort). If the policy delete then fails, no runnable actor
+// remains and the orphan policy is reported.
 //
-// DeleteActor carries the uid the pre-delete GetActor read as a
-// precondition, so a later incarnation created under the same name between
-// the read and the delete is not removed; that case returns
-// ErrSubstrateIncarnationChanged and leaves the in-memory state alone. When
-// the uid is unknown (GetActor failed, the record-less path) the delete is
-// unconditional, as before.
+// The policy's own uid and the actor's uid are read first, and each delete
+// carries its uid as a precondition. A later incarnation created under the
+// same name has a new actor uid and a new policy uid, so its actor is
+// refused (ErrSubstrateIncarnationChanged, nothing deleted, in-memory state
+// kept) and its policy is never removed. If DeleteActor fails for any
+// other reason, the policy is left in place and the error returned; a
+// retried Delete finishes the job. A policy read that fails with anything
+// but NotFound returns an error before any delete; with no policy found
+// there is no policy delete (a policy created later is at worst an orphan
+// with no runnable actor). When the actor uid is unknown (the read failed,
+// the record-less path) the actor delete is unconditional.
 // P4: enforce ref.RunID (ptone/scion#2550). Today the actor name is reused
 // across runs, so this still targets whatever actor holds the name.
 func (r *SubstrateRuntime) Delete(ctx context.Context, ref RunRef) error {
@@ -684,24 +724,48 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, ref RunRef) error {
 		return err
 	}
 
+	// Only NotFound means "no policy", and then there is no policy delete.
+	// Any other read error returns before anything is deleted. A retried
+	// Delete finishes.
+	var policyUID string
+	policy, perr := r.client.GetActorEgressPolicy(ctx, &ateapi.GetActorEgressPolicyRequest{
+		Actor: &ateapi.ObjectRef{Atespace: atespace, Name: actorName},
+		Name:  substrateEgressPolicyName,
+	})
+	switch {
+	case perr == nil:
+		policyUID = policy.GetMetadata().GetUid()
+	case status.Code(perr) != codes.NotFound:
+		// The status code only: the server's text may carry the uid.
+		return fmt.Errorf("substrate: delete actor %s: read egress policy (code %s); nothing was deleted, retry the delete", id, status.Code(perr))
+	}
 	var uid string
 	if actor, gerr := r.client.GetActor(ctx, &ateapi.GetActorRequest{Actor: &ateapi.ObjectRef{Atespace: atespace, Name: actorName}}); gerr == nil {
 		uid = actor.GetMetadata().GetUid()
 	}
 
-	if _, err := r.client.DeleteActorEgressPolicy(ctx, &ateapi.DeleteActorEgressPolicyRequest{
-		Actor: &ateapi.ObjectRef{Atespace: atespace, Name: actorName},
-		Name:  substrateEgressPolicyName,
-	}); err != nil && status.Code(err) != codes.NotFound {
-		return fmt.Errorf("substrate: delete egress policy for %s: %w", id, err)
-	}
-
 	deletedActor, err := r.client.DeleteActor(ctx, substrateDeleteActorRequest(atespace, actorName, uid))
 	if isSubstrateUIDPreconditionFailure(err, uid != "") {
-		return fmt.Errorf("%w (%s): %v", ErrSubstrateIncarnationChanged, id, err)
+		// The server's error is not appended: it may carry the uid.
+		return fmt.Errorf("%w (%s)", ErrSubstrateIncarnationChanged, id)
 	}
 	if err != nil && status.Code(err) != codes.NotFound {
+		// The policy stays: the actor may still be able to run.
 		return fmt.Errorf("substrate: delete actor %s: %w", id, err)
+	}
+
+	// The actor is gone. With no policy uid there is no policy delete. A
+	// refused policy delete means the policy at the name belongs to a
+	// later incarnation: it is not this Run's to remove, and this Run's
+	// policy is gone.
+	if policyUID != "" {
+		_, err = r.client.DeleteActorEgressPolicy(ctx, substrateDeleteEgressPolicyRequest(atespace, actorName, policyUID))
+		if err != nil && status.Code(err) != codes.NotFound && !isSubstrateUIDPreconditionFailure(err, true) {
+			// No runnable actor remains; the orphan policy is reported by
+			// its actor id and the status code only (the server's text may
+			// carry the uid). A retried Delete removes it.
+			return fmt.Errorf("substrate: actor %s was deleted, but its egress policy could not be deleted (code %s); an orphan policy remains, retry the delete", id, status.Code(err))
+		}
 	}
 	if uid == "" {
 		// The speculative GetActor above failed (a transient error, or a
@@ -1030,9 +1094,14 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 		}
 		if actor.GetStatus().GetState() == ateapi.ActorState_ACTOR_STATE_DELETING {
 			// A record-less actor already in ACTOR_STATE_DELETING needs no
-			// protection here: Delete (above) removes
-			// the egress policy before DeleteActor, so a delete already in
-			// flight has no leak left to prevent, restart or not. Excluding
+			// protection here: a DeleteActor for it has already been
+			// accepted, so it is on its way out, restart or not. (Delete,
+			// above, removes the egress policy only after DeleteActor
+			// succeeded, so a DELETING actor may still have its policy
+			// until Delete's next step or a retried Delete removes it; a
+			// broker restart in between can leave a policy object without
+			// a runnable actor, never a runnable actor without its
+			// policy.) Excluding
 			// it here is also what keeps ordinary, no-restart operation
 			// working: Stop is Delete (this runtime's Stop doc
 			// comment), which drops the in-memory record immediately but
@@ -1043,11 +1112,12 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 			// restarted.
 			//
 			// This exclusion is safe to apply unconditionally, not just
-			// "usually", with respect to the egress leak it exists to avoid
-			// counting: the actor's egress policy is already gone by the
-			// time it reaches DELETING (Delete's own ordering, above), so
-			// there is nothing left here for the count to protect, whether
-			// or not the actor's DELETING state itself ever resolves. The
+			// "usually", with respect to the egress invariant: an actor in
+			// DELETING keeps whatever egress policy it has (Delete's own
+			// ordering, above, never removes the policy first), so
+			// excluding it here cannot leave a runnable actor without its
+			// policy, whether or not the DELETING state itself ever
+			// resolves. The
 			// proto documents no transition out of DELETING back to a live
 			// state either: RevertActor, the one RPC that returns an actor
 			// to a pre-delete state, only accepts crashed or running
@@ -1067,11 +1137,12 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 			// delete of its slug afterward returns the ordinary idempotent
 			// 404 instead of 409, and the hub drops its record while the
 			// actor may still be sitting in the cluster, stuck. That is a
-			// deliberate, documented exception (its egress policy is
-			// already gone, so this exclusion trades a rare, already-leaked
-			// actor for not reintroducing a false 409 on ordinary
-			// stop-then-delete). See deploy/substrate/README.md, "After a
-			// broker restart", consequence (d).
+			// deliberate, documented exception (it trades a rare, stuck
+			// actor, which keeps its egress policy, for not reintroducing a
+			// false 409 on ordinary stop-then-delete). See
+			// deploy/substrate/README.md, "After a broker restart",
+			// consequence (d) (to be re-worded for the v1 delete order in
+			// the docs phase).
 			continue
 		}
 		actors = append(actors, RecordlessActor{Name: actor.GetMetadata().GetName(), UID: actor.GetMetadata().GetUid()})

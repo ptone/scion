@@ -887,7 +887,7 @@ func TestSubstrateEgressTargets_N5_2LiteralValues(t *testing.T) {
 	}
 }
 
-// SEC-1: a "://" anywhere but a leading http:// or https:// makes a tenant
+// A "://" anywhere but a leading http:// or https:// makes a tenant
 // value unparseable; neither the log nor any error carries value bytes.
 func TestSubstrateEgressTargets_EmbeddedSchemeUnparseable(t *testing.T) {
 	for name, v := range map[string]string{

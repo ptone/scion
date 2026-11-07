@@ -246,8 +246,8 @@ func ValidateEgressTrustBundle(name string) error {
 // against everything the public suffix list already excludes, but not
 // dependent on it staying that way.
 //
-// Empty entries are ignored. The returned error names the offending entry
-// as originally written, before normalization.
+// Empty entries are ignored. The returned error never echoes an entry or
+// any part of it: it names the problem class and the entry index only.
 func ValidateEgressAllow(entries []string) error {
 	_, err := ParseEgressAllow(entries)
 	return err

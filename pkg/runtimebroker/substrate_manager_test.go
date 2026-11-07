@@ -216,6 +216,12 @@ func (f *fakeSubstrateControlClient) DeleteActor(ctx context.Context, in *ateapi
 	return &ateapi.Actor{}, nil
 }
 
+// GetActorEgressPolicy reports no policy, so Delete makes no policy delete
+// here.
+func (f *fakeSubstrateControlClient) GetActorEgressPolicy(ctx context.Context, in *ateapi.GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapi.EgressPolicy, error) {
+	return nil, status.Error(codes.NotFound, "not found")
+}
+
 func (f *fakeSubstrateControlClient) DeleteActorEgressPolicy(ctx context.Context, in *ateapi.DeleteActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapi.EgressPolicy, error) {
 	return &ateapi.EgressPolicy{}, nil
 }

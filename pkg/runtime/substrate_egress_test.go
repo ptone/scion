@@ -238,8 +238,9 @@ func TestSubstrateEgressHostnames_InvalidVertexRegionRefused(t *testing.T) {
 // TestSubstrateEgressHostnames_VertexBaseURLOverrideGoesThroughCoverageGate
 // proves ANTHROPIC_VERTEX_BASE_URL — a model base-URL override an
 // agent/template can set outright, unlike the fixed-suffix host
-// addVertexAIHost constructs — is treated as a tenant host: admitted only
-// when an operator egress_allow entry covers it, dropped otherwise.
+// addVertexAIHost constructs — is treated as a tenant host: it never adds a
+// rule; an operator egress_allow entry covering it admits it, otherwise it
+// is dropped.
 func TestSubstrateEgressHostnames_VertexBaseURLOverrideGoesThroughCoverageGate(t *testing.T) {
 	env := map[string]string{"ANTHROPIC_VERTEX_BASE_URL": "https://attacker-controlled.example.com/v1"}
 
@@ -253,15 +254,12 @@ func TestSubstrateEgressHostnames_VertexBaseURLOverrideGoesThroughCoverageGate(t
 		}
 	})
 
-	t.Run("covered, added", func(t *testing.T) {
+	t.Run("covered, adds no rule", func(t *testing.T) {
+		// Tenant-derived hosts never emit a rule (design §3.5 R3-1): the
+		// operator's own entry admits the host, and the tenant value
+		// leaves the rule set unchanged.
 		sc := config.V1SubstrateConfig{EgressAllow: []string{"attacker-controlled.example.com"}}
-		hosts, hostsErr := substrateEgressTargetHosts(RunConfig{}, env, sc)
-		if hostsErr != nil {
-			t.Fatalf("substrateEgressTargetHosts() error = %v", hostsErr)
-		}
-		if !containsHost(hosts, "attacker-controlled.example.com") {
-			t.Errorf("substrateEgressTargetHosts() = %v, want the operator-covered ANTHROPIC_VERTEX_BASE_URL host present", hosts)
-		}
+		assertTenantOnlyUnchanged(t, RunConfig{}, sc, env)
 	})
 }
 
@@ -803,8 +801,9 @@ func TestSubstrateEgressHostnames_TenantHostCoveredByEgressAllow(t *testing.T) {
 // TestSubstrateEgressHostnames_NipIoStyleHostRequiresCoverage proves a
 // nip.io-style host (a public, well-formed hostname that resolves an
 // embedded IP octet on request — including the cloud metadata address) is
-// dropped the same as any other uncovered tenant host, and only added when
-// an operator egress_allow entry explicitly covers it.
+// dropped the same as any other uncovered tenant host, and admitted only by
+// an operator egress_allow entry that explicitly covers it (it never adds a
+// rule of its own).
 func TestSubstrateEgressHostnames_NipIoStyleHostRequiresCoverage(t *testing.T) {
 	cases := []struct {
 		name string
@@ -826,16 +825,13 @@ func TestSubstrateEgressHostnames_NipIoStyleHostRequiresCoverage(t *testing.T) {
 					t.Errorf("substrateEgressTargetHosts() = %v, want %q dropped (not covered by any egress_allow entry)", hosts, tc.host)
 				}
 			})
-			t.Run("covered, added", func(t *testing.T) {
+			t.Run("covered, adds no rule", func(t *testing.T) {
+				// The operator entry admits the host; the tenant value
+				// adds no rule of its own (design §3.5 R3-1).
 				sc := config.V1SubstrateConfig{EgressAllow: []string{tc.host}}
-				hosts, hostsErr := substrateEgressTargetHosts(RunConfig{}, env, sc)
-				if hostsErr != nil {
-					t.Fatalf("substrateEgressTargetHosts() error = %v", hostsErr)
-				}
-				if !containsHost(hosts, tc.host) {
-					t.Errorf("substrateEgressTargetHosts() = %v, want %q present (operator explicitly covered it)", hosts, tc.host)
-				}
+				assertTenantOnlyUnchanged(t, RunConfig{}, sc, env)
 			})
+
 		})
 	}
 }

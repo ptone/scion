@@ -75,6 +75,9 @@ func (c *callRecorder) list() []string {
 
 const fakeActorUID = "actor-uid-1"
 
+// fakePolicyUID is the uid the default CreateActorEgressPolicy fake returns.
+const fakePolicyUID = "policy-uid-1"
+
 // fakeControlClient embeds ateapi.ControlClient (nil) and overrides only
 // the methods SubstrateRuntime calls; any other method panics, so a new
 // call site cannot go unnoticed.
@@ -89,6 +92,7 @@ type fakeControlClient struct {
 	createActor             func(*ateapi.CreateActorRequest) (*ateapi.Actor, error)
 	createActorEgressPolicy func(*ateapi.CreateActorEgressPolicyRequest) (*ateapi.EgressPolicy, error)
 	deleteActorEgressPolicy func(*ateapi.DeleteActorEgressPolicyRequest) (*ateapi.EgressPolicy, error)
+	getActorEgressPolicy    func(*ateapi.GetActorEgressPolicyRequest) (*ateapi.EgressPolicy, error)
 	resumeActor             func(*ateapi.ResumeActorRequest) (*ateapi.ResumeActorResponse, error)
 	getActor                func(*ateapi.GetActorRequest) (*ateapi.Actor, error)
 	deleteActor             func(*ateapi.DeleteActorRequest) (*ateapi.Actor, error)
@@ -129,7 +133,10 @@ func newFakeControlClient(rec *callRecorder) *fakeControlClient {
 			return tmpl, nil
 		},
 		createActorEgressPolicy: func(*ateapi.CreateActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
-			return &ateapi.EgressPolicy{}, nil
+			return &ateapi.EgressPolicy{Metadata: &ateapi.ResourceMetadata{Name: "default", Uid: fakePolicyUID}}, nil
+		},
+		getActorEgressPolicy: func(*ateapi.GetActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
+			return nil, status.Error(codes.NotFound, "not found")
 		},
 		deleteActorEgressPolicy: func(*ateapi.DeleteActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
 			return &ateapi.EgressPolicy{}, nil
@@ -207,6 +214,10 @@ func (f *fakeControlClient) DeleteActor(ctx context.Context, in *ateapi.DeleteAc
 func (f *fakeControlClient) CreateActorEgressPolicy(ctx context.Context, in *ateapi.CreateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapi.EgressPolicy, error) {
 	f.rec.record("CreateActorEgressPolicy")
 	return f.createActorEgressPolicy(in)
+}
+func (f *fakeControlClient) GetActorEgressPolicy(ctx context.Context, in *ateapi.GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapi.EgressPolicy, error) {
+	f.rec.record("GetActorEgressPolicy")
+	return f.getActorEgressPolicy(in)
 }
 func (f *fakeControlClient) DeleteActorEgressPolicy(ctx context.Context, in *ateapi.DeleteActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapi.EgressPolicy, error) {
 	f.rec.record("DeleteActorEgressPolicy")
@@ -651,6 +662,9 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 		cfg        func(cfg RunConfig) RunConfig
 		wantErr    string
 		wantAbsent string // optional; asserts this string does NOT appear in the error
+		// noPolicyDelete: the policy create failed, so its uid is unknown
+		// and cleanup issues no policy delete.
+		noPolicyDelete bool
 	}{
 		{
 			name: "CreateActorEgressPolicy fails",
@@ -659,7 +673,8 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 					return nil, status.Error(codes.Internal, "egress boom")
 				}
 			},
-			wantErr: "egress boom",
+			wantErr:        "egress boom",
+			noPolicyDelete: true,
 		},
 		{
 			name: "ResumeActor fails",
@@ -783,8 +798,8 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 			if !containsCall(calls, "DeleteActor") {
 				t.Errorf("Run() failure did not clean up with DeleteActor; calls = %v", calls)
 			}
-			if !containsCall(calls, "DeleteActorEgressPolicy") {
-				t.Errorf("Run() failure did not clean up with DeleteActorEgressPolicy; calls = %v", calls)
+			if got := containsCall(calls, "DeleteActorEgressPolicy"); got == tc.noPolicyDelete {
+				t.Errorf("Run() failure: DeleteActorEgressPolicy called = %v, want %v; calls = %v", got, !tc.noPolicyDelete, calls)
 			}
 		})
 	}

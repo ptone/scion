@@ -146,6 +146,15 @@ func (f *fakeSubstrateControlClient) DeleteActor(ctx context.Context, in *ateapi
 	return &ateapi.Actor{}, nil
 }
 
+// fakeSubstratePolicyUID is the uid GetActorEgressPolicy reports, so
+// Delete's policy delete carries it as a precondition.
+const fakeSubstratePolicyUID = "policy-uid-1"
+
+// GetActorEgressPolicy reports the policy a Run created.
+func (f *fakeSubstrateControlClient) GetActorEgressPolicy(ctx context.Context, in *ateapi.GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapi.EgressPolicy, error) {
+	return &ateapi.EgressPolicy{Metadata: &ateapi.ResourceMetadata{Name: "default", Uid: fakeSubstratePolicyUID}}, nil
+}
+
 func (f *fakeSubstrateControlClient) DeleteActorEgressPolicy(ctx context.Context, in *ateapi.DeleteActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapi.EgressPolicy, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -229,6 +238,9 @@ func TestSubstrateAgentManagerDelete_RecordExists(t *testing.T) {
 	gotEgress := fc.deleteEgressCalls[len(fc.deleteEgressCalls)-1].GetActor()
 	if gotEgress.GetName() != cfg.Name || gotEgress.GetAtespace() != got.GetAtespace() {
 		t.Errorf("DeleteActorEgressPolicy actor = %s/%s, want %s/%s", gotEgress.GetAtespace(), gotEgress.GetName(), got.GetAtespace(), cfg.Name)
+	}
+	if u := fc.deleteEgressCalls[len(fc.deleteEgressCalls)-1].GetOptions().GetUid(); u != fakeSubstratePolicyUID {
+		t.Errorf("DeleteActorEgressPolicy Options.Uid = %q, want %q", u, fakeSubstratePolicyUID)
 	}
 }
 
