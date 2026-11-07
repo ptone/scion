@@ -103,6 +103,7 @@ type RouterTLSConfig struct {
 //   - RootCAs come only from cfg's ClusterTrustBundle or CAFile (read
 //     through the same lookup as the ateapi dialer), never the system roots;
 //   - ServerName is cfg.ServerName, else the Endpoint host;
+//   - no proxy from the environment is used for the fixed in-cluster router;
 //   - the client certificate is re-read from CertFile/KeyFile on every
 //     handshake (GetClientCertificate), and loaded once here so a missing or
 //     mismatched pair fails construction rather than the first request.
@@ -155,6 +156,9 @@ func newMTLSRouterClient(ctx context.Context, lookup ctbLookup, cfg RouterTLSCon
 	}
 	transport := base.Clone()
 	transport.TLSClientConfig = tlsCfg
+	// The router is a fixed in-cluster endpoint: never route it through an
+	// HTTP(S)_PROXY from the broker's environment.
+	transport.Proxy = nil
 
 	return &RouterClient{
 		Endpoint:   strings.TrimRight(cfg.Endpoint, "/"),

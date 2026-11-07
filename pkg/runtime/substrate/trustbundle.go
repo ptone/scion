@@ -122,7 +122,11 @@ func checkClusterTrustBundleName(name string) error {
 }
 
 // clusterTrustBundleV1 is the part of a certificates.k8s.io/v1
-// ClusterTrustBundle the lookup reads.
+// ClusterTrustBundle the lookup reads. Unknown fields are deliberately
+// ignored: a real object carries more metadata and spec fields (for
+// example spec.signerName) than the lookup needs, and new fields must not
+// break it. What the lookup relies on is checked strictly instead:
+// apiVersion, kind, metadata.name and the presence of spec.trustBundle.
 type clusterTrustBundleV1 struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`

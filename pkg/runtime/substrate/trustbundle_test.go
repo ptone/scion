@@ -155,6 +155,32 @@ func statusJSON(t *testing.T, code int, reason metav1.StatusReason) string {
 
 func strPtr(s string) *string { return &s }
 
+// v1WithExtraFields is a v1 ClusterTrustBundle carrying fields the lookup
+// does not read, as a real API server returns it.
+func v1WithExtraFields(t *testing.T, bundle string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]interface{}{
+		"apiVersion": "certificates.k8s.io/v1",
+		"kind":       "ClusterTrustBundle",
+		"metadata": map[string]interface{}{
+			"name":            testCTBName,
+			"uid":             "00000000-0000-0000-0000-000000000001",
+			"resourceVersion": "42",
+			"labels":          map[string]string{"podcert.ate.dev/canarying": "live"},
+		},
+		"spec": map[string]interface{}{
+			"signerName":  "servicedns.podcert.ate.dev/identity",
+			"trustBundle": bundle,
+			"futureField": true,
+		},
+		"status": map[string]interface{}{"unknown": "x"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 // TestCTBLookup_FallbackTable drives the shared lookup through a real
 // clientset against an API stub, one row per fallback rule.
 func TestCTBLookup_FallbackTable(t *testing.T) {
@@ -180,6 +206,15 @@ func TestCTBLookup_FallbackTable(t *testing.T) {
 		{
 			name:     "v1 200 valid bundle is used, no fallback",
 			replies:  map[string]apiReply{ctbV1ObjPath: v1OK(&caPEM), ctbBetaObjPath: betaOK(otherPEM)},
+			wantPEM:  caPEM,
+			wantBeta: 0,
+		},
+		{
+			name: "v1 200 with unknown fields is used (unknown fields are ignored deliberately)",
+			replies: map[string]apiReply{
+				ctbV1ObjPath:   {status: http.StatusOK, body: v1WithExtraFields(t, caPEM)},
+				ctbBetaObjPath: betaOK(otherPEM),
+			},
 			wantPEM:  caPEM,
 			wantBeta: 0,
 		},

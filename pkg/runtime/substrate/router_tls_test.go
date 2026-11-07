@@ -304,6 +304,9 @@ func TestMTLSRouterClient_TLSConfigInvariants(t *testing.T) {
 	if cfg.ServerName != testRouterHost {
 		t.Errorf("ServerName = %q, want the endpoint host %q", cfg.ServerName, testRouterHost)
 	}
+	if routerTransport(t, rc).Proxy != nil {
+		t.Error("router transport has a Proxy func; router traffic must never use an environment proxy")
+	}
 	// RootCAs are exactly the configured CA file: no system roots, nothing else.
 	want := x509.NewCertPool()
 	want.AddCert(f.serverCA.cert)
@@ -410,6 +413,32 @@ func TestMTLSRouterClient_RotatedCertificateReRead(t *testing.T) {
 	}
 	if cn != "broker-1-rotated" {
 		t.Errorf("after rotation the server saw CN %q, want broker-1-rotated", cn)
+	}
+}
+
+// TestMTLSRouterClient_MismatchedRotatedPairFailsClosed: a rotation that
+// leaves a certificate and key that do not belong together fails the
+// handshake; the client never falls back to the pair it loaded earlier.
+func TestMTLSRouterClient_MismatchedRotatedPairFailsClosed(t *testing.T) {
+	f := newRouterFixture(t, nil)
+	rc, err := f.build(t, f.config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cn, err := get(t, rc); err != nil || cn != "broker-1" {
+		t.Fatalf("before rotation: CN %q, err %v; want broker-1", cn, err)
+	}
+	before := f.hits.Load()
+
+	newCertPEM, _ := f.clientCA.issue(t, "broker-1-rotated", "", true)
+	writeFileAtomic(t, f.certFile, newCertPEM) // the key file still holds the old key
+	rc.HTTPClient.CloseIdleConnections()
+
+	if _, err := get(t, rc); err == nil {
+		t.Fatal("Do() succeeded with a mismatched certificate and key")
+	}
+	if n := f.hits.Load(); n != before {
+		t.Errorf("handler ran %d more time(s) after the mismatched rotation, want 0", n-before)
 	}
 }
 
