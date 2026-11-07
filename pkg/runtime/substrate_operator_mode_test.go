@@ -445,3 +445,80 @@ func TestSubstrateRecordlessActors_FailsOnAnyError(t *testing.T) {
 		})
 	}
 }
+
+// TestSubstrateAtespaceProvisioningError_NeverCarriesServerText: the typed
+// error skips redact in Run, so it must carry only the atespace name and
+// the gRPC code. A distinctive server message planted in the NotFound or
+// PermissionDenied status must not appear in the error text from
+// ensureAtespace, Run, or a project-scoped List.
+func TestSubstrateAtespaceProvisioningError_NeverCarriesServerText(t *testing.T) {
+	const planted = "PLANTED-SERVER-TEXT-7f3a9c internal://ate-api.example:8443 principal=broker-sa"
+	for _, code := range []codes.Code{codes.NotFound, codes.PermissionDenied} {
+		t.Run(code.String(), func(t *testing.T) {
+			rec := &callRecorder{}
+			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+			defer closeServer()
+			fc.getAtespace = func(*ateapi.GetAtespaceRequest) (*ateapi.Atespace, error) {
+				return nil, status.Error(code, planted)
+			}
+			fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+				return nil, status.Error(code, planted)
+			}
+			_, runErr := rt.Run(context.Background(), testSubstrateRunConfig())
+			_, listErr := rt.List(context.Background(), map[string]string{projectkeys.LabelProjectID: testProjAID})
+			for name, err := range map[string]error{
+				"ensureAtespace": rt.ensureAtespace(context.Background(), testAtespaceA),
+				"Run":            runErr,
+				"List":           listErr,
+			} {
+				if !errors.Is(err, ErrSubstrateAtespaceNotProvisioned) {
+					t.Fatalf("%s: err = %v, want the typed provisioning error", name, err)
+				}
+				for _, part := range []string{"PLANTED", "7f3a9c", "ate-api.example", "principal="} {
+					if strings.Contains(err.Error(), part) {
+						t.Errorf("%s: error text %q carries server text %q", name, err.Error(), part)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestSubstrateList_NeverReturnsActorReportingAnotherAtespace: each
+// atespace's listing keeps only actors that report that atespace. An actor
+// a server returns under the wrong atespace is dropped there: it is listed
+// once if its own atespace is served, and not at all otherwise.
+func TestSubstrateList_NeverReturnsActorReportingAnotherAtespace(t *testing.T) {
+	rec := &callRecorder{}
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+	rt.SetProjectSet(newFakeProjectSet(testProjAID, testProjBID))
+	notServed := substrateAtespaceName("not-served")
+	ownA := runningActor(testAtespaceA, "projA--dev", "uid-a")
+	ownB := runningActor(testAtespaceB, "projB--dev", "uid-b")
+	stray := runningActor(notServed, "other--dev", "uid-x")
+	log := &atespaceRequestLog{}
+	// Every atespace's response also carries the other atespaces' actors.
+	fc.listActors = listActorsByAtespace(log, map[string][]*ateapi.Actor{
+		testAtespaceA: {ownA, ownB, stray},
+		testAtespaceB: {ownB, ownA, stray},
+	}, nil)
+
+	for _, filter := range []map[string]string{nil, {projectkeys.LabelProjectID: testProjAID}} {
+		agents, err := rt.List(context.Background(), filter)
+		if err != nil {
+			t.Fatalf("List(%v) error = %v", filter, err)
+		}
+		var ids []string
+		for _, a := range agents {
+			ids = append(ids, a.ContainerID)
+		}
+		want := []string{testAtespaceA + "/projA--dev", testAtespaceB + "/projB--dev"}
+		if filter != nil {
+			want = want[:1]
+		}
+		if !reflect.DeepEqual(ids, want) {
+			t.Errorf("List(%v) = %v, want %v (each actor only from its own atespace, the unserved one never)", filter, ids, want)
+		}
+	}
+}

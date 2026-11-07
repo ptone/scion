@@ -209,6 +209,25 @@ func TestServedProjects_UnionAndColdAcrossHubConnections(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, []string{"p1", "p2", "p3"}) {
 		t.Fatalf("union: %v, %v; want [p1 p2 p3], nil", got, err)
 	}
+	// Each connection is read with its own broker ID and keeps its own
+	// snapshot: one connection's load never writes another's.
+	for _, c := range []struct {
+		f    *fakeProjectLister
+		id   string
+		want []string
+	}{{a, "ba", []string{"p1", "p2"}}, {b, "bb", []string{"p2", "p3"}}} {
+		for _, id := range c.f.brokerID {
+			if id != c.id {
+				t.Errorf("ListProjects broker ID = %q, want %q", id, c.id)
+			}
+		}
+	}
+	if snap := p.snaps[servedProjectsSource{name: "a", brokerID: "ba"}.key()]; !reflect.DeepEqual(snap.projectIDs, []string{"p1", "p2"}) {
+		t.Errorf("connection a snapshot = %v, want [p1 p2]", snap.projectIDs)
+	}
+	if snap := p.snaps[servedProjectsSource{name: "b", brokerID: "bb"}.key()]; !reflect.DeepEqual(snap.projectIDs, []string{"p2", "p3"}) {
+		t.Errorf("connection b snapshot = %v, want [p2 p3]", snap.projectIDs)
+	}
 }
 
 // TestServedProjects_RemovedConnectionLeavesUnionAndColdCheck: a hub
