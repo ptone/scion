@@ -3024,11 +3024,52 @@ func (l *listProjectsFailStore) ListProjects(ctx context.Context, f store.Projec
 	return l.Store.ListProjects(ctx, f, o)
 }
 
+// brokerRowFailStore is a store whose plugin broker row look-up or create
+// fails while its fault switch is armed.
+type brokerRowFailStore struct {
+	store.Store
+	fault      *storeFaultSwitch
+	failLookup bool // false: the look-up reports not found and the create fails
+}
+
+func (b *brokerRowFailStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	if b.fault.Active() {
+		if b.failLookup {
+			return nil, errors.New("database is locked")
+		}
+		return nil, store.ErrNotFound
+	}
+	return b.Store.GetRuntimeBroker(ctx, id)
+}
+
+func (b *brokerRowFailStore) CreateRuntimeBrokerClearingCredentials(ctx context.Context, r *store.RuntimeBroker) error {
+	if b.fault.Active() {
+		return errors.New("database is locked")
+	}
+	return b.Store.CreateRuntimeBrokerClearingCredentials(ctx, r)
+}
+
+// brokerRowFault arms a brokerRowFailStore and gives the server a broker
+// auth service over the unwrapped store, so a secret it generated would be
+// visible there.
+func brokerRowFault(failLookup bool) func(t *testing.T, srv *Server, st store.Store, _ *supervisionWiringRecorder) {
+	return func(t *testing.T, srv *Server, st store.Store, _ *supervisionWiringRecorder) {
+		svc := NewBrokerAuthService(DefaultBrokerAuthConfig(), st)
+		t.Cleanup(svc.Close)
+		srv.brokerAuthService = svc
+		_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *brokerRowFailStore {
+			return &brokerRowFailStore{Store: inner, fault: f, failLookup: failLookup}
+		})
+		fault.Arm()
+	}
+}
+
 func TestSupervisionConfigProvider_ReportsUnreadableInputs(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		setup   func(t *testing.T, srv *Server, st store.Store, rec *supervisionWiringRecorder)
 		wantErr string // "" means no error
+		wantIs  error  // when set, errors.Is(err, wantIs), no hmac_key and no stored broker secret
 	}{
 		{name: "unreadable config file", wantErr: "resolve config file", setup: func(t *testing.T, _ *Server, _ store.Store, rec *supervisionWiringRecorder) {
 			bad := filepath.Join(t.TempDir(), "discord.yaml")
@@ -3046,6 +3087,8 @@ func TestSupervisionConfigProvider_ReportsUnreadableInputs(t *testing.T) {
 			t.Cleanup(svc.Close)
 			srv.brokerAuthService = svc
 		}},
+		{name: "broker row look-up failure", wantErr: "plugin broker row look-up failed", wantIs: errPluginBrokerRow, setup: brokerRowFault(true)},
+		{name: "broker row create failure", wantErr: "plugin broker row create failed", wantIs: errPluginBrokerRow, setup: brokerRowFault(false)},
 		{name: "project list failure", wantErr: "project slug map", setup: func(t *testing.T, srv *Server, _ store.Store, _ *supervisionWiringRecorder) {
 			_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *listProjectsFailStore {
 				return &listProjectsFailStore{Store: inner, fault: f}
@@ -3068,6 +3111,13 @@ func TestSupervisionConfigProvider_ReportsUnreadableInputs(t *testing.T) {
 			} else {
 				require.Error(t, err, "an unreadable input fails the restart attempt")
 				assert.Contains(t, err.Error(), tc.wantErr)
+			}
+			if tc.wantIs != nil {
+				assert.ErrorIs(t, err, tc.wantIs)
+				assert.Empty(t, cfg["hmac_key"], "no hub key without a confirmed broker row")
+				require.NotEmpty(t, cfg["broker_id"])
+				_, secretErr := st.GetBrokerSecret(context.Background(), cfg["broker_id"])
+				assert.ErrorIs(t, secretErr, store.ErrNotFound, "no broker secret is generated without a confirmed broker row")
 			}
 			assert.Equal(t, "discord", cfg["plugin_name"])
 
