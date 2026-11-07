@@ -17,7 +17,6 @@ package runtime
 import (
 	"fmt"
 	"log/slog"
-	"net/url"
 	"regexp"
 	"slices"
 	"sort"
@@ -288,8 +287,8 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 	// checked against.
 	operatorTargets := slices.Clone(targets)
 
-	trustedHubHost := strings.ToLower(hostFromURL(cfg.TrustedHubEndpoint))
-	if finalHubHost := strings.ToLower(hostFromURLEnv(env, "SCION_HUB_ENDPOINT", "SCION_HUB_URL")); finalHubHost != "" && finalHubHost != trustedHubHost {
+	trustedHubHost := hostFromURL(cfg.TrustedHubEndpoint)
+	if finalHubHost := hostFromURLEnv(env, "SCION_HUB_ENDPOINT", "SCION_HUB_URL"); finalHubHost != "" && finalHubHost != trustedHubHost {
 		slog.Warn("substrate: ignoring agent env hub endpoint that does not match the operator-configured hub",
 			"trusted_host", trustedHubHost, "env_host", finalHubHost)
 	}
@@ -312,7 +311,12 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 	// input (raw is a URL or host[:port]; source names the setting). It
 	// never adds a rule: covered by an operator-trusted rule on the same
 	// protocol and port means it is already admitted; anything else is
-	// dropped with a warning naming the egress_allow entry to add.
+	// dropped with a warning naming the egress_allow entry to add. The
+	// need maps like the translation: http:// is an http need on its port
+	// (default 80); https:// or bare is a passthrough need (default 443).
+	// Tenant values are reduced to scheme, host and port
+	// (parseDerivedEndpoint) before parsing or logging; parser errors never
+	// echo userinfo or query.
 	// Well-formedness alone would not be enough to admit it: an
 	// attacker-chosen but ordinary-looking public hostname (a service like
 	// nip.io/sslip.io that resolves an embedded IP octet on request, or any
@@ -364,7 +368,7 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 		} else {
 			// hostFromURL returns "" for a URL it cannot extract a hostname
 			// from — notably an scp-style git remote ("git@host:org/r.git",
-			// no "://"), which url.Parse does not accept as a URL at all.
+			// no "://"), whose "org" is not a port.
 			// Nothing is admitted for it, logged so the failure mode is
 			// distinguishable.
 			slog.Warn("substrate: could not extract a hostname from the configured git clone URL; no egress host added for it", "hint", "scp-style remotes (git@host:org/repo.git) are not supported here — use an https:// URL")
@@ -410,26 +414,68 @@ func substrateEgressTargetLess(a, b substrateEgressTarget) bool {
 	return a.host < b.host
 }
 
-// parseDerivedEndpoint splits a URL or bare host[:port] into its lowercase
-// scheme, lowercase host and port. A value with no scheme is https; a
-// missing port is the scheme's default (443 for https, 80 for http, 0 for
-// anything else). ok is false when no host can be extracted or the port is
-// not a number from 1 to 65535.
+// parseDerivedEndpoint reduces a URL or bare host[:port] to its lowercase
+// scheme, lowercase host and port, and nothing else: userinfo, path, query
+// and fragment are cut off before anything is parsed or logged. The scheme
+// is detected only by a literal "http://" or "https://" prefix (any other
+// "<name>://" yields that name, which callers refuse); a value with no
+// scheme is https. A missing port is the scheme's default (443 for https,
+// 80 for http, 0 for anything else). An IPv6 literal must be bracketed. ok
+// is false when no host can be extracted or the port is not a number from
+// 1 to 65535. No URL parser is used.
 func parseDerivedEndpoint(raw string) (scheme, host string, port int32, ok bool) {
-	candidate := strings.TrimSpace(raw)
-	if candidate == "" {
+	s := strings.TrimSpace(raw)
+	if s == "" {
 		return "", "", 0, false
 	}
-	if !strings.Contains(candidate, "://") {
-		candidate = "https://" + candidate
+	lower := strings.ToLower(s)
+	switch {
+	case strings.HasPrefix(lower, "https://"):
+		scheme, s = "https", s[len("https://"):]
+	case strings.HasPrefix(lower, "http://"):
+		scheme, s = "http", s[len("http://"):]
+	case strings.Contains(s, "://"):
+		i := strings.Index(s, "://")
+		scheme, s = lower[:i], s[i+len("://"):]
+	default:
+		scheme = "https"
 	}
-	u, err := url.Parse(candidate)
-	if err != nil || u.Hostname() == "" {
+	// The authority ends at the first "/", "?" or "#"; userinfo ends at
+	// the last "@" before it.
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		s = s[i+1:]
+	}
+	var p string
+	hasPort := false
+	if strings.HasPrefix(s, "[") {
+		end := strings.Index(s, "]")
+		if end < 0 {
+			return "", "", 0, false
+		}
+		host = s[1:end]
+		switch after := s[end+1:]; {
+		case after == "":
+		case strings.HasPrefix(after, ":"):
+			p, hasPort = after[1:], true
+		default:
+			return "", "", 0, false
+		}
+	} else if h, pp, found := strings.Cut(s, ":"); found {
+		if strings.Contains(pp, ":") {
+			return "", "", 0, false
+		}
+		host, p, hasPort = h, pp, true
+	} else {
+		host = s
+	}
+	if host == "" {
 		return "", "", 0, false
 	}
-	scheme = strings.ToLower(u.Scheme)
-	switch p := u.Port(); {
-	case p != "":
+	switch {
+	case hasPort:
 		n, err := strconv.ParseUint(p, 10, 16)
 		if err != nil || n == 0 {
 			return "", "", 0, false
@@ -440,7 +486,7 @@ func parseDerivedEndpoint(raw string) (scheme, host string, port int32, ok bool)
 	case scheme == "http":
 		port = 80
 	}
-	return scheme, strings.ToLower(u.Hostname()), port, true
+	return scheme, strings.ToLower(host), port, true
 }
 
 // firstEnv returns env[key] trimmed.
@@ -461,21 +507,14 @@ func hostFromURLEnv(env map[string]string, keys ...string) string {
 	return ""
 }
 
-// hostFromURL extracts the hostname from a URL string, tolerating bare
-// host[:port] values (no scheme) as well as full URLs.
+// hostFromURL extracts the lowercase hostname from a URL or bare
+// host[:port] value (see parseDerivedEndpoint), or "".
 func hostFromURL(raw string) string {
-	if raw == "" {
+	_, host, _, ok := parseDerivedEndpoint(raw)
+	if !ok {
 		return ""
 	}
-	candidate := raw
-	if !strings.Contains(candidate, "://") {
-		candidate = "https://" + candidate
-	}
-	u, err := url.Parse(candidate)
-	if err != nil || u.Hostname() == "" {
-		return ""
-	}
-	return u.Hostname()
+	return host
 }
 
 // substrateEgressPolicyName is the only permitted name of an actor's v1

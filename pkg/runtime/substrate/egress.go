@@ -17,7 +17,6 @@ package substrate
 import (
 	"fmt"
 	"net/netip"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -351,8 +350,10 @@ func parseEgressPort(raw, p string) (int32, error) {
 // part runs every host check again (normalizeEgressAllowHost:
 // validatePublicHostname and the catch-all, IP/CIDR and blocked-suffix
 // refusals), so no syntax admits a catch-all, an in-cluster or an IP host.
-// The port is an integer from 1 to 65535. A URL form carries no userinfo,
-// path (other than "/"), query or fragment.
+// The scheme is detected only by a literal "http://" or "https://" prefix;
+// no URL parser is used. The port is an integer from 1 to 65535. A URL form
+// carries no userinfo, path (other than a single trailing "/"), query or
+// fragment.
 //
 // A "*.host" wildcard keeps today's meaning without widening: the v1 rule
 // pattern syntax matches exactly one leftmost label, as EgressAllowCovers
@@ -376,52 +377,45 @@ func NormalizeEgressAllowEntry(raw string) (EgressAllowEntry, error) {
 		return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q is not permitted", raw)
 	}
 
+	// The scheme is detected ONLY by a literal "http://" or "https://"
+	// prefix (the entry is already lowercased); any other "://" is an
+	// unsupported scheme. No URL parser is involved.
 	scheme := "https"
 	port := defaultHTTPSPort
-	hostPart := e
+	rest := e
+	isURL := false
 	switch {
+	case strings.HasPrefix(e, "https://"):
+		rest, isURL = strings.TrimPrefix(e, "https://"), true
+	case strings.HasPrefix(e, "http://"):
+		scheme, port, isURL = "http", defaultHTTPPort, true
+		rest = strings.TrimPrefix(e, "http://")
 	case strings.Contains(e, "://"):
-		u, perr := url.Parse(e)
-		if perr != nil {
-			if strings.Contains(perr.Error(), "invalid port") {
-				return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q has invalid port; a port is a number from 1 to 65535", raw)
-			}
-			return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q is not a valid URL", raw)
-		}
-		if u.User != nil {
+		name, _, _ := strings.Cut(e, "://")
+		return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q has unsupported scheme %q; use http:// or https://, or host:port", raw, name)
+	}
+	if isURL {
+		if strings.Contains(rest, "@") {
 			// The entry is not echoed: userinfo may carry a credential.
 			return EgressAllowEntry{}, fmt.Errorf("an egress_allow URL entry carries userinfo, which is not permitted; write it as http://host[:port] or host:port")
 		}
-		if u.Path != "" && u.Path != "/" {
-			return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q may not carry a path; write it as http://host[:port] or host:port", raw)
-		}
-		if u.RawQuery != "" || u.ForceQuery {
-			return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q may not carry a query; write it as http://host[:port] or host:port", raw)
-		}
-		if u.Fragment != "" || strings.Contains(e, "#") {
+		if strings.Contains(rest, "#") {
 			return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q may not carry a fragment; write it as http://host[:port] or host:port", raw)
 		}
-		if u.Opaque != "" {
-			return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q is not a valid URL", raw)
+		if strings.Contains(rest, "?") {
+			return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q may not carry a query; write it as http://host[:port] or host:port", raw)
 		}
-		switch u.Scheme {
-		case "http":
-			scheme, port = "http", defaultHTTPPort
-		case "https":
-		default:
-			return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q has unsupported scheme %q; use http:// or https://, or host:port", raw, u.Scheme)
-		}
-		hostPart = u.Hostname()
-		if p := u.Port(); p != "" {
-			var err error
-			if port, err = parseEgressPort(raw, p); err != nil {
-				return EgressAllowEntry{}, err
+		if i := strings.Index(rest, "/"); i >= 0 {
+			if i != len(rest)-1 {
+				return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q may not carry a path; write it as http://host[:port] or host:port", raw)
 			}
-		} else if strings.HasSuffix(u.Host, ":") {
-			return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q has invalid port %q; a port is a number from 1 to 65535", raw, "")
+			rest = rest[:i] // a single trailing "/" is allowed
 		}
-	case strings.Contains(e, ":"):
-		h, p, _ := strings.Cut(e, ":")
+		// The whole-entry trailing-dot strip above saw the "/" last.
+		rest = strings.TrimSuffix(rest, ".")
+	}
+	hostPart := rest
+	if h, p, found := strings.Cut(rest, ":"); found {
 		if strings.Contains(p, ":") {
 			return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q is not host:port", raw)
 		}

@@ -210,3 +210,34 @@ func TestParseEgressAllow_TargetsAndProtocolConflict(t *testing.T) {
 		}
 	}
 }
+
+// Design §9 AC9 refused list (r2/r4), each refused.
+func TestNormalizeEgressAllowEntry_AC9Refused(t *testing.T) {
+	for entry, reason := range map[string]string{
+		"*":                       "catch-all",
+		"http://169.254.169.254":  "IP/CIDR",
+		"http://user@host":        "userinfo",
+		"host:0":                  "invalid port",
+		"host:70000":              "invalid port",
+		"hub.ns.svc:8080":         "ICANN",
+		"10.0.0.1:443":            "IP/CIDR",
+		"http://host/path?q":      "query",
+		"x.cluster.local:8080":    "ICANN",
+		"https://example.com/a/b": "path",
+	} {
+		assertNormalizeRefused(t, entry, reason)
+	}
+}
+
+// The scheme is detected only by the literal prefix: a scheme-like word
+// without "://" is a host:port and fails as one, and an uppercase prefix is
+// still recognised.
+func TestNormalizeEgressAllowEntry_SchemeByLiteralPrefixOnly(t *testing.T) {
+	assertNormalizeRefused(t, "http:example.com", "invalid port")
+	assertNormalizeRefused(t, "https:/example.com", "invalid port")
+	got, err := NormalizeEgressAllowEntry("HTTPS://Example.com:8443")
+	want := EgressAllowEntry{Scheme: "https", Host: "example.com", Port: 8443}
+	if err != nil || got != want {
+		t.Errorf("NormalizeEgressAllowEntry(HTTPS://Example.com:8443) = %+v, %v; want %+v", got, err, want)
+	}
+}

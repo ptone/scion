@@ -549,20 +549,18 @@ func TestSubstrateEgressHostnames_IPLiteralTrustedHubRefused(t *testing.T) {
 	}
 }
 
-// TestSubstrateEgressHostnames_UnencodedZoneTrustedHubAddsNoHost: a
-// trusted hub endpoint with a raw (not percent-encoded) IPv6 zone is not a
-// parseable URL, so no hub host is extracted and none is added — it fails
-// closed by omission rather than reaching the policy in any form.
-func TestSubstrateEgressHostnames_UnencodedZoneTrustedHubAddsNoHost(t *testing.T) {
+// TestSubstrateEgressHostnames_UnencodedZoneTrustedHubRefused: a trusted
+// hub endpoint with a raw (not percent-encoded) IPv6 zone is an IP literal,
+// so it is refused like any other IP hub endpoint and never reaches the
+// policy in any form.
+func TestSubstrateEgressHostnames_UnencodedZoneTrustedHubRefused(t *testing.T) {
 	cfg := RunConfig{TrustedHubEndpoint: "https://[fe80::1%eth0]:8443"}
 	hosts, hostsErr := substrateEgressTargetHosts(cfg, map[string]string{}, config.V1SubstrateConfig{})
-	if hostsErr != nil {
-		t.Fatalf("substrateEgressTargetHosts() error = %v", hostsErr)
+	if hostsErr == nil || !strings.Contains(hostsErr.Error(), "resolves to IP address") {
+		t.Fatalf("substrateEgressTargetHosts() error = %v, want the IP-address refusal", hostsErr)
 	}
-	for _, h := range hosts {
-		if strings.Contains(h, "fe80") || strings.Contains(h, "eth0") {
-			t.Errorf("substrateEgressTargetHosts() = %v, the zoned IPv6 hub host %q reached the policy", hosts, h)
-		}
+	if len(hosts) != 0 {
+		t.Errorf("substrateEgressTargetHosts() returned hosts %v alongside its error, want none", hosts)
 	}
 }
 

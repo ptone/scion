@@ -639,3 +639,148 @@ func TestSubstrateEgressTargets_A4UncoveredCloneHostDropped(t *testing.T) {
 		t.Errorf("log = %q, want the warning naming git.example.com and egress_allow", out)
 	}
 }
+
+// Design §9 AC9 accepted forms, at the translation: http://host -> http on
+// 80; https://host:8443 -> passthrough 8443; http://*.example.com:8080 ->
+// one wildcard http rule on 8080; *.example.com:8443 -> one wildcard
+// passthrough rule on 8443.
+func TestSubstrateEgressTargets_AC9AcceptedForms(t *testing.T) {
+	sc := config.V1SubstrateConfig{EgressAllow: []string{
+		"http://plain.example.net", "https://api.example.net:8443", "http://*.example.com:8080", "*.example.com:8443",
+	}}
+	targets, err := substrateEgressTargets(RunConfig{}, map[string]string{}, sc)
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	for host, want := range map[string][]substrateEgressTarget{
+		"plain.example.net": {{protocol: substrate.EgressProtocolHTTP, host: "plain.example.net", port: 80}},
+		"api.example.net":   {{protocol: substrate.EgressProtocolTLSPassthrough, host: "api.example.net", port: 8443}},
+		"*.example.com": {
+			{protocol: substrate.EgressProtocolHTTP, host: "*.example.com", port: 8080},
+			{protocol: substrate.EgressProtocolTLSPassthrough, host: "*.example.com", port: 8443},
+		},
+	} {
+		if got := targetsFor(targets, host); !slices.Equal(got, want) {
+			t.Errorf("targets for %s = %+v, want %+v", host, got, want)
+		}
+	}
+}
+
+// assertTenantOnlyUnchanged checks design §9 AC9 GENERAL [r4:R4-1]: adding
+// tenant-derived input (env) leaves the rule set unchanged.
+func assertTenantOnlyUnchanged(t *testing.T, cfg RunConfig, sc config.V1SubstrateConfig, env map[string]string) []substrateEgressTarget {
+	t.Helper()
+	without, err := substrateEgressTargets(cfg, map[string]string{}, sc)
+	if err != nil {
+		t.Fatalf("without tenant input: error = %v", err)
+	}
+	with, err := substrateEgressTargets(cfg, env, sc)
+	if err != nil {
+		t.Fatalf("with tenant input: error = %v, want no refusal", err)
+	}
+	if !slices.Equal(with, without) {
+		t.Errorf("tenant input changed the rules:\nwith:    %+v\nwithout: %+v", with, without)
+	}
+	return with
+}
+
+// Design §9 AC9 GENERAL [r4:R4-1], the four concrete cases.
+func TestSubstrateEgressTargets_R4TenantOnlyInputLeavesRulesUnchanged(t *testing.T) {
+	t.Run("hub-shaped env value", func(t *testing.T) {
+		assertTenantOnlyUnchanged(t, RunConfig{TrustedHubEndpoint: "https://hub.example.com"}, config.V1SubstrateConfig{},
+			map[string]string{"SCION_HUB_ENDPOINT": "http://hub.scion-system.svc:8080", "SCION_HUB_URL": "http://evil.example.com:8080"})
+	})
+	t.Run("uncovered tenant host on 443", func(t *testing.T) {
+		logs := &syncBuffer{}
+		setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
+		assertTenantOnlyUnchanged(t, RunConfig{}, config.V1SubstrateConfig{},
+			map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://otel.example.com"})
+		if out := logs.String(); !strings.Contains(out, "otel.example.com") || !strings.Contains(out, "egress_allow") {
+			t.Errorf("log = %q, want the warning naming otel.example.com", out)
+		}
+	})
+	t.Run("passthrough need covered only by an operator http wildcard", func(t *testing.T) {
+		logs := &syncBuffer{}
+		setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
+		sc := config.V1SubstrateConfig{EgressAllow: []string{"http://*.example.com:443"}}
+		got := assertTenantOnlyUnchanged(t, RunConfig{}, sc, map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://api.example.com"})
+		want := []substrateEgressTarget{{protocol: substrate.EgressProtocolHTTP, host: "*.example.com", port: 443}}
+		if w := targetsFor(got, "*.example.com"); !slices.Equal(w, want) {
+			t.Errorf("operator rule = %+v, want it untouched: %+v", w, want)
+		}
+		out := logs.String()
+		if !strings.Contains(out, `add \"api.example.com\"`) {
+			t.Errorf("log = %q, want the warning to name the passthrough entry api.example.com", out)
+		}
+		if strings.Contains(out, "http://api.example.com") {
+			t.Errorf("log = %q, the warning names an http entry for a passthrough need", out)
+		}
+	})
+	t.Run("tenant http://h:443 with operator https://h:443", func(t *testing.T) {
+		sc := config.V1SubstrateConfig{EgressAllow: []string{"https://h.example.com:443"}}
+		env := map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://h.example.com:443"}
+		assertTenantOnlyUnchanged(t, RunConfig{}, sc, env)
+
+		rec := &callRecorder{}
+		rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
+		defer closeServer()
+		rt.cfg = sc
+		cfg := testSubstrateRunConfig()
+		cfg.Env = append(slices.Clone(cfg.Env), "OTEL_EXPORTER_OTLP_ENDPOINT=http://h.example.com:443")
+		if _, err := rt.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run() error = %v, want the Run to proceed", err)
+		}
+	})
+}
+
+// Tenant values are reduced to scheme, host and port before parsing or
+// logging; a parser error never echoes the URL's userinfo, path or query.
+func TestSubstrateEgressTargets_TenantValueReducedBeforeParseOrLog(t *testing.T) {
+	logs := &syncBuffer{}
+	setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
+	env := map[string]string{
+		"SCION_OTEL_ENDPOINT":         "https://tok-user:tok-secret@bad_host!.example.com:4317/tok-path?key=tok-query#tok-frag",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "https://tok-user2:tok-secret2@10.0.0.1:4318/v1?key=tok-query2",
+		"ANTHROPIC_VERTEX_BASE_URL":   "https://tok-user3:tok-secret3@[::1",
+	}
+	if _, err := substrateEgressTargets(RunConfig{}, env, config.V1SubstrateConfig{}); err != nil {
+		t.Fatalf("error = %v, want drops only", err)
+	}
+	out := logs.String()
+	for _, leak := range []string{"tok-user", "tok-secret", "tok-path", "tok-query", "tok-frag"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("log = %q, leaks %q", out, leak)
+		}
+	}
+	if !strings.Contains(out, "bad_host!.example.com") {
+		t.Errorf("log = %q, want the invalid host named", out)
+	}
+}
+
+func TestParseDerivedEndpoint(t *testing.T) {
+	type res struct {
+		scheme, host string
+		port         int32
+		ok           bool
+	}
+	for raw, want := range map[string]res{
+		"https://User:pw@Host.Example.com:4317/p?q#f": {"https", "host.example.com", 4317, true},
+		"HTTP://host.example.com":                     {"http", "host.example.com", 80, true},
+		"host.example.com":                            {"https", "host.example.com", 443, true},
+		"host.example.com:8080/x":                     {"https", "host.example.com", 8080, true},
+		"grpc://host.example.com:4317":                {"grpc", "host.example.com", 4317, true},
+		"grpc://host.example.com":                     {"grpc", "host.example.com", 0, true},
+		"https://[fd00::1]:8443":                      {"https", "fd00::1", 8443, true},
+		"git@github.com:acme/repo.git":                {"", "", 0, false},
+		"https://host.example.com:0":                  {"", "", 0, false},
+		"https://host.example.com:99999":              {"", "", 0, false},
+		"https://[::1":                                {"", "", 0, false},
+		"2001:db8::1":                                 {"", "", 0, false},
+		"":                                            {"", "", 0, false},
+	} {
+		s, h, p, ok := parseDerivedEndpoint(raw)
+		if got := (res{s, h, p, ok}); got != want {
+			t.Errorf("parseDerivedEndpoint(%q) = %+v, want %+v", raw, got, want)
+		}
+	}
+}
