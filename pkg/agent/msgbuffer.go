@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/tmuxdeliver"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -303,7 +304,8 @@ func bufferKey(agentID, projectID string) string {
 // unless it is a PartialDeliveryError: once some of the coalesced text has
 // reached the agent's terminal, retrying would re-deliver it and the agent
 // would see it twice, so that class of failure is reported immediately
-// instead (ptone/scion#1866).
+// instead (ptone/scion#1866). So is tmuxdeliver.ErrEmptyAfterSanitize (a
+// text with nothing left to paste), which no retry can change.
 func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 	gate := mb.acquireGate(key)
 	defer mb.releaseGate(key, gate)
@@ -363,6 +365,11 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 
 		var partial *PartialDeliveryError
 		if errors.As(err, &partial) {
+			break
+		}
+		// A text with only characters the sanitiser removes is never
+		// pasted, so a retry cannot succeed: report it at once.
+		if errors.Is(err, tmuxdeliver.ErrEmptyAfterSanitize) {
 			break
 		}
 		if attempt < mb.maxFlushAttempts {
