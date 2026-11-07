@@ -349,6 +349,8 @@ var testAdminLegacyRoutePolicy = map[string]testAdminPolicy{
 	"admin.delegationAdoption":          testAdminPolicyDeny,
 	"admin.delegationAdoption.previews": testAdminPolicyDeny,
 	"admin.delegationAdoption.commits":  testAdminPolicyDeny,
+	// Server key status: deployment-wide key configuration.
+	"admin.keys.status": testAdminPolicyDeny,
 	// Lifting a governance hold on one agent.
 	"agents.hold.lift": testAdminPolicyAllow,
 	// Revoking one user's web sessions.
@@ -560,9 +562,12 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AuthorizationDecisionAuditV2: testAdminPolicyDeny,
 	"web.gcs_links":                          testAdminPolicyDeny,
 	experiments.K8sNFSHome:                   testAdminPolicyDeny,
+	experiments.CloudRunNativeIdentity:       testAdminPolicyDeny,
 	experiments.FlatRuntimeBrokers:           testAdminPolicyDeny,
+	experiments.FlatCloudRunTarget:           testAdminPolicyDeny,
 	experiments.Artifacts:                    testAdminPolicyDeny,
 	"hub.conduit":                            testAdminPolicyDeny,
+	experiments.ConduitDeliver:               testAdminPolicyDeny,
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
 	experiments.ChatStarredMessages:          testAdminPolicyDeny,
 	experiments.ChatRetention:                testAdminPolicyDeny,
@@ -575,9 +580,14 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
 	experiments.SecretRotation:               testAdminPolicyDeny,
 	experiments.ContentHashV2:                testAdminPolicyDeny,
+	experiments.LifecycleEvents:              testAdminPolicyDeny,
 	experiments.ArtifactReviewEditor:         testAdminPolicyDeny,
+	experiments.ArtifactManageAccess:         testAdminPolicyDeny,
+	experiments.ArtifactSponsorReviewGrant:   testAdminPolicyDeny,
 	experiments.SkillContentHashV2:           testAdminPolicyDeny,
 	experiments.UserDeleteForceCascade:       testAdminPolicyDeny,
+	experiments.ArtifactArchive:              testAdminPolicyDeny,
+	experiments.ImageTagSetting:              testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
@@ -969,7 +979,7 @@ func (d *HTTPAgentDispatcher) applyTestAdminSecretScopes(ctx context.Context, ag
 // envScopesForDispatch is envScopesInPrecedenceOrder with testAdminRootScopes
 // applied: the env var scopes an agent rooted at an admin-kind test
 // identity may receive. Every dispatch env read uses it (first pass,
-// as_needed pass, env source labels); the TZ chain (resolveStorageTZ)
+// as_needed pass); the TZ chain (resolveStorageTZ)
 // reads only TZ and keeps every scope.
 func (d *HTTPAgentDispatcher) envScopesForDispatch(ctx context.Context, agent *store.Agent) []store.EnvVarFilter {
 	filters := d.envScopesInPrecedenceOrder(agent)
