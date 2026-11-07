@@ -86,7 +86,7 @@ type fakeControlClient struct {
 
 	rec *callRecorder
 
-	createAtespace          func(*ateapi.CreateAtespaceRequest) (*ateapi.Atespace, error)
+	getAtespace             func(*ateapi.GetAtespaceRequest) (*ateapi.Atespace, error)
 	getActorTemplate        func(*ateapi.GetActorTemplateRequest) (*ateapi.ActorTemplate, error)
 	createActorTemplate     func(*ateapi.CreateActorTemplateRequest) (*ateapi.ActorTemplate, error)
 	createActor             func(*ateapi.CreateActorRequest) (*ateapi.Actor, error)
@@ -117,8 +117,8 @@ func newFakeControlClient(rec *callRecorder) *fakeControlClient {
 	f := &fakeControlClient{
 		rec:           rec,
 		createdActors: make(map[string]*ateapi.Actor),
-		createAtespace: func(*ateapi.CreateAtespaceRequest) (*ateapi.Atespace, error) {
-			return &ateapi.Atespace{}, nil
+		getAtespace: func(req *ateapi.GetAtespaceRequest) (*ateapi.Atespace, error) {
+			return &ateapi.Atespace{Metadata: &ateapi.ResourceMetadata{Name: req.GetAtespace().GetName()}}, nil
 		},
 		getActorTemplate: func(*ateapi.GetActorTemplateRequest) (*ateapi.ActorTemplate, error) {
 			return nil, status.Error(codes.NotFound, "not found")
@@ -227,9 +227,12 @@ func (f *fakeControlClient) ListActors(ctx context.Context, in *ateapi.ListActor
 	f.rec.record("ListActors")
 	return f.listActors(in)
 }
-func (f *fakeControlClient) CreateAtespace(ctx context.Context, in *ateapi.CreateAtespaceRequest, opts ...grpc.CallOption) (*ateapi.Atespace, error) {
-	f.rec.record("CreateAtespace")
-	return f.createAtespace(in)
+// GetAtespace backs ensureAtespace's verify-or-fail check. There is no
+// CreateAtespace override: operator mode never creates an atespace, so a
+// CreateAtespace call reaches the nil embedded interface and panics.
+func (f *fakeControlClient) GetAtespace(ctx context.Context, in *ateapi.GetAtespaceRequest, opts ...grpc.CallOption) (*ateapi.Atespace, error) {
+	f.rec.record("GetAtespace")
+	return f.getAtespace(in)
 }
 func (f *fakeControlClient) CreateActorTemplate(ctx context.Context, in *ateapi.CreateActorTemplateRequest, opts ...grpc.CallOption) (*ateapi.ActorTemplate, error) {
 	f.rec.record("CreateActorTemplate")
@@ -346,7 +349,60 @@ func newTestSubstrateHarness(t *testing.T, rec *callRecorder) (*SubstrateRuntime
 	fa := newFakeActorServer(rec)
 	server := httptest.NewServer(fa.handler())
 	rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, config.V1SubstrateConfig{})
+	// The runtime broker installs a ProjectSet in production; the harness
+	// serves one project, so an unfiltered List reads testServedAtespace.
+	rt.SetProjectSet(newFakeProjectSet(testServedProjectID))
 	return rt, fc, fa, server.Close
+}
+
+// testServedProjectID is the project the harness's ProjectSet serves;
+// testServedAtespace is the atespace an unfiltered List reads for it.
+const testServedProjectID = "proj"
+
+var testServedAtespace = substrateAtespaceName(testServedProjectID)
+
+// fakeProjectSet is a static ProjectSet with an optional error.
+type fakeProjectSet struct {
+	mu    sync.Mutex
+	ids   []string
+	err   error
+	calls int
+}
+
+func newFakeProjectSet(ids ...string) *fakeProjectSet { return &fakeProjectSet{ids: ids} }
+
+func (f *fakeProjectSet) ServedProjects(context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return append([]string(nil), f.ids...), nil
+}
+
+// The two projects of the two-project List tests, and their atespaces.
+const (
+	testProjAID = "aaaaaaaaaaaa"
+	testProjBID = "bbbbbbbbbbbb"
+)
+
+var (
+	testAtespaceA = substrateAtespaceName(testProjAID)
+	testAtespaceB = substrateAtespaceName(testProjBID)
+)
+
+// servedInActorOrder returns the project IDs of actors' atespaces in
+// actors' order. An unfiltered List reads the served projects' atespaces
+// in ProjectSet order, so a test that varies the ListActors return order
+// varies the served order the same way.
+func servedInActorOrder(actors []*ateapi.Actor) []string {
+	byAtespace := map[string]string{testAtespaceA: testProjAID, testAtespaceB: testProjBID}
+	var ids []string
+	for _, a := range actors {
+		ids = append(ids, byAtespace[a.GetMetadata().GetAtespace()])
+	}
+	return ids
 }
 
 // resetSubstrateAgentStateForTest clears the process-wide
@@ -448,7 +504,7 @@ func TestSubstrateRun_HappyPath(t *testing.T) {
 
 	gotCalls := rec.list()
 	wantOrder := []string{
-		"CreateAtespace",
+		"GetAtespace",
 		"GetActorTemplate",
 		"CreateActorTemplate",
 		"CreateActor",
@@ -606,10 +662,9 @@ func TestSubstrateRun_NonDigestImageError(t *testing.T) {
 		t.Errorf("error = %v, want it to mention the digest requirement", err)
 	}
 
-	// Must fail before touching the control plane at all (step 2 precedes
-	// CreateAtespace's caller-visible effect... actually atespace is step 1;
-	// the image check is step 2, so CreateAtespace WILL have been called).
-	// What must NOT happen is anything past the image check.
+	// The atespace check is step 1 and the image check step 2, so
+	// GetAtespace WILL have been called. What must NOT happen is anything
+	// past the image check.
 	for _, c := range rec.list() {
 		if c == "CreateActor" || c == "CreateActorTemplate" {
 			t.Errorf("Run() called %s before failing the digest check", c)
@@ -621,7 +676,7 @@ func TestSubstrateRun_NonDigestImageError(t *testing.T) {
 // ProjectID outright rather than silently hashing it into one fixed
 // atespace shared by every such caller (substrateAtespaceName has no other
 // input to distinguish them). Must fail before touching the control plane
-// at all — no CreateAtespace call.
+// at all — no GetAtespace call.
 func TestSubstrateRun_EmptyProjectIDRejected(t *testing.T) {
 	rec := &callRecorder{}
 	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
@@ -1246,17 +1301,17 @@ func TestSubstrateList_MappingAndLabelFilter(t *testing.T) {
 		return &ateapi.ListActorsResponse{
 			Actors: []*ateapi.Actor{
 				{
-					Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: "agent-a", Uid: "uid-a"},
+					Metadata: &ateapi.ResourceMetadata{Atespace: testServedAtespace, Name: "agent-a", Uid: "uid-a"},
 					Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 				},
 				{
-					Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: "agent-b", Uid: "uid-b"},
+					Metadata: &ateapi.ResourceMetadata{Atespace: testServedAtespace, Name: "agent-b", Uid: "uid-b"},
 					Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_SUSPENDED},
 				},
 				{
 					// No agentRecords entry — should still be listed, with
 					// empty synthesised fields.
-					Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: "agent-c", Uid: "uid-c"},
+					Metadata: &ateapi.ResourceMetadata{Atespace: testServedAtespace, Name: "agent-c", Uid: "uid-c"},
 					Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_CRASHED},
 				},
 			},
@@ -1285,8 +1340,8 @@ func TestSubstrateList_MappingAndLabelFilter(t *testing.T) {
 	if byName["agent-c"].Phase != "error" {
 		t.Errorf("agent-c phase = %q, want error", byName["agent-c"].Phase)
 	}
-	if byName["agent-a"].ContainerID != "scion-proj/agent-a" {
-		t.Errorf("agent-a ContainerID = %q, want scion-proj/agent-a", byName["agent-a"].ContainerID)
+	if want := testServedAtespace + "/agent-a"; byName["agent-a"].ContainerID != want {
+		t.Errorf("agent-a ContainerID = %q, want %q", byName["agent-a"].ContainerID, want)
 	}
 	if byName["agent-a"].Runtime != "substrate" {
 		t.Errorf("agent-a Runtime = %q, want substrate", byName["agent-a"].Runtime)
@@ -2271,7 +2326,7 @@ func TestSubstrateList_Pagination(t *testing.T) {
 		case "":
 			return &ateapi.ListActorsResponse{
 				Actors: []*ateapi.Actor{
-					{Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: "agent-a", Uid: "uid-a"},
+					{Metadata: &ateapi.ResourceMetadata{Atespace: testServedAtespace, Name: "agent-a", Uid: "uid-a"},
 						Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
 				},
 				NextPageToken: "page-2",
@@ -2279,7 +2334,7 @@ func TestSubstrateList_Pagination(t *testing.T) {
 		case "page-2":
 			return &ateapi.ListActorsResponse{
 				Actors: []*ateapi.Actor{
-					{Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: "agent-b", Uid: "uid-b"},
+					{Metadata: &ateapi.ResourceMetadata{Atespace: testServedAtespace, Name: "agent-b", Uid: "uid-b"},
 						Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
 				},
 				NextPageToken: "",
@@ -2374,7 +2429,7 @@ func TestSubstrateList_SkipsNonScionAtespaces(t *testing.T) {
 	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 		return &ateapi.ListActorsResponse{
 			Actors: []*ateapi.Actor{
-				{Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: "agent-a", Uid: "uid-a"},
+				{Metadata: &ateapi.ResourceMetadata{Atespace: testServedAtespace, Name: "agent-a", Uid: "uid-a"},
 					Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
 				{Metadata: &ateapi.ResourceMetadata{Atespace: "other-tenant", Name: "not-ours", Uid: "uid-x"},
 					Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
@@ -2405,7 +2460,7 @@ func TestSubstrateList_SynthesisesNameAndAgentLabelsWithoutRecord(t *testing.T) 
 	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 		return &ateapi.ListActorsResponse{
 			Actors: []*ateapi.Actor{
-				{Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: actorName, Uid: "uid-orphan"},
+				{Metadata: &ateapi.ResourceMetadata{Atespace: testServedAtespace, Name: actorName, Uid: "uid-orphan"},
 					Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
 			},
 		}, nil
@@ -2443,10 +2498,10 @@ func TestSubstrateList_SynthesisesNameAndAgentLabelsWithoutRecord(t *testing.T) 
 // a slug lookup for it finds nothing, by design.
 func TestSubstrateList_NameIsAgentSlugNotActorName(t *testing.T) {
 	const (
-		atespace  = "scion-proj"
 		actorName = "myproj--sb-smoke-2" // containerName("myproj", "sb-smoke-2")
 		agentSlug = "sb-smoke-2"
 	)
+	atespace := testServedAtespace
 
 	t.Run("record exists", func(t *testing.T) {
 		rec := &callRecorder{}
@@ -2523,11 +2578,11 @@ func TestSubstrateList_NameIsAgentSlugNotActorName(t *testing.T) {
 // actor orderings to confirm that explicitly.
 func TestSubstrateList_RecordlessActorsNeverMatchedBySlug(t *testing.T) {
 	actorA := &ateapi.Actor{
-		Metadata: &ateapi.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: "uid-a"},
+		Metadata: &ateapi.ResourceMetadata{Atespace: testAtespaceA, Name: "projA--dev", Uid: "uid-a"},
 		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
 	actorB := &ateapi.Actor{
-		Metadata: &ateapi.ResourceMetadata{Atespace: "scion-bbbbbbbbbbbb", Name: "projB--dev", Uid: "uid-b"},
+		Metadata: &ateapi.ResourceMetadata{Atespace: testAtespaceB, Name: "projB--dev", Uid: "uid-b"},
 		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
 
@@ -2540,6 +2595,7 @@ func TestSubstrateList_RecordlessActorsNeverMatchedBySlug(t *testing.T) {
 			rec := &callRecorder{}
 			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 			defer closeServer()
+			rt.SetProjectSet(newFakeProjectSet(servedInActorOrder(order)...))
 
 			fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 				return &ateapi.ListActorsResponse{Actors: order}, nil
@@ -2614,11 +2670,11 @@ func TestSubstrateList_RecordlessActorNotMatchedEvenWhenProjectScoped(t *testing
 func TestSubstrateList_RecordExistsAndRecordlessSameSlug(t *testing.T) {
 	const uid = "uid-with-record"
 	actorWithRecord := &ateapi.Actor{
-		Metadata: &ateapi.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: uid},
+		Metadata: &ateapi.ResourceMetadata{Atespace: testAtespaceA, Name: "projA--dev", Uid: uid},
 		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
 	actorWithoutRecord := &ateapi.Actor{
-		Metadata: &ateapi.ResourceMetadata{Atespace: "scion-bbbbbbbbbbbb", Name: "projB--dev", Uid: "uid-no-record"},
+		Metadata: &ateapi.ResourceMetadata{Atespace: testAtespaceB, Name: "projB--dev", Uid: "uid-no-record"},
 		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
 
@@ -2631,6 +2687,7 @@ func TestSubstrateList_RecordExistsAndRecordlessSameSlug(t *testing.T) {
 			rec := &callRecorder{}
 			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 			defer closeServer()
+			rt.SetProjectSet(newFakeProjectSet(servedInActorOrder(order)...))
 
 			fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 				return &ateapi.ListActorsResponse{Actors: order}, nil
@@ -2648,7 +2705,7 @@ func TestSubstrateList_RecordExistsAndRecordlessSameSlug(t *testing.T) {
 			if len(agents) != 1 {
 				t.Fatalf(`List(scion.name="dev") = %v, want exactly the record-having actor`, agents)
 			}
-			if agents[0].ContainerID != "scion-aaaaaaaaaaaa/projA--dev" {
+			if agents[0].ContainerID != testAtespaceA+"/projA--dev" {
 				t.Errorf("ContainerID = %q, want the record-having projA actor, not the record-less projB one", agents[0].ContainerID)
 			}
 		})
@@ -2673,11 +2730,11 @@ func TestSubstrateList_SameSlugDifferentProjects_UnscopedReturnsNothing(t *testi
 		uidB = "uid-projB-dev"
 	)
 	actorA := &ateapi.Actor{
-		Metadata: &ateapi.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: uidA},
+		Metadata: &ateapi.ResourceMetadata{Atespace: testAtespaceA, Name: "projA--dev", Uid: uidA},
 		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
 	actorB := &ateapi.Actor{
-		Metadata: &ateapi.ResourceMetadata{Atespace: "scion-bbbbbbbbbbbb", Name: "projB--dev", Uid: uidB},
+		Metadata: &ateapi.ResourceMetadata{Atespace: testAtespaceB, Name: "projB--dev", Uid: uidB},
 		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
 
@@ -2690,6 +2747,7 @@ func TestSubstrateList_SameSlugDifferentProjects_UnscopedReturnsNothing(t *testi
 			rec := &callRecorder{}
 			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 			defer closeServer()
+			rt.SetProjectSet(newFakeProjectSet(servedInActorOrder(order)...))
 
 			fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 				return &ateapi.ListActorsResponse{Actors: order}, nil
@@ -2733,7 +2791,7 @@ func TestSubstrateList_SameSlugDifferentProjects_UnscopedReturnsNothing(t *testi
 			if err != nil {
 				t.Fatalf("List() scoped to projB error = %v", err)
 			}
-			if len(scoped) != 1 || scoped[0].ContainerID != "scion-bbbbbbbbbbbb/projB--dev" {
+			if len(scoped) != 1 || scoped[0].ContainerID != testAtespaceB+"/projB--dev" {
 				t.Fatalf("List(scion.name=dev, scion.project_id=projB) = %v, want exactly projB's actor", scoped)
 			}
 			if scoped[0].ProjectPath != "/projects/projB" {
@@ -2777,7 +2835,10 @@ func TestNewSubstrateRuntime_MemoizedAcrossCalls(t *testing.T) {
 	origBuilder := substrateRuntimeBuilder
 	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
 		built++
-		return NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg), nil
+		rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg)
+		// As the runtime broker would: serve the project Run uses.
+		rt.SetProjectSet(newFakeProjectSet(testSubstrateRunConfig().ProjectID))
+		return rt, nil
 	}
 	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
 
@@ -2905,7 +2966,10 @@ func TestSubstrateAgentState_SharedAcrossConfigChange(t *testing.T) {
 	// NewSubstrateRuntime treat them as separate connection-registry
 	// entries.
 	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
-		return NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg), nil
+		rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg)
+		// As the runtime broker would: serve the project Run uses.
+		rt.SetProjectSet(newFakeProjectSet(testSubstrateRunConfig().ProjectID))
+		return rt, nil
 	}
 	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
 

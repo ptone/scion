@@ -192,8 +192,9 @@ func TestSubstrateDeleteActorRequest(t *testing.T) {
 	}
 }
 
-// List keeps the empty atespace (all atespaces) and pages with ListOptions;
-// RecordlessActors lists its one atespace the same way.
+// List (operator mode) reads each served project's atespace, never the
+// empty atespace, and pages with ListOptions; RecordlessActors lists its
+// one atespace the same way.
 func TestSubstrateList_UsesListOptions(t *testing.T) {
 	rec := &callRecorder{}
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
@@ -219,8 +220,8 @@ func TestSubstrateList_UsesListOptions(t *testing.T) {
 		t.Fatalf("List() made %d ListActors calls, want 2 (one per page)", len(reqs))
 	}
 	for i, r := range reqs {
-		if r.GetAtespace() != "" || r.GetOptions().GetPageSize() != substrateListPageSize {
-			t.Errorf("List() request[%d] = %v, want empty atespace and page size %d", i, r, substrateListPageSize)
+		if r.GetAtespace() != testServedAtespace || r.GetOptions().GetPageSize() != substrateListPageSize {
+			t.Errorf("List() request[%d] = %v, want atespace %q and page size %d", i, r, testServedAtespace, substrateListPageSize)
 		}
 	}
 	if reqs[1].GetOptions().GetPageToken() != "p2" {

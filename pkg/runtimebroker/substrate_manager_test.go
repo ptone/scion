@@ -100,9 +100,10 @@ type fakeSubstrateControlClient struct {
 	listActorsErr error
 
 	// listActorsErrFor, when non-nil, is consulted per request and may fail
-	// only some ListActors calls — e.g. only the atespace-scoped call the
-	// record-less-actor probe makes, or only the unscoped call List makes —
-	// so a test can reach one code path while the other still succeeds.
+	// only some ListActors calls (for example by call number). List and the
+	// record-less-actor probe both send atespace-scoped requests in operator
+	// mode, so a test that must fail one but not the other wraps the runtime
+	// in substrateFaults instead (substrate_restart_gaps_test.go).
 	listActorsErrFor func(*ateapi.ListActorsRequest) error
 }
 
@@ -110,7 +111,10 @@ func newFakeSubstrateControlClient(recorder *substrateEgressRecorder) *fakeSubst
 	return &fakeSubstrateControlClient{recorder: recorder, actors: make(map[string]*ateapi.Actor)}
 }
 
-func (f *fakeSubstrateControlClient) CreateAtespace(ctx context.Context, in *ateapi.CreateAtespaceRequest, opts ...grpc.CallOption) (*ateapi.Atespace, error) {
+// GetAtespace backs Run's verify-or-fail atespace check. There is no
+// CreateAtespace: operator mode never creates an atespace, so a call
+// would reach the nil embedded interface and panic.
+func (f *fakeSubstrateControlClient) GetAtespace(ctx context.Context, in *ateapi.GetAtespaceRequest, opts ...grpc.CallOption) (*ateapi.Atespace, error) {
 	return &ateapi.Atespace{}, nil
 }
 

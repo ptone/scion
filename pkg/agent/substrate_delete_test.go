@@ -75,8 +75,20 @@ func (f *fakeSubstrateControlClient) putActor(atespace, name, uid string) {
 	}
 }
 
-func (f *fakeSubstrateControlClient) CreateAtespace(ctx context.Context, in *ateapi.CreateAtespaceRequest, opts ...grpc.CallOption) (*ateapi.Atespace, error) {
+// GetAtespace backs Run's verify-or-fail atespace check. There is no
+// CreateAtespace: operator mode never creates an atespace, so a call
+// would reach the nil embedded interface and panic.
+func (f *fakeSubstrateControlClient) GetAtespace(ctx context.Context, in *ateapi.GetAtespaceRequest, opts ...grpc.CallOption) (*ateapi.Atespace, error) {
 	return &ateapi.Atespace{}, nil
+}
+
+// servedProjects is a static runtime.ProjectSet: the projects whose
+// atespaces an unfiltered substrate List reads (Delete by slug lists
+// unfiltered), in order.
+type servedProjects []string
+
+func (s servedProjects) ServedProjects(context.Context) ([]string, error) {
+	return append([]string(nil), s...), nil
 }
 
 func (f *fakeSubstrateControlClient) GetActorTemplate(ctx context.Context, in *ateapi.GetActorTemplateRequest, opts ...grpc.CallOption) (*ateapi.ActorTemplate, error) {
@@ -199,6 +211,7 @@ func TestSubstrateAgentManagerDelete_RecordExists(t *testing.T) {
 	defer actorServer.Close()
 
 	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
+	rt.SetProjectSet(servedProjects{"550e8400-e29b-41d4-a716-446655440002"})
 
 	const agentSlug = "sb-smoke-2"
 	cfg := scionruntime.RunConfig{
@@ -258,13 +271,15 @@ func TestSubstrateAgentManagerDelete_RecordExists(t *testing.T) {
 func TestSubstrateAgentManagerDelete_NoRecord(t *testing.T) {
 	fc := newFakeSubstrateControlClient()
 	const (
-		atespace  = "scion-someproj"
+		projectID = "someproj"
 		agentSlug = "sb-smoke-3"
 		actorName = "myproj--" + agentSlug
 	)
+	atespace := scionruntime.SubstrateAtespaceNameForTest(projectID)
 	fc.putActor(atespace, actorName, "uid-orphan")
 
 	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient("http://unused"), nil, config.V1SubstrateConfig{})
+	rt.SetProjectSet(servedProjects{projectID})
 
 	mgr := NewManager(rt)
 	defer mgr.Close()
@@ -300,11 +315,13 @@ func TestSubstrateAgentManagerDelete_NoRecord(t *testing.T) {
 // the outcome truly doesn't depend on map iteration order.
 func TestSubstrateAgentManagerDelete_RecordlessAmbiguousSlugDeletesNothing(t *testing.T) {
 	const (
-		atespaceA = "scion-aaaaaaaaaaaa"
-		actorA    = "projA--dev"
-		atespaceB = "scion-bbbbbbbbbbbb"
-		actorB    = "projB--dev"
+		projAID = "aaaaaaaaaaaa"
+		actorA  = "projA--dev"
+		projBID = "bbbbbbbbbbbb"
+		actorB  = "projB--dev"
 	)
+	atespaceA := scionruntime.SubstrateAtespaceNameForTest(projAID)
+	atespaceB := scionruntime.SubstrateAtespaceNameForTest(projBID)
 
 	for _, order := range []string{"A then B", "B then A"} {
 		t.Run(order, func(t *testing.T) {
@@ -318,6 +335,11 @@ func TestSubstrateAgentManagerDelete_RecordlessAmbiguousSlugDeletesNothing(t *te
 			}
 
 			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient("http://unused"), nil, config.V1SubstrateConfig{})
+			if order == "A then B" {
+				rt.SetProjectSet(servedProjects{projAID, projBID})
+			} else {
+				rt.SetProjectSet(servedProjects{projBID, projAID})
+			}
 			mgr := NewManager(rt)
 			defer mgr.Close()
 
@@ -357,9 +379,11 @@ func TestSubstrateAgentManagerDelete_RecordlessAmbiguousSlugDeletesNothing(t *te
 // one order.
 func TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug(t *testing.T) {
 	const (
-		otherAtespace = "scion-bbbbbbbbbbbb"
-		otherActor    = "projB--dev"
+		otherProjectID = "bbbbbbbbbbbb"
+		otherActor     = "projB--dev"
+		recordedProjID = "550e8400-e29b-41d4-a716-446655440020"
 	)
+	otherAtespace := scionruntime.SubstrateAtespaceNameForTest(otherProjectID)
 
 	for _, orderName := range []string{"record-having first", "record-less first"} {
 		t.Run(orderName, func(t *testing.T) {
@@ -368,6 +392,11 @@ func TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug(t *testin
 			defer actorServer.Close()
 
 			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
+			if orderName == "record-having first" {
+				rt.SetProjectSet(servedProjects{recordedProjID, otherProjectID})
+			} else {
+				rt.SetProjectSet(servedProjects{otherProjectID, recordedProjID})
+			}
 
 			// The record-less other-project actor, injected directly (never
 			// through this runtime's Run, so it genuinely has no record).
@@ -493,8 +522,10 @@ func TestSubstrateAgentManagerDelete_SameSlugDifferentProjectsFailsClosed(t *tes
 			fc.mu.Lock()
 			if orderName == "projA first" {
 				fc.forceListOrder = []*ateapi.Actor{actorA, actorB}
+				rt.SetProjectSet(servedProjects{"aaaaaaaaaaaa", "bbbbbbbbbbbb"})
 			} else {
 				fc.forceListOrder = []*ateapi.Actor{actorB, actorA}
+				rt.SetProjectSet(servedProjects{"bbbbbbbbbbbb", "aaaaaaaaaaaa"})
 			}
 			fc.mu.Unlock()
 

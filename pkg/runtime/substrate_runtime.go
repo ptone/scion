@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -116,6 +117,43 @@ func (r *SubstrateRuntime) currentProjectSet() ProjectSet {
 	r.projectSetMu.RLock()
 	defer r.projectSetMu.RUnlock()
 	return r.projectSet
+}
+
+// ErrSubstrateAtespaceNotProvisioned matches (errors.Is) every
+// *SubstrateAtespaceProvisioningError.
+var ErrSubstrateAtespaceNotProvisioned = errors.New("substrate: atespace not provisioned for the broker")
+
+// SubstrateAtespaceProvisioningError reports that a project's atespace does
+// not exist or the broker principal cannot read it (GetAtespace or
+// ListActors returned NotFound or PermissionDenied). In operator mode the
+// broker never creates atespaces (substrate v1 design §3.7): an operator
+// provisions each one and grants the broker editor on it.
+type SubstrateAtespaceProvisioningError struct {
+	Atespace string
+	Code     codes.Code
+	Err      error
+}
+
+func (e *SubstrateAtespaceProvisioningError) Error() string {
+	return fmt.Sprintf("substrate: atespace %q is not provisioned or the broker cannot read it (%s): ask your operator to provision atespace %q and grant the broker editor on it",
+		e.Atespace, e.Code, e.Atespace)
+}
+
+// Is reports a match for ErrSubstrateAtespaceNotProvisioned.
+func (e *SubstrateAtespaceProvisioningError) Is(target error) bool {
+	return target == ErrSubstrateAtespaceNotProvisioned
+}
+
+func (e *SubstrateAtespaceProvisioningError) Unwrap() error { return e.Err }
+
+// atespaceProvisioningError returns the typed provisioning error for a
+// NotFound or PermissionDenied err on atespace, else nil.
+func atespaceProvisioningError(atespace string, err error) error {
+	switch c := status.Code(err); c {
+	case codes.NotFound, codes.PermissionDenied:
+		return &SubstrateAtespaceProvisioningError{Atespace: atespace, Code: c, Err: err}
+	}
+	return nil
 }
 
 // substrateAgentStateMu guards substrateControlTokens and
@@ -471,8 +509,16 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		return "", r.redact(cfg, fmt.Errorf("substrate: resolve egress hosts for %s: %w", id, err))
 	}
 
-	// Step 1: atespace.
+	// Step 1: atespace (verify-or-fail; operator mode never creates one).
 	if err := r.ensureAtespace(ctx, atespace); err != nil {
+		// The provisioning error's text holds only the atespace name and
+		// the gRPC code (never the server message or any env value), so
+		// it is returned as is: redact would flatten it to a string and
+		// callers could no longer match ErrSubstrateAtespaceNotProvisioned.
+		var perr *SubstrateAtespaceProvisioningError
+		if errors.As(err, &perr) {
+			return "", perr
+		}
 		return "", r.redact(cfg, err)
 	}
 
@@ -829,14 +875,23 @@ func (r *SubstrateRuntime) Stop(ctx context.Context, ref RunRef) error {
 }
 
 // substrateAtespacePrefix is the naming convention substrateAtespaceName
-// produces. List uses it to skip actors outside any scion-managed
-// atespace: ListActors with an empty atespace (List has no project context
-// to scope it to, unlike the atespace-scoped call substrate-runtime.md §4
-// describes) lists across the whole cluster, which may host other
-// tenants sharing the same Substrate install.
+// produces. List keeps it as a defensive check that an actor belongs to a
+// scion-managed atespace; listAtespaceActors already drops any actor whose
+// atespace is not the one it asked for.
 const substrateAtespacePrefix = "scion-"
 
 // List implements substrate-runtime.md §4.
+//
+// Source of the listing, operator mode (substrate v1 design §3.3): when
+// labelFilter carries a project ID, List reads that project's atespace
+// only, and a NotFound or PermissionDenied there returns the typed
+// *SubstrateAtespaceProvisioningError. Otherwise it reads the atespace of
+// each project in the injected ProjectSet; a ProjectSet that is unset, cold
+// or unreadable fails the List (never an empty result), and an atespace
+// that is NotFound or PermissionDenied is skipped with a logged, counted
+// note. Any other error fails the List. List never issues an
+// empty-atespace ListActors (that needs the global viewer role, which
+// operator mode does not grant). maxActorListPages applies per atespace.
 //
 // AgentInfo.ProjectPath is populated from the record's ProjectPath (set at
 // Run time from cfg.Annotations, falling back to cfg.Labels — see Run),
@@ -886,30 +941,13 @@ const substrateAtespacePrefix = "scion-"
 // durable fix here is persisting agent records so they survive a broker
 // restart in the first place, not reconstructing them from the actor name.
 func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-	var actors []*ateapi.Actor
-	pageToken := ""
-	for page := 0; ; page++ {
-		if page >= maxActorListPages {
-			return nil, fmt.Errorf("substrate: list actors: exceeded %d pages", maxActorListPages)
-		}
-		// An empty atespace lists across every atespace (v1
-		// ListActorsRequest.atespace: "Empty lists across all atespaces").
-		// That form needs the global viewer role on the broker principal.
-		resp, err := r.client.ListActors(ctx, &ateapi.ListActorsRequest{
-			Options: &ateapi.ListOptions{PageSize: substrateListPageSize, PageToken: pageToken},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("substrate: list actors: %w", err)
-		}
-		actors = append(actors, resp.GetActors()...)
-		next := resp.GetNextPageToken()
-		if next != "" && next == pageToken {
-			return nil, fmt.Errorf("substrate: list actors: server returned a repeated page token")
-		}
-		pageToken = next
-		if pageToken == "" {
-			break
-		}
+	actors, skipped, err := r.listOperatorModeActors(ctx, labelFilter)
+	if err != nil {
+		return nil, err
+	}
+	if len(skipped) > 0 {
+		slog.Warn("substrate: list skipped served projects with no provisioned or readable atespace",
+			"skipped", len(skipped), "atespaces", skipped)
 	}
 
 	substrateAgentStateMu.Lock()
@@ -1036,6 +1074,94 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 		})
 	}
 	return agents, nil
+}
+
+// errSubstrateProjectSetUnset fails an unfiltered List on a runtime the
+// broker never gave a ProjectSet: listing nothing would hide every actor.
+var errSubstrateProjectSetUnset = errors.New("substrate: list actors: no served-project set (the runtime broker has not provided one)")
+
+// listOperatorModeActors returns the actors List reports, read per atespace
+// (see List's doc comment), and the atespaces an unfiltered listing skipped
+// because they were NotFound or PermissionDenied.
+func (r *SubstrateRuntime) listOperatorModeActors(ctx context.Context, labelFilter map[string]string) ([]*ateapi.Actor, []string, error) {
+	if projectID := labelFilter[projectkeys.LabelProjectID]; projectID != "" {
+		// A single project: its atespace only. A NotFound or
+		// PermissionDenied comes back as the typed provisioning error.
+		actors, err := r.listAtespaceActors(ctx, substrateAtespaceName(projectID))
+		if err != nil {
+			return nil, nil, err
+		}
+		return actors, nil, nil
+	}
+
+	ps := r.currentProjectSet()
+	if ps == nil {
+		return nil, nil, errSubstrateProjectSetUnset
+	}
+	projectIDs, err := ps.ServedProjects(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("substrate: list actors: served projects unavailable: %w", err)
+	}
+	var actors []*ateapi.Actor
+	var skipped []string
+	for _, projectID := range projectIDs {
+		if projectID == "" {
+			continue
+		}
+		atespace := substrateAtespaceName(projectID)
+		got, err := r.listAtespaceActors(ctx, atespace)
+		if err != nil {
+			var perr *SubstrateAtespaceProvisioningError
+			if errors.As(err, &perr) {
+				// A served project with no provisioned (or no
+				// readable) substrate atespace, common on a broker
+				// that also serves other runtimes.
+				skipped = append(skipped, atespace)
+				continue
+			}
+			return nil, nil, err
+		}
+		actors = append(actors, got...)
+	}
+	return actors, skipped, nil
+}
+
+// listAtespaceActors pages ListActors over one atespace, up to
+// maxActorListPages pages, and keeps only actors that report that
+// atespace. A NotFound or PermissionDenied returns the typed
+// *SubstrateAtespaceProvisioningError; any other failure a plain error.
+func (r *SubstrateRuntime) listAtespaceActors(ctx context.Context, atespace string) ([]*ateapi.Actor, error) {
+	var actors []*ateapi.Actor
+	pageToken := ""
+	for page := 0; ; page++ {
+		if page >= maxActorListPages {
+			return nil, fmt.Errorf("substrate: list actors in atespace %s: exceeded %d pages", atespace, maxActorListPages)
+		}
+		resp, err := r.client.ListActors(ctx, &ateapi.ListActorsRequest{
+			Atespace: atespace,
+			Options:  &ateapi.ListOptions{PageSize: substrateListPageSize, PageToken: pageToken},
+		})
+		if err != nil {
+			if perr := atespaceProvisioningError(atespace, err); perr != nil {
+				return nil, perr
+			}
+			return nil, fmt.Errorf("substrate: list actors in atespace %s: %w", atespace, err)
+		}
+		for _, actor := range resp.GetActors() {
+			if actor.GetMetadata().GetAtespace() == atespace {
+				actors = append(actors, actor)
+			}
+		}
+		next := resp.GetNextPageToken()
+		if next != "" && next == pageToken {
+			return nil, fmt.Errorf("substrate: list actors in atespace %s: server returned a repeated page token", atespace)
+		}
+		pageToken = next
+		if pageToken == "" {
+			break
+		}
+	}
+	return actors, nil
 }
 
 // RecordlessActors implements the broker's optional record-less-actor
@@ -1185,15 +1311,15 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 // exercise the cap without paging through this many fake responses.
 var maxRecordlessActorListPages = 100
 
-// maxActorListPages bounds List's own ListActors paging loop, the same way
-// maxRecordlessActorListPages bounds RecordlessActors' — a misbehaving
-// server that never returns an empty next_page_token would otherwise spin
-// until ctx expires. Larger than maxRecordlessActorListPages because List's
-// query is unscoped (cluster-wide across every project sharing this
-// Substrate install, not one project's own atespace): a legitimately large
-// cluster needs more headroom here than RecordlessActors' one-atespace
-// query does. A package-level var, not a const, for the same test-lowering
-// reason as maxRecordlessActorListPages.
+// maxActorListPages bounds List's ListActors paging loop PER ATESPACE
+// (listAtespaceActors), the same way maxRecordlessActorListPages bounds
+// RecordlessActors' — a misbehaving server that never returns an empty
+// next_page_token would otherwise spin until ctx expires. List reads one
+// atespace per served project, so its overall call count is bounded by
+// the served-project count times this cap (substrate v1 design §3.3). The
+// value is unchanged from when List made a single cluster-wide query. A
+// package-level var, not a const, for the same test-lowering reason as
+// maxRecordlessActorListPages.
 var maxActorListPages = 1000
 
 // substrateListPageSize is the ListOptions.page_size List and
@@ -1399,16 +1525,23 @@ func (r *SubstrateRuntime) RemoveImage(ctx context.Context, image string) error 
 // PullImage is a no-op: Substrate pulls the image itself.
 func (r *SubstrateRuntime) PullImage(ctx context.Context, image string) error { return nil }
 
-// ensureAtespace creates atespace, treating AlreadyExists as success
-// (substrate-runtime.md §4).
+// ensureAtespace verifies that atespace exists and the broker can read it
+// (substrate v1 design §3.7, operator mode). It never creates one: on
+// NotFound or PermissionDenied it returns a
+// *SubstrateAtespaceProvisioningError asking the operator to provision the
+// atespace and grant the broker editor on it. Creating atespaces needs the
+// global owner role, which operator mode does not grant.
 func (r *SubstrateRuntime) ensureAtespace(ctx context.Context, atespace string) error {
-	_, err := r.client.CreateAtespace(ctx, &ateapi.CreateAtespaceRequest{
-		Atespace: &ateapi.Atespace{Metadata: &ateapi.ResourceMetadata{Name: atespace}},
+	_, err := r.client.GetAtespace(ctx, &ateapi.GetAtespaceRequest{
+		Atespace: &ateapi.ObjectRef{Name: atespace},
 	})
-	if err != nil && status.Code(err) != codes.AlreadyExists {
-		return fmt.Errorf("substrate: create atespace %q: %w", atespace, err)
+	if err == nil {
+		return nil
 	}
-	return nil
+	if perr := atespaceProvisioningError(atespace, err); perr != nil {
+		return perr
+	}
+	return fmt.Errorf("substrate: get atespace %q: %w", atespace, err)
 }
 
 // waitRunning polls GetActor until state is RUNNING, or defaultActorRunningTimeout
