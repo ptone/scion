@@ -109,7 +109,7 @@ func TestServerTLSConfig_ClusterTrustBundle(t *testing.T) {
 	})
 
 	cfg := DialerConfig{APIEndpoint: "api.ate-system.svc:443", ClusterTrustBundle: "ate-root"}
-	tlsCfg, err := serverTLSConfig(context.Background(), client, cfg)
+	tlsCfg, err := serverTLSConfigFrom(context.Background(), lookupV1NotServed(client), cfg)
 	if err != nil {
 		t.Fatalf("serverTLSConfig() error = %v", err)
 	}
@@ -133,7 +133,7 @@ func TestServerTLSConfig_ClusterTrustBundlePreferredOverCAFile(t *testing.T) {
 		ClusterTrustBundle: "ate-root",
 		CAFile:             "/nonexistent/ca.pem",
 	}
-	if _, err := serverTLSConfig(context.Background(), client, cfg); err != nil {
+	if _, err := serverTLSConfigFrom(context.Background(), lookupV1NotServed(client), cfg); err != nil {
 		t.Fatalf("serverTLSConfig() error = %v, want ClusterTrustBundle to take precedence over the unreadable CAFile", err)
 	}
 }

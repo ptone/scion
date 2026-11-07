@@ -21,17 +21,15 @@
 //     authenticated with a TokenRequest-minted ServiceAccount token
 //     refreshed before it expires, with TLS verified against a configured
 //     CA (never InsecureSkipVerify);
-//   - a plain HTTP client for calling an actor's control server through
+//   - an mTLS HTTP client for calling an actor's control server through
 //     Substrate's inbound atenet-router, using the ate-target-actor header.
 package substrate
 
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -71,9 +69,10 @@ type DialerConfig struct {
 	// CAFile is a path to a PEM CA bundle used to verify ateapi's serving
 	// certificate. Used when ClusterTrustBundle is empty.
 	CAFile string
-	// ClusterTrustBundle names a certificates.k8s.io/v1beta1
-	// ClusterTrustBundle object whose trust bundle verifies ateapi's serving
-	// certificate. Takes precedence over CAFile when both are set.
+	// ClusterTrustBundle names a ClusterTrustBundle object whose trust
+	// bundle verifies ateapi's serving certificate. It is read from
+	// certificates.k8s.io/v1, and from v1beta1 only when v1 answers 404
+	// (see ctbLookup). Takes precedence over CAFile when both are set.
 	ClusterTrustBundle string
 	// ServerName overrides the TLS ServerName sent in the handshake.
 	// Defaults to the host portion of APIEndpoint.
@@ -91,33 +90,21 @@ type DialerConfig struct {
 	ServiceAccountName string
 }
 
-// serverTLSConfig builds the *tls.Config used to verify ateapi's (or the
-// router's) serving certificate against the configured CA.
+// serverTLSConfig builds the *tls.Config used to verify ateapi's serving
+// certificate against the configured CA source, read through the shared
+// ClusterTrustBundle lookup (v1, then v1beta1 on a v1 404; see ctbLookup).
 // InsecureSkipVerify is never set, even implicitly: a cfg with neither
 // ClusterTrustBundle nor CAFile is a configuration error, not a fallback to
-// an unverified connection.
+// an unverified connection or to the system roots.
 func serverTLSConfig(ctx context.Context, k8sClient kubernetes.Interface, cfg DialerConfig) (*tls.Config, error) {
-	pool := x509.NewCertPool()
+	return serverTLSConfigFrom(ctx, newCTBLookup(k8sClient), cfg)
+}
 
-	switch {
-	case cfg.ClusterTrustBundle != "":
-		ctb, err := k8sClient.CertificatesV1beta1().ClusterTrustBundles().Get(ctx, cfg.ClusterTrustBundle, metav1.GetOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("substrate: get ClusterTrustBundle %q: %w", cfg.ClusterTrustBundle, err)
-		}
-		if !pool.AppendCertsFromPEM([]byte(ctb.Spec.TrustBundle)) {
-			return nil, fmt.Errorf("substrate: ClusterTrustBundle %q contains no valid certificates", cfg.ClusterTrustBundle)
-		}
-	case cfg.CAFile != "":
-		pem, err := os.ReadFile(cfg.CAFile)
-		if err != nil {
-			return nil, fmt.Errorf("substrate: read ca_file %q: %w", cfg.CAFile, err)
-		}
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("substrate: ca_file %q contains no valid certificates", cfg.CAFile)
-		}
-	default:
-		return nil, fmt.Errorf("substrate: one of cluster_trust_bundle or ca_file must be configured; InsecureSkipVerify is not supported")
+// serverTLSConfigFrom is serverTLSConfig over an explicit lookup.
+func serverTLSConfigFrom(ctx context.Context, lookup ctbLookup, cfg DialerConfig) (*tls.Config, error) {
+	pool, err := rootCAPool(ctx, lookup, cfg.ClusterTrustBundle, cfg.CAFile)
+	if err != nil {
+		return nil, err
 	}
 
 	serverName := cfg.ServerName
