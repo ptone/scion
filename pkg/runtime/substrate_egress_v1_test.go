@@ -143,13 +143,19 @@ func TestSubstrateEgressTargets_TrustedHubDefaults(t *testing.T) {
 		// SEC-R3-1: the host must be plain DNS labels: no "*", no
 		// catch-all spelling, no other characters.
 		"https://*.tokhub.example.com", "https://*", "http://all:8080", "https://tok_hub.example.com", "https://tok!hub.example.com:8443", "tok$hub",
+		// SEC-R4-1: a bracketed DNS name; SEC-R4-2(b): a trailing dot.
+		"https://[tokhub.example.test]", "https://[tokhub.example.test]:8443", "https://tokhub.example.com.", "tokhub.example.com.:8443",
 	} {
 		_, err := substrateEgressTargets(RunConfig{TrustedHubEndpoint: endpoint}, map[string]string{}, config.V1SubstrateConfig{})
 		if err == nil {
 			t.Errorf("TrustedHubEndpoint %q: error = nil, want a refusal", endpoint)
 			continue
 		}
-		if !strings.Contains(err.Error(), "hub endpoint (hub server dispatch endpoint or broker HubEndpoint)") || strings.Contains(err.Error(), "tok") {
+		// The host-form refusal fired, not the IP refusal (N4-2).
+		if strings.Contains(err.Error(), "IP address") {
+			t.Errorf("TrustedHubEndpoint %q: error = %q, want the host-form refusal, not the IP refusal", endpoint, err)
+		}
+		if !strings.Contains(err.Error(), "hub endpoint (hub server dispatch endpoint, hub connection endpoint or broker HubEndpoint)") || strings.Contains(err.Error(), "tok") {
 			t.Errorf("TrustedHubEndpoint %q: error = %q, want it to name the setting and not the value", endpoint, err)
 		}
 	}

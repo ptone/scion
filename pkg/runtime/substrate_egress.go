@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"regexp"
 	"slices"
 	"sort"
@@ -270,7 +271,7 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 			// would otherwise reach CreateActorEgressPolicy and fail
 			// only there: v1 egress rule hostnames do not accept IP
 			// addresses. Fail here instead, as a clear config error.
-			return nil, errors.New("substrate: the hub endpoint (hub server dispatch endpoint or broker HubEndpoint) resolves to IP address form; configure it with a DNS hostname — substrate's egress policy supports hostname patterns only, not IP addresses")
+			return nil, errors.New("substrate: the hub endpoint (hub server dispatch endpoint, hub connection endpoint or broker HubEndpoint) resolves to IP address form; configure it with a DNS hostname — substrate's egress policy supports hostname patterns only, not IP addresses")
 		}
 		t := substrateEgressTarget{protocol: substrate.EgressProtocolTLSPassthrough, host: trustedHubHost, port: port}
 		if scheme == "http" {
@@ -415,7 +416,7 @@ func substrateEgressTargetLess(a, b substrateEgressTarget) bool {
 // errTrustedHubEndpoint is the refusal for a trusted hub endpoint scion
 // cannot use. It names the operator sources of the setting and never its
 // value.
-var errTrustedHubEndpoint = errors.New("substrate: the hub endpoint (hub server dispatch endpoint or broker HubEndpoint) is not an http:// or https:// URL, or a host[:port], with a plain DNS host name and no userinfo; fix the hub endpoint configuration")
+var errTrustedHubEndpoint = errors.New("substrate: the hub endpoint (hub server dispatch endpoint, hub connection endpoint or broker HubEndpoint) is not an http:// or https:// URL, or a host[:port], with a plain DNS host name and no userinfo; fix the hub endpoint configuration")
 
 // trustedHubHostPattern is the host form the trusted hub endpoint may use:
 // lowercase DNS labels only (in-cluster single-label names allowed), no
@@ -434,11 +435,12 @@ func foldHubScheme(s string) string {
 }
 
 // parseTrustedHubEndpoint parses the operator-trusted hub endpoint (design
-// §3.5 v0.5.3/v0.5.4, M1 and SEC-R3-1): a leading scheme token matched
+// §3.5 v0.5.3/v0.5.4, M1, SEC-R3-1 and SEC-R4-1/2): a leading scheme token matched
 // case-insensitively against http/https is lowercased, the host is
 // lowercased, and the value then goes through parseDerivedEndpoint. The host
 // must be an IP literal (refused later, with its own error) or plain DNS
-// labels: no "*", no catch-all spelling, no other characters. Anything else
+// labels: no "*", no catch-all spelling, no trailing dot, no other
+// characters; a bracketed authority must hold an IP literal. Anything else
 // (another scheme, an embedded "://", userinfo, an unparseable value, an
 // illegal host) refuses the Run with errTrustedHubEndpoint.
 func parseTrustedHubEndpoint(raw string) (scheme, host string, port int32, err error) {
@@ -449,6 +451,14 @@ func parseTrustedHubEndpoint(raw string) (scheme, host string, port int32, err e
 	scheme, host, port, ok := parseDerivedEndpoint(s)
 	if !ok {
 		return "", "", 0, errTrustedHubEndpoint
+	}
+	// A bracketed authority must hold an IP literal (it then gets the IP
+	// refusal below); a bracketed DNS name is refused (SEC-R4-1). netip
+	// keeps zoned IPv6 forms in the IP refusal.
+	if strings.HasPrefix(strings.TrimPrefix(strings.TrimPrefix(s, "https://"), "http://"), "[") {
+		if _, perr := netip.ParseAddr(host); perr != nil {
+			return "", "", 0, errTrustedHubEndpoint
+		}
 	}
 	if substrate.IsIPLiteralHost(host) {
 		return scheme, host, port, nil
