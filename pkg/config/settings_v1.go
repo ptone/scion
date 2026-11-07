@@ -2929,6 +2929,9 @@ type V1SubstrateConfig struct {
 	// gateway's own TLS certificate (docs/egress-trust-bundle.md, vendored
 	// Substrate v1.0.0).
 	//
+	// Phase 1: setting this refuses the Run (design A3); projection and https
+	// rules return together in Phase 3.
+	//
 	// Required iff the cluster runs the sdsmint egress gateway
 	// (`hack/install-ate.sh --deploy-atenet --experimental-use-sdsmint`) and
 	// the actor makes any HTTPS/TLS request: under sdsmint, the gateway

@@ -255,28 +255,29 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 	// Operator-trusted source (1): the trusted hub endpoint, the only place
 	// outside egress_allow that may yield an http target or a port other
 	// than 443.
-	if cfg.TrustedHubEndpoint != "" {
-		scheme, trustedHubHost, port, ok := parseDerivedEndpoint(cfg.TrustedHubEndpoint)
-		if !ok {
-			slog.Warn("substrate: could not parse the trusted hub endpoint; no egress host added for it")
-		} else {
-			if substrate.IsIPLiteralHost(trustedHubHost) {
-				// An IP-literal host, added unvalidated (see above on why
-				// the trusted hub host skips NormalizeEgressAllowEntry),
-				// including the short and mixed-radix inet_aton spellings
-				// ("127.1", "0x7f000001", "2130706433") netip alone misses,
-				// would otherwise reach CreateActorEgressPolicy and fail
-				// only there: v1 egress rule hostnames do not accept IP
-				// addresses. Fail here instead, as a clear config error.
-				return nil, fmt.Errorf("substrate: trusted hub endpoint %q resolves to IP address %q; configure the hub endpoint with a DNS hostname — substrate's egress policy supports hostname patterns only, not IP addresses", cfg.TrustedHubEndpoint, trustedHubHost)
-			}
-			t := substrateEgressTarget{protocol: substrate.EgressProtocolTLSPassthrough, host: trustedHubHost, port: port}
-			if scheme == "http" {
-				t.protocol = substrate.EgressProtocolHTTP
-			}
-			if err := addOperator(t, "trusted hub endpoint"); err != nil {
-				return nil, err
-			}
+	trustedHubHost := ""
+	if strings.TrimSpace(cfg.TrustedHubEndpoint) != "" {
+		scheme, hubHost, port, err := parseTrustedHubEndpoint(cfg.TrustedHubEndpoint)
+		if err != nil {
+			return nil, err
+		}
+		trustedHubHost = hubHost
+		if substrate.IsIPLiteralHost(trustedHubHost) {
+			// An IP-literal host, added unvalidated (see above on why
+			// the trusted hub host skips NormalizeEgressAllowEntry),
+			// including the short and mixed-radix inet_aton spellings
+			// ("127.1", "0x7f000001", "2130706433") netip alone misses,
+			// would otherwise reach CreateActorEgressPolicy and fail
+			// only there: v1 egress rule hostnames do not accept IP
+			// addresses. Fail here instead, as a clear config error.
+			return nil, errors.New("substrate: the trusted hub endpoint resolves to IP address form; configure the hub endpoint with a DNS hostname — substrate's egress policy supports hostname patterns only, not IP addresses")
+		}
+		t := substrateEgressTarget{protocol: substrate.EgressProtocolTLSPassthrough, host: trustedHubHost, port: port}
+		if scheme == "http" {
+			t.protocol = substrate.EgressProtocolHTTP
+		}
+		if err := addOperator(t, "trusted hub endpoint"); err != nil {
+			return nil, err
 		}
 	}
 	for i, e := range operatorEgressAllow {
@@ -286,7 +287,6 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 		}
 	}
 
-	trustedHubHost := hostFromURL(cfg.TrustedHubEndpoint)
 	if finalHubHost := hostFromURLEnv(env, "SCION_HUB_ENDPOINT", "SCION_HUB_URL"); finalHubHost != "" && finalHubHost != trustedHubHost {
 		slog.Warn("substrate: ignoring agent env hub endpoint that does not match the operator-configured hub",
 			"trusted_host", trustedHubHost, "env_host", finalHubHost)
@@ -312,11 +312,11 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 	// checkTenantHost checks a destination derived from tenant-controllable
 	// input (raw is a URL or host[:port]; source names the setting). It
 	// never adds a rule: covered by an emitted rule (operator-trusted or
-	// built-in) on the same protocol and port means it is already
-	// admitted; anything else is
-	// dropped with a warning naming the egress_allow entry to add. The
-	// need maps like the translation: http:// is an http need on its port
-	// (default 80); https:// or bare is a passthrough need (default 443).
+	// built-in) on the same protocol and port means it is already admitted;
+	// anything else is dropped with a warning naming the egress_allow entry
+	// to add. The need maps like the translation: http:// is an http need
+	// on its port (default 80); https:// or bare is a passthrough need
+	// (default 443).
 	// Tenant values are reduced to scheme, host and port
 	// (parseDerivedEndpoint) before parsing or logging; parser errors never
 	// echo userinfo or query.
@@ -330,7 +330,7 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 	checkTenantHost := func(source, raw string) {
 		scheme, h, port, ok := parseDerivedEndpoint(raw)
 		if !ok {
-			slog.Warn("substrate: dropping a tenant-derived endpoint that could not be parsed", "source", source, "value", "unparseable")
+			slog.Warn("substrate: dropping a tenant-derived endpoint that could not be parsed", "source", source, "reason", "unparseable")
 			return
 		}
 		entry, err := substrate.NormalizeEgressAllowEntry(h)
@@ -410,6 +410,32 @@ func substrateEgressTargetLess(a, b substrateEgressTarget) bool {
 		return a.port < b.port
 	}
 	return a.host < b.host
+}
+
+// parseTrustedHubEndpoint parses the operator-trusted hub endpoint (design
+// §3.5 v0.5.3, M1): a leading scheme token matched case-insensitively
+// against http/https is lowercased, the host is lowercased, and the value
+// then goes through parseDerivedEndpoint. Anything else (another scheme, an
+// embedded "://", userinfo, an unparseable value) refuses the Run with an
+// error that names the setting and never its value.
+func parseTrustedHubEndpoint(raw string) (scheme, host string, port int32, err error) {
+	s := strings.TrimSpace(raw)
+	lower := strings.ToLower(s)
+	for _, p := range []string{"https://", "http://"} {
+		if strings.HasPrefix(lower, p) {
+			s = p + s[len(p):]
+			break
+		}
+	}
+	refusal := errors.New("substrate: the trusted hub endpoint is not an http:// or https:// URL, or a host[:port], without userinfo; fix the hub endpoint configuration")
+	if strings.Contains(s, "@") {
+		return "", "", 0, refusal
+	}
+	scheme, host, port, ok := parseDerivedEndpoint(s)
+	if !ok {
+		return "", "", 0, refusal
+	}
+	return scheme, host, port, nil
 }
 
 // parseDerivedEndpoint reduces a URL or bare host[:port] to its scheme

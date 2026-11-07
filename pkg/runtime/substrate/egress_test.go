@@ -53,8 +53,10 @@ func TestValidateEgressAllow_RejectsCatchAlls(t *testing.T) {
 			t.Errorf("ValidateEgressAllow([%q]) = nil, want a catch-all rejection", entry)
 			continue
 		}
-		if !strings.Contains(err.Error(), entry) {
-			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to name the offending entry", entry, err)
+		// The error names the entry by position, never by value (it may
+		// carry a credential).
+		if !strings.Contains(err.Error(), "entry 1") {
+			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to name entry 1", entry, err)
 		}
 	}
 }
@@ -215,8 +217,10 @@ func TestValidateEgressAllow_RejectsInClusterHostSuffixes(t *testing.T) {
 			t.Errorf("ValidateEgressAllow([%q]) = nil, want an in-cluster-suffix rejection", entry)
 			continue
 		}
-		if !strings.Contains(err.Error(), entry) {
-			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to name the offending entry", entry, err)
+		// The error names the entry by position, never by value (it may
+		// carry a credential).
+		if !strings.Contains(err.Error(), "entry 1") {
+			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to name entry 1", entry, err)
 		}
 	}
 }
@@ -227,8 +231,13 @@ func TestValidateEgressAllow_NamesTheOffendingEntryAmongValidOnes(t *testing.T) 
 	if err == nil {
 		t.Fatal("ValidateEgressAllow() = nil, want an error for the embedded non-public-suffix entry")
 	}
-	if !strings.Contains(err.Error(), "foo.pod") {
-		t.Errorf("error = %v, want it to name foo.pod specifically, not the whole list", err)
+	// Errors never echo an entry (it may carry a credential); they name
+	// the offending entry by its position instead.
+	if !strings.Contains(err.Error(), "entry 3") {
+		t.Errorf("error = %v, want it to name entry 3 specifically, not the whole list", err)
+	}
+	if strings.Contains(err.Error(), "foo.pod") {
+		t.Errorf("error = %v echoes the entry", err)
 	}
 }
 

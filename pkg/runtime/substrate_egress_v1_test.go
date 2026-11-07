@@ -120,14 +120,33 @@ func TestSubstrateEgressTargets_TrustedHubDefaults(t *testing.T) {
 		}
 	}
 
-	// Any scheme but a leading http:// or https:// makes the endpoint
-	// unparseable: no hub target, a warning, no refusal.
-	targets, err := substrateEgressTargets(RunConfig{TrustedHubEndpoint: "ftp://hub.example.com"}, map[string]string{}, config.V1SubstrateConfig{})
-	if err != nil {
-		t.Errorf("TrustedHubEndpoint with scheme ftp: error = %v, want no hub target and no refusal", err)
+	// The operator-trusted hub matches http/https case-insensitively and
+	// lowercases the host (design §3.5 v0.5.3, M1).
+	for endpoint, want := range map[string]substrateEgressTarget{
+		"HTTPS://Hub.Example.COM:8443": {protocol: substrate.EgressProtocolTLSPassthrough, host: "hub.example.com", port: 8443},
+		"Http://HUB.example.com":       {protocol: substrate.EgressProtocolHTTP, host: "hub.example.com", port: 80},
+	} {
+		targets, err := substrateEgressTargets(RunConfig{TrustedHubEndpoint: endpoint}, map[string]string{}, config.V1SubstrateConfig{})
+		if err != nil {
+			t.Errorf("TrustedHubEndpoint %q: error = %v", endpoint, err)
+			continue
+		}
+		if got := targetsFor(targets, "hub.example.com"); !slices.Equal(got, []substrateEgressTarget{want}) {
+			t.Errorf("TrustedHubEndpoint %q: targets = %+v, want %+v", endpoint, got, want)
+		}
 	}
-	if got := targetsFor(targets, "hub.example.com"); len(got) != 0 {
-		t.Errorf("TrustedHubEndpoint with scheme ftp: targets = %+v, want none", got)
+
+	// Anything else refuses the Run, naming the setting and never the
+	// value.
+	for _, endpoint := range []string{"ftp://tokhub.example.com", "https://tokuser:tokpass@tokhub.example.com", "https://tokhub.example.com/p?x=https://tok", "tok://tokhub.example.com", "https://[tok"} {
+		_, err := substrateEgressTargets(RunConfig{TrustedHubEndpoint: endpoint}, map[string]string{}, config.V1SubstrateConfig{})
+		if err == nil {
+			t.Errorf("TrustedHubEndpoint %q: error = nil, want a refusal", endpoint)
+			continue
+		}
+		if !strings.Contains(err.Error(), "trusted hub endpoint") || strings.Contains(err.Error(), "tok") {
+			t.Errorf("TrustedHubEndpoint %q: error = %q, want it to name the setting and not the value", endpoint, err)
+		}
 	}
 }
 
@@ -936,5 +955,26 @@ func TestSubstrateRun_InvalidVertexRegionRefusedBeforeCreate(t *testing.T) {
 	}
 	if calls := rec.list(); len(calls) != 0 {
 		t.Errorf("Run() made control-plane calls %v before refusing", calls)
+	}
+}
+
+// Design §9 AC9 reduction literal (v0.5.3), verbatim: no rule; the
+// uncovered-host warning carries host h.example.com, port 8443 and scheme
+// https, and none of the userinfo, path or query.
+func TestSubstrateEgressTargets_AC9ReductionLiteral(t *testing.T) {
+	logs := &syncBuffer{}
+	setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
+	assertTenantOnlyUnchanged(t, RunConfig{}, config.V1SubstrateConfig{},
+		map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://user:pw@h.example.com:8443/p?q=secret"})
+	out := logs.String()
+	for _, want := range []string{"host=h.example.com", "port=8443", "scheme=https"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log = %q, want %s", out, want)
+		}
+	}
+	for _, leak := range []string{"user", "pw", "/p", "q=secret", "secret"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("log = %q, leaks %q", out, leak)
+		}
 	}
 }

@@ -20,8 +20,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"math/big"
+	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -289,11 +292,11 @@ func resolveSubstrateResources(agent *api.ResourceSpec) (substrateResources, err
 		agentCPU, agentMemory = agent.Limits.CPU, agent.Limits.Memory
 	}
 
-	cpuQ, err := parseSubstrateQuantity("cpu", resolveSubstrateQuantity(agentCPU, substrateBuiltinDefaultCPU), resource.NewMilliQuantity(substrateMaxCPUMillicores, resource.DecimalSI))
+	cpuQ, err := parseSubstrateQuantity("cpu", resolveSubstrateQuantity(agentCPU, substrateBuiltinDefaultCPU), big.NewRat(substrateMaxCPUMillicores, 1000), "999999m")
 	if err != nil {
 		return substrateResources{}, err
 	}
-	memQ, err := parseSubstrateQuantity("memory", resolveSubstrateQuantity(agentMemory, substrateBuiltinDefaultMemory), resource.NewQuantity(math.MaxInt64, resource.BinarySI))
+	memQ, err := parseSubstrateQuantity("memory", resolveSubstrateQuantity(agentMemory, substrateBuiltinDefaultMemory), new(big.Rat).SetInt64(math.MaxInt64), "9223372036854775807")
 	if err != nil {
 		return substrateResources{}, err
 	}
@@ -315,9 +318,11 @@ func resolveSubstrateQuantity(agentValue, builtinDefault string) string {
 }
 
 // parseSubstrateQuantity parses a Kubernetes quantity string and rejects
-// non-positive values and values above limit (the v1 cpu bound, or the
-// int64 the v1 API carries for memory).
-func parseSubstrateQuantity(field, value string, limit *resource.Quantity) (resource.Quantity, error) {
+// non-positive values and values above limit (in base units: cores or
+// bytes; shown to the user as limitText). resource.ParseQuantity validates
+// the format, but it clamps values beyond the int64 range, so the range is
+// checked exactly from the string itself (quantityRat).
+func parseSubstrateQuantity(field, value string, limit *big.Rat, limitText string) (resource.Quantity, error) {
 	q, err := resource.ParseQuantity(value)
 	if err != nil {
 		return resource.Quantity{}, fmt.Errorf("substrate: invalid %s limit %q: %w", field, value, err)
@@ -325,12 +330,73 @@ func parseSubstrateQuantity(field, value string, limit *resource.Quantity) (reso
 	if q.Sign() <= 0 {
 		return resource.Quantity{}, fmt.Errorf("substrate: %s limit %q must be positive", field, value)
 	}
-	// Compared as decimals: a value above the int64 range (such as 8Ei)
-	// does not compare above an int64-sized Quantity otherwise.
-	if q.AsDec().Cmp(limit.AsDec()) > 0 {
-		return resource.Quantity{}, fmt.Errorf("substrate: %s limit %q is above the maximum Substrate accepts (%s)", field, value, limit.String())
+	r, ok := quantityRat(value)
+	if !ok {
+		return resource.Quantity{}, fmt.Errorf("substrate: invalid %s limit %q", field, value)
+	}
+	if r.Cmp(limit) > 0 {
+		return resource.Quantity{}, fmt.Errorf("substrate: %s limit %q is above the maximum Substrate accepts (%s)", field, value, limitText)
 	}
 	return q, nil
+}
+
+// quantitySuffixes maps a Kubernetes quantity suffix to its multiplier.
+var quantitySuffixes = map[string]*big.Rat{
+	"":   big.NewRat(1, 1),
+	"n":  big.NewRat(1, 1_000_000_000),
+	"u":  big.NewRat(1, 1_000_000),
+	"m":  big.NewRat(1, 1000),
+	"k":  big.NewRat(1_000, 1),
+	"M":  big.NewRat(1_000_000, 1),
+	"G":  big.NewRat(1_000_000_000, 1),
+	"T":  big.NewRat(1_000_000_000_000, 1),
+	"P":  big.NewRat(1_000_000_000_000_000, 1),
+	"E":  big.NewRat(1_000_000_000_000_000_000, 1),
+	"Ki": new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), 10)),
+	"Mi": new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), 20)),
+	"Gi": new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), 30)),
+	"Ti": new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), 40)),
+	"Pi": new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), 50)),
+	"Ei": new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), 60)),
+}
+
+// quantityPattern splits a quantity into its number and its suffix (a
+// unit suffix, or a decimal exponent such as "e3").
+var quantityPattern = regexp.MustCompile(`^([+-]?[0-9]*\.?[0-9]*)([eE][+-]?[0-9]+|[a-zA-Z]*)$`)
+
+// quantityRat returns the exact value of a quantity string in base units.
+func quantityRat(value string) (*big.Rat, bool) {
+	m := quantityPattern.FindStringSubmatch(strings.TrimSpace(value))
+	if m == nil || m[1] == "" || m[1] == "." || m[1] == "+" || m[1] == "-" {
+		return nil, false
+	}
+	n, ok := new(big.Rat).SetString(m[1])
+	if !ok {
+		return nil, false
+	}
+	suffix := m[2]
+	if mult, ok := quantitySuffixes[suffix]; ok {
+		return n.Mul(n, mult), true
+	}
+	if suffix[0] == 'e' || suffix[0] == 'E' {
+		exp, err := strconv.Atoi(suffix[1:])
+		if err != nil || exp > 64 || exp < -64 {
+			return nil, false
+		}
+		pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(absInt(exp))), nil)
+		if exp >= 0 {
+			return n.Mul(n, new(big.Rat).SetInt(pow)), true
+		}
+		return n.Quo(n, new(big.Rat).SetInt(pow)), true
+	}
+	return nil, false
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // substrateRemovedKeys lists the substrate settings keys the v1 API has no

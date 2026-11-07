@@ -257,7 +257,12 @@ func TestNormalizeEgressAllowEntry_OneTrailingDotOnly(t *testing.T) {
 // SEC-2: an "@" anywhere in an entry is refused before any port or scheme
 // parse, and the error carries no entry bytes.
 func TestNormalizeEgressAllowEntry_AtAnywhereRefusedWithoutEcho(t *testing.T) {
-	for _, bad := range []string{"tokuser:toksecret@host.example.com", "tokuser@host.example.com:8443", "https://tokuser:toksecret@host.example.com", "host.example.com/tokpath@x"} {
+	for _, bad := range []string{
+		"tokuser:toksecret@host.example.com", "tokuser@host.example.com:8443", "https://tokuser:toksecret@host.example.com", "host.example.com/tokpath@x",
+		// "@" combined with forms the whole-entry checks refuse: the "@"
+		// refusal runs first, so no other error can echo the entry.
+		"tokuser:toksecret@10.0.0.1", "tokuser@[fe80::1%25eth0]", "tokuser@host%tok.example.com", "tokuser@*", "toksecret@0.0.0.0/0",
+	} {
 		got, err := NormalizeEgressAllowEntry(bad)
 		if err == nil {
 			t.Errorf("NormalizeEgressAllowEntry(%q) = %+v, nil; want a refusal", bad, got)
@@ -285,5 +290,35 @@ func TestNormalizeEgressAllowEntry_InteriorWhitespaceRefused(t *testing.T) {
 	}
 	if got, err := NormalizeEgressAllowEntry("  api.example.com  "); err != nil || got.Host != "api.example.com" {
 		t.Errorf("outer whitespace: NormalizeEgressAllowEntry() = %+v, %v; want accepted", got, err)
+	}
+}
+
+// No NormalizeEgressAllowEntry error carries any byte of the entry: every
+// refusal case runs with a canary token in the entry, and the canary never
+// appears in the error (S-R2-2).
+func TestNormalizeEgressAllowEntry_ErrorsNeverEchoTheEntry(t *testing.T) {
+	const c = "zqcanary"
+	for _, bad := range []string{
+		c + ".svc", c + ".svc..", "*." + c, c, c + ".local", c + ".example.com:0", c + ".example.com:99999",
+		c + ".example.com:" + c, c + ".example.com:1:2", "ftp://" + c + ".example.com", c + "://x.example.com",
+		"http://" + c + ".example.com/" + c, "http://" + c + ".example.com?" + c, "http://" + c + ".example.com#" + c,
+		"https://" + c + "@x.example.com", c + "@x.example.com", c + " .example.com", c + ".pod", c + ".arpa",
+		c + ".onion", c + "..example.com", "-" + c + ".example.com", c + "-.example.com",
+		strings.Repeat(c, 40) + ".example.com", "localhost.localdomain", "[" + c + "]", c + "%eth0",
+		"http://" + c + ".svc.cluster.local:8080", "https://*." + c + ":8443/x",
+	} {
+		_, err := NormalizeEgressAllowEntry(bad)
+		if err == nil {
+			t.Errorf("NormalizeEgressAllowEntry(%q) = nil error, want a refusal", bad)
+			continue
+		}
+		if strings.Contains(err.Error(), c) {
+			t.Errorf("NormalizeEgressAllowEntry(%q) error = %q echoes the entry", bad, err)
+		}
+	}
+	// Through ParseEgressAllow the error names the entry position only.
+	_, err := ParseEgressAllow([]string{"api.example.com", c + ".svc"})
+	if err == nil || !strings.Contains(err.Error(), "entry 2") || strings.Contains(err.Error(), c) {
+		t.Errorf("ParseEgressAllow() error = %v, want \"entry 2\" and no entry bytes", err)
 	}
 }

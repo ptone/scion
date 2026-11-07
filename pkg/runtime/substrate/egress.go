@@ -15,6 +15,7 @@
 package substrate
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"regexp"
@@ -315,7 +316,7 @@ func ParseEgressAllowIndexed(raws []string) ([]EgressAllowEntry, []int, error) {
 	for i, raw := range raws {
 		e, err := NormalizeEgressAllowEntry(raw)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("entry %d: %w", i+1, err)
 		}
 		if e.IsZero() {
 			continue
@@ -334,10 +335,10 @@ func ParseEgressAllowIndexed(raws []string) ([]EgressAllowEntry, []int, error) {
 }
 
 // parseEgressPort parses an exact TCP port, 1 to 65535.
-func parseEgressPort(raw, p string) (int32, error) {
+func parseEgressPort(p string) (int32, error) {
 	n, err := strconv.ParseUint(p, 10, 16)
 	if err != nil || n == 0 {
-		return 0, fmt.Errorf("egress_allow entry %q has invalid port %q; a port is a number from 1 to 65535", raw, p)
+		return 0, errors.New("egress_allow entry has an invalid port; a port is a number from 1 to 65535")
 	}
 	return int32(n), nil
 }
@@ -384,25 +385,24 @@ func NormalizeEgressAllowEntry(raw string) (EgressAllowEntry, error) {
 	if e == "" {
 		return EgressAllowEntry{}, nil
 	}
+	// No userinfo in any form: an "@" anywhere is refused first, before
+	// any other check or parse. No error from this function echoes the
+	// entry or any part of it: an entry may carry a credential.
+	if strings.Contains(e, "@") {
+		return EgressAllowEntry{}, errors.New("egress_allow entry carries userinfo (an \"@\"), which is not permitted; write it as host[:port] or http://host[:port]")
+	}
+	// No interior whitespace (the outer whitespace is already trimmed).
+	if strings.IndexFunc(e, unicode.IsSpace) >= 0 {
+		return EgressAllowEntry{}, errors.New("egress_allow entry contains whitespace, which is not permitted")
+	}
 	// Catch-alls, IP and CIDR spellings (including IPv6, whose colons are
 	// not a port separator) and bracketed or zoned forms are refused by
-	// the host checks on the whole entry, with the same errors as before
-	// ports existed.
+	// the host checks on the whole entry, before any scheme or port split.
 	if egressAllowCatchAllValues[e] || isBareWildcard(e) || strings.ContainsAny(e, "[]%") || looksLikeIPAttempt(e) {
-		if _, herr := normalizeEgressAllowHost(raw, e); herr != nil {
+		if _, herr := normalizeEgressAllowHost(e); herr != nil {
 			return EgressAllowEntry{}, herr
 		}
-		return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q is not permitted", raw)
-	}
-	// No userinfo in any form: an "@" anywhere is refused before any port
-	// or scheme parse. The entry is not echoed: it may carry a credential.
-	if strings.Contains(e, "@") {
-		return EgressAllowEntry{}, fmt.Errorf("an egress_allow entry carries userinfo (an \"@\"), which is not permitted; write it as host[:port] or http://host[:port]")
-	}
-	// No interior whitespace (the outer whitespace is already trimmed). The
-	// entry is not echoed.
-	if strings.IndexFunc(e, unicode.IsSpace) >= 0 {
-		return EgressAllowEntry{}, fmt.Errorf("an egress_allow entry contains whitespace, which is not permitted")
+		return EgressAllowEntry{}, errors.New("egress_allow entry is not permitted")
 	}
 
 	// The scheme is detected ONLY by a literal "http://" or "https://"
@@ -419,19 +419,18 @@ func NormalizeEgressAllowEntry(raw string) (EgressAllowEntry, error) {
 		scheme, port, isURL = "http", defaultHTTPPort, true
 		rest = strings.TrimPrefix(e, "http://")
 	case strings.Contains(e, "://"):
-		name, _, _ := strings.Cut(e, "://")
-		return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q has unsupported scheme %q; use http:// or https://, or host:port", raw, name)
+		return EgressAllowEntry{}, errors.New("egress_allow entry has an unsupported scheme; use http:// or https://, or host:port")
 	}
 	if isURL {
 		if strings.Contains(rest, "#") {
-			return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q may not carry a fragment; write it as http://host[:port] or host:port", raw)
+			return EgressAllowEntry{}, errors.New("egress_allow entry may not carry a fragment; write it as http://host[:port] or host:port")
 		}
 		if strings.Contains(rest, "?") {
-			return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q may not carry a query; write it as http://host[:port] or host:port", raw)
+			return EgressAllowEntry{}, errors.New("egress_allow entry may not carry a query; write it as http://host[:port] or host:port")
 		}
 		if i := strings.Index(rest, "/"); i >= 0 {
 			if i != len(rest)-1 {
-				return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q may not carry a path; write it as http://host[:port] or host:port", raw)
+				return EgressAllowEntry{}, errors.New("egress_allow entry may not carry a path; write it as http://host[:port] or host:port")
 			}
 			rest = rest[:i] // a single trailing "/" is allowed
 		}
@@ -439,11 +438,11 @@ func NormalizeEgressAllowEntry(raw string) (EgressAllowEntry, error) {
 	hostPart := rest
 	if h, p, found := strings.Cut(rest, ":"); found {
 		if strings.Contains(p, ":") {
-			return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q is not host:port", raw)
+			return EgressAllowEntry{}, errors.New("egress_allow entry is not host:port")
 		}
 		hostPart = h
 		var err error
-		if port, err = parseEgressPort(raw, p); err != nil {
+		if port, err = parseEgressPort(p); err != nil {
 			return EgressAllowEntry{}, err
 		}
 	}
@@ -455,19 +454,20 @@ func NormalizeEgressAllowEntry(raw string) (EgressAllowEntry, error) {
 		hostPart = strings.TrimSuffix(hostPart, ".")
 	}
 
-	host, err := normalizeEgressAllowHost(raw, hostPart)
+	host, err := normalizeEgressAllowHost(hostPart)
 	if err != nil {
 		return EgressAllowEntry{}, err
 	}
 	if host == "" {
-		return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q names no host", raw)
+		return EgressAllowEntry{}, errors.New("egress_allow entry names no host")
 	}
 	return EgressAllowEntry{Scheme: scheme, Host: host, Port: port, Wildcard: strings.HasPrefix(host, "*.")}, nil
 }
 
 // normalizeEgressAllowHost applies every host check to host (the host part
-// of raw) and returns its canonical form; errors name raw as written.
-func normalizeEgressAllowHost(raw, host string) (string, error) {
+// of an entry) and returns its canonical form. Errors name the problem
+// class only, never the entry or any part of it.
+func normalizeEgressAllowHost(host string) (string, error) {
 	// No trailing-dot strip here: NormalizeEgressAllowEntry strips at most
 	// one (see the doc on egressAllowLabelPattern for why a second one
 	// isn't stripped too).
@@ -477,17 +477,17 @@ func normalizeEgressAllowHost(raw, host string) (string, error) {
 	}
 
 	if egressAllowCatchAllValues[e] || isBareWildcard(e) {
-		return "", fmt.Errorf("egress_allow entry %q is a catch-all and is not permitted; name a specific public hostname instead", raw)
+		return "", errors.New("egress_allow entry is a catch-all and is not permitted; name a specific public hostname instead")
 	}
 	if strings.ContainsAny(e, "[]%") {
-		return "", fmt.Errorf("egress_allow entry %q contains an unsupported character (brackets or a zone id) and is not permitted", raw)
+		return "", errors.New("egress_allow entry contains an unsupported character (brackets or a zone id) and is not permitted")
 	}
 	if looksLikeIPAttempt(e) {
-		return "", fmt.Errorf("egress_allow entry %q: IP/CIDR egress rules not currently supported", raw)
+		return "", errors.New("egress_allow entry: IP/CIDR egress rules not currently supported")
 	}
 
 	rest, wildcard := strings.CutPrefix(e, "*.")
-	ascii, err := validatePublicHostname(raw, rest, wildcard)
+	ascii, err := validatePublicHostname(rest, wildcard)
 	if err != nil {
 		return "", err
 	}
@@ -499,7 +499,7 @@ func normalizeEgressAllowHost(raw, host string) (string, error) {
 	// including a wildcard prefix — not just the hostname portion — so
 	// what's validated matches what's sendable.
 	if len(final) > egressAllowMaxLength {
-		return "", fmt.Errorf("egress_allow entry %q is %d characters long, over the %d-character limit for a DNS name", raw, len(final), egressAllowMaxLength)
+		return "", fmt.Errorf("egress_allow entry is %d characters long, over the %d-character limit for a DNS name", len(final), egressAllowMaxLength)
 	}
 	return final, nil
 }
@@ -603,18 +603,18 @@ func egressAllowSuffixOK(ascii string, labels []string, wildcard bool) (ok bool,
 	}
 
 	if _, icann := publicsuffix.PublicSuffix("x." + lastLabel); !icann {
-		return false, fmt.Sprintf("top-level domain %q is not a recognized ICANN-managed public suffix — likely a private, unmanaged, or made-up zone (e.g. a Kubernetes DNS zone like \"pod\"/\"svc\", or a typo)", lastLabel)
+		return false, "its top-level domain is not a recognized ICANN-managed public suffix — likely a private, unmanaged, or made-up zone (e.g. a Kubernetes DNS zone like \"pod\"/\"svc\", or a typo)"
 	}
 
 	suffix, _ := publicsuffix.PublicSuffix(ascii)
 	if ascii == suffix {
-		return false, fmt.Sprintf("the entry is itself a public suffix (%q) — whether ICANN-managed or a private multi-tenant platform suffix such as \"googleapis.com\"/\"github.io\" — not a specific hostname beneath one", suffix)
+		return false, "the entry is itself a public suffix — whether ICANN-managed or a private multi-tenant platform suffix such as \"googleapis.com\"/\"github.io\" — not a specific hostname beneath one"
 	}
 
 	if wildcard {
 		probe := "x." + ascii
 		if s, _ := publicsuffix.PublicSuffix(probe); s == probe {
-			return false, fmt.Sprintf("%q is a wildcard public-suffix rule (every subdomain beneath it is a separate, mutually untrusting tenant, the same shape as \"googleapis.com\"/\"github.io\") — a wildcard egress_allow entry over it would grant every tenant on the platform, not a specific hostname beneath one", ascii)
+			return false, "the wildcard is over a wildcard public-suffix rule (every subdomain beneath it is a separate, mutually untrusting tenant, the same shape as \"googleapis.com\"/\"github.io\") — a wildcard egress_allow entry over it would grant every tenant on the platform, not a specific hostname beneath one"
 		}
 	}
 
@@ -633,33 +633,33 @@ func egressAllowSuffixOK(ascii string, labels []string, wildcard bool) (ok bool,
 // nothing to search-domain-expand under a wildcard), so it's let through to
 // egressAllowSuffixOK, which rejects it for the more specific and more
 // accurate reason that "com" is itself a public suffix.
-func validatePublicHostname(raw, hostname string, wildcard bool) (string, error) {
+func validatePublicHostname(hostname string, wildcard bool) (string, error) {
 	ascii, err := idna.Lookup.ToASCII(hostname)
 	if err != nil {
-		return "", fmt.Errorf("egress_allow entry %q is not a valid hostname (or valid internationalized domain name): %w", raw, err)
+		return "", errors.New("egress_allow entry is not a valid hostname (or valid internationalized domain name)")
 	}
 
 	labels := strings.Split(ascii, ".")
 	if len(labels) < 2 && !wildcard {
-		return "", fmt.Errorf("egress_allow entry %q is a single-label hostname, which can resolve through a cluster or local DNS search domain; use a fully-qualified hostname", raw)
+		return "", errors.New("egress_allow entry is a single-label hostname, which can resolve through a cluster or local DNS search domain; use a fully-qualified hostname")
 	}
 	for _, label := range labels {
 		if !egressAllowLabelPattern.MatchString(label) {
-			return "", fmt.Errorf("egress_allow entry %q has an invalid DNS label %q (labels must be ASCII letters, digits, and hyphens, and must not start or end with a hyphen, or be empty)", raw, label)
+			return "", errors.New("egress_allow entry has an invalid DNS label (labels must be ASCII letters, digits, and hyphens, and must not start or end with a hyphen, or be empty)")
 		}
 	}
 
 	if ok, reason := egressAllowSuffixOK(ascii, labels, wildcard); !ok {
-		return "", fmt.Errorf("egress_allow entry %q: %s", raw, reason)
+		return "", errors.New("egress_allow entry: " + reason)
 	}
 
 	for _, blockedSuffix := range egressAllowBlockedHostSuffixes {
 		if strings.HasSuffix(ascii, blockedSuffix) {
-			return "", fmt.Errorf("egress_allow entry %q targets an in-cluster or local DNS suffix (%q) and is not permitted", raw, blockedSuffix)
+			return "", fmt.Errorf("egress_allow entry targets an in-cluster or local DNS suffix (%s) and is not permitted", blockedSuffix)
 		}
 	}
 	if egressAllowBlockedHostNames[ascii] {
-		return "", fmt.Errorf("egress_allow entry %q is a well-known loopback/local alias and is not permitted", raw)
+		return "", errors.New("egress_allow entry is a well-known loopback/local alias and is not permitted")
 	}
 
 	return ascii, nil

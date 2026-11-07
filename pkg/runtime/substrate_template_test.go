@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"math"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -87,12 +88,18 @@ func TestResolveSubstrateResources_Bounds(t *testing.T) {
 	if err != nil || got.memoryBytes != math.MaxInt64 || got.cpuMillicores != 999999 {
 		t.Errorf("maxima: resolveSubstrateResources() = %+v, %v; want memory MaxInt64 and cpu 999999m", got, err)
 	}
+	// A fractional suffix just under the int64 edge is accepted.
+	if got, err := resolveSubstrateResources(&api.ResourceSpec{Limits: api.ResourceList{Memory: "7.99999Ei"}}); err != nil || got.memoryBytes <= 0 {
+		t.Errorf("7.99999Ei: resolveSubstrateResources() = %+v, %v; want accepted", got, err)
+	}
 	for _, tc := range []struct {
 		limits api.ResourceList
 		field  string
 	}{
 		{api.ResourceList{Memory: "9223372036854775808"}, "memory"},
 		{api.ResourceList{Memory: "8Ei"}, "memory"},
+		{api.ResourceList{Memory: "8.00001Ei"}, "memory"},
+		{api.ResourceList{Memory: "9.3e18"}, "memory"},
 		{api.ResourceList{CPU: "1000"}, "cpu"},
 		{api.ResourceList{CPU: "1000000m"}, "cpu"},
 		{api.ResourceList{CPU: "9223372036854775807m"}, "cpu"},
@@ -319,5 +326,22 @@ func TestSubstrateRun_EgressTrustBundleRefused(t *testing.T) {
 	}
 	if calls := rec.list(); len(calls) != 0 {
 		t.Errorf("Run() made control-plane calls %v before refusing", calls)
+	}
+}
+
+func TestQuantityRat(t *testing.T) {
+	for in, want := range map[string]*big.Rat{
+		"2":    big.NewRat(2, 1),
+		"500m": big.NewRat(1, 2),
+		"4Gi":  big.NewRat(1<<32, 1),
+		"1e3":  big.NewRat(1000, 1),
+		"1.5k": big.NewRat(1500, 1),
+		"1E":   big.NewRat(1_000_000_000_000_000_000, 1),
+		"8Ei":  new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), 63)),
+	} {
+		got, ok := quantityRat(in)
+		if !ok || got.Cmp(want) != 0 {
+			t.Errorf("quantityRat(%q) = %v, %v; want %v", in, got, ok, want)
+		}
 	}
 }
