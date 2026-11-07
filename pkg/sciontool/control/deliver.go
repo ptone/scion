@@ -67,16 +67,15 @@ const (
 
 // Response outcomes and stages (r3 §1.3, lines 52-68).
 const (
-	outcomeDelivered      = "delivered"
-	outcomePartial        = "partial"
-	outcomeInProgress     = "in_progress"
-	outcomeBusy           = "busy"
-	outcomeExpired        = "expired_before_paste"
-	outcomeFailed         = "failed"
-	stageTarget           = "target"
-	statusExpired         = http.StatusRequestTimeout
-	statusTargetMissing   = http.StatusUnprocessableEntity
-	statusFailedAfterStep = http.StatusInternalServerError
+	outcomeDelivered  = "delivered"
+	outcomePartial    = "partial"
+	outcomeInProgress = "in_progress"
+	outcomeBusy       = "busy"
+	outcomeExpired    = "expired_before_paste"
+	outcomeFailed     = "failed"
+	stageTarget       = "target"
+	statusExpired     = http.StatusRequestTimeout
+	statusBeforePaste = http.StatusUnprocessableEntity
 )
 
 // idPattern is the delivery, broker and message id shape (r3 §1.2,
@@ -300,14 +299,30 @@ func hardStop(receipt time.Time, deadline time.Duration, notAfterUnixMS *int64) 
 // errExpired: the hard stop passed before the first acting step.
 var errExpired = errors.New("control: hard stop passed before the paste")
 
-// gatedRunner refuses the first acting step (any step but the readiness
-// probe) once the hard stop has passed, so no paste or first key starts
-// late (r3 §1.2 line 45). Later steps of a flush that has started run.
+// Stages of a flush step, reported with a partial outcome.
+const (
+	stageInterrupt  = "interrupt"
+	stageLoadBuffer = "load_buffer"
+	stagePaste      = "paste"
+)
+
+// gatedRunner runs a flush's steps. It refuses the first acting step
+// once the hard stop has passed, so no paste or first key starts late
+// (r3 §1.2 line 45); later steps of a flush that has started run. It
+// also records whether a step the harness can see (paste-buffer or
+// send-keys) was attempted, and the stage of the first failed step.
 type gatedRunner struct {
 	inner tmuxdeliver.Runner
 	now   func() time.Time
 	stop  time.Time
-	acted bool
+	// interruptKeys is how many leading send-keys are interrupt keys.
+	interruptKeys int
+
+	acted      bool   // an acting step was attempted
+	visible    bool   // a paste-buffer or send-keys was attempted
+	pasteSeen  bool   // paste-buffer was attempted
+	sendKeys   int    // send-keys attempted so far
+	failedStep string // stage of the first failed step
 }
 
 func (g *gatedRunner) Run(ctx context.Context, argv []string, stdin io.Reader) (string, error) {
@@ -317,7 +332,27 @@ func (g *gatedRunner) Run(ctx context.Context, argv []string, stdin io.Reader) (
 		}
 		g.acted = true
 	}
-	return g.inner.Run(ctx, argv, stdin)
+	stage := ""
+	if len(argv) >= 2 {
+		switch argv[1] {
+		case "paste-buffer":
+			g.visible, g.pasteSeen, stage = true, true, stagePaste
+		case "send-keys":
+			g.visible = true
+			g.sendKeys++
+			stage = tmuxdeliver.StageSubmit
+			if !g.pasteSeen && g.sendKeys <= g.interruptKeys {
+				stage = stageInterrupt
+			}
+		case "load-buffer":
+			stage = stageLoadBuffer
+		}
+	}
+	out, err := g.inner.Run(ctx, argv, stdin)
+	if err != nil && g.failedStep == "" {
+		g.failedStep = stage
+	}
+	return out, err
 }
 
 // serve handles one deliver-message request.
@@ -388,13 +423,20 @@ func (d *deliverer) serve(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, res.status, resp)
 }
 
-// flushResult is a flush's answer. store is set when any acting step
-// was attempted, so a replay never acts twice; a flush that did nothing
-// (expired, target missing) is not stored and may be retried.
+// flushResult is a flush's answer. store is set once a step the harness
+// can see (paste-buffer or send-keys) was attempted, so a replay never
+// repeats it. A flush that did nothing visible (expired, target missing,
+// a failed load-buffer) is not stored and may be retried under the same
+// key.
 type flushResult struct {
 	idemOutcome
 	store bool
 }
+
+// For S4's unbind mapping (design r3 §2.4 lines 175-177, §2.6 line 197):
+// 422 (stage target or load_buffer) and 408 mean nothing was pasted and
+// the rows go back to dispatched; 200 partial (stages interrupt, paste,
+// submit, extra_submit) keeps the binding and finalises it as partial.
 
 func (d *deliverer) flush(ctx context.Context, req *deliverRequest, receipt time.Time, seq uint64) flushResult {
 	stop, skewed := hardStop(receipt, time.Duration(*req.DeadlineMS)*time.Millisecond, req.NotAfterUnixMS)
@@ -405,20 +447,8 @@ func (d *deliverer) flush(ctx context.Context, req *deliverRequest, receipt time
 		d.logf.debug("deliver-message: observed skew %dms (not_after minus the receipt bound)",
 			time.UnixMilli(*req.NotAfterUnixMS).Sub(receipt.Add(time.Duration(*req.DeadlineMS)*time.Millisecond)).Milliseconds())
 	}
-	gate := &gatedRunner{inner: d.runner, now: d.now, stop: stop}
 
-	// The tmux target must exist before anything is attempted (r3 §1.3,
-	// 422 stage target). The check is not an acting step.
-	if _, err := d.runner.Run(ctx, targetCheckArgv(), nil); err != nil {
-		return flushResult{idemOutcome: idemOutcome{status: statusTargetMissing, outcome: outcomeFailed, stage: stageTarget}}
-	}
-
-	if req.Op == tmuxdeliver.OpPaste && req.Ready != nil {
-		if gone := d.waitReady(ctx, req.Ready, receipt, stop); gone {
-			return flushResult{idemOutcome: idemOutcome{status: statusTargetMissing, outcome: outcomeFailed, stage: stageTarget}}
-		}
-	}
-
+	// Build and bound-check the steps before running anything.
 	treq := tmuxdeliver.Request{
 		Op:            req.Op,
 		InterruptKeys: req.InterruptKeys,
@@ -440,6 +470,18 @@ func (d *deliverer) flush(ctx context.Context, req *deliverRequest, receipt time
 		return flushResult{idemOutcome: idemOutcome{status: http.StatusBadRequest, outcome: outcomeFailed}}
 	}
 
+	// The tmux target must exist before anything is attempted (r3 §1.3
+	// line 64, 422 stage target). The check is not an acting step.
+	if _, err := d.runner.Run(ctx, targetCheckArgv(), nil); err != nil {
+		return flushResult{idemOutcome: idemOutcome{status: statusBeforePaste, outcome: outcomeFailed, stage: stageTarget}}
+	}
+
+	if req.Op == tmuxdeliver.OpPaste && req.Ready != nil {
+		if gone := d.waitReady(ctx, req.Ready, receipt, stop); gone {
+			return flushResult{idemOutcome: idemOutcome{status: statusBeforePaste, outcome: outcomeFailed, stage: stageTarget}}
+		}
+	}
+
 	// The caller went away during the wait: nothing was done, so nothing
 	// is stored.
 	if ctx.Err() != nil {
@@ -450,6 +492,7 @@ func (d *deliverer) flush(ctx context.Context, req *deliverRequest, receipt time
 	// bound is a duration from now, so an injected clock stays consistent.
 	fctx, cancel := context.WithTimeout(ctx, stop.Sub(d.now())+flushBudget)
 	defer cancel()
+	gate := &gatedRunner{inner: d.runner, now: d.now, stop: stop, interruptKeys: len(req.InterruptKeys)}
 	err := tmuxdeliver.Deliver(fctx, gate, treq)
 	var partial *tmuxdeliver.PartialError
 	switch {
@@ -462,11 +505,26 @@ func (d *deliverer) flush(ctx context.Context, req *deliverRequest, receipt time
 		return flushResult{idemOutcome: idemOutcome{status: statusExpired, outcome: outcomeExpired}}
 	case errors.Is(err, tmuxdeliver.ErrEmptyAfterSanitize):
 		return flushResult{idemOutcome: idemOutcome{status: http.StatusBadRequest, outcome: outcomeFailed, stage: "text"}}
+	case !gate.visible:
+		// Nothing the harness can see happened (a failed load-buffer):
+		// a failure before paste, retryable, not stored (r3 §1.3 line 64,
+		// §2.4 line 177). Errors carry the verb only (runnerError).
+		d.logf.debug("deliver-message: flush failed before any visible step: %v", err)
+		stage := gate.failedStep
+		if stage == "" {
+			stage = stageLoadBuffer
+		}
+		return flushResult{idemOutcome: idemOutcome{status: statusBeforePaste, outcome: outcomeFailed, stage: stage}}
 	default:
-		// A step failed before the paste completed. Errors carry the
-		// verb only (runnerError), never text.
-		d.logf.debug("deliver-message: flush failed: %v", err)
-		return flushResult{idemOutcome: idemOutcome{status: statusFailedAfterStep, outcome: outcomeFailed}, store: gate.acted}
+		// A visible step (an interrupt key, the paste) was attempted and
+		// the flush failed at or after it: partial with that stage,
+		// stored so a replay never repeats it (r3 §1.3 line 56).
+		d.logf.debug("deliver-message: flush failed after a visible step: %v", err)
+		stage := gate.failedStep
+		if stage == "" {
+			stage = stagePaste
+		}
+		return flushResult{idemOutcome: idemOutcome{status: http.StatusOK, outcome: outcomePartial, stage: stage}, store: true}
 	}
 }
 

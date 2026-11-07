@@ -514,20 +514,68 @@ func TestDeliverPartial(t *testing.T) {
 	})
 }
 
-// TestDeliverFailedBeforePaste: a load-buffer failure is a 500 with a
-// fixed body; it is stored (a step was attempted), so a replay does not
-// run again.
+// TestDeliverFailedBeforePaste: a load-buffer failure happens before any
+// step the harness can see, so it answers 422 stage load_buffer (a
+// failure before paste, r3 §1.3 line 64), is not stored, and the same
+// delivery id retried goes through. The error text never reaches the
+// response.
 func TestDeliverFailedBeforePaste(t *testing.T) {
 	h := newHarness(t)
 	h.run.fail = map[string]error{"load-buffer": errors.New("boom SENTINEL-ERR")}
 	r := h.post(t, body(nil))
-	if r.status != http.StatusInternalServerError || r.resp.Outcome != outcomeFailed || strings.Contains(r.raw, "SENTINEL") {
-		t.Fatalf("got %d %s", r.status, r.raw)
+	if r.status != http.StatusUnprocessableEntity || r.resp.Outcome != outcomeFailed || r.resp.Stage != stageLoadBuffer || strings.Contains(r.raw, "SENTINEL") {
+		t.Fatalf("got %d %s, want 422 failed load_buffer", r.status, r.raw)
+	}
+	if h.run.count("paste-buffer") != 0 || h.run.count("send-keys") != 0 {
+		t.Fatalf("visible steps ran: %v", h.run.verbs())
 	}
 	h.run.fail = nil
 	h.run.reset()
-	if r := h.post(t, body(nil)); r.resp.Replayed == nil || !*r.resp.Replayed || len(h.run.verbs()) != 0 {
-		t.Fatalf("replay: %s steps %v", r.raw, h.run.verbs())
+	r = h.post(t, body(nil))
+	if r.status != http.StatusOK || r.resp.Outcome != outcomeDelivered || r.resp.Replayed == nil || *r.resp.Replayed {
+		t.Fatalf("retry: %d %s, want a fresh 200 delivered", r.status, r.raw)
+	}
+	if h.run.count("paste-buffer") != 1 {
+		t.Fatalf("retry steps %v, want one paste", h.run.verbs())
+	}
+}
+
+// TestDeliverFailedAtVisibleStep: once a step the harness can see was
+// attempted (an interrupt key, the paste), a failure there answers 200
+// partial with that stage and is stored, so a replay of the same key
+// runs nothing (r3 §1.3 line 56, §5.5).
+func TestDeliverFailedAtVisibleStep(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(m map[string]any)
+		fail   string
+		stage  string
+	}{
+		{"paste-buffer fails", nil, "paste-buffer", stagePaste},
+		{"interrupt key fails", func(m map[string]any) {
+			m["op"] = "interrupt_paste"
+			m["interrupt_keys"] = []string{"C-c"}
+		}, "send-keys", stageInterrupt},
+		{"load-buffer fails after the interrupt key", func(m map[string]any) {
+			m["op"] = "interrupt_paste"
+			m["interrupt_keys"] = []string{"C-c"}
+		}, "load-buffer", stageLoadBuffer},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.run.fail = map[string]error{tt.fail: errors.New("boom")}
+			r := h.post(t, body(tt.mutate))
+			if r.status != http.StatusOK || r.resp.Outcome != outcomePartial || r.resp.Stage != tt.stage {
+				t.Fatalf("got %d %s, want 200 partial %s", r.status, r.raw, tt.stage)
+			}
+			h.run.fail = nil
+			h.run.reset()
+			r = h.post(t, body(tt.mutate))
+			if r.resp.Outcome != outcomePartial || r.resp.Replayed == nil || !*r.resp.Replayed || len(h.run.verbs()) != 0 {
+				t.Fatalf("replay: %s steps %v, want the stored partial and no steps", r.raw, h.run.verbs())
+			}
+		})
 	}
 }
 
