@@ -41,6 +41,12 @@ var ErrInvalidRouterEndpoint = errors.New("substrate: invalid router_endpoint")
 // them.
 var ErrRouterClientCertNotConfigured = errors.New("substrate: router client certificate not configured: router mTLS needs both the client certificate file and the client key file")
 
+// ErrRouterRedirectRefused is returned (wrapped in a *url.Error) when the
+// router answers a request made by an mTLS RouterClient with a redirect.
+// Router calls never need one, and following it could carry the request's
+// headers and body to another host or over plaintext.
+var ErrRouterRedirectRefused = errors.New("substrate: router answered with a redirect; redirects are refused")
+
 // RouterClient sends HTTP requests to an actor's in-actor control server
 // (sciontool substrate-serve) through Substrate's inbound atenet-router.
 // An inbound request through the router auto-resumes a SUSPENDED actor —
@@ -104,6 +110,7 @@ type RouterTLSConfig struct {
 //     through the same lookup as the ateapi dialer), never the system roots;
 //   - ServerName is cfg.ServerName, else the Endpoint host;
 //   - no proxy from the environment is used for the fixed in-cluster router;
+//   - redirects are refused (ErrRouterRedirectRefused), never followed;
 //   - the client certificate is re-read from CertFile/KeyFile on every
 //     handshake (GetClientCertificate), and loaded once here so a missing or
 //     mismatched pair fails construction rather than the first request.
@@ -161,9 +168,20 @@ func newMTLSRouterClient(ctx context.Context, lookup ctbLookup, cfg RouterTLSCon
 	transport.Proxy = nil
 
 	return &RouterClient{
-		Endpoint:   strings.TrimRight(cfg.Endpoint, "/"),
-		HTTPClient: &http.Client{Transport: transport},
+		Endpoint: strings.TrimRight(cfg.Endpoint, "/"),
+		HTTPClient: &http.Client{
+			Transport:     transport,
+			CheckRedirect: refuseRedirect,
+		},
 	}, nil
+}
+
+// refuseRedirect is the mTLS client's CheckRedirect: it refuses every
+// redirect with an error rather than returning the 3xx response
+// (http.ErrUseLastResponse), so a caller cannot mistake a redirect for an
+// answer from the actor.
+func refuseRedirect(*http.Request, []*http.Request) error {
+	return ErrRouterRedirectRefused
 }
 
 // clientCertFiles loads the broker's client certificate from disk.

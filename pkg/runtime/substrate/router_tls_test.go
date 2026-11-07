@@ -31,6 +31,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -137,6 +138,9 @@ type routerFixture struct {
 	keyFile  string
 	caFile   string
 	hits     atomic.Int64
+	// redirectTo, when set before the first request, makes the handler
+	// answer 307 to that URL.
+	redirectTo string
 }
 
 // newRouterFixture starts the server. serverTLS may adjust the server's TLS
@@ -158,6 +162,10 @@ func newRouterFixture(t *testing.T, serverTLS func(*tls.Config)) *routerFixture 
 
 	f.srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.hits.Add(1)
+		if f.redirectTo != "" {
+			http.Redirect(w, r, f.redirectTo, http.StatusTemporaryRedirect)
+			return
+		}
 		cn := ""
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 			cn = r.TLS.PeerCertificates[0].Subject.CommonName
@@ -554,6 +562,44 @@ func TestMTLSRouterClient_ConstructionRefusals(t *testing.T) {
 				t.Errorf("error = %v, want it to match %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestMTLSRouterClient_RedirectRefused: a 307 from the router to a plaintext
+// URL is refused; no second request is made anywhere.
+func TestMTLSRouterClient_RedirectRefused(t *testing.T) {
+	var plainHits atomic.Int64
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		plainHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(plain.Close)
+
+	f := newRouterFixture(t, nil)
+	f.redirectTo = plain.URL + "/scion/v1/exec"
+	rc, err := f.build(t, f.config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc.HTTPClient.CheckRedirect == nil {
+		t.Fatal("router client has no CheckRedirect")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := rc.Do(ctx, "ns-a", "actor-1", http.MethodPost, "/scion/v1/exec", strings.NewReader("{}"), nil)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("Do() = status %d, want the redirect refused", resp.StatusCode)
+	}
+	if !errors.Is(err, ErrRouterRedirectRefused) {
+		t.Errorf("Do() error = %v, want ErrRouterRedirectRefused", err)
+	}
+	if n := f.hits.Load(); n != 1 {
+		t.Errorf("router handler ran %d time(s), want exactly 1", n)
+	}
+	if n := plainHits.Load(); n != 0 {
+		t.Errorf("plaintext listener got %d request(s), want 0", n)
 	}
 }
 
