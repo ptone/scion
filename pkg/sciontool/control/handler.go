@@ -20,8 +20,10 @@
 // reach.
 //
 // Every route answers POST only (other methods get 405), unknown paths
-// get 404, and every route is idempotent or coalescing. No request or
-// response body carries a credential.
+// get 404, and every route is idempotent, coalescing, or idempotent by a
+// request key (deliver-message: a replay of a finished key answers the
+// stored outcome and never acts again). No request or response body
+// carries a credential.
 package control
 
 import (
@@ -45,16 +47,21 @@ type Options struct {
 	// block and must not refresh the token itself; the loop coalesces
 	// kicks and keeps refreshes single-flight. Required.
 	KickTokenRefresh func()
+	// Deliver, when set, serves RouteDeliverMessage. The caller sets it
+	// only when this agent can deliver into the harness's tmux session;
+	// when nil the route is neither served nor advertised.
+	Deliver *DeliverOptions
 }
 
 // Handler serves the /v1/control/* routes.
 type Handler struct {
-	routes map[string]http.HandlerFunc
-	names  []string
+	routes  map[string]http.HandlerFunc
+	names   []string
+	deliver *deliverer // nil unless Options.Deliver was set
 }
 
 // New returns a Handler serving the routes opts supports. It panics if
-// KickTokenRefresh is nil.
+// KickTokenRefresh is nil, or if Deliver is set without a Runner.
 func New(opts Options) *Handler {
 	if opts.KickTokenRefresh == nil {
 		panic("control: KickTokenRefresh is required")
@@ -65,6 +72,10 @@ func New(opts Options) *Handler {
 		kick()
 		w.WriteHeader(http.StatusAccepted)
 	})
+	if opts.Deliver != nil {
+		h.deliver = newDeliverer(*opts.Deliver)
+		h.add(RouteDeliverMessage, h.deliver.serve)
+	}
 	return h
 }
 
