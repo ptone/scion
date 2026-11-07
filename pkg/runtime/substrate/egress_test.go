@@ -141,18 +141,18 @@ func TestValidateEgressAllow_RejectsAllIPAndCIDR(t *testing.T) {
 
 // TestNormalizeEgressAllowEntry_ZonedIPv6Refused covers the zoned IPv6
 // forms on the tenant path (NormalizeEgressAllowEntry is what
-// addTenantHost in pkg/runtime calls): bracketed with a percent-encoded
+// checkTenantHost in pkg/runtime calls): bracketed with a percent-encoded
 // zone, and bare with a raw zone. Both are refused, by the
 // unsupported-character check ahead of the IP test.
 func TestNormalizeEgressAllowEntry_ZonedIPv6Refused(t *testing.T) {
 	for _, entry := range []string{"[fe80::1%25eth0]", "fe80::1%eth0"} {
 		got, err := NormalizeEgressAllowEntry(entry)
 		if err == nil {
-			t.Errorf("NormalizeEgressAllowEntry(%q) = %q, nil; want a refusal", entry, got)
+			t.Errorf("NormalizeEgressAllowEntry(%q) = %+v, nil; want a refusal", entry, got)
 			continue
 		}
-		if got != "" {
-			t.Errorf("NormalizeEgressAllowEntry(%q) returned %q alongside its error, want \"\"", entry, got)
+		if !got.IsZero() {
+			t.Errorf("NormalizeEgressAllowEntry(%q) returned %+v alongside its error, want the zero entry", entry, got)
 		}
 	}
 }

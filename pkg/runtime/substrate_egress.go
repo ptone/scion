@@ -60,7 +60,7 @@ var hardcodedModelEgressHosts = []string{
 // refused rather than silently lowercased, since CLOUD_ML_REGION reaching
 // here with the wrong case indicates a misconfiguration worth surfacing,
 // not papering over.
-var vertexRegionLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+var vertexRegionLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // addVertexAIHost adds the Vertex AI regional endpoint host
 // ("<region>-aiplatform.googleapis.com", or the bare "aiplatform.googleapis.com"
@@ -69,49 +69,65 @@ var vertexRegionLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])
 // pkg/harness/container_script_harness.go's vertex-ai translation, or
 // ANTHROPIC_VERTEX_PROJECT_ID/CLOUD_ML_REGION directly, for a harness that
 // sets them without going through that translation). Added via add (not
-// addTenantHost): the region is agent/template-configurable, but once
+// checkTenantHost): the region is agent/template-configurable, but once
 // validated against vertexRegionLabelPattern the result always terminates
 // in the fixed ".googleapis.com" suffix — a tenant can only choose which
 // Google-owned regional endpoint is reached, never redirect to
 // infrastructure outside Google's own, so this needs no egress_allow
 // coverage gate, the same trust basis as the other entries in
-// hardcodedModelEgressHosts. An invalid region is a config error, not a
-// silent skip: returning one here must fail Run closed (see its caller),
-// since silently dropping the Vertex host would leave a Vertex-configured
-// agent unable to reach its model API at all, an availability failure
-// that's easier to diagnose as a refused Run than as an opaque egress
-// timeout.
+// hardcodedModelEgressHosts. An invalid region adds no host and logs a
+// warning; it never refuses the Run (design-addenda A4: binary-fixed hosts
+// never refuse a Run).
 //
 // This covers ONLY the Claude harness's Vertex AI integration — the sole
 // one substrate currently wires through container_script_harness.go's
 // vertex-ai env translation (substrate-runtime.md §7). A harness with its
 // own model-API host (Vertex-backed or otherwise) needs the same two-part
 // treatment — a validated, fixed-Google-suffix host via add(), or a tenant
-// host via addTenantHost's coverage gate — added here when that harness is
+// host via checkTenantHost's coverage check — added here when that harness is
 // wired for substrate.
-func addVertexAIHost(add func(string), env map[string]string) error {
+func addVertexAIHost(add func(string), env map[string]string) {
 	usesVertex := env["CLAUDE_CODE_USE_VERTEX"] != "" ||
 		env["ANTHROPIC_VERTEX_PROJECT_ID"] != "" ||
 		env["CLOUD_ML_REGION"] != ""
 	if !usesVertex {
-		return nil
+		return
 	}
 	region := env["CLOUD_ML_REGION"]
 	var host string
-	if region == "" || region == "global" {
+	switch {
+	case region == "":
+		// Refused, with no rule (sec-review-3 condition on design-addenda
+		// A4): the host is only ever built from one validated label.
+		slog.Warn("substrate: CLOUD_ML_REGION is empty; no Vertex AI egress host added")
+		return
+	case region == "global":
 		host = "aiplatform.googleapis.com"
-	} else {
+	default:
 		if !vertexRegionLabelPattern.MatchString(region) {
-			return fmt.Errorf("CLOUD_ML_REGION %q is not a single valid DNS label; refusing to construct a Vertex AI egress host from it", region)
+			// The region value is not logged: it is agent input.
+			slog.Warn("substrate: CLOUD_ML_REGION is not a single valid DNS label; no Vertex AI egress host added")
+			return
 		}
 		host = region + "-aiplatform.googleapis.com"
 	}
 	normalized, err := substrate.NormalizeEgressAllowEntry(host)
 	if err != nil {
-		return fmt.Errorf("constructed Vertex AI host %q failed validation: %w", host, err)
+		slog.Warn("substrate: constructed Vertex AI host failed validation; no Vertex AI egress host added", "error", err)
+		return
 	}
-	add(normalized)
-	return nil
+	add(normalized.Host)
+}
+
+// addBinaryFixedHosts adds the BINARY-FIXED source class (design-addenda
+// A4): hardcodedModelEgressHosts, and the Vertex AI regional host (one
+// validated label under the fixed googleapis.com suffix). Moving the Vertex
+// host to the tenant-derived class is a one-line edit here.
+func addBinaryFixedHosts(addFixed func(string), env map[string]string) {
+	for _, h := range hardcodedModelEgressHosts {
+		addFixed(h)
+	}
+	addVertexAIHost(addFixed, env)
 }
 
 // substrateEgressTarget is one allowed egress destination: a host pattern
@@ -128,163 +144,110 @@ type substrateEgressTarget struct {
 const substrateHTTPSPort int32 = 443
 
 // substrateEgressTargets collects the actor's egress destinations
-// (substrate-runtime.md §7; design §3.5): the trusted hub endpoint, the git
-// clone host, the telemetry hosts, the hardcoded harness model hosts and
-// egress_allow from settings. The result is deduplicated and sorted, so
-// buildEgressPolicy never emits two rules that tie.
+// (substrate-runtime.md §7; design §3.5). The result is deduplicated and
+// sorted, so buildEgressPolicy never emits two rules that tie.
 //
-// Ports and the cleartext http protocol come ONLY from two
-// operator-trusted sources:
+// Three source classes (design-addenda A4):
 //
-//  1. cfg.TrustedHubEndpoint, resolved (unchanged by this code) from the
-//     operator-derived tiers only, never from agent, template, harness or
-//     project settings or env (RunConfig's own doc comment;
-//     pkg/agent/run.go). An
-//     http:// endpoint becomes an http target on its port (default 80);
-//     https:// or a bare host becomes TLS passthrough on its port (default
-//     443). It is not validated as a public hostname: an in-cluster hub
-//     (e.g. "hub.scion-system.svc.cluster.local") is a legitimate,
-//     common deployment shape that substrate.NormalizeEgressAllowEntry's
-//     public-hostname grammar would reject outright. The FINAL env's own
-//     SCION_HUB_ENDPOINT/SCION_HUB_URL, which an agent/template override
-//     can change, is read only to detect and log a mismatch; it never
-//     adds a target, on any port.
-//  2. Operator egress_allow entries, validated by
+//   - OPERATOR-TRUSTED: (1) and (2) below;
+//   - BINARY-FIXED: (3) below (addBinaryFixedHosts);
+//   - TENANT-DERIVED: the hosts checkTenantHost checks; they never emit a
+//     rule.
+//
+// Rules come only from:
+//
+//  1. cfg.TrustedHubEndpoint (operator-trusted), resolved (unchanged by
+//     this code) from the operator-derived tiers only, never from agent,
+//     template, harness or project settings or env (RunConfig's own doc
+//     comment; pkg/agent/run.go). An http:// endpoint becomes an http
+//     target on its port (default 80); https:// or a bare host becomes TLS
+//     passthrough on its port (default 443). It is not validated as a
+//     public hostname: an in-cluster hub (e.g.
+//     "hub.scion-system.svc.cluster.local") is a legitimate, common
+//     deployment shape that substrate.NormalizeEgressAllowEntry's
+//     public-hostname grammar would reject outright.
+//  2. Operator egress_allow entries (operator-trusted), validated by
 //     substrate.NormalizeEgressAllowEntry (via substrate.ParseEgressAllow):
 //     "host", "host:port", "https://host[:port]" or "http://host[:port]".
 //     A bare host narrows from any port (the pre-1.0 API) to 443, by
-//     design.
-//     egress_allow is operator-only (substrate_operator_only.go).
+//     design. egress_allow is operator-only (substrate_operator_only.go).
+//  3. BINARY-FIXED, the hosts fixed in this binary:
+//     hardcodedModelEgressHosts and the Vertex AI host (a validated region
+//     label under the fixed googleapis.com suffix), TLS passthrough on 443.
+//     They never refuse a Run: when an operator-trusted source already has
+//     the same host and port under another protocol, the fixed host is
+//     skipped with a warning, so the operator's choice stands; an invalid
+//     region adds no Vertex host.
 //
-// Every other host is TLS passthrough on 443 only:
+// The same host and port from two operator-trusted sources under different
+// protocols is a config refusal (v1 would rank them as a tie).
 //
-//   - hardcodedModelEgressHosts and the Vertex AI host (fixed literals or a
-//     validated, fixed-Google-suffix construction);
-//   - tenant-controllable hosts: cfg.GitClone.URL/SCION_GIT_CLONE_URL,
-//     every OTEL_*/SCION_OTEL_* endpoint and ANTHROPIC_VERTEX_BASE_URL.
-//     Each goes through addTenantHost, which admits a host ONLY if an
-//     operator egress_allow entry covers it on the same protocol and port
-//     (substrate.EgressAllowCovers for the host: an exact match, or a
-//     wildcard entry one label above it). An endpoint that is not covered
-//     is dropped with a warning naming the egress_allow entry that would
-//     allow it, never with the URL's userinfo or query.
-//     Before the coverage check, the host must pass the same
-//     substrate.NormalizeEgressAllowEntry validator operator entries use,
-//     which also rejects every IP-literal/CIDR form.
+// Tenant-derived hosts (cfg.GitClone.URL/SCION_GIT_CLONE_URL, every
+// OTEL_*/SCION_OTEL_* endpoint, ANTHROPIC_VERTEX_BASE_URL) NEVER emit a
+// rule and never refuse a Run. Each is checked against the
+// operator-trusted rules, host-, port- and protocol-aware
+// (substrate.EgressAllowCovers for the host: an exact match or a wildcard
+// one label above it): covered means the operator rule already admits it
+// and nothing is added; not covered means it is dropped with a warning
+// naming the egress_allow entry that would allow it, never with the URL's
+// userinfo or query. The host must also pass
+// substrate.NormalizeEgressAllowEntry's host checks, which reject every
+// IP-literal/CIDR form; an invalid host is dropped with a warning. The
+// final env's own SCION_HUB_ENDPOINT/SCION_HUB_URL is read only to log a
+// mismatch with the trusted hub; it is never a rule.
 //
 // MITM ("https" rules) is not produced yet; every TLS target is passthrough.
 func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1SubstrateConfig) ([]substrateEgressTarget, error) {
 	seen := make(map[substrateEgressTarget]struct{})
 	protoByHostPort := make(map[string]substrate.EgressProtocol)
 	var targets []substrateEgressTarget
-	add := func(t substrateEgressTarget) error {
-		t.host = strings.ToLower(strings.TrimSpace(t.host))
-		if t.host == "" {
-			return nil
-		}
+	// conflict reports the protocol already chosen for t's host and port,
+	// when it differs from t's.
+	conflict := func(t substrateEgressTarget) (substrate.EgressProtocol, bool) {
+		prev, ok := protoByHostPort[fmt.Sprintf("%s:%d", t.host, t.port)]
+		return prev, ok && prev != t.protocol
+	}
+	record := func(t substrateEgressTarget) {
 		if _, ok := seen[t]; ok {
-			return nil
+			return
 		}
-		key := fmt.Sprintf("%s:%d", t.host, t.port)
-		if prev, ok := protoByHostPort[key]; ok && prev != t.protocol {
-			return fmt.Errorf("egress destination %s is configured as both %s and %s; one host and port can have only one protocol", key, prev, t.protocol)
-		}
-		protoByHostPort[key] = t.protocol
+		protoByHostPort[fmt.Sprintf("%s:%d", t.host, t.port)] = t.protocol
 		seen[t] = struct{}{}
 		targets = append(targets, t)
+	}
+	// addOperator adds an operator-trusted target; a protocol conflict is a
+	// config refusal.
+	addOperator := func(t substrateEgressTarget) error {
+		if prev, bad := conflict(t); bad {
+			return fmt.Errorf("substrate: egress destination %s:%d is configured as both %s and %s; one host and port can have only one protocol", t.host, t.port, prev, t.protocol)
+		}
+		record(t)
 		return nil
 	}
-	addHTTPS := func(h string) error {
-		return add(substrateEgressTarget{protocol: substrate.EgressProtocolTLSPassthrough, host: h, port: substrateHTTPSPort})
+	// addFixed adds a host fixed in this binary on TLS 443, skipped with a
+	// warning when an operator-trusted source chose another protocol.
+	addFixed := func(h string) {
+		t := substrateEgressTarget{protocol: substrate.EgressProtocolTLSPassthrough, host: strings.ToLower(strings.TrimSpace(h)), port: substrateHTTPSPort}
+		if t.host == "" {
+			return
+		}
+		if prev, bad := conflict(t); bad {
+			slog.Warn("substrate: not adding a built-in egress host; an operator-trusted rule uses another protocol on the same port",
+				"host", t.host, "port", t.port, "operator_protocol", prev)
+			return
+		}
+		record(t)
 	}
 
-	// operatorEgressAllow is every sc.EgressAllow entry, parsed, computed
-	// up front so addTenantHost can check coverage against it. A parse
-	// error fails the Run (substrate.Validate at the top of Run already
-	// refuses such a config, so this is a second check, never a skip).
+	// Operator-trusted source (2), parsed up front. A parse error fails the
+	// Run (substrate.Validate at the top of Run already refuses such a
+	// config, so this is a second check, never a skip).
 	operatorEgressAllow, err := substrate.ParseEgressAllow(sc.EgressAllow)
 	if err != nil {
 		return nil, fmt.Errorf("runtimes.<name>.substrate.egress_allow: %w", err)
 	}
 
-	// covered reports whether an egress_allow entry on the same protocol
-	// and port covers host.
-	covered := func(protocol substrate.EgressProtocol, host string, port int32) bool {
-		for _, t := range operatorEgressAllow {
-			if t.Protocol == protocol && t.Port == port && substrate.EgressAllowCovers([]string{t.Host}, host) {
-				return true
-			}
-		}
-		return false
-	}
-
-	// addTenantHost admits a destination derived from tenant-controllable
-	// input (raw is a URL or host[:port]; source names the setting for the
-	// error) only if it is a well-formed public hostname AND covered by an
-	// operator egress_allow entry on the same protocol and port.
-	// Well-formedness alone is not enough: an attacker-chosen but
-	// otherwise ordinary-looking public hostname (a service like
-	// nip.io/sslip.io that resolves an embedded IP octet on request, or any
-	// domain the tenant registers) would pass the grammar check while
-	// letting the tenant point their own git-clone remote or telemetry
-	// endpoint at an address of their choosing. Only the bare host is
-	// logged or named in an error: never the userinfo, query, or full URL
-	// it was derived from, either of which could carry a credential.
-	//
-	// This can therefore never WIDEN the policy beyond what sc.EgressAllow
-	// already grants: every operator entry is added unconditionally below,
-	// a covered destination only adds one already subsumed by an operator
-	// entry on the same protocol and port, and an uncovered one adds
-	// nothing.
-	addTenantHost := func(source, raw string) error {
-		scheme, h, port, ok := parseDerivedEndpoint(raw)
-		if !ok {
-			slog.Warn("substrate: could not parse a tenant-derived endpoint; no egress host added for it", "source", source)
-			return nil
-		}
-		normalized, err := substrate.NormalizeEgressAllowEntry(h)
-		if err != nil {
-			slog.Warn("substrate: dropping invalid tenant-derived egress host", "host", h, "error", err)
-			return nil
-		}
-		if normalized == "" {
-			return nil
-		}
-		if scheme == "https" && port == substrateHTTPSPort {
-			if !covered(substrate.EgressProtocolTLSPassthrough, normalized, port) {
-				slog.Warn("substrate: dropping tenant-derived egress host not covered by egress_allow",
-					"host", normalized, "hint", "add this host (or a wildcard covering it) to runtimes.<name>.substrate.egress_allow to permit it")
-				return nil
-			}
-			return addHTTPS(normalized)
-		}
-		// Not https on 443: only an operator entry on the same protocol and
-		// port may allow it; otherwise it is dropped with a warning naming
-		// the egress_allow entry to add. The warning carries only the
-		// normalized host, port and scheme, never the URL it came from.
-		protocol := substrate.EgressProtocolTLSPassthrough
-		hint := fmt.Sprintf("%s:%d", normalized, port)
-		switch scheme {
-		case "https":
-		case "http":
-			protocol = substrate.EgressProtocolHTTP
-			hint = fmt.Sprintf("http://%s:%d", normalized, port)
-		default:
-			slog.Warn("substrate: dropping tenant-derived egress host with an unsupported scheme",
-				"source", source, "host", normalized, "scheme", scheme,
-				"hint", "only https on port 443, or an operator egress_allow entry (host:port or http://host:port) on the same port, can allow it")
-			return nil
-		}
-		if !covered(protocol, normalized, port) {
-			slog.Warn("substrate: dropping tenant-derived egress host not on https port 443 and not covered by egress_allow on its port",
-				"source", source, "host", normalized, "port", port, "scheme", scheme,
-				"hint", fmt.Sprintf("add %q to runtimes.<name>.substrate.egress_allow to permit it", hint))
-			return nil
-		}
-		return add(substrateEgressTarget{protocol: protocol, host: normalized, port: port})
-	}
-
-	// The trusted hub endpoint: operator-trusted source (1), the only place
+	// Operator-trusted source (1): the trusted hub endpoint, the only place
 	// outside egress_allow that may yield an http target or a port other
 	// than 443.
 	if cfg.TrustedHubEndpoint != "" {
@@ -311,89 +274,125 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 			default:
 				return nil, fmt.Errorf("substrate: trusted hub endpoint host %q uses scheme %q; use an http:// or https:// hub endpoint", trustedHubHost, scheme)
 			}
-			if err := add(t); err != nil {
-				return nil, fmt.Errorf("substrate: %w", err)
+			if err := addOperator(t); err != nil {
+				return nil, err
 			}
 		}
 	}
+	for _, e := range operatorEgressAllow {
+		if err := addOperator(substrateEgressTarget{protocol: e.Protocol(), host: e.Host, port: e.Port}); err != nil {
+			return nil, err
+		}
+	}
+	// operatorTargets are the operator-trusted rules tenant hosts are
+	// checked against.
+	operatorTargets := slices.Clone(targets)
+
 	trustedHubHost := strings.ToLower(hostFromURL(cfg.TrustedHubEndpoint))
 	if finalHubHost := strings.ToLower(hostFromURLEnv(env, "SCION_HUB_ENDPOINT", "SCION_HUB_URL")); finalHubHost != "" && finalHubHost != trustedHubHost {
 		slog.Warn("substrate: ignoring agent env hub endpoint that does not match the operator-configured hub",
 			"trusted_host", trustedHubHost, "env_host", finalHubHost)
 	}
 
+	// Source class BINARY-FIXED.
+	addBinaryFixedHosts(addFixed, env)
+
+	// covered reports whether an operator-trusted rule with the same
+	// protocol and port covers host.
+	covered := func(protocol substrate.EgressProtocol, host string, port int32) bool {
+		for _, t := range operatorTargets {
+			if t.protocol == protocol && t.port == port && substrate.EgressAllowCovers([]string{t.host}, host) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// checkTenantHost checks a destination derived from tenant-controllable
+	// input (raw is a URL or host[:port]; source names the setting). It
+	// never adds a rule: covered by an operator-trusted rule on the same
+	// protocol and port means it is already admitted; anything else is
+	// dropped with a warning naming the egress_allow entry to add.
+	// Well-formedness alone would not be enough to admit it: an
+	// attacker-chosen but ordinary-looking public hostname (a service like
+	// nip.io/sslip.io that resolves an embedded IP octet on request, or any
+	// domain the tenant registers) would pass the grammar check. Only the
+	// normalized host, port and scheme are logged: never the userinfo,
+	// query, or full URL it was derived from, either of which could carry
+	// a credential.
+	checkTenantHost := func(source, raw string) {
+		scheme, h, port, ok := parseDerivedEndpoint(raw)
+		if !ok {
+			slog.Warn("substrate: could not parse a tenant-derived endpoint; no egress host added for it", "source", source)
+			return
+		}
+		entry, err := substrate.NormalizeEgressAllowEntry(h)
+		if err != nil {
+			slog.Warn("substrate: dropping invalid tenant-derived egress host", "source", source, "host", h, "error", err)
+			return
+		}
+		if entry.IsZero() {
+			return
+		}
+		host := entry.Host
+		var protocol substrate.EgressProtocol
+		var hint string
+		switch {
+		case scheme == "https" && port == substrateHTTPSPort:
+			protocol, hint = substrate.EgressProtocolTLSPassthrough, host
+		case scheme == "https":
+			protocol, hint = substrate.EgressProtocolTLSPassthrough, fmt.Sprintf("%s:%d", host, port)
+		case scheme == "http":
+			protocol, hint = substrate.EgressProtocolHTTP, fmt.Sprintf("http://%s:%d", host, port)
+		default:
+			slog.Warn("substrate: dropping tenant-derived egress host with an unsupported scheme",
+				"source", source, "host", host, "scheme", scheme,
+				"hint", "only an operator egress_allow entry (host[:port] or http://host[:port]) on the same port can allow it")
+			return
+		}
+		if covered(protocol, host, port) {
+			return
+		}
+		slog.Warn("substrate: dropping tenant-derived egress host not covered by egress_allow",
+			"source", source, "host", host, "port", port, "scheme", scheme,
+			"hint", fmt.Sprintf("add %q (or a wildcard covering it on that port) to runtimes.<name>.substrate.egress_allow to permit it", hint))
+	}
+
 	if cfg.GitClone != nil && cfg.GitClone.URL != "" {
 		if hostFromURL(cfg.GitClone.URL) != "" {
-			if err := addTenantHost("git clone URL", cfg.GitClone.URL); err != nil {
-				return nil, err
-			}
+			checkTenantHost("git clone URL", cfg.GitClone.URL)
 		} else {
 			// hostFromURL returns "" for a URL it cannot extract a hostname
 			// from — notably an scp-style git remote ("git@host:org/r.git",
 			// no "://"), which url.Parse does not accept as a URL at all.
-			// This fails closed (no host is added, so the agent's own git
-			// clone may fail with egress-denied rather than being silently
-			// widened), logged so the failure mode is distinguishable.
+			// Nothing is admitted for it, logged so the failure mode is
+			// distinguishable.
 			slog.Warn("substrate: could not extract a hostname from the configured git clone URL; no egress host added for it", "hint", "scp-style remotes (git@host:org/repo.git) are not supported here — use an https:// URL")
 		}
 	} else if v := firstEnv(env, "SCION_GIT_CLONE_URL"); v != "" {
-		if err := addTenantHost("SCION_GIT_CLONE_URL", v); err != nil {
-			return nil, err
-		}
+		checkTenantHost("SCION_GIT_CLONE_URL", v)
 	}
 
 	// The configured telemetry endpoint hosts (substrate-runtime.md §7). No
 	// wildcard covers a default here (hardcodedModelEgressHosts carries no
-	// "*.googleapis.com" entry): a self-hosted OTLP collector, the hub's
-	// own endpoint, or the GCP default Cloud Trace exporter all need their
-	// own explicit coverage. Checked independently, because a deployment
-	// could point different signals at different collectors.
+	// "*.googleapis.com" entry). Checked independently, because a
+	// deployment could point different signals at different collectors.
 	for _, key := range []string{
 		"SCION_OTEL_ENDPOINT",                // pkg/sciontool/telemetry, pkg/util/logging: scion's own var.
 		"OTEL_EXPORTER_OTLP_ENDPOINT",        // OTel SDK standard var, if a harness sets it directly.
 		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", // OTel SDK per-signal override.
 	} {
 		if v := firstEnv(env, key); v != "" {
-			if err := addTenantHost(key, v); err != nil {
-				return nil, err
-			}
+			checkTenantHost(key, v)
 		}
 	}
 
 	// ANTHROPIC_VERTEX_BASE_URL (or any other model base-URL override a
 	// harness forwards) is NOT a fixed Google host the way
 	// addVertexAIHost's constructed endpoint is: it is a URL an
-	// agent/template can set outright, so it goes through addTenantHost's
-	// coverage gate like the git-clone and telemetry hosts above.
+	// agent/template can set outright, so it is a tenant-derived host.
 	if v := firstEnv(env, "ANTHROPIC_VERTEX_BASE_URL"); v != "" {
-		if err := addTenantHost("ANTHROPIC_VERTEX_BASE_URL", v); err != nil {
-			return nil, err
-		}
-	}
-
-	for _, h := range hardcodedModelEgressHosts {
-		if err := addHTTPS(h); err != nil {
-			return nil, err
-		}
-	}
-	var vertexErr error
-	if err := addVertexAIHost(func(h string) {
-		if err := addHTTPS(h); err != nil && vertexErr == nil {
-			vertexErr = err
-		}
-	}, env); err != nil {
-		return nil, err
-	}
-	if vertexErr != nil {
-		return nil, vertexErr
-	}
-
-	// Operator-trusted source (2): every egress_allow entry, exactly as
-	// parsed and validated.
-	for _, t := range operatorEgressAllow {
-		if err := add(substrateEgressTarget{protocol: t.Protocol, host: t.Host, port: t.Port}); err != nil {
-			return nil, fmt.Errorf("substrate: %w", err)
-		}
+		checkTenantHost("ANTHROPIC_VERTEX_BASE_URL", v)
 	}
 
 	sort.Slice(targets, func(i, j int) bool { return substrateEgressTargetLess(targets[i], targets[j]) })

@@ -20,42 +20,73 @@ import (
 )
 
 // assertNormalizeRefused checks that NormalizeEgressAllowEntry refuses entry
-// with an error containing wantReason.
+// with an error containing wantReason, returning the zero entry.
 func assertNormalizeRefused(t *testing.T, entry, wantReason string) {
 	t.Helper()
 	got, err := NormalizeEgressAllowEntry(entry)
 	if err == nil {
-		t.Errorf("NormalizeEgressAllowEntry(%q) = %q, nil; want a refusal (%s)", entry, got, wantReason)
+		t.Errorf("NormalizeEgressAllowEntry(%q) = %+v, nil; want a refusal (%s)", entry, got, wantReason)
 		return
+	}
+	if !got.IsZero() {
+		t.Errorf("NormalizeEgressAllowEntry(%q) returned %+v alongside its error", entry, got)
 	}
 	if !strings.Contains(err.Error(), wantReason) {
 		t.Errorf("NormalizeEgressAllowEntry(%q) error = %q, want it to contain %q", entry, err, wantReason)
 	}
 }
 
-// The accepted forms and their canonical strings.
+// The accepted forms and the canonical entry each returns.
 func TestNormalizeEgressAllowEntry_PortAndSchemeForms(t *testing.T) {
-	cases := map[string]string{
-		"api.example.com":               "api.example.com",
-		"  API.Example.COM.  ":          "api.example.com",
-		"*.example.com":                 "*.example.com",
-		"api.example.com:443":           "api.example.com",
-		"otel.example.com:4317":         "otel.example.com:4317",
-		"https://api.example.com":       "api.example.com",
-		"https://api.example.com:8443/": "api.example.com:8443",
-		"http://plain.example.com":      "http://plain.example.com:80",
-		"HTTP://Plain.Example.com:8080": "http://plain.example.com:8080",
-		"*.example.com:8443":            "*.example.com:8443",
-		"http://*.example.com:8080":     "http://*.example.com:8080",
+	cases := map[string]EgressAllowEntry{
+		"api.example.com":               {Scheme: "https", Host: "api.example.com", Port: 443},
+		"  API.Example.COM.  ":          {Scheme: "https", Host: "api.example.com", Port: 443},
+		"*.example.com":                 {Scheme: "https", Host: "*.example.com", Port: 443, Wildcard: true},
+		"api.example.com:443":           {Scheme: "https", Host: "api.example.com", Port: 443},
+		"otel.example.com:4317":         {Scheme: "https", Host: "otel.example.com", Port: 4317},
+		"https://api.example.com":       {Scheme: "https", Host: "api.example.com", Port: 443},
+		"https://api.example.com:8443/": {Scheme: "https", Host: "api.example.com", Port: 8443},
+		"http://plain.example.com":      {Scheme: "http", Host: "plain.example.com", Port: 80},
+		"HTTP://Plain.Example.com:8080": {Scheme: "http", Host: "plain.example.com", Port: 8080},
+		"*.example.com:8443":            {Scheme: "https", Host: "*.example.com", Port: 8443, Wildcard: true},
+		"http://*.example.com:8080":     {Scheme: "http", Host: "*.example.com", Port: 8080, Wildcard: true},
 	}
 	for entry, want := range cases {
 		got, err := NormalizeEgressAllowEntry(entry)
 		if err != nil || got != want {
-			t.Errorf("NormalizeEgressAllowEntry(%q) = %q, %v; want %q", entry, got, err, want)
+			t.Errorf("NormalizeEgressAllowEntry(%q) = %+v, %v; want %+v", entry, got, err, want)
 		}
 	}
-	if got, err := NormalizeEgressAllowEntry("   "); got != "" || err != nil {
-		t.Errorf("NormalizeEgressAllowEntry(blank) = %q, %v; want skipped without error", got, err)
+	if got, err := NormalizeEgressAllowEntry("   "); !got.IsZero() || err != nil {
+		t.Errorf("NormalizeEgressAllowEntry(blank) = %+v, %v; want the zero entry without error", got, err)
+	}
+	if p := (EgressAllowEntry{Scheme: "http"}).Protocol(); p != EgressProtocolHTTP {
+		t.Errorf("http entry Protocol() = %q", p)
+	}
+	if p := (EgressAllowEntry{Scheme: "https"}).Protocol(); p != EgressProtocolTLSPassthrough {
+		t.Errorf("https entry Protocol() = %q", p)
+	}
+}
+
+// Design review r3 (R3-4) list, verbatim: each refused, and
+// *.example.com:8443 accepted.
+func TestNormalizeEgressAllowEntry_R3List(t *testing.T) {
+	for entry, reason := range map[string]string{
+		"host:abc":          "invalid port",
+		"http://host#f":     "fragment",
+		"https://user@host": "userinfo",
+		"https://host/path": "path",
+		"*:443":             "catch-all",
+		"http://*":          "catch-all",
+		"*.com:443":         "itself a public suffix",
+		"localhost:8080":    "single-label",
+		"ftp://host":        "unsupported scheme",
+		"tcp://host:22":     "unsupported scheme",
+	} {
+		assertNormalizeRefused(t, entry, reason)
+	}
+	if _, err := NormalizeEgressAllowEntry("*.example.com:8443"); err != nil {
+		t.Errorf("NormalizeEgressAllowEntry(*.example.com:8443) error = %v, want accepted", err)
 	}
 }
 
@@ -142,17 +173,17 @@ func TestNormalizeEgressAllowEntry_HostChecksCarryOver(t *testing.T) {
 	}
 }
 
-// ParseEgressAllow returns the typed targets and refuses one host and port
+// ParseEgressAllow returns the entries and refuses one host and port
 // on two protocols, deterministically naming both.
 func TestParseEgressAllow_TargetsAndProtocolConflict(t *testing.T) {
 	got, err := ParseEgressAllow([]string{"svc.example.com:8080", "http://svc.example.com:8081", "", "*.example.com"})
 	if err != nil {
 		t.Fatalf("ParseEgressAllow() error = %v", err)
 	}
-	want := []EgressAllowTarget{
-		{EgressProtocolTLSPassthrough, "svc.example.com", 8080},
-		{EgressProtocolHTTP, "svc.example.com", 8081},
-		{EgressProtocolTLSPassthrough, "*.example.com", 443},
+	want := []EgressAllowEntry{
+		{Scheme: "https", Host: "svc.example.com", Port: 8080},
+		{Scheme: "http", Host: "svc.example.com", Port: 8081},
+		{Scheme: "https", Host: "*.example.com", Port: 443, Wildcard: true},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("ParseEgressAllow() = %+v, want %+v", got, want)

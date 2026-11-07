@@ -447,9 +447,12 @@ func TestSubstrateEgressTargets_Deterministic(t *testing.T) {
 }
 
 // A wildcard egress_allow entry is never widened: it is sent as the same
-// single-label pattern (v1 ateapi.proto:683-685 matches exactly one label),
-// and a tenant host two labels under it is not covered, so it is not added.
+// single-label pattern (v1 ateapi.proto:683-685 matches exactly one label).
+// A tenant host one label under it is covered and adds no rule of its own;
+// a tenant host two labels under it is not covered: no rule, and a warning.
 func TestSubstrateEgressTargets_WildcardNotWidened(t *testing.T) {
+	logs := &syncBuffer{}
+	setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
 	sc := config.V1SubstrateConfig{EgressAllow: []string{"*.example.com"}}
 	env := map[string]string{
 		"SCION_GIT_CLONE_URL": "https://nested.api.example.com/org/repo.git",
@@ -459,11 +462,10 @@ func TestSubstrateEgressTargets_WildcardNotWidened(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error = %v", err)
 	}
-	if got := targetsFor(targets, "nested.api.example.com"); len(got) != 0 {
-		t.Errorf("two-label host under *.example.com was allowed: %+v", got)
-	}
-	if got := targetsFor(targets, "api.example.com"); len(got) != 1 {
-		t.Errorf("one-label host under *.example.com: targets = %+v, want one", got)
+	for _, h := range []string{"nested.api.example.com", "api.example.com"} {
+		if got := targetsFor(targets, h); len(got) != 0 {
+			t.Errorf("tenant host %s produced targets %+v; tenant hosts never emit a rule", h, got)
+		}
 	}
 	var patterns []string
 	for _, r := range viewEgressRules(t, buildEgressPolicy("scion-p", "a", targets)) {
@@ -476,6 +478,64 @@ func TestSubstrateEgressTargets_WildcardNotWidened(t *testing.T) {
 		if p == "*" || p == "*.com" || (strings.HasPrefix(p, "*.") && p != "*.example.com") {
 			t.Errorf("rule hostnames = %v, contain a broader wildcard %q", patterns, p)
 		}
+	}
+	out := logs.String()
+	if !strings.Contains(out, "nested.api.example.com") {
+		t.Errorf("log = %q, want a warning for the two-label host nested.api.example.com", out)
+	}
+	if strings.Contains(out, "host=api.example.com") {
+		t.Errorf("log = %q, the covered host api.example.com should not be warned about", out)
+	}
+	if !substrate.EgressAllowCovers([]string{"*.example.com"}, "api.example.com") || substrate.EgressAllowCovers([]string{"*.example.com"}, "nested.api.example.com") {
+		t.Error("EgressAllowCovers: *.example.com must cover exactly one label")
+	}
+}
+
+// A tenant host covered by an operator wildcard on the same port and
+// protocol adds no extra rule: the policy equals the one without the
+// tenant value.
+func TestSubstrateEgressTargets_TenantCoveredByWildcardAddsNoRule(t *testing.T) {
+	sc := config.V1SubstrateConfig{EgressAllow: []string{"*.example.com", "*.example.com:4317"}}
+	without, err := substrateEgressTargets(RunConfig{}, map[string]string{}, sc)
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	env := map[string]string{
+		"SCION_OTEL_ENDPOINT": "otel.example.com:4317",
+		"SCION_GIT_CLONE_URL": "https://git.example.com/org/repo.git",
+	}
+	with, err := substrateEgressTargets(RunConfig{}, env, sc)
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if !slices.Equal(with, without) {
+		t.Errorf("tenant values changed the targets:\nwith:    %+v\nwithout: %+v", with, without)
+	}
+}
+
+// A tenant host equal to an operator http://h:443 entry is not a tie and
+// not a refusal (tenant hosts never emit a rule): the translation succeeds
+// with only the operator's http rule for that host, and the Run proceeds.
+func TestSubstrateEgressTargets_TenantEqualToOperatorHTTP443NoRefusal(t *testing.T) {
+	sc := config.V1SubstrateConfig{EgressAllow: []string{"http://h.example.com:443"}}
+	env := map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://h.example.com"}
+	targets, err := substrateEgressTargets(RunConfig{}, env, sc)
+	if err != nil {
+		t.Fatalf("error = %v, want no refusal", err)
+	}
+	want := []substrateEgressTarget{{protocol: substrate.EgressProtocolHTTP, host: "h.example.com", port: 443}}
+	if got := targetsFor(targets, "h.example.com"); !slices.Equal(got, want) {
+		t.Errorf("targets = %+v, want only the operator's %+v", got, want)
+	}
+
+	rec := &callRecorder{}
+	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+	rt.cfg = sc
+	cfg := testSubstrateRunConfig()
+	cfg.Env = append(slices.Clone(cfg.Env), "OTEL_EXPORTER_OTLP_ENDPOINT=https://h.example.com")
+	if _, err := rt.Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run() error = %v, want the Run to proceed", err)
 	}
 }
 
@@ -524,5 +584,58 @@ func TestSubstrateEgressTargets_HTTPOn443PlusBareHostRefused(t *testing.T) {
 		} else if msg != first {
 			t.Errorf("error not deterministic: %q vs %q", msg, first)
 		}
+	}
+}
+
+// Design-addenda A4: the binary-fixed model hosts are emitted as
+// tls_passthrough on 443 with no operator entry.
+func TestSubstrateEgressTargets_A4BinaryFixedHostsOn443(t *testing.T) {
+	targets, err := substrateEgressTargets(RunConfig{}, map[string]string{"CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": "us-east5"}, config.V1SubstrateConfig{})
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	for _, h := range append(slices.Clone(hardcodedModelEgressHosts), "us-east5-aiplatform.googleapis.com") {
+		want := []substrateEgressTarget{{protocol: substrate.EgressProtocolTLSPassthrough, host: h, port: 443}}
+		if got := targetsFor(targets, h); !slices.Equal(got, want) {
+			t.Errorf("targets for %s = %+v, want %+v", h, got, want)
+		}
+	}
+}
+
+// Design-addenda A4: an operator http://<model-host>:443 entry wins; the
+// binary-fixed host is skipped with a warning and nothing is refused.
+func TestSubstrateEgressTargets_A4OperatorWinsOverBinaryFixed(t *testing.T) {
+	logs := &syncBuffer{}
+	setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
+	host := hardcodedModelEgressHosts[0]
+	sc := config.V1SubstrateConfig{EgressAllow: []string{"http://" + host + ":443"}}
+	targets, err := substrateEgressTargets(RunConfig{}, map[string]string{}, sc)
+	if err != nil {
+		t.Fatalf("error = %v, want no refusal", err)
+	}
+	want := []substrateEgressTarget{{protocol: substrate.EgressProtocolHTTP, host: host, port: 443}}
+	if got := targetsFor(targets, host); !slices.Equal(got, want) {
+		t.Errorf("targets for %s = %+v, want only the operator's %+v", host, got, want)
+	}
+	if out := logs.String(); !strings.Contains(out, "built-in egress host") || !strings.Contains(out, host) {
+		t.Errorf("log = %q, want the skipped built-in host warning naming %s", out, host)
+	}
+}
+
+// Design-addenda A4: an uncovered git clone host emits no rule and is
+// dropped with a warning naming the egress_allow entry to add.
+func TestSubstrateEgressTargets_A4UncoveredCloneHostDropped(t *testing.T) {
+	logs := &syncBuffer{}
+	setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
+	cfg := RunConfig{GitClone: &api.GitCloneConfig{URL: "https://git.example.com/org/repo.git"}}
+	targets, err := substrateEgressTargets(cfg, map[string]string{}, config.V1SubstrateConfig{})
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if got := targetsFor(targets, "git.example.com"); len(got) != 0 {
+		t.Errorf("uncovered clone host produced targets %+v", got)
+	}
+	if out := logs.String(); !strings.Contains(out, "git.example.com") || !strings.Contains(out, "egress_allow") {
+		t.Errorf("log = %q, want the warning naming git.example.com and egress_allow", out)
 	}
 }

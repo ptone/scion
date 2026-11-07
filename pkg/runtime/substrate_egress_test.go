@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"log/slog"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -147,11 +148,6 @@ func TestSubstrateEgressHostnames_VertexAIHost(t *testing.T) {
 			want: "us-central1-aiplatform.googleapis.com",
 		},
 		{
-			name: "Vertex indicated with no region set",
-			env:  map[string]string{"CLAUDE_CODE_USE_VERTEX": "1"},
-			want: "aiplatform.googleapis.com",
-		},
-		{
 			name: "explicit global region",
 			env:  map[string]string{"CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": "global"},
 			want: "aiplatform.googleapis.com",
@@ -185,16 +181,11 @@ func TestSubstrateEgressHostnames_NoVertexHostWithoutVertexAuth(t *testing.T) {
 	}
 }
 
-// TestSubstrateEgressHostnames_InvalidVertexRegionRefused is the
-// security-load-bearing proof for addVertexAIHost's region validation: an
-// invalid CLOUD_ML_REGION must fail Run closed — never silently construct
-// a malformed or wildcard-shaped host, and never silently skip the Vertex
-// host while admitting the rest of the egress policy. "*" is the
-// specifically dangerous case: fed unchecked into
-// "<region>-aiplatform.googleapis.com", it would construct
-// "*-aiplatform.googleapis.com", a wildcard host — exactly the class of
-// grant item 4 exists to remove.
-func TestSubstrateEgressHostnames_InvalidVertexRegionRefused(t *testing.T) {
+// TestSubstrateEgressHostnames_InvalidVertexRegionDropped proves an invalid
+// CLOUD_ML_REGION adds no Vertex AI host (never a wildcard or extra label)
+// and does not refuse the Run (design-addenda A4: binary-fixed hosts never
+// refuse a Run); a warning is logged without the region value.
+func TestSubstrateEgressHostnames_InvalidVertexRegionDropped(t *testing.T) {
 	cases := []struct {
 		name   string
 		region string
@@ -208,18 +199,27 @@ func TestSubstrateEgressHostnames_InvalidVertexRegionRefused(t *testing.T) {
 		{name: "empty leading label", region: ".us"},
 		{name: "empty inner label", region: "us..east1"},
 		{name: "label over 63 chars", region: strings.Repeat("a", 64)},
+		{name: "percent-encoded dot", region: "us%2eeast1"},
+		{name: "escape form", region: "us\\x2eeast1"},
+		{name: "space", region: "us east1"},
+		{name: "empty", region: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			logs := &syncBuffer{}
+			setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
 			env := map[string]string{"CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": tc.region}
 			hosts, err := substrateEgressTargetHosts(RunConfig{}, env, config.V1SubstrateConfig{})
-			if err == nil {
-				t.Fatalf("substrateEgressTargetHosts() with CLOUD_ML_REGION=%q: expected an error, got hosts = %v", tc.region, hosts)
+			if err != nil {
+				t.Fatalf("substrateEgressTargetHosts() with CLOUD_ML_REGION=%q: error = %v, want the host dropped, not a refusal", tc.region, err)
 			}
 			for _, h := range hosts {
-				if strings.Contains(h, "*") {
-					t.Errorf("a wildcard host %q leaked into the result despite the error", h)
+				if strings.Contains(h, "aiplatform") || strings.Contains(h, "*") {
+					t.Errorf("host %q reached the result for an invalid region", h)
 				}
+			}
+			if !strings.Contains(logs.String(), "CLOUD_ML_REGION") {
+				t.Errorf("log = %q, want the invalid-region warning", logs.String())
 			}
 		})
 	}
@@ -593,7 +593,7 @@ func TestSubstrateEgressHostnames_HostnameTrustedHubStillAdded(t *testing.T) {
 
 // TestSubstrateEgressHostnames_IPLiteralTenantHostsDropped covers the
 // tenant-derived hosts (ANTHROPIC_VERTEX_BASE_URL, the git clone URL, an
-// OTEL endpoint), which go through addTenantHost and so
+// OTEL endpoint), which go through checkTenantHost and so
 // substrate.NormalizeEgressAllowEntry: none of the inet_aton or zoned
 // forms reaches the policy. The validator-level refusal reason for each
 // form is pinned in pkg/runtime/substrate's TestValidateEgressAllow_RejectsAllIPAndCIDR
@@ -714,7 +714,7 @@ func TestSubstrateEgressHostnames_EmptyTrustedHubAddsNoHubHost(t *testing.T) {
 // TestSubstrateEgressHostnames_ValidPublicOTELHostAllowed proves the
 // tenant-controllable path is refuse-invalid, not refuse-everything: an
 // ordinary public OTLP collector hostname still passes through
-// addTenantHost and reaches the result, normalized.
+// checkTenantHost and is admitted by the operator entry covering it.
 func TestSubstrateEgressHostnames_ValidPublicOTELHostAllowed(t *testing.T) {
 	env := map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://Otel-Collector.Example.COM:4318"}
 	sc := config.V1SubstrateConfig{EgressAllow: []string{"otel-collector.example.com:4318"}}
@@ -748,9 +748,9 @@ func TestSubstrateEgressHostnames_TenantHostRequiresEgressAllowCoverage(t *testi
 }
 
 // TestSubstrateEgressHostnames_TenantHostCoveredByEgressAllow proves the
-// other side: a tenant-derived host IS added when an operator egress_allow
-// entry covers it, both via an exact match and via a wildcard entry one
-// label above it.
+// other side: a tenant-derived host covered by an operator egress_allow
+// entry (exact or a wildcard one label above it) is admitted by that
+// operator rule, and never adds a rule of its own.
 func TestSubstrateEgressHostnames_TenantHostCoveredByEgressAllow(t *testing.T) {
 	t.Run("exact match", func(t *testing.T) {
 		env := map[string]string{"SCION_GIT_CLONE_URL": "https://git.example.com/repo.git"}
@@ -770,8 +770,11 @@ func TestSubstrateEgressHostnames_TenantHostCoveredByEgressAllow(t *testing.T) {
 		if hostsErr != nil {
 			t.Fatalf("substrateEgressTargetHosts() error = %v", hostsErr)
 		}
-		if !containsHost(hosts, "git.example.com") {
-			t.Errorf("substrateEgressTargetHosts() = %v, want git.example.com present (covered by the *.example.com wildcard)", hosts)
+		if containsHost(hosts, "git.example.com") {
+			t.Errorf("substrateEgressTargetHosts() = %v, want no git.example.com rule of its own (the *.example.com operator rule admits it)", hosts)
+		}
+		if !containsHost(hosts, "*.example.com") {
+			t.Errorf("substrateEgressTargetHosts() = %v, want the operator wildcard rule", hosts)
 		}
 	})
 }
@@ -818,7 +821,7 @@ func TestSubstrateEgressHostnames_NipIoStyleHostRequiresCoverage(t *testing.T) {
 
 // TestSubstrateEgressHostnames_HardcodedModelHostsUnaffectedByCoverage
 // proves hardcodedModelEgressHosts is unaffected by the egress_allow
-// coverage gate addTenantHost applies: these hosts are a fixed literal in
+// coverage check checkTenantHost applies: these hosts are a fixed literal in
 // the binary, never tenant-derived, and are always present regardless of
 // egress_allow.
 func TestSubstrateEgressHostnames_HardcodedModelHostsUnaffectedByCoverage(t *testing.T) {
