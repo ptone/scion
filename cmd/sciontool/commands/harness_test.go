@@ -402,6 +402,23 @@ func TestRunHarnessProvision_ResolvesHomePrefixInManifestPaths(t *testing.T) {
 	}
 }
 
+func TestMinimalEnv_DisablesPythonUserSite(t *testing.T) {
+	home := t.TempDir()
+	m := baseManifest(t, home, "/bin/true")
+	found := false
+	for _, e := range minimalEnv(home, &m) {
+		if strings.HasPrefix(e, "PYTHONNOUSERSITE=") {
+			found = true
+			if e != "PYTHONNOUSERSITE=1" {
+				t.Errorf("minimalEnv has %q, want PYTHONNOUSERSITE=1", e)
+			}
+		}
+	}
+	if !found {
+		t.Error("minimalEnv lacks PYTHONNOUSERSITE=1")
+	}
+}
+
 func TestResolveManifestHomePaths(t *testing.T) {
 	m := &containerProvisionManifest{
 		HarnessBundleDir: "$HOME/.scion/harness",

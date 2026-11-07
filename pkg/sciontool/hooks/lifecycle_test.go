@@ -7,6 +7,7 @@ package hooks
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -162,6 +163,53 @@ func TestRunPreStart_AgentHomeOverridesHOMEInHooks(t *testing.T) {
 	}
 	if string(got) != agentHome {
 		t.Errorf("HOME in hook = %q, want %q", string(got), agentHome)
+	}
+}
+
+func TestNonEnforcedHooksDisableUserSiteAndRunFromRoot(t *testing.T) {
+	t.Setenv("PYTHONNOUSERSITE", "")
+	for _, tc := range []struct {
+		event string
+		run   func(*LifecycleManager) error
+	}{
+		{EventPreStart, (*LifecycleManager).RunPreStart},
+		{EventPostStart, (*LifecycleManager).RunPostStart},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			dir := t.TempDir()
+			marker := filepath.Join(t.TempDir(), "marker")
+			mustWriteScript(t, filepath.Join(dir, tc.event+".d", "10-check"),
+				"#!/bin/sh\necho \"$PYTHONNOUSERSITE\" > "+marker+"\npwd -P >> "+marker+"\n")
+
+			m := &LifecycleManager{
+				HooksDirs: []string{dir},
+				Handlers:  map[string][]Handler{},
+				AgentHome: t.TempDir(),
+			}
+			if err := tc.run(m); err != nil {
+				t.Fatalf("run %s: %v", tc.event, err)
+			}
+			got, err := os.ReadFile(marker)
+			if err != nil {
+				t.Fatalf("read marker: %v", err)
+			}
+			if want := "1\n/\n"; string(got) != want {
+				t.Errorf("%s hook PYTHONNOUSERSITE and cwd = %q, want %q", tc.event, got, want)
+			}
+		})
+	}
+}
+
+func TestDroppedHookEnv_LeavesPythonUserSiteUnset(t *testing.T) {
+	t.Setenv("PYTHONNOUSERSITE", "")
+	if err := os.Unsetenv("PYTHONNOUSERSITE"); err != nil {
+		t.Fatal(err)
+	}
+	m := &LifecycleManager{AgentHome: t.TempDir(), WorkloadUsername: "scion"}
+	for _, e := range m.droppedHookEnv() {
+		if strings.HasPrefix(e, "PYTHONNOUSERSITE=") {
+			t.Errorf("droppedHookEnv contains %q; it must stay the harness-equivalent env", e)
+		}
 	}
 }
 
