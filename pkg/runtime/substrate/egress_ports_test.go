@@ -203,7 +203,7 @@ func TestParseEgressAllow_TargetsAndProtocolConflict(t *testing.T) {
 			t.Errorf("ParseEgressAllow(%q) = nil error, want a refusal", entries)
 			continue
 		}
-		for _, want := range []string{"http", "tls_passthrough"} {
+		for _, want := range []string{"http", "tls_passthrough", "entry 1", "entry 2"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("ParseEgressAllow(%q) error = %q, want it to name %q", entries, err, want)
 			}
@@ -251,5 +251,39 @@ func TestNormalizeEgressAllowEntry_OneTrailingDotOnly(t *testing.T) {
 	}
 	for _, bad := range []string{"api.example.com..", "api.example.com..:8443", "https://api.example.com..", "https://api.example.com../", "http://api.example.com..:8080"} {
 		assertNormalizeRefused(t, bad, "invalid DNS label")
+	}
+}
+
+// SEC-2: an "@" anywhere in an entry is refused before any port or scheme
+// parse, and the error carries no entry bytes.
+func TestNormalizeEgressAllowEntry_AtAnywhereRefusedWithoutEcho(t *testing.T) {
+	for _, bad := range []string{"tokuser:toksecret@host.example.com", "tokuser@host.example.com:8443", "https://tokuser:toksecret@host.example.com", "host.example.com/tokpath@x"} {
+		got, err := NormalizeEgressAllowEntry(bad)
+		if err == nil {
+			t.Errorf("NormalizeEgressAllowEntry(%q) = %+v, nil; want a refusal", bad, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), "userinfo") {
+			t.Errorf("error = %q, want the userinfo refusal", err)
+		}
+		for _, leak := range []string{"tokuser", "toksecret", "tokpath", "host.example.com"} {
+			if strings.Contains(err.Error(), leak) {
+				t.Errorf("error = %q echoes %q", err, leak)
+			}
+		}
+	}
+}
+
+// SEC-3: interior whitespace anywhere in an entry is refused (outer
+// whitespace is trimmed), without echoing the entry.
+func TestNormalizeEgressAllowEntry_InteriorWhitespaceRefused(t *testing.T) {
+	for _, bad := range []string{"api. example.com", "api.example.com :443", "api.example.com:\t443", "http://api.example .com", "https://api.example.com/ x"} {
+		got, err := NormalizeEgressAllowEntry(bad)
+		if err == nil || !strings.Contains(err.Error(), "whitespace") {
+			t.Errorf("NormalizeEgressAllowEntry(%q) = %+v, %v; want the whitespace refusal", bad, got, err)
+		}
+	}
+	if got, err := NormalizeEgressAllowEntry("  api.example.com  "); err != nil || got.Host != "api.example.com" {
+		t.Errorf("outer whitespace: NormalizeEgressAllowEntry() = %+v, %v; want accepted", got, err)
 	}
 }

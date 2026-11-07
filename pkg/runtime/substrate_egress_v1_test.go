@@ -120,8 +120,14 @@ func TestSubstrateEgressTargets_TrustedHubDefaults(t *testing.T) {
 		}
 	}
 
-	if _, err := substrateEgressTargets(RunConfig{TrustedHubEndpoint: "ftp://hub.example.com"}, map[string]string{}, config.V1SubstrateConfig{}); err == nil {
-		t.Error("TrustedHubEndpoint with scheme ftp: error = nil, want a refusal")
+	// Any scheme but a leading http:// or https:// makes the endpoint
+	// unparseable: no hub target, a warning, no refusal.
+	targets, err := substrateEgressTargets(RunConfig{TrustedHubEndpoint: "ftp://hub.example.com"}, map[string]string{}, config.V1SubstrateConfig{})
+	if err != nil {
+		t.Errorf("TrustedHubEndpoint with scheme ftp: error = %v, want no hub target and no refusal", err)
+	}
+	if got := targetsFor(targets, "hub.example.com"); len(got) != 0 {
+		t.Errorf("TrustedHubEndpoint with scheme ftp: targets = %+v, want none", got)
 	}
 }
 
@@ -244,6 +250,9 @@ func TestSubstrateEgressTargets_TenantNon443DroppedWithWarning(t *testing.T) {
 			if !strings.Contains(out, "egress_allow") || !strings.Contains(out, tc.wantHint) || !strings.Contains(out, tc.host) {
 				t.Errorf("log = %q, want a warning naming %s and the egress_allow entry %s", out, tc.host, tc.wantHint)
 			}
+			if tc.name == "userinfo and query stripped" && !strings.Contains(out, "scheme=https") {
+				t.Errorf("log = %q, want scheme=https in the reduction warning", out)
+			}
 			for _, leak := range []string{"tok-user", "tok-secret", "tok-query", "/v1"} {
 				if strings.Contains(out, leak) {
 					t.Errorf("log = %q, leaks %q from the endpoint URL", out, leak)
@@ -252,7 +261,7 @@ func TestSubstrateEgressTargets_TenantNon443DroppedWithWarning(t *testing.T) {
 		})
 	}
 
-	t.Run("unsupported scheme", func(t *testing.T) {
+	t.Run("non-http scheme is unparseable", func(t *testing.T) {
 		logs := &syncBuffer{}
 		setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
 		env := map[string]string{"SCION_OTEL_ENDPOINT": "grpc://otel.example.com:4317"}
@@ -266,8 +275,14 @@ func TestSubstrateEgressTargets_TenantNon443DroppedWithWarning(t *testing.T) {
 		if got := targetsFor(targets, "otel.example.com"); !slices.Equal(got, want) {
 			t.Errorf("targets = %+v, want only the operator entry %+v", got, want)
 		}
-		if !strings.Contains(logs.String(), "unsupported scheme") {
-			t.Errorf("log = %q, want the unsupported-scheme warning", logs.String())
+		out := logs.String()
+		if !strings.Contains(out, "could not be parsed") || !strings.Contains(out, "source=SCION_OTEL_ENDPOINT") {
+			t.Errorf("log = %q, want the unparseable warning naming the source", out)
+		}
+		for _, leak := range []string{"grpc", "otel.example.com", "4317"} {
+			if strings.Contains(out, leak) {
+				t.Errorf("log = %q, leaks %q", out, leak)
+			}
 		}
 	})
 }
@@ -765,11 +780,15 @@ func TestParseDerivedEndpoint(t *testing.T) {
 	}
 	for raw, want := range map[string]res{
 		"https://User:pw@Host.Example.com:4317/p?q#f": {"https", "host.example.com", 4317, true},
-		"HTTP://host.example.com":                     {"http", "host.example.com", 80, true},
+		"HTTP://host.example.com":                     {"", "", 0, false},
 		"host.example.com":                            {"https", "host.example.com", 443, true},
 		"host.example.com:8080/x":                     {"https", "host.example.com", 8080, true},
-		"grpc://host.example.com:4317":                {"grpc", "host.example.com", 4317, true},
-		"grpc://host.example.com":                     {"grpc", "host.example.com", 0, true},
+		"grpc://host.example.com:4317":                {"", "", 0, false},
+		"grpc://host.example.com":                     {"", "", 0, false},
+		"https://host.example.com/p?next=https://x":   {"", "", 0, false},
+		"tok:pw@host.example.com/?a=grpc://x":         {"", "", 0, false},
+		"http://a?b@h.example":                        {"", "", 0, false},
+		"http://host.example.com:8080/p":              {"http", "host.example.com", 8080, true},
 		"https://[fd00::1]:8443":                      {"https", "fd00::1", 8443, true},
 		"git@github.com:acme/repo.git":                {"", "", 0, false},
 		"https://host.example.com:0":                  {"", "", 0, false},
@@ -813,5 +832,109 @@ func TestSubstrateEgressTargets_AtAfterDelimiterUnparseable(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Design §9 AC9 N5-2, the two literal values verbatim: no rule, and a
+// warning naming the source setting only.
+func TestSubstrateEgressTargets_N5_2LiteralValues(t *testing.T) {
+	for _, v := range []string{"https://us/er@h.example/p", "http://a?b@h.example"} {
+		t.Run(v, func(t *testing.T) {
+			logs := &syncBuffer{}
+			setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
+			sc := config.V1SubstrateConfig{EgressAllow: []string{"h.example.com"}}
+			assertTenantOnlyUnchanged(t, RunConfig{}, sc, map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": v})
+			out := logs.String()
+			if !strings.Contains(out, "source=OTEL_EXPORTER_OTLP_ENDPOINT") {
+				t.Errorf("log = %q, want a warning naming the source setting", out)
+			}
+			for _, leak := range []string{"h.example", "us/er", "a?b", "/p"} {
+				if strings.Contains(out, leak) {
+					t.Errorf("log = %q, leaks %q", out, leak)
+				}
+			}
+		})
+	}
+}
+
+// SEC-1: a "://" anywhere but a leading http:// or https:// makes a tenant
+// value unparseable; neither the log nor any error carries value bytes.
+func TestSubstrateEgressTargets_EmbeddedSchemeUnparseable(t *testing.T) {
+	for name, v := range map[string]string{
+		"scheme inside the query":  "https://tokhost.example.com/p?next=grpc://toksecret",
+		"scheme after userinfo":    "tokuser:tokpass@tokhost.example.com/?a=https://toksecret",
+		"non-http scheme":          "grpc://tokhost.example.com:4317",
+		"uppercase scheme literal": "HTTPS://tokhost.example.com",
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := &syncBuffer{}
+			setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
+			before, err := substrateEgressTargets(RunConfig{}, map[string]string{}, config.V1SubstrateConfig{})
+			if err != nil {
+				t.Fatalf("error = %v", err)
+			}
+			after, err := substrateEgressTargets(RunConfig{}, map[string]string{"SCION_OTEL_ENDPOINT": v}, config.V1SubstrateConfig{})
+			if err != nil {
+				t.Fatalf("error = %v, want a drop", err)
+			}
+			if !slices.Equal(before, after) {
+				t.Errorf("tenant value changed the rules: %+v vs %+v", after, before)
+			}
+			out := logs.String()
+			if !strings.Contains(out, "source=SCION_OTEL_ENDPOINT") {
+				t.Errorf("log = %q, want the warning naming the source", out)
+			}
+			for _, leak := range []string{"tok", "grpc", "://"} {
+				if strings.Contains(out, leak) {
+					t.Errorf("log = %q, leaks %q", out, leak)
+				}
+			}
+		})
+	}
+}
+
+// SEC-4: a tenant value covered by a built-in rule adds nothing and is not
+// warned about as dropped.
+func TestSubstrateEgressTargets_TenantCoveredByBuiltinNoWarning(t *testing.T) {
+	logs := &syncBuffer{}
+	setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
+	host := hardcodedModelEgressHosts[0]
+	assertTenantOnlyUnchanged(t, RunConfig{}, config.V1SubstrateConfig{}, map[string]string{"ANTHROPIC_VERTEX_BASE_URL": "https://" + host + "/v1"})
+	if out := logs.String(); strings.Contains(out, "dropping") {
+		t.Errorf("log = %q, want no dropping warning for a host covered by a built-in rule", out)
+	}
+}
+
+// N1: a cross-protocol tie names both sides' sources.
+func TestSubstrateEgressTargets_TieNamesBothSources(t *testing.T) {
+	_, err := substrateEgressTargets(RunConfig{TrustedHubEndpoint: "http://hub.example.com:8080"}, map[string]string{},
+		config.V1SubstrateConfig{EgressAllow: []string{"api.example.com", "hub.example.com:8080"}})
+	if err == nil {
+		t.Fatal("error = nil, want the tie refusal")
+	}
+	for _, want := range []string{"trusted hub endpoint", "egress_allow entry 2", "http", "tls_passthrough", "hub.example.com:8080"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %q", err, want)
+		}
+	}
+}
+
+// Design §9 AC9 N5-1 at Run level (review L3c, L5): an invalid
+// CLOUD_ML_REGION refuses the Run before any control-plane call.
+func TestSubstrateRun_InvalidVertexRegionRefusedBeforeCreate(t *testing.T) {
+	rec := &callRecorder{}
+	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+	cfg := testSubstrateRunConfig()
+	cfg.Env = append(slices.Clone(cfg.Env), "CLAUDE_CODE_USE_VERTEX=1", "CLOUD_ML_REGION=Bad.Region")
+	_, err := rt.Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run() error = nil, want the CLOUD_ML_REGION refusal")
+	}
+	if !strings.Contains(err.Error(), "CLOUD_ML_REGION") || strings.Contains(err.Error(), "Bad.Region") {
+		t.Errorf("Run() error = %q, want it to name CLOUD_ML_REGION and not the value", err)
+	}
+	if calls := rec.list(); len(calls) != 0 {
+		t.Errorf("Run() made control-plane calls %v before refusing", calls)
 	}
 }

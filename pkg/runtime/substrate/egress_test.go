@@ -642,7 +642,8 @@ func TestValidateEgressAllow_KnownBypasses(t *testing.T) {
 		{"IP/CIDR: too many dotted parts, all numeric", "1.2.3.4.5", reasonIPCIDR},
 		{"numeric last label (not a real TLD)", "foo.123", reasonNotICANN},
 		{"hex-shaped last label (not a real TLD)", "foo.0x7f", reasonNotICANN},
-		{"invalid hostname: space in label", "git hub.com", reasonNotValidHost},
+		// Interior whitespace is refused before the hostname grammar runs.
+		{"whitespace: space in label", "git hub.com", "whitespace"},
 
 		// --- Kubernetes pod-IP DNS names and other TLD-shaped-but-not-public
 		// zones; IP/CIDR entirely ---

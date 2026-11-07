@@ -440,6 +440,15 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	actorName := cfg.Name
 	id := atespace + "/" + actorName
 
+	// Egress targets, before any control-plane call: they need only cfg
+	// and r.cfg, and a refusal (an invalid CLOUD_ML_REGION, an egress
+	// config error) then costs no create or cleanup.
+	env := buildBootstrapEnv(cfg)
+	targets, err := substrateEgressTargets(cfg, env, r.cfg)
+	if err != nil {
+		return "", r.redact(cfg, fmt.Errorf("substrate: resolve egress hosts for %s: %w", id, err))
+	}
+
 	// Step 1: atespace.
 	if err := r.ensureAtespace(ctx, atespace); err != nil {
 		return "", r.redact(cfg, err)
@@ -495,15 +504,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		_, _ = r.client.DeleteActor(cleanupCtx, substrateDeleteActorRequest(atespace, actorName, actorUID))
 	}
 
-	// Step 5: egress policy. (r.cfg was already validated at the top of
-	// Run; r.cfg is immutable for the lifetime of this call, so revalidating
-	// it here would only ever re-check the same result.)
-	env := buildBootstrapEnv(cfg)
-	targets, err := substrateEgressTargets(cfg, env, r.cfg)
-	if err != nil {
-		cleanup()
-		return "", r.redact(cfg, fmt.Errorf("substrate: resolve egress hosts for %s: %w", id, err))
-	}
+	// Step 5: egress policy, from the targets resolved before Step 1.
 	if _, err := r.client.CreateActorEgressPolicy(ctx, buildEgressPolicy(atespace, actorName, targets)); err != nil {
 		cleanup()
 		return "", r.redact(cfg, fmt.Errorf("substrate: create egress policy for %s: %w", id, err))

@@ -21,7 +21,7 @@ template, egress translation and test fake to the v1 shapes.
     the uid is unknown. A FailedPrecondition on a delete that sent a uid is
     `ErrSubstrateIncarnationChanged` and leaves in-memory state alone (the
     code is an assumption the live Phase 1d observation confirms).
-  - Get/DeleteActorEgressPolicy name the policy `default`.
+  - DeleteActorEgressPolicy and the created policy name it `default`.
   - List keeps the empty atespace (needs the global viewer role) and
     RecordlessActors its one atespace, both paging with `ListOptions`.
   - The phase map drops PAUSING/PAUSED.
@@ -30,23 +30,46 @@ template, egress translation and test fake to the v1 shapes.
     agent's limit, else the built-in substrate default (cpu `2`, memory
     `4Gi`). Phase 2 adds `default_resources` in `resolveSubstrateQuantity`.
     Limits are set on the template only; the container-level limits are gone.
-    `buildActorTemplate` refuses a template without both.
+    `buildActorTemplate` refuses a template without both. cpu is capped at
+    v1's 999999 millicores and memory at the int64 range, each refused with
+    an error naming the field.
   - `sandbox_config` and `snapshot_config` are not sent. A FailedPrecondition
     from CreateActorTemplate names the ate-api-server `--snapshot-location`.
   - `sandbox_class`, `sandbox_config_name` and `snapshot_storage` refuse the
     Run with the key and its v1 replacement (`checkSubstrateRemovedKeys`).
   - The template name hashes an explicit field list behind `v1|`
     (`substrateTemplateHashInput`).
-- **Egress** (`pkg/runtime/substrate_egress.go`, `pkg/runtime/substrate/egress.go`):
-  - `NormalizeEgressAllowEntry` accepts `host`, `host:port`, `https://host[:port]`
-    and `http://host[:port]` (wildcards too); the host part keeps every
-    existing check.
-  - Ports and http come only from `cfg.TrustedHubEndpoint` and egress_allow.
-    Every other derived host is TLS passthrough on 443; a tenant-derived host
-    on another port or scheme that egress_allow does not list on that port is
-    dropped with a warning naming the entry to add.
-  - One host and port on two protocols is a config refusal. Rules are grouped
-    per protocol and exact port, sorted, deterministic.
+- **Egress** (`pkg/runtime/substrate_egress.go`, `pkg/runtime/substrate/egress.go`;
+  design §3.5 and addenda A4):
+  - `NormalizeEgressAllowEntry` is the single validator for egress_allow. It
+    returns `{Scheme, Host, Port, Wildcard}` and accepts `host`, `host:port`,
+    `https://host[:port]` and `http://host[:port]`, wildcards included. The
+    scheme comes only from a literal `http://`/`https://` prefix; userinfo
+    (any `@`), interior whitespace, paths, queries and fragments are
+    refused, at most one trailing dot is stripped, and the host part passes
+    every existing host check (no IPs, CIDRs, catch-alls or in-cluster
+    names).
+  - Three source classes. OPERATOR-TRUSTED (`cfg.TrustedHubEndpoint` and
+    egress_allow) emit rules, including http and ports other than 443; the
+    same host and port under two protocols among them is a config refusal
+    naming both sources. BINARY-FIXED (the compiled model hosts and the
+    Vertex AI host) emit tls_passthrough on 443 and are skipped with a
+    warning when an operator rule uses another protocol there. TENANT-DERIVED
+    (git clone URL, OTEL endpoints, `ANTHROPIC_VERTEX_BASE_URL`) never emit a
+    rule: covered by an emitted rule on the same host, port and protocol,
+    nothing happens; otherwise the host is dropped with a warning naming the
+    egress_allow entry to add.
+  - Tenant values are reduced to scheme, host and port before any parsing or
+    logging. Only a leading `http://`/`https://` sets the scheme; any other
+    `://`, or an `@` after the first `/`, `?` or `#`, makes the value
+    unparseable: no rule, and a warning naming only the source setting.
+  - Vertex region: empty or unset and `global` map to
+    `aiplatform.googleapis.com`; one lowercase DNS label maps to
+    `<label>-aiplatform.googleapis.com`; anything else refuses the Run with
+    an error that names `CLOUD_ML_REGION` and never its value. Egress targets
+    are resolved before the first control-plane call, so a refusal creates
+    nothing.
+  - Rules are grouped per protocol and exact port, sorted and deterministic.
 - **Fakes.** `fakeControlClient` embeds `ateapi.ControlClient` and overrides
   only the methods the runtime calls.
 

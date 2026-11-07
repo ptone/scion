@@ -79,12 +79,13 @@ func TestResolveSubstrateResources_PerField(t *testing.T) {
 	}
 }
 
-// The int64 boundary: MaxInt64 is accepted, MaxInt64+1 and 8Ei are refused,
-// and the error names the field.
-func TestResolveSubstrateResources_Int64Boundary(t *testing.T) {
-	got, err := resolveSubstrateResources(&api.ResourceSpec{Limits: api.ResourceList{Memory: "9223372036854775807", CPU: "9223372036854775807m"}})
-	if err != nil || got.memoryBytes != math.MaxInt64 || got.cpuMillicores != math.MaxInt64 {
-		t.Errorf("MaxInt64: resolveSubstrateResources() = %+v, %v; want both fields MaxInt64", got, err)
+// The bounds: memory up to MaxInt64 bytes is accepted, MaxInt64+1 and 8Ei
+// are refused; cpu up to v1's 999999 millicores is accepted, 1000 cores
+// (and anything larger) refused. The error names the field.
+func TestResolveSubstrateResources_Bounds(t *testing.T) {
+	got, err := resolveSubstrateResources(&api.ResourceSpec{Limits: api.ResourceList{Memory: "9223372036854775807", CPU: "999999m"}})
+	if err != nil || got.memoryBytes != math.MaxInt64 || got.cpuMillicores != 999999 {
+		t.Errorf("maxima: resolveSubstrateResources() = %+v, %v; want memory MaxInt64 and cpu 999999m", got, err)
 	}
 	for _, tc := range []struct {
 		limits api.ResourceList
@@ -92,7 +93,9 @@ func TestResolveSubstrateResources_Int64Boundary(t *testing.T) {
 	}{
 		{api.ResourceList{Memory: "9223372036854775808"}, "memory"},
 		{api.ResourceList{Memory: "8Ei"}, "memory"},
-		{api.ResourceList{CPU: "9223372036854775808m"}, "cpu"},
+		{api.ResourceList{CPU: "1000"}, "cpu"},
+		{api.ResourceList{CPU: "1000000m"}, "cpu"},
+		{api.ResourceList{CPU: "9223372036854775807m"}, "cpu"},
 	} {
 		got, err := resolveSubstrateResources(&api.ResourceSpec{Limits: tc.limits})
 		if err == nil {

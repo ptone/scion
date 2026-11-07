@@ -266,6 +266,12 @@ const (
 	substrateBuiltinDefaultMemory = "4Gi"
 )
 
+// substrateMaxCPUMillicores is the v1 admission bound on
+// Resources.cpu_millicores (+k8s:maximum=999999 in the vendored
+// ateapi.proto: less than 1000 cores). A larger value is refused locally,
+// before any control-plane call.
+const substrateMaxCPUMillicores = 999999
+
 // substrateResources is the template-level compute size: both fields are
 // always positive once resolveSubstrateResources returns without error.
 type substrateResources struct {
@@ -283,7 +289,7 @@ func resolveSubstrateResources(agent *api.ResourceSpec) (substrateResources, err
 		agentCPU, agentMemory = agent.Limits.CPU, agent.Limits.Memory
 	}
 
-	cpuQ, err := parseSubstrateQuantity("cpu", resolveSubstrateQuantity(agentCPU, substrateBuiltinDefaultCPU), resource.NewMilliQuantity(math.MaxInt64, resource.DecimalSI))
+	cpuQ, err := parseSubstrateQuantity("cpu", resolveSubstrateQuantity(agentCPU, substrateBuiltinDefaultCPU), resource.NewMilliQuantity(substrateMaxCPUMillicores, resource.DecimalSI))
 	if err != nil {
 		return substrateResources{}, err
 	}
@@ -309,8 +315,8 @@ func resolveSubstrateQuantity(agentValue, builtinDefault string) string {
 }
 
 // parseSubstrateQuantity parses a Kubernetes quantity string and rejects
-// non-positive values and values above limit (which would overflow the
-// int64 the v1 API carries).
+// non-positive values and values above limit (the v1 cpu bound, or the
+// int64 the v1 API carries for memory).
 func parseSubstrateQuantity(field, value string, limit *resource.Quantity) (resource.Quantity, error) {
 	q, err := resource.ParseQuantity(value)
 	if err != nil {
@@ -322,7 +328,7 @@ func parseSubstrateQuantity(field, value string, limit *resource.Quantity) (reso
 	// Compared as decimals: a value above the int64 range (such as 8Ei)
 	// does not compare above an int64-sized Quantity otherwise.
 	if q.AsDec().Cmp(limit.AsDec()) > 0 {
-		return resource.Quantity{}, fmt.Errorf("substrate: %s limit %q is too large", field, value)
+		return resource.Quantity{}, fmt.Errorf("substrate: %s limit %q is above the maximum Substrate accepts (%s)", field, value, limit.String())
 	}
 	return q, nil
 }

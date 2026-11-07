@@ -39,9 +39,9 @@ import (
 // project's Google API. The Vertex AI endpoint itself is added separately,
 // by substrateEgressTargets, derived from the agent's own configured
 // region (see addVertexAIHost) rather than hardcoded here, since the
-// correct host depends on CLOUD_ML_REGION. The configured telemetry
-// endpoint host is likewise added as its own rule from the actual env var
-// in play, not assumed from this list — see the telemetry section below.
+// correct host depends on CLOUD_ML_REGION. Telemetry endpoints are
+// tenant-derived: they never add a rule and are only checked for coverage
+// (see checkTenantHost).
 var hardcodedModelEgressHosts = []string{
 	"api.anthropic.com",
 	"oauth2.googleapis.com",
@@ -181,13 +181,15 @@ const substrateHTTPSPort int32 = 443
 //
 // Tenant-derived hosts (cfg.GitClone.URL/SCION_GIT_CLONE_URL, every
 // OTEL_*/SCION_OTEL_* endpoint, ANTHROPIC_VERTEX_BASE_URL) NEVER emit a
-// rule and never refuse a Run. Each is checked against the
-// operator-trusted rules, host-, port- and protocol-aware
+// rule and never refuse a Run. Each is checked against the emitted rules
+// (operator-trusted and built-in), host-, port- and protocol-aware
 // (substrate.EgressAllowCovers for the host: an exact match or a wildcard
-// one label above it): covered means the operator rule already admits it
-// and nothing is added; not covered means it is dropped with a warning
+// one label above it): covered means a rule already admits it and nothing
+// is added or logged; not covered means it is dropped with a warning
 // naming the egress_allow entry that would allow it, never with the URL's
-// userinfo or query. The host must also pass
+// userinfo or query. A value that cannot be reduced (another "://", or an
+// "@" after the first "/", "?" or "#") is dropped with a warning naming
+// only the source setting. The host must also pass
 // substrate.NormalizeEgressAllowEntry's host checks, which reject every
 // IP-literal/CIDR form; an invalid host is dropped with a warning. The
 // final env's own SCION_HUB_ENDPOINT/SCION_HUB_URL is read only to log a
@@ -195,30 +197,36 @@ const substrateHTTPSPort int32 = 443
 //
 // MITM ("https" rules) is not produced yet; every TLS target is passthrough.
 func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1SubstrateConfig) ([]substrateEgressTarget, error) {
-	seen := make(map[substrateEgressTarget]struct{})
-	protoByHostPort := make(map[string]substrate.EgressProtocol)
-	var targets []substrateEgressTarget
-	// conflict reports the protocol already chosen for t's host and port,
-	// when it differs from t's.
-	conflict := func(t substrateEgressTarget) (substrate.EgressProtocol, bool) {
-		prev, ok := protoByHostPort[fmt.Sprintf("%s:%d", t.host, t.port)]
-		return prev, ok && prev != t.protocol
+	type hostPortUse struct {
+		protocol substrate.EgressProtocol
+		source   string
 	}
-	record := func(t substrateEgressTarget) {
+	seen := make(map[substrateEgressTarget]struct{})
+	byHostPort := make(map[string]hostPortUse)
+	var targets []substrateEgressTarget
+	// conflict reports the first use of t's host and port, when its
+	// protocol differs from t's.
+	conflict := func(t substrateEgressTarget) (hostPortUse, bool) {
+		prev, ok := byHostPort[fmt.Sprintf("%s:%d", t.host, t.port)]
+		return prev, ok && prev.protocol != t.protocol
+	}
+	record := func(t substrateEgressTarget, source string) {
 		if _, ok := seen[t]; ok {
 			return
 		}
-		protoByHostPort[fmt.Sprintf("%s:%d", t.host, t.port)] = t.protocol
+		if _, ok := byHostPort[fmt.Sprintf("%s:%d", t.host, t.port)]; !ok {
+			byHostPort[fmt.Sprintf("%s:%d", t.host, t.port)] = hostPortUse{protocol: t.protocol, source: source}
+		}
 		seen[t] = struct{}{}
 		targets = append(targets, t)
 	}
-	// addOperator adds an operator-trusted target; a protocol conflict is a
-	// config refusal.
-	addOperator := func(t substrateEgressTarget) error {
+	// addOperator adds an operator-trusted target from source; a protocol
+	// conflict is a config refusal naming both sources.
+	addOperator := func(t substrateEgressTarget, source string) error {
 		if prev, bad := conflict(t); bad {
-			return fmt.Errorf("substrate: egress destination %s:%d is configured as both %s and %s; one host and port can have only one protocol", t.host, t.port, prev, t.protocol)
+			return fmt.Errorf("substrate: egress destination %s:%d is configured by the %s (%s) and by the %s (%s); one host and port can have only one protocol", t.host, t.port, prev.source, prev.protocol, source, t.protocol)
 		}
-		record(t)
+		record(t, source)
 		return nil
 	}
 	// addFixed adds a host fixed in this binary on TLS 443, skipped with a
@@ -230,16 +238,16 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 		}
 		if prev, bad := conflict(t); bad {
 			slog.Warn("substrate: not adding a built-in egress host; an operator-trusted rule uses another protocol on the same port",
-				"host", t.host, "port", t.port, "operator_protocol", prev)
+				"host", t.host, "port", t.port, "operator_protocol", prev.protocol)
 			return
 		}
-		record(t)
+		record(t, "built-in host list")
 	}
 
 	// Operator-trusted source (2), parsed up front. A parse error fails the
 	// Run (substrate.Validate at the top of Run already refuses such a
 	// config, so this is a second check, never a skip).
-	operatorEgressAllow, err := substrate.ParseEgressAllow(sc.EgressAllow)
+	operatorEgressAllow, operatorIndex, err := substrate.ParseEgressAllowIndexed(sc.EgressAllow)
 	if err != nil {
 		return nil, fmt.Errorf("runtimes.<name>.substrate.egress_allow: %w", err)
 	}
@@ -262,28 +270,21 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 				// addresses. Fail here instead, as a clear config error.
 				return nil, fmt.Errorf("substrate: trusted hub endpoint %q resolves to IP address %q; configure the hub endpoint with a DNS hostname — substrate's egress policy supports hostname patterns only, not IP addresses", cfg.TrustedHubEndpoint, trustedHubHost)
 			}
-			var t substrateEgressTarget
-			switch scheme {
-			case "http":
-				t = substrateEgressTarget{protocol: substrate.EgressProtocolHTTP, host: trustedHubHost, port: port}
-			case "https":
-				t = substrateEgressTarget{protocol: substrate.EgressProtocolTLSPassthrough, host: trustedHubHost, port: port}
-			default:
-				return nil, fmt.Errorf("substrate: trusted hub endpoint host %q uses scheme %q; use an http:// or https:// hub endpoint", trustedHubHost, scheme)
+			t := substrateEgressTarget{protocol: substrate.EgressProtocolTLSPassthrough, host: trustedHubHost, port: port}
+			if scheme == "http" {
+				t.protocol = substrate.EgressProtocolHTTP
 			}
-			if err := addOperator(t); err != nil {
+			if err := addOperator(t, "trusted hub endpoint"); err != nil {
 				return nil, err
 			}
 		}
 	}
-	for _, e := range operatorEgressAllow {
-		if err := addOperator(substrateEgressTarget{protocol: e.Protocol(), host: e.Host, port: e.Port}); err != nil {
+	for i, e := range operatorEgressAllow {
+		source := fmt.Sprintf("egress_allow entry %d", operatorIndex[i]+1)
+		if err := addOperator(substrateEgressTarget{protocol: e.Protocol(), host: e.Host, port: e.Port}, source); err != nil {
 			return nil, err
 		}
 	}
-	// operatorTargets are the operator-trusted rules tenant hosts are
-	// checked against.
-	operatorTargets := slices.Clone(targets)
 
 	trustedHubHost := hostFromURL(cfg.TrustedHubEndpoint)
 	if finalHubHost := hostFromURLEnv(env, "SCION_HUB_ENDPOINT", "SCION_HUB_URL"); finalHubHost != "" && finalHubHost != trustedHubHost {
@@ -296,10 +297,11 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 		return nil, err
 	}
 
-	// covered reports whether an operator-trusted rule with the same
-	// protocol and port covers host.
+	// covered reports whether an emitted rule (operator-trusted or
+	// built-in) with the same protocol and port covers host. A covered
+	// tenant value adds nothing and is not warned about.
 	covered := func(protocol substrate.EgressProtocol, host string, port int32) bool {
-		for _, t := range operatorTargets {
+		for _, t := range targets {
 			if t.protocol == protocol && t.port == port && substrate.EgressAllowCovers([]string{t.host}, host) {
 				return true
 			}
@@ -309,8 +311,9 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 
 	// checkTenantHost checks a destination derived from tenant-controllable
 	// input (raw is a URL or host[:port]; source names the setting). It
-	// never adds a rule: covered by an operator-trusted rule on the same
-	// protocol and port means it is already admitted; anything else is
+	// never adds a rule: covered by an emitted rule (operator-trusted or
+	// built-in) on the same protocol and port means it is already
+	// admitted; anything else is
 	// dropped with a warning naming the egress_allow entry to add. The
 	// need maps like the translation: http:// is an http need on its port
 	// (default 80); https:// or bare is a passthrough need (default 443).
@@ -327,7 +330,7 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 	checkTenantHost := func(source, raw string) {
 		scheme, h, port, ok := parseDerivedEndpoint(raw)
 		if !ok {
-			slog.Warn("substrate: could not parse a tenant-derived endpoint; no egress host added for it", "source", source)
+			slog.Warn("substrate: dropping a tenant-derived endpoint that could not be parsed", "source", source, "value", "unparseable")
 			return
 		}
 		entry, err := substrate.NormalizeEgressAllowEntry(h)
@@ -346,13 +349,8 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 			protocol, hint = substrate.EgressProtocolTLSPassthrough, host
 		case scheme == "https":
 			protocol, hint = substrate.EgressProtocolTLSPassthrough, fmt.Sprintf("%s:%d", host, port)
-		case scheme == "http":
+		default: // scheme is the literal word "http"
 			protocol, hint = substrate.EgressProtocolHTTP, fmt.Sprintf("http://%s:%d", host, port)
-		default:
-			slog.Warn("substrate: dropping tenant-derived egress host with an unsupported scheme",
-				"source", source, "host", host, "scheme", scheme,
-				"hint", "only an operator egress_allow entry (host[:port] or http://host[:port]) on the same port can allow it")
-			return
 		}
 		if covered(protocol, host, port) {
 			return
@@ -414,32 +412,35 @@ func substrateEgressTargetLess(a, b substrateEgressTarget) bool {
 	return a.host < b.host
 }
 
-// parseDerivedEndpoint reduces a URL or bare host[:port] to its lowercase
-// scheme, lowercase host and port, and nothing else: userinfo, path, query
-// and fragment are cut off before anything is parsed or logged. The scheme
-// is detected only by a literal "http://" or "https://" prefix (any other
-// "<name>://" yields that name, which callers refuse); a value with no
-// scheme is https. A missing port is the scheme's default (443 for https,
-// 80 for http, 0 for anything else). An IPv6 literal must be bracketed. ok
-// is false when no host can be extracted, the port is not a number from 1
-// to 65535, or an "@" appears after the first "/", "?" or "#". No URL
-// parser is used.
+// parseDerivedEndpoint reduces a URL or bare host[:port] to its scheme
+// ("http" or "https"), lowercase host and port, and nothing else (design
+// §3.5 S4-a, N5-2): the scheme is set ONLY by a value starting with exactly
+// "http://" or "https://"; anything else is bare (https). A bare value that
+// contains "://" anywhere is unparseable, as is any value with an "@" after
+// its first "/", "?" or "#". Then the value is cut at the first "/", "?" or
+// "#" and userinfo is dropped up to the last "@". A missing port is the
+// scheme's default (443 for https, 80 for http). An IPv6 literal must be
+// bracketed. ok is false when the value is unparseable, no host can be
+// extracted, or the port is not a number from 1 to 65535; callers then log
+// the source setting only. No URL parser is used, and the returned scheme
+// is only ever the literal word http or https.
 func parseDerivedEndpoint(raw string) (scheme, host string, port int32, ok bool) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return "", "", 0, false
 	}
-	lower := strings.ToLower(s)
 	switch {
-	case strings.HasPrefix(lower, "https://"):
-		scheme, s = "https", s[len("https://"):]
-	case strings.HasPrefix(lower, "http://"):
-		scheme, s = "http", s[len("http://"):]
-	case strings.Contains(s, "://"):
-		i := strings.Index(s, "://")
-		scheme, s = lower[:i], s[i+len("://"):]
+	case strings.HasPrefix(s, "https://"):
+		scheme, s = "https", strings.TrimPrefix(s, "https://")
+	case strings.HasPrefix(s, "http://"):
+		scheme, s = "http", strings.TrimPrefix(s, "http://")
 	default:
 		scheme = "https"
+	}
+	// Any further "://" (another scheme, or one inside userinfo, path or
+	// query) makes the value unparseable.
+	if strings.Contains(s, "://") {
+		return "", "", 0, false
 	}
 	// The authority ends at the first "/", "?" or "#"; userinfo ends at
 	// the last "@" before it. An "@" anywhere after that first delimiter
@@ -487,10 +488,10 @@ func parseDerivedEndpoint(raw string) (scheme, host string, port int32, ok bool)
 			return "", "", 0, false
 		}
 		port = int32(n)
-	case scheme == "https":
-		port = substrateHTTPSPort
 	case scheme == "http":
 		port = 80
+	default:
+		port = substrateHTTPSPort
 	}
 	return scheme, strings.ToLower(host), port, true
 }

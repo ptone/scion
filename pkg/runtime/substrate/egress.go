@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"golang.org/x/net/idna"
@@ -297,24 +298,39 @@ func (e EgressAllowEntry) Protocol() EgressProtocol {
 // the same host and port with both http and TLS: v1 would rank them as a
 // tie. The error is deterministic for a given list order.
 func ParseEgressAllow(raws []string) ([]EgressAllowEntry, error) {
+	entries, _, err := ParseEgressAllowIndexed(raws)
+	return entries, err
+}
+
+// ParseEgressAllowIndexed is ParseEgressAllow that also returns, for each
+// entry, its 0-based position in raws, so callers can name it.
+func ParseEgressAllowIndexed(raws []string) ([]EgressAllowEntry, []int, error) {
+	type firstUse struct {
+		protocol EgressProtocol
+		index    int
+	}
 	var entries []EgressAllowEntry
-	protoByHostPort := make(map[string]EgressProtocol)
-	for _, raw := range raws {
+	var index []int
+	byHostPort := make(map[string]firstUse)
+	for i, raw := range raws {
 		e, err := NormalizeEgressAllowEntry(raw)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if e.IsZero() {
 			continue
 		}
 		key := e.Host + ":" + strconv.Itoa(int(e.Port))
-		if prev, seen := protoByHostPort[key]; seen && prev != e.Protocol() {
-			return nil, fmt.Errorf("egress_allow names %s as both %s and %s; one host and port can have only one protocol", key, prev, e.Protocol())
+		if prev, seen := byHostPort[key]; seen && prev.protocol != e.Protocol() {
+			return nil, nil, fmt.Errorf("egress_allow entry %d (%s) and entry %d (%s) both name %s; one host and port can have only one protocol", prev.index+1, prev.protocol, i+1, e.Protocol(), key)
 		}
-		protoByHostPort[key] = e.Protocol()
+		if _, seen := byHostPort[key]; !seen {
+			byHostPort[key] = firstUse{protocol: e.Protocol(), index: i}
+		}
 		entries = append(entries, e)
+		index = append(index, i)
 	}
-	return entries, nil
+	return entries, index, nil
 }
 
 // parseEgressPort parses an exact TCP port, 1 to 65535.
@@ -378,6 +394,16 @@ func NormalizeEgressAllowEntry(raw string) (EgressAllowEntry, error) {
 		}
 		return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q is not permitted", raw)
 	}
+	// No userinfo in any form: an "@" anywhere is refused before any port
+	// or scheme parse. The entry is not echoed: it may carry a credential.
+	if strings.Contains(e, "@") {
+		return EgressAllowEntry{}, fmt.Errorf("an egress_allow entry carries userinfo (an \"@\"), which is not permitted; write it as host[:port] or http://host[:port]")
+	}
+	// No interior whitespace (the outer whitespace is already trimmed). The
+	// entry is not echoed.
+	if strings.IndexFunc(e, unicode.IsSpace) >= 0 {
+		return EgressAllowEntry{}, fmt.Errorf("an egress_allow entry contains whitespace, which is not permitted")
+	}
 
 	// The scheme is detected ONLY by a literal "http://" or "https://"
 	// prefix (the entry is already lowercased); any other "://" is an
@@ -397,10 +423,6 @@ func NormalizeEgressAllowEntry(raw string) (EgressAllowEntry, error) {
 		return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q has unsupported scheme %q; use http:// or https://, or host:port", raw, name)
 	}
 	if isURL {
-		if strings.Contains(rest, "@") {
-			// The entry is not echoed: userinfo may carry a credential.
-			return EgressAllowEntry{}, fmt.Errorf("an egress_allow URL entry carries userinfo, which is not permitted; write it as http://host[:port] or host:port")
-		}
 		if strings.Contains(rest, "#") {
 			return EgressAllowEntry{}, fmt.Errorf("egress_allow entry %q may not carry a fragment; write it as http://host[:port] or host:port", raw)
 		}
