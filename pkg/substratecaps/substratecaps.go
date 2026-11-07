@@ -40,8 +40,8 @@ package substratecaps
 // Capability names a single required Linux capability.
 type Capability struct {
 	// Name is the capability name the way Substrate's
-	// ContainerSpec.Capabilities.Add expects it: no CAP_ prefix (see the
-	// vendored third_party/ateapipb types), e.g. "SETUID".
+	// Container.SecurityContext.Capabilities.Add expects it: no CAP_ prefix
+	// (see the vendored third_party/substrate/ateapi/v1 types), e.g. "SETUID".
 	Name string
 
 	// EffBit is Name's bit position in /proc/self/status's CapEff field —

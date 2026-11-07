@@ -22,7 +22,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 )
 
 // Dial opens a gRPC connection to the ateapi Control service at
@@ -57,7 +57,7 @@ func Dial(ctx context.Context, k8sClient kubernetes.Interface, cfg DialerConfig)
 }
 
 // NewControlClient is a thin convenience wrapper so callers do not need to
-// import ateapipb directly just to wrap the connection Dial returns.
-func NewControlClient(conn *grpc.ClientConn) ateapipb.ControlClient {
-	return ateapipb.NewControlClient(conn)
+// import the ateapi v1 stubs directly just to wrap the connection Dial returns.
+func NewControlClient(conn *grpc.ClientConn) ateapi.ControlClient {
+	return ateapi.NewControlClient(conn)
 }

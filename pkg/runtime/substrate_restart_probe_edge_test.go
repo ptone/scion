@@ -20,16 +20,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 )
 
 const probeEdgeProjectID = "550e8400-e29b-41d4-a716-446655440000"
 
 var probeEdgeAtespace = substrateAtespaceName(probeEdgeProjectID)
 
-func probeEdgeActor(name, uid string, status *ateapipb.ActorStatus) *ateapipb.Actor {
-	return &ateapipb.Actor{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: probeEdgeAtespace, Name: name, Uid: uid},
+func probeEdgeActor(name, uid string, status *ateapi.ActorStatus) *ateapi.Actor {
+	return &ateapi.Actor{
+		Metadata: &ateapi.ResourceMetadata{Atespace: probeEdgeAtespace, Name: name, Uid: uid},
 		Status:   status,
 	}
 }
@@ -40,17 +40,17 @@ func TestSubstrateRestart_RecordlessActors_CountsActorsOnLaterPages(t *testing.T
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, &callRecorder{})
 	defer closeServer()
 
-	running := &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}
-	fc.listActors = func(req *ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		switch req.GetPageToken() {
+	running := &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}
+	fc.listActors = func(req *ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+		switch req.GetOptions().GetPageToken() {
 		case "":
-			return &ateapipb.ListActorsResponse{NextPageToken: "p2"}, nil
+			return &ateapi.ListActorsResponse{NextPageToken: "p2"}, nil
 		case "p2":
-			return &ateapipb.ListActorsResponse{
-				Actors: []*ateapipb.Actor{probeEdgeActor("late-agent", "uid-late", running)},
+			return &ateapi.ListActorsResponse{
+				Actors: []*ateapi.Actor{probeEdgeActor("late-agent", "uid-late", running)},
 			}, nil
 		default:
-			return nil, fmt.Errorf("unexpected page token %q", req.GetPageToken())
+			return nil, fmt.Errorf("unexpected page token %q", req.GetOptions().GetPageToken())
 		}
 	}
 
@@ -71,12 +71,12 @@ func TestSubstrateRestart_RecordlessActors_RepeatedPageTokenIsExplicitError(t *t
 	defer closeServer()
 
 	calls := 0
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 		calls++
 		if calls > 3 {
 			return nil, fmt.Errorf("probe kept paging after a repeated token (call %d)", calls)
 		}
-		return &ateapipb.ListActorsResponse{NextPageToken: "same"}, nil
+		return &ateapi.ListActorsResponse{NextPageToken: "same"}, nil
 	}
 
 	_, actors, err := rt.RecordlessActors(context.Background(), probeEdgeProjectID)
@@ -106,12 +106,12 @@ func TestSubstrateRestart_RecordlessActors_EndlessPagingHitsPageCap(t *testing.T
 	t.Cleanup(func() { maxRecordlessActorListPages = origCap })
 
 	calls := 0
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 		calls++
 		if calls > maxRecordlessActorListPages+1 {
 			return nil, fmt.Errorf("probe exceeded the page cap (call %d)", calls)
 		}
-		return &ateapipb.ListActorsResponse{NextPageToken: fmt.Sprintf("p%d", calls)}, nil
+		return &ateapi.ListActorsResponse{NextPageToken: fmt.Sprintf("p%d", calls)}, nil
 	}
 
 	_, actors, err := rt.RecordlessActors(context.Background(), probeEdgeProjectID)
@@ -133,18 +133,18 @@ func TestSubstrateRestart_RecordlessActors_EndlessPagingHitsPageCap(t *testing.T
 func TestSubstrateRestart_RecordlessActors_CountsUnspecifiedState(t *testing.T) {
 	cases := []struct {
 		name   string
-		status *ateapipb.ActorStatus
+		status *ateapi.ActorStatus
 	}{
-		{"explicit UNSPECIFIED", &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_UNSPECIFIED}},
+		{"explicit UNSPECIFIED", &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_UNSPECIFIED}},
 		{"nil status", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, fc, _, closeServer := newTestSubstrateHarness(t, &callRecorder{})
 			defer closeServer()
-			fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-				return &ateapipb.ListActorsResponse{
-					Actors: []*ateapipb.Actor{probeEdgeActor("unknown-state", "uid-unknown", tc.status)},
+			fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+				return &ateapi.ListActorsResponse{
+					Actors: []*ateapi.Actor{probeEdgeActor("unknown-state", "uid-unknown", tc.status)},
 				}, nil
 			}
 

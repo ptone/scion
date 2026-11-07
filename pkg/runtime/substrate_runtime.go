@@ -36,7 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -69,7 +69,7 @@ type substrateAgentRecord struct {
 // SubstrateRuntime implements runtime.Runtime for Agent Substrate.
 type SubstrateRuntime struct {
 	cfg    config.V1SubstrateConfig
-	client ateapipb.ControlClient
+	client ateapi.ControlClient
 	conn   *grpc.ClientConn // non-nil only when this runtime opened it (nil for injected test clients)
 	router *substrate.RouterClient
 	// k8sClient is not read by any runtime method — the dialer receives its
@@ -324,9 +324,9 @@ func newSubstrateRuntimeFromConfig(sc config.V1SubstrateConfig) (*SubstrateRunti
 // dependencies and no real network/cluster access, for unit tests. Exported
 // so tests in other packages (e.g. pkg/agent, pkg/runtimebroker) can drive a
 // real SubstrateRuntime — List/Delete/Run's actual logic, not a
-// reimplementation of it — through a fake ateapipb.ControlClient and
+// reimplementation of it — through a fake ateapi.ControlClient and
 // substrate.RouterClient, the same way this package's own tests do.
-func NewSubstrateRuntimeForTest(client ateapipb.ControlClient, router *substrate.RouterClient, k8sClient kubernetes.Interface, cfg config.V1SubstrateConfig) *SubstrateRuntime {
+func NewSubstrateRuntimeForTest(client ateapi.ControlClient, router *substrate.RouterClient, k8sClient kubernetes.Interface, cfg config.V1SubstrateConfig) *SubstrateRuntime {
 	return &SubstrateRuntime{
 		cfg:            cfg,
 		client:         client,
@@ -413,6 +413,17 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	if err := substrate.Validate(&r.cfg); err != nil {
 		return "", err
 	}
+	// Settings keys the v1 API has no target for refuse the Run rather
+	// than being silently ignored.
+	if err := checkSubstrateRemovedKeys(r.cfg); err != nil {
+		return "", err
+	}
+	// Resolved before any control-plane call: v1 needs both a cpu and a
+	// memory limit on the template, and an invalid value fails here.
+	resources, err := resolveSubstrateResources(cfg.Resources)
+	if err != nil {
+		return "", err
+	}
 	if cfg.ProjectID == "" {
 		// An empty ProjectID would hash to the same atespace for every
 		// such agent (substrateAtespaceName has no other input), colliding
@@ -437,17 +448,20 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	}
 
 	// Step 3: content-addressed template, created + waited-ready if new.
-	templateName := substrateTemplateName(cfg.Image, r.cfg, cfg.Resources)
-	tmpl := buildActorTemplate(atespace, templateName, cfg.Image, r.cfg, cfg.Resources)
+	templateName := substrateTemplateName(cfg.Image, r.cfg, resources)
+	tmpl, err := buildActorTemplate(atespace, templateName, cfg.Image, r.cfg, resources)
+	if err != nil {
+		return "", err
+	}
 	if err := ensureActorTemplate(ctx, r.client, atespace, templateName, tmpl, templateReadyTimeout(r.cfg), r.sleep); err != nil {
 		return "", r.redact(cfg, err)
 	}
 
 	// Step 4: create the actor.
-	actor, err := r.client.CreateActor(ctx, &ateapipb.CreateActorRequest{
-		Actor: &ateapipb.Actor{
-			Metadata:      &ateapipb.ResourceMetadata{Atespace: atespace, Name: actorName},
-			ActorTemplate: &ateapipb.ObjectRef{Atespace: atespace, Name: templateName},
+	actor, err := r.client.CreateActor(ctx, &ateapi.CreateActorRequest{
+		Actor: &ateapi.Actor{
+			Metadata:      &ateapi.ResourceMetadata{Atespace: atespace, Name: actorName},
+			ActorTemplate: &ateapi.ObjectRef{Atespace: atespace, Name: templateName},
 		},
 	})
 	if err != nil {
@@ -468,32 +482,33 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	cleanup := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, _ = r.client.DeleteActorEgressPolicy(cleanupCtx, &ateapipb.DeleteActorEgressPolicyRequest{
-			Actor: &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
+		_, _ = r.client.DeleteActorEgressPolicy(cleanupCtx, &ateapi.DeleteActorEgressPolicyRequest{
+			Actor: &ateapi.ObjectRef{Atespace: atespace, Name: actorName},
+			Name:  substrateEgressPolicyName,
 		})
-		_, _ = r.client.DeleteActor(cleanupCtx, &ateapipb.DeleteActorRequest{
-			Actor:    &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
-			AnyState: true,
-		})
+		// The uid CreateActor returned makes the delete conditional on
+		// this Run's own actor, so cleanup never removes a later
+		// incarnation created under the same name.
+		_, _ = r.client.DeleteActor(cleanupCtx, substrateDeleteActorRequest(atespace, actorName, actorUID))
 	}
 
 	// Step 5: egress policy. (r.cfg was already validated at the top of
 	// Run; r.cfg is immutable for the lifetime of this call, so revalidating
 	// it here would only ever re-check the same result.)
 	env := buildBootstrapEnv(cfg)
-	hostnames, err := substrateEgressHostnames(cfg, env, r.cfg)
+	targets, err := substrateEgressTargets(cfg, env, r.cfg)
 	if err != nil {
 		cleanup()
 		return "", r.redact(cfg, fmt.Errorf("substrate: resolve egress hosts for %s: %w", id, err))
 	}
-	if _, err := r.client.CreateActorEgressPolicy(ctx, buildEgressPolicy(atespace, actorName, hostnames)); err != nil {
+	if _, err := r.client.CreateActorEgressPolicy(ctx, buildEgressPolicy(atespace, actorName, targets)); err != nil {
 		cleanup()
 		return "", r.redact(cfg, fmt.Errorf("substrate: create egress policy for %s: %w", id, err))
 	}
 
 	// Step 6: resume, then wait RUNNING.
-	if _, err := r.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{
-		Actor: &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
+	if _, err := r.client.ResumeActor(ctx, &ateapi.ResumeActorRequest{
+		Actor: &ateapi.ObjectRef{Atespace: atespace, Name: actorName},
 	}); err != nil {
 		cleanup()
 		return "", r.redact(cfg, fmt.Errorf("substrate: resume actor %s: %w", id, err))
@@ -620,9 +635,42 @@ func (r *SubstrateRuntime) bootstrapNonce(ctx context.Context, atespace, actorNa
 	return generateControlToken()
 }
 
+// ErrSubstrateIncarnationChanged reports that DeleteActor refused a delete
+// because the actor now holding the name is not the one Delete read: a
+// different incarnation exists, and nothing was deleted.
+var ErrSubstrateIncarnationChanged = errors.New("substrate: a different incarnation of the actor exists; nothing deleted")
+
+// substrateDeleteActorRequest builds a DeleteActorRequest. A non-empty uid
+// becomes a DeleteOptions precondition, so the server deletes only that
+// incarnation; an unknown uid (the record-less path) sends no options.
+func substrateDeleteActorRequest(atespace, actorName, uid string) *ateapi.DeleteActorRequest {
+	req := &ateapi.DeleteActorRequest{Actor: &ateapi.ObjectRef{Atespace: atespace, Name: actorName}}
+	if uid != "" {
+		req.Options = &ateapi.DeleteOptions{Uid: uid}
+	}
+	return req
+}
+
+// isSubstrateUIDPreconditionFailure reports whether err is DeleteActor
+// refusing a uid precondition. The v1 proto does not name the code for a
+// DeleteOptions.uid mismatch; this assumes FailedPrecondition, which the
+// live Phase 1d observation (design §7 gate item 2b) confirms. Aborted is
+// deliberately not mapped: the v1 API uses it for "a concurrent write
+// landed first; retry". Only a delete that sent a uid can fail this way.
+func isSubstrateUIDPreconditionFailure(err error, uidSent bool) bool {
+	return uidSent && status.Code(err) == codes.FailedPrecondition
+}
+
 // Delete implements substrate-runtime.md §9: DeleteActorEgressPolicy
-// (ignoring NotFound), then DeleteActor(any_state=true), then drop the
-// in-memory control token (and label record, best effort).
+// (ignoring NotFound), then DeleteActor, then drop the in-memory control
+// token (and label record, best effort).
+//
+// DeleteActor carries the uid the pre-delete GetActor read as a
+// precondition, so a later incarnation created under the same name between
+// the read and the delete is not removed; that case returns
+// ErrSubstrateIncarnationChanged and leaves the in-memory state alone. When
+// the uid is unknown (GetActor failed, the record-less path) the delete is
+// unconditional, as before.
 // P4: enforce ref.RunID (ptone/scion#2550). Today the actor name is reused
 // across runs, so this still targets whatever actor holds the name.
 func (r *SubstrateRuntime) Delete(ctx context.Context, ref RunRef) error {
@@ -633,20 +681,21 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, ref RunRef) error {
 	}
 
 	var uid string
-	if actor, gerr := r.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: &ateapipb.ObjectRef{Atespace: atespace, Name: actorName}}); gerr == nil {
+	if actor, gerr := r.client.GetActor(ctx, &ateapi.GetActorRequest{Actor: &ateapi.ObjectRef{Atespace: atespace, Name: actorName}}); gerr == nil {
 		uid = actor.GetMetadata().GetUid()
 	}
 
-	if _, err := r.client.DeleteActorEgressPolicy(ctx, &ateapipb.DeleteActorEgressPolicyRequest{
-		Actor: &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
+	if _, err := r.client.DeleteActorEgressPolicy(ctx, &ateapi.DeleteActorEgressPolicyRequest{
+		Actor: &ateapi.ObjectRef{Atespace: atespace, Name: actorName},
+		Name:  substrateEgressPolicyName,
 	}); err != nil && status.Code(err) != codes.NotFound {
 		return fmt.Errorf("substrate: delete egress policy for %s: %w", id, err)
 	}
 
-	deletedActor, err := r.client.DeleteActor(ctx, &ateapipb.DeleteActorRequest{
-		Actor:    &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
-		AnyState: true,
-	})
+	deletedActor, err := r.client.DeleteActor(ctx, substrateDeleteActorRequest(atespace, actorName, uid))
+	if isSubstrateUIDPreconditionFailure(err, uid != "") {
+		return fmt.Errorf("%w (%s): %v", ErrSubstrateIncarnationChanged, id, err)
+	}
 	if err != nil && status.Code(err) != codes.NotFound {
 		return fmt.Errorf("substrate: delete actor %s: %w", id, err)
 	}
@@ -744,13 +793,18 @@ const substrateAtespacePrefix = "scion-"
 // durable fix here is persisting agent records so they survive a broker
 // restart in the first place, not reconstructing them from the actor name.
 func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-	var actors []*ateapipb.Actor
+	var actors []*ateapi.Actor
 	pageToken := ""
 	for page := 0; ; page++ {
 		if page >= maxActorListPages {
 			return nil, fmt.Errorf("substrate: list actors: exceeded %d pages", maxActorListPages)
 		}
-		resp, err := r.client.ListActors(ctx, &ateapipb.ListActorsRequest{PageToken: pageToken})
+		// An empty atespace lists across every atespace (v1
+		// ListActorsRequest.atespace: "Empty lists across all atespaces").
+		// That form needs the global viewer role on the broker principal.
+		resp, err := r.client.ListActors(ctx, &ateapi.ListActorsRequest{
+			Options: &ateapi.ListOptions{PageSize: substrateListPageSize, PageToken: pageToken},
+		})
 		if err != nil {
 			return nil, fmt.Errorf("substrate: list actors: %w", err)
 		}
@@ -917,27 +971,35 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 // Positive rule for what counts as a project atespace's actor: Run (above)
 // is the only call site in this runtime that creates an Actor in a
 // project's own atespace, and it creates exactly one per real agent, named
-// cfg.Name. An ActorTemplate's golden actor — created as a side effect of
-// CreateActorTemplate/ensureActorTemplate — is placed in the
-// substrate-reserved "ate-golden" atespace instead, never in a project's
-// atespace (see the DeleteActorTemplate RPC comment,
-// third_party/ateapipb/ateapi.proto: "Delete an ActorTemplate together with
-// its golden actor and golden tag in the reserved ate-golden atespace").
-// ActorTemplate and Tag are themselves distinct resource kinds that
-// ListActors never returns. So every actor ListActors reports for a
-// project's own atespace is a real per-agent actor; scoping the list to
-// that one atespace (both via the request's Atespace field and the
-// defensive equality check below) is the only exclusion this method needs.
+// cfg.Name. ActorTemplate and Tag are distinct resource kinds that
+// ListActors never returns. Scoping the list to that one atespace (both via
+// the request's Atespace field and the defensive equality check below) is
+// the only exclusion this method applies.
+//
+// Known gap: in the v1 API an ActorTemplate's golden actor lives in the
+// template's own atespace, which for scion is the project atespace
+// (third_party/substrate/ateapi/v1/ateapi.proto:218-219: "Delete an
+// ActorTemplate together with its golden actor and golden tag in the
+// template's atespace"). It is temporary: the template controller deletes
+// it after tagging the golden snapshot (:1244-1245). While a template
+// builds, that golden actor may therefore appear in this list with no
+// record and count as record-less (and List reports it as an agent). The
+// proto gives no naming contract to filter it on, so it is not filtered
+// here; the live Phase 1d observation and a design follow-up decide the
+// fix.
 func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID string) (atespace string, actors []RecordlessActor, err error) {
 	atespace = substrateAtespaceName(projectID)
 
-	var rawActors []*ateapipb.Actor
+	var rawActors []*ateapi.Actor
 	pageToken := ""
 	for page := 0; ; page++ {
 		if page >= maxRecordlessActorListPages {
 			return atespace, nil, fmt.Errorf("substrate: list actors in atespace %s: exceeded %d pages", atespace, maxRecordlessActorListPages)
 		}
-		resp, err := r.client.ListActors(ctx, &ateapipb.ListActorsRequest{Atespace: atespace, PageToken: pageToken})
+		resp, err := r.client.ListActors(ctx, &ateapi.ListActorsRequest{
+			Atespace: atespace,
+			Options:  &ateapi.ListOptions{PageSize: substrateListPageSize, PageToken: pageToken},
+		})
 		if err != nil {
 			return atespace, nil, fmt.Errorf("substrate: list actors in atespace %s: %w", atespace, err)
 		}
@@ -962,7 +1024,7 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 		if substrateAgentRecords[actor.GetMetadata().GetUid()] != nil {
 			continue
 		}
-		if actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_DELETING {
+		if actor.GetStatus().GetState() == ateapi.ActorState_ACTOR_STATE_DELETING {
 			// A record-less actor already in ACTOR_STATE_DELETING needs no
 			// protection here: Delete (above) removes
 			// the egress policy before DeleteActor, so a delete already in
@@ -984,14 +1046,16 @@ func (r *SubstrateRuntime) RecordlessActors(ctx context.Context, projectID strin
 			// or not the actor's DELETING state itself ever resolves. The
 			// proto documents no transition out of DELETING back to a live
 			// state either: RevertActor, the one RPC that returns an actor
-			// to a pre-delete state, only accepts CRASHED/RUNNING/PAUSED
-			// actors (third_party/ateapipb/ateapi.proto:46-47), and a
-			// deleted actor simply stops being listed (there is no
-			// ACTOR_STATE_DELETED for it to sit in). ActorStatus.state is
-			// also `+k8s:required` (proto:537), so a listed actor's state is
-			// never zero-valued/unknown here. DELETING actors are observed
-			// either to finish deleting or to stay stuck; none returns to a
-			// live state.
+			// to a pre-delete state, only accepts crashed or running
+			// actors, or suspended ones with a node-local snapshot
+			// (third_party/substrate/ateapi/v1/ateapi.proto:52-54), and a
+			// deleted actor stops being listed (there is no
+			// ACTOR_STATE_DELETED for it to sit in; the live Phase 1d
+			// observation re-checks this against v1's delete_time).
+			// ActorStatus.state is also `+k8s:required` (proto:894), so a
+			// listed actor's state is never zero-valued/unknown here.
+			// DELETING actors are observed either to finish deleting or to
+			// stay stuck; none returns to a live state.
 			//
 			// It is NOT unconditionally safe with respect to the broader
 			// invariant this whole mechanism protects: an actor already
@@ -1032,6 +1096,11 @@ var maxRecordlessActorListPages = 100
 // reason as maxRecordlessActorListPages.
 var maxActorListPages = 1000
 
+// substrateListPageSize is the ListOptions.page_size List and
+// RecordlessActors request. The server may return fewer and coerces
+// values above 1000 to 1000.
+const substrateListPageSize int32 = 500
+
 // isProjectNameLabelKey reports whether key is the project-name label key.
 func isProjectNameLabelKey(key string) bool {
 	return key == projectkeys.LabelProject
@@ -1065,23 +1134,23 @@ func substrateLabelsMatch(labels map[string]string, project, projectID string, f
 	return true
 }
 
-// substratePhase maps ateapipb.ActorState onto scion's AgentInfo.Phase
+// substratePhase maps ateapi.ActorState onto scion's AgentInfo.Phase
 // vocabulary.
-func substratePhase(s ateapipb.ActorState) string {
+func substratePhase(s ateapi.ActorState) string {
 	switch s {
-	case ateapipb.ActorState_ACTOR_STATE_RESUMING:
+	case ateapi.ActorState_ACTOR_STATE_RESUMING:
 		return "provisioning"
-	case ateapipb.ActorState_ACTOR_STATE_RUNNING:
+	case ateapi.ActorState_ACTOR_STATE_RUNNING:
 		return "running"
-	case ateapipb.ActorState_ACTOR_STATE_SUSPENDING, ateapipb.ActorState_ACTOR_STATE_PAUSING:
+	case ateapi.ActorState_ACTOR_STATE_SUSPENDING:
 		return "stopping"
-	case ateapipb.ActorState_ACTOR_STATE_SUSPENDED, ateapipb.ActorState_ACTOR_STATE_PAUSED:
+	case ateapi.ActorState_ACTOR_STATE_SUSPENDED:
 		return "stopped"
-	case ateapipb.ActorState_ACTOR_STATE_CRASHED:
+	case ateapi.ActorState_ACTOR_STATE_CRASHED:
 		return "error"
-	case ateapipb.ActorState_ACTOR_STATE_DELETING:
+	case ateapi.ActorState_ACTOR_STATE_DELETING:
 		return "stopping"
-	case ateapipb.ActorState_ACTOR_STATE_REVERTING:
+	case ateapi.ActorState_ACTOR_STATE_REVERTING:
 		return "provisioning"
 	default:
 		return "unknown"
@@ -1233,8 +1302,8 @@ func (r *SubstrateRuntime) PullImage(ctx context.Context, image string) error { 
 // ensureAtespace creates atespace, treating AlreadyExists as success
 // (substrate-runtime.md §4).
 func (r *SubstrateRuntime) ensureAtespace(ctx context.Context, atespace string) error {
-	_, err := r.client.CreateAtespace(ctx, &ateapipb.CreateAtespaceRequest{
-		Atespace: &ateapipb.Atespace{Metadata: &ateapipb.ResourceMetadata{Name: atespace}},
+	_, err := r.client.CreateAtespace(ctx, &ateapi.CreateAtespaceRequest{
+		Atespace: &ateapi.Atespace{Metadata: &ateapi.ResourceMetadata{Name: atespace}},
 	})
 	if err != nil && status.Code(err) != codes.AlreadyExists {
 		return fmt.Errorf("substrate: create atespace %q: %w", atespace, err)
@@ -1247,15 +1316,15 @@ func (r *SubstrateRuntime) ensureAtespace(ctx context.Context, atespace string) 
 func (r *SubstrateRuntime) waitRunning(ctx context.Context, atespace, actorName string) error {
 	deadline := r.now().Add(defaultActorRunningTimeout)
 	for {
-		actor, err := r.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: &ateapipb.ObjectRef{Atespace: atespace, Name: actorName}})
+		actor, err := r.client.GetActor(ctx, &ateapi.GetActorRequest{Actor: &ateapi.ObjectRef{Atespace: atespace, Name: actorName}})
 		if err != nil {
 			return fmt.Errorf("substrate: get actor %s/%s: %w", atespace, actorName, err)
 		}
 		state := actor.GetStatus().GetState()
-		if state == ateapipb.ActorState_ACTOR_STATE_RUNNING {
+		if state == ateapi.ActorState_ACTOR_STATE_RUNNING {
 			return nil
 		}
-		if state == ateapipb.ActorState_ACTOR_STATE_CRASHED {
+		if state == ateapi.ActorState_ACTOR_STATE_CRASHED {
 			return fmt.Errorf("substrate: actor %s/%s crashed while starting", atespace, actorName)
 		}
 		if r.now().After(deadline) {

@@ -44,7 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
 	sciontoolsubstrate "github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 )
 
 // -----------------------------------------------------------------------
@@ -70,24 +70,29 @@ func (c *callRecorder) list() []string {
 }
 
 // -----------------------------------------------------------------------
-// fakeControlClient: interface-backed fake for ateapipb.ControlClient.
+// fakeControlClient: interface-backed fake for ateapi.ControlClient.
 // -----------------------------------------------------------------------
 
 const fakeActorUID = "actor-uid-1"
 
+// fakeControlClient embeds ateapi.ControlClient (nil) and overrides only
+// the methods SubstrateRuntime calls; any other method panics, so a new
+// call site cannot go unnoticed.
 type fakeControlClient struct {
+	ateapi.ControlClient
+
 	rec *callRecorder
 
-	createAtespace          func(*ateapipb.CreateAtespaceRequest) (*ateapipb.Atespace, error)
-	getActorTemplate        func(*ateapipb.GetActorTemplateRequest) (*ateapipb.ActorTemplate, error)
-	createActorTemplate     func(*ateapipb.CreateActorTemplateRequest) (*ateapipb.ActorTemplate, error)
-	createActor             func(*ateapipb.CreateActorRequest) (*ateapipb.Actor, error)
-	createActorEgressPolicy func(*ateapipb.CreateActorEgressPolicyRequest) (*ateapipb.EgressPolicy, error)
-	deleteActorEgressPolicy func(*ateapipb.DeleteActorEgressPolicyRequest) (*ateapipb.EgressPolicy, error)
-	resumeActor             func(*ateapipb.ResumeActorRequest) (*ateapipb.ResumeActorResponse, error)
-	getActor                func(*ateapipb.GetActorRequest) (*ateapipb.Actor, error)
-	deleteActor             func(*ateapipb.DeleteActorRequest) (*ateapipb.Actor, error)
-	listActors              func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error)
+	createAtespace          func(*ateapi.CreateAtespaceRequest) (*ateapi.Atespace, error)
+	getActorTemplate        func(*ateapi.GetActorTemplateRequest) (*ateapi.ActorTemplate, error)
+	createActorTemplate     func(*ateapi.CreateActorTemplateRequest) (*ateapi.ActorTemplate, error)
+	createActor             func(*ateapi.CreateActorRequest) (*ateapi.Actor, error)
+	createActorEgressPolicy func(*ateapi.CreateActorEgressPolicyRequest) (*ateapi.EgressPolicy, error)
+	deleteActorEgressPolicy func(*ateapi.DeleteActorEgressPolicyRequest) (*ateapi.EgressPolicy, error)
+	resumeActor             func(*ateapi.ResumeActorRequest) (*ateapi.ResumeActorResponse, error)
+	getActor                func(*ateapi.GetActorRequest) (*ateapi.Actor, error)
+	deleteActor             func(*ateapi.DeleteActorRequest) (*ateapi.Actor, error)
+	listActors              func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error)
 
 	// createdActors backs the DEFAULT createActor closure's AlreadyExists
 	// behavior below (see newFakeControlClient) — keyed by "atespace/name",
@@ -96,7 +101,7 @@ type fakeControlClient struct {
 	// gets realistic "second call for the same name fails" behavior rather
 	// than a silent overwrite, matching real ateapi.
 	mu            sync.Mutex
-	createdActors map[string]*ateapipb.Actor
+	createdActors map[string]*ateapi.Actor
 }
 
 // newFakeControlClient returns a fake wired for the Run happy path: a
@@ -107,55 +112,55 @@ type fakeControlClient struct {
 func newFakeControlClient(rec *callRecorder) *fakeControlClient {
 	f := &fakeControlClient{
 		rec:           rec,
-		createdActors: make(map[string]*ateapipb.Actor),
-		createAtespace: func(*ateapipb.CreateAtespaceRequest) (*ateapipb.Atespace, error) {
-			return &ateapipb.Atespace{}, nil
+		createdActors: make(map[string]*ateapi.Actor),
+		createAtespace: func(*ateapi.CreateAtespaceRequest) (*ateapi.Atespace, error) {
+			return &ateapi.Atespace{}, nil
 		},
-		getActorTemplate: func(*ateapipb.GetActorTemplateRequest) (*ateapipb.ActorTemplate, error) {
+		getActorTemplate: func(*ateapi.GetActorTemplateRequest) (*ateapi.ActorTemplate, error) {
 			return nil, status.Error(codes.NotFound, "not found")
 		},
-		createActorTemplate: func(req *ateapipb.CreateActorTemplateRequest) (*ateapipb.ActorTemplate, error) {
+		createActorTemplate: func(req *ateapi.CreateActorTemplateRequest) (*ateapi.ActorTemplate, error) {
 			tmpl := req.GetActorTemplate()
-			tmpl.Status = &ateapipb.ActorTemplateStatus{
-				GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{
-					GoldenTag: &ateapipb.ObjectRef{Atespace: "ate-golden", Name: "golden"},
+			tmpl.Status = &ateapi.ActorTemplateStatus{
+				GoldenSnapshotStatus: &ateapi.GoldenSnapshotStatus{
+					GoldenTag: &ateapi.ObjectRef{Atespace: "ate-golden", Name: "golden"},
 				},
 			}
 			return tmpl, nil
 		},
-		createActorEgressPolicy: func(*ateapipb.CreateActorEgressPolicyRequest) (*ateapipb.EgressPolicy, error) {
-			return &ateapipb.EgressPolicy{}, nil
+		createActorEgressPolicy: func(*ateapi.CreateActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
+			return &ateapi.EgressPolicy{}, nil
 		},
-		deleteActorEgressPolicy: func(*ateapipb.DeleteActorEgressPolicyRequest) (*ateapipb.EgressPolicy, error) {
-			return &ateapipb.EgressPolicy{}, nil
+		deleteActorEgressPolicy: func(*ateapi.DeleteActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
+			return &ateapi.EgressPolicy{}, nil
 		},
-		resumeActor: func(*ateapipb.ResumeActorRequest) (*ateapipb.ResumeActorResponse, error) {
-			return &ateapipb.ResumeActorResponse{}, nil
+		resumeActor: func(*ateapi.ResumeActorRequest) (*ateapi.ResumeActorResponse, error) {
+			return &ateapi.ResumeActorResponse{}, nil
 		},
-		getActor: func(req *ateapipb.GetActorRequest) (*ateapipb.Actor, error) {
-			return &ateapipb.Actor{
-				Metadata: &ateapipb.ResourceMetadata{
+		getActor: func(req *ateapi.GetActorRequest) (*ateapi.Actor, error) {
+			return &ateapi.Actor{
+				Metadata: &ateapi.ResourceMetadata{
 					Atespace: req.GetActor().GetAtespace(),
 					Name:     req.GetActor().GetName(),
 					Uid:      fakeActorUID,
 				},
-				Status: &ateapipb.ActorStatus{
-					State: ateapipb.ActorState_ACTOR_STATE_RUNNING,
-					WorkerAssignment: &ateapipb.WorkerAssignment{
+				Status: &ateapi.ActorStatus{
+					State: ateapi.ActorState_ACTOR_STATE_RUNNING,
+					WorkerAssignment: &ateapi.WorkerAssignment{
 						WorkerPod:       "worker-pod-1",
 						WorkerNamespace: "ate-workers",
 					},
 				},
 			}, nil
 		},
-		deleteActor: func(*ateapipb.DeleteActorRequest) (*ateapipb.Actor, error) {
-			return &ateapipb.Actor{}, nil
+		deleteActor: func(*ateapi.DeleteActorRequest) (*ateapi.Actor, error) {
+			return &ateapi.Actor{}, nil
 		},
-		listActors: func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-			return &ateapipb.ListActorsResponse{}, nil
+		listActors: func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+			return &ateapi.ListActorsResponse{}, nil
 		},
 	}
-	f.createActor = func(req *ateapipb.CreateActorRequest) (*ateapipb.Actor, error) {
+	f.createActor = func(req *ateapi.CreateActorRequest) (*ateapi.Actor, error) {
 		key := req.GetActor().GetMetadata().GetAtespace() + "/" + req.GetActor().GetMetadata().GetName()
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -170,8 +175,8 @@ func newFakeControlClient(rec *callRecorder) *fakeControlClient {
 		if _, exists := f.createdActors[key]; exists {
 			return nil, status.Error(codes.AlreadyExists, "actor already exists")
 		}
-		actor := &ateapipb.Actor{
-			Metadata: &ateapipb.ResourceMetadata{
+		actor := &ateapi.Actor{
+			Metadata: &ateapi.ResourceMetadata{
 				Atespace: req.GetActor().GetMetadata().GetAtespace(),
 				Name:     req.GetActor().GetMetadata().GetName(),
 				Uid:      fakeActorUID,
@@ -183,143 +188,47 @@ func newFakeControlClient(rec *callRecorder) *fakeControlClient {
 	return f
 }
 
-func (f *fakeControlClient) GetActor(ctx context.Context, in *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
+func (f *fakeControlClient) GetActor(ctx context.Context, in *ateapi.GetActorRequest, opts ...grpc.CallOption) (*ateapi.Actor, error) {
 	f.rec.record("GetActor")
 	return f.getActor(in)
 }
-func (f *fakeControlClient) CreateActor(ctx context.Context, in *ateapipb.CreateActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
+func (f *fakeControlClient) CreateActor(ctx context.Context, in *ateapi.CreateActorRequest, opts ...grpc.CallOption) (*ateapi.Actor, error) {
 	f.rec.record("CreateActor")
 	return f.createActor(in)
 }
-func (f *fakeControlClient) UpdateActor(ctx context.Context, in *ateapipb.UpdateActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
-	f.rec.record("UpdateActor")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) SuspendActor(ctx context.Context, in *ateapipb.SuspendActorRequest, opts ...grpc.CallOption) (*ateapipb.SuspendActorResponse, error) {
-	f.rec.record("SuspendActor")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) PauseActor(ctx context.Context, in *ateapipb.PauseActorRequest, opts ...grpc.CallOption) (*ateapipb.PauseActorResponse, error) {
-	f.rec.record("PauseActor")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) ResumeActor(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+func (f *fakeControlClient) ResumeActor(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
 	f.rec.record("ResumeActor")
 	return f.resumeActor(in)
 }
-func (f *fakeControlClient) RevertActor(ctx context.Context, in *ateapipb.RevertActorRequest, opts ...grpc.CallOption) (*ateapipb.RevertActorResponse, error) {
-	f.rec.record("RevertActor")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) DeleteActor(ctx context.Context, in *ateapipb.DeleteActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
+func (f *fakeControlClient) DeleteActor(ctx context.Context, in *ateapi.DeleteActorRequest, opts ...grpc.CallOption) (*ateapi.Actor, error) {
 	f.rec.record("DeleteActor")
 	return f.deleteActor(in)
 }
-func (f *fakeControlClient) GetActorEgressPolicy(ctx context.Context, in *ateapipb.GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
-	f.rec.record("GetActorEgressPolicy")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) CreateActorEgressPolicy(ctx context.Context, in *ateapipb.CreateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
+func (f *fakeControlClient) CreateActorEgressPolicy(ctx context.Context, in *ateapi.CreateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapi.EgressPolicy, error) {
 	f.rec.record("CreateActorEgressPolicy")
 	return f.createActorEgressPolicy(in)
 }
-func (f *fakeControlClient) UpdateActorEgressPolicy(ctx context.Context, in *ateapipb.UpdateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
-	f.rec.record("UpdateActorEgressPolicy")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) DeleteActorEgressPolicy(ctx context.Context, in *ateapipb.DeleteActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
+func (f *fakeControlClient) DeleteActorEgressPolicy(ctx context.Context, in *ateapi.DeleteActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapi.EgressPolicy, error) {
 	f.rec.record("DeleteActorEgressPolicy")
 	return f.deleteActorEgressPolicy(in)
 }
-func (f *fakeControlClient) MintActorJWT(ctx context.Context, in *ateapipb.MintActorJWTRequest, opts ...grpc.CallOption) (*ateapipb.MintActorJWTResponse, error) {
-	f.rec.record("MintActorJWT")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) MintActorCertificate(ctx context.Context, in *ateapipb.MintActorCertificateRequest, opts ...grpc.CallOption) (*ateapipb.MintActorCertificateResponse, error) {
-	f.rec.record("MintActorCertificate")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) CreateTag(ctx context.Context, in *ateapipb.CreateTagRequest, opts ...grpc.CallOption) (*ateapipb.Tag, error) {
-	f.rec.record("CreateTag")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) GetTag(ctx context.Context, in *ateapipb.GetTagRequest, opts ...grpc.CallOption) (*ateapipb.Tag, error) {
-	f.rec.record("GetTag")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) ListTags(ctx context.Context, in *ateapipb.ListTagsRequest, opts ...grpc.CallOption) (*ateapipb.ListTagsResponse, error) {
-	f.rec.record("ListTags")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) UpdateTag(ctx context.Context, in *ateapipb.UpdateTagRequest, opts ...grpc.CallOption) (*ateapipb.Tag, error) {
-	f.rec.record("UpdateTag")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) DeleteTag(ctx context.Context, in *ateapipb.DeleteTagRequest, opts ...grpc.CallOption) (*ateapipb.Tag, error) {
-	f.rec.record("DeleteTag")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) ListWorkers(ctx context.Context, in *ateapipb.ListWorkersRequest, opts ...grpc.CallOption) (*ateapipb.ListWorkersResponse, error) {
-	f.rec.record("ListWorkers")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) GetWorker(ctx context.Context, in *ateapipb.GetWorkerRequest, opts ...grpc.CallOption) (*ateapipb.Worker, error) {
-	f.rec.record("GetWorker")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) CreateWorker(ctx context.Context, in *ateapipb.CreateWorkerRequest, opts ...grpc.CallOption) (*ateapipb.Worker, error) {
-	f.rec.record("CreateWorker")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) UpdateWorker(ctx context.Context, in *ateapipb.UpdateWorkerRequest, opts ...grpc.CallOption) (*ateapipb.Worker, error) {
-	f.rec.record("UpdateWorker")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) DeleteWorker(ctx context.Context, in *ateapipb.DeleteWorkerRequest, opts ...grpc.CallOption) (*ateapipb.Worker, error) {
-	f.rec.record("DeleteWorker")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) DrainWorker(ctx context.Context, in *ateapipb.DrainWorkerRequest, opts ...grpc.CallOption) (*ateapipb.Worker, error) {
-	f.rec.record("DrainWorker")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) ListWorkerActorAssignments(ctx context.Context, in *ateapipb.ListWorkerActorAssignmentsRequest, opts ...grpc.CallOption) (*ateapipb.ListWorkerActorAssignmentsResponse, error) {
-	f.rec.record("ListWorkerActorAssignments")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) ListActors(ctx context.Context, in *ateapipb.ListActorsRequest, opts ...grpc.CallOption) (*ateapipb.ListActorsResponse, error) {
+func (f *fakeControlClient) ListActors(ctx context.Context, in *ateapi.ListActorsRequest, opts ...grpc.CallOption) (*ateapi.ListActorsResponse, error) {
 	f.rec.record("ListActors")
 	return f.listActors(in)
 }
-func (f *fakeControlClient) CreateAtespace(ctx context.Context, in *ateapipb.CreateAtespaceRequest, opts ...grpc.CallOption) (*ateapipb.Atespace, error) {
+func (f *fakeControlClient) CreateAtespace(ctx context.Context, in *ateapi.CreateAtespaceRequest, opts ...grpc.CallOption) (*ateapi.Atespace, error) {
 	f.rec.record("CreateAtespace")
 	return f.createAtespace(in)
 }
-func (f *fakeControlClient) GetAtespace(ctx context.Context, in *ateapipb.GetAtespaceRequest, opts ...grpc.CallOption) (*ateapipb.Atespace, error) {
-	f.rec.record("GetAtespace")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) ListAtespaces(ctx context.Context, in *ateapipb.ListAtespacesRequest, opts ...grpc.CallOption) (*ateapipb.ListAtespacesResponse, error) {
-	f.rec.record("ListAtespaces")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) DeleteAtespace(ctx context.Context, in *ateapipb.DeleteAtespaceRequest, opts ...grpc.CallOption) (*ateapipb.Atespace, error) {
-	f.rec.record("DeleteAtespace")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) CreateActorTemplate(ctx context.Context, in *ateapipb.CreateActorTemplateRequest, opts ...grpc.CallOption) (*ateapipb.ActorTemplate, error) {
+func (f *fakeControlClient) CreateActorTemplate(ctx context.Context, in *ateapi.CreateActorTemplateRequest, opts ...grpc.CallOption) (*ateapi.ActorTemplate, error) {
 	f.rec.record("CreateActorTemplate")
 	return f.createActorTemplate(in)
 }
-func (f *fakeControlClient) GetActorTemplate(ctx context.Context, in *ateapipb.GetActorTemplateRequest, opts ...grpc.CallOption) (*ateapipb.ActorTemplate, error) {
+func (f *fakeControlClient) GetActorTemplate(ctx context.Context, in *ateapi.GetActorTemplateRequest, opts ...grpc.CallOption) (*ateapi.ActorTemplate, error) {
 	f.rec.record("GetActorTemplate")
 	return f.getActorTemplate(in)
 }
-func (f *fakeControlClient) ListActorTemplates(ctx context.Context, in *ateapipb.ListActorTemplatesRequest, opts ...grpc.CallOption) (*ateapipb.ListActorTemplatesResponse, error) {
-	f.rec.record("ListActorTemplates")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) DeleteActorTemplate(ctx context.Context, in *ateapipb.DeleteActorTemplateRequest, opts ...grpc.CallOption) (*ateapipb.ActorTemplate, error) {
+func (f *fakeControlClient) DeleteActorTemplate(ctx context.Context, in *ateapi.DeleteActorTemplateRequest, opts ...grpc.CallOption) (*ateapi.ActorTemplate, error) {
 	f.rec.record("DeleteActorTemplate")
 	return nil, status.Error(codes.Unimplemented, "not used in this fake")
 }
@@ -404,7 +313,7 @@ func testSubstrateRunConfig() RunConfig {
 		Env:          []string{"SCION_AGENT_ID=agent-1", "SCION_HUB_ENDPOINT=https://hub.example.com"},
 		// Matches the SCION_HUB_ENDPOINT entry in Env above: this fixture
 		// has no agent/template override in play, so the trusted and final
-		// hub hosts agree, and substrateEgressHostnames's mismatch Warn
+		// hub hosts agree, and substrateEgressTargets's mismatch Warn
 		// (see its own doc comment) stays silent for every test that uses
 		// this shared config instead of exercising the hub-endpoint-
 		// mismatch path incidentally.
@@ -425,10 +334,7 @@ func newTestSubstrateHarness(t *testing.T, rec *callRecorder) (*SubstrateRuntime
 	fc := newFakeControlClient(rec)
 	fa := newFakeActorServer(rec)
 	server := httptest.NewServer(fa.handler())
-	rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, config.V1SubstrateConfig{
-		SnapshotStorage:   "gs://bucket/prefix/",
-		SandboxConfigName: "gvisor-default",
-	})
+	rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, config.V1SubstrateConfig{})
 	return rt, fc, fa, server.Close
 }
 
@@ -469,7 +375,7 @@ func TestEnsureActorTemplate_FailedGoldenSnapshotIsCleanedUp(t *testing.T) {
 	const atespace, templateName = "scion-proj", "tmpl-abc123"
 	var getCalls int
 	var getMu sync.Mutex
-	fc.getActorTemplate = func(*ateapipb.GetActorTemplateRequest) (*ateapipb.ActorTemplate, error) {
+	fc.getActorTemplate = func(*ateapi.GetActorTemplateRequest) (*ateapi.ActorTemplate, error) {
 		// Not ready yet (no golden tag), and no error message either, on
 		// the FIRST call only — this is the initial GetActorTemplate
 		// ensureActorTemplate makes before entering its poll loop. The
@@ -479,12 +385,12 @@ func TestEnsureActorTemplate_FailedGoldenSnapshotIsCleanedUp(t *testing.T) {
 		defer getMu.Unlock()
 		getCalls++
 		if getCalls == 1 {
-			return &ateapipb.ActorTemplate{Status: &ateapipb.ActorTemplateStatus{}}, nil
+			return &ateapi.ActorTemplate{Status: &ateapi.ActorTemplateStatus{}}, nil
 		}
 		// The poll: the golden snapshot build failed.
-		return &ateapipb.ActorTemplate{
-			Status: &ateapipb.ActorTemplateStatus{
-				GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{
+		return &ateapi.ActorTemplate{
+			Status: &ateapi.ActorTemplateStatus{
+				GoldenSnapshotStatus: &ateapi.GoldenSnapshotStatus{
 					ErrorMessage: "simulated golden snapshot build failure",
 				},
 			},
@@ -492,7 +398,7 @@ func TestEnsureActorTemplate_FailedGoldenSnapshotIsCleanedUp(t *testing.T) {
 	}
 
 	err := ensureActorTemplate(context.Background(), fc, atespace, templateName,
-		&ateapipb.ActorTemplate{Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: templateName}},
+		&ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: atespace, Name: templateName}},
 		time.Second, func(time.Duration) {})
 	if err == nil || !strings.Contains(err.Error(), "golden snapshot failed") {
 		t.Fatalf("ensureActorTemplate() error = %v, want a golden-snapshot-failed error", err)
@@ -749,7 +655,7 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 		{
 			name: "CreateActorEgressPolicy fails",
 			inject: func(fc *fakeControlClient, fa *fakeActorServer) {
-				fc.createActorEgressPolicy = func(*ateapipb.CreateActorEgressPolicyRequest) (*ateapipb.EgressPolicy, error) {
+				fc.createActorEgressPolicy = func(*ateapi.CreateActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
 					return nil, status.Error(codes.Internal, "egress boom")
 				}
 			},
@@ -758,7 +664,7 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 		{
 			name: "ResumeActor fails",
 			inject: func(fc *fakeControlClient, fa *fakeActorServer) {
-				fc.resumeActor = func(*ateapipb.ResumeActorRequest) (*ateapipb.ResumeActorResponse, error) {
+				fc.resumeActor = func(*ateapi.ResumeActorRequest) (*ateapi.ResumeActorResponse, error) {
 					return nil, status.Error(codes.Internal, "resume boom")
 				}
 			},
@@ -767,10 +673,10 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 		{
 			name: "actor crashes while starting",
 			inject: func(fc *fakeControlClient, fa *fakeActorServer) {
-				fc.getActor = func(req *ateapipb.GetActorRequest) (*ateapipb.Actor, error) {
-					return &ateapipb.Actor{
-						Metadata: &ateapipb.ResourceMetadata{Atespace: req.GetActor().GetAtespace(), Name: req.GetActor().GetName(), Uid: fakeActorUID},
-						Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_CRASHED},
+				fc.getActor = func(req *ateapi.GetActorRequest) (*ateapi.Actor, error) {
+					return &ateapi.Actor{
+						Metadata: &ateapi.ResourceMetadata{Atespace: req.GetActor().GetAtespace(), Name: req.GetActor().GetName(), Uid: fakeActorUID},
+						Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_CRASHED},
 					}, nil
 				}
 			},
@@ -1123,14 +1029,10 @@ func containsCall(calls []string, name string) bool {
 func TestSubstrateTemplateName_Stable(t *testing.T) {
 	resources := &api.ResourceSpec{Limits: api.ResourceList{CPU: "2", Memory: "4Gi"}}
 	image := "repo/image@sha256:" + strings.Repeat("b", 64)
-	baseCfg := config.V1SubstrateConfig{
-		SandboxClass:      "gvisor",
-		SandboxConfigName: "gvisor-default",
-		SnapshotStorage:   "gs://bucket/prefix/",
-	}
+	baseCfg := config.V1SubstrateConfig{WorkerSelector: map[string]string{"pool": "scion-agents"}}
 
-	n1 := substrateTemplateName(image, baseCfg, resources)
-	n2 := substrateTemplateName(image, baseCfg, resources)
+	n1 := substrateTemplateName(image, baseCfg, mustResolveSubstrateResources(t, resources))
+	n2 := substrateTemplateName(image, baseCfg, mustResolveSubstrateResources(t, resources))
 	if n1 != n2 {
 		t.Errorf("substrateTemplateName() not stable: %q != %q", n1, n2)
 	}
@@ -1138,43 +1040,12 @@ func TestSubstrateTemplateName_Stable(t *testing.T) {
 		t.Errorf("substrateTemplateName() = %q, want scion- prefix", n1)
 	}
 
-	microVMCfg := baseCfg
-	microVMCfg.SandboxClass = "microvm"
-	n3 := substrateTemplateName(image, microVMCfg, resources)
-	if n1 == n3 {
-		t.Error("substrateTemplateName() did not change with sandbox class")
-	}
-
-	n4 := substrateTemplateName(image, baseCfg, &api.ResourceSpec{Limits: api.ResourceList{CPU: "4"}})
-	if n1 == n4 {
-		t.Error("substrateTemplateName() did not change with resources")
-	}
-
-	n5 := substrateTemplateName(image, baseCfg, nil)
-	n6 := substrateTemplateName(image, baseCfg, config.BuiltinDefaultResources())
-	if n5 != n6 {
-		t.Error("substrateTemplateName() with nil resources did not match the resolved default resources (buildActorTemplate substitutes BuiltinDefaultResources for nil)")
-	}
-
-	configNameCfg := baseCfg
-	configNameCfg.SandboxConfigName = "other-config"
-	n7 := substrateTemplateName(image, configNameCfg, resources)
-	if n1 == n7 {
-		t.Error("substrateTemplateName() did not change with sandbox_config_name")
-	}
-
-	workerSelectorCfg := baseCfg
-	workerSelectorCfg.WorkerSelector = map[string]string{"pool": "scion-agents"}
-	n8 := substrateTemplateName(image, workerSelectorCfg, resources)
-	if n1 == n8 {
-		t.Error("substrateTemplateName() did not change with worker_selector")
-	}
-
-	snapshotCfg := baseCfg
-	snapshotCfg.SnapshotStorage = "gs://other-bucket/prefix/"
-	n9 := substrateTemplateName(image, snapshotCfg, resources)
-	if n1 == n9 {
-		t.Error("substrateTemplateName() did not change with snapshot_storage")
+	// nil resources resolve to the built-in substrate defaults, so they
+	// name the same template as those defaults spelled out.
+	n3 := substrateTemplateName(image, baseCfg, mustResolveSubstrateResources(t, nil))
+	n4 := substrateTemplateName(image, baseCfg, mustResolveSubstrateResources(t, &api.ResourceSpec{Limits: api.ResourceList{CPU: substrateBuiltinDefaultCPU, Memory: substrateBuiltinDefaultMemory}}))
+	if n3 != n4 {
+		t.Errorf("substrateTemplateName() with nil resources = %q, want the name for the built-in defaults %q", n3, n4)
 	}
 }
 
@@ -1187,7 +1058,7 @@ func TestSubstrateTemplateName_Stable(t *testing.T) {
 // rather than lean on a default set.
 func TestBuildActorTemplate_SecurityContextGrantsExactlyRequiredCapabilities(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("b", 64)
-	tmpl := buildActorTemplate("scion-test", "scion-abc123", image, config.V1SubstrateConfig{}, nil)
+	tmpl := mustBuildActorTemplate(t, "scion-test", "scion-abc123", image, config.V1SubstrateConfig{}, nil)
 
 	if len(tmpl.GetContainers()) != 1 {
 		t.Fatalf("Containers = %d, want 1", len(tmpl.GetContainers()))
@@ -1221,9 +1092,9 @@ func TestBuildActorTemplate_WakeupProbeTargetsServeHealthz(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("b", 64)
 	for _, sc := range []config.V1SubstrateConfig{
 		{},
-		{SandboxClass: "microvm", EgressTrustBundle: "egress-mitm.ate.dev"},
+		{WorkerSelector: map[string]string{"pool": "x"}, EgressTrustBundle: "egress-mitm.ate.dev"},
 	} {
-		tmpl := buildActorTemplate("scion-test", "scion-abc123", image, sc, nil)
+		tmpl := mustBuildActorTemplate(t, "scion-test", "scion-abc123", image, sc, nil)
 		if len(tmpl.GetContainers()) != 1 {
 			t.Fatalf("Containers = %d, want 1", len(tmpl.GetContainers()))
 		}
@@ -1248,17 +1119,17 @@ func TestBuildActorTemplate_WakeupProbeTargetsServeHealthz(t *testing.T) {
 // the next one, or what substrateTemplateName hashes for it.
 func TestBuildActorTemplate_WakeupProbeIsFreshPerCall(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("b", 64)
-	cfg := config.V1SubstrateConfig{SandboxClass: "gvisor"}
-	before := substrateTemplateName(image, cfg, nil)
+	cfg := config.V1SubstrateConfig{}
+	before := substrateTemplateName(image, cfg, mustResolveSubstrateResources(t, nil))
 
-	first := buildActorTemplate("scion-test", "scion-abc123", image, cfg, nil)
+	first := mustBuildActorTemplate(t, "scion-test", "scion-abc123", image, cfg, nil)
 	first.GetContainers()[0].GetWakeupProbe().GetHttpGet().Path = "/mutated"
 
-	second := buildActorTemplate("scion-test", "scion-abc123", image, cfg, nil)
+	second := mustBuildActorTemplate(t, "scion-test", "scion-abc123", image, cfg, nil)
 	if got := second.GetContainers()[0].GetWakeupProbe().GetHttpGet().GetPath(); got != substrateHealthzPath {
 		t.Errorf("second template's WakeupProbe path = %q after mutating the first, want %q", got, substrateHealthzPath)
 	}
-	if after := substrateTemplateName(image, cfg, nil); after != before {
+	if after := substrateTemplateName(image, cfg, mustResolveSubstrateResources(t, nil)); after != before {
 		t.Errorf("substrateTemplateName() changed after mutating a built template's probe: %q -> %q", before, after)
 	}
 }
@@ -1272,12 +1143,12 @@ func TestBuildActorTemplate_WakeupProbeIsFreshPerCall(t *testing.T) {
 // the image fixed across all of its cases and never varies it, so this is
 // the only place that exercises this input.
 func TestSubstrateTemplateName_ChangesWithImageDigest(t *testing.T) {
-	cfg := config.V1SubstrateConfig{SandboxClass: "gvisor"}
+	cfg := config.V1SubstrateConfig{}
 	image1 := "repo/image@sha256:" + strings.Repeat("a", 64)
 	image2 := "repo/image@sha256:" + strings.Repeat("b", 64)
 
-	n1 := substrateTemplateName(image1, cfg, nil)
-	n2 := substrateTemplateName(image2, cfg, nil)
+	n1 := substrateTemplateName(image1, cfg, mustResolveSubstrateResources(t, nil))
+	n2 := substrateTemplateName(image2, cfg, mustResolveSubstrateResources(t, nil))
 	if n1 == n2 {
 		t.Error("substrateTemplateName() did not change with the image digest — an existing golden template would be silently reused with stale image content")
 	}
@@ -1290,22 +1161,22 @@ func TestSubstrateTemplateName_ChangesWithImageDigest(t *testing.T) {
 // running with the old (missing) capabilities.
 func TestSubstrateTemplateName_ChangesWithCapabilitySet(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("b", 64)
-	cfg := config.V1SubstrateConfig{SandboxClass: "gvisor"}
+	cfg := config.V1SubstrateConfig{}
 
-	before := substrateTemplateName(image, cfg, nil)
+	before := substrateTemplateName(image, cfg, mustResolveSubstrateResources(t, nil))
 
 	original := substrateContainerCapabilitiesAdd
 	substrateContainerCapabilitiesAdd = append([]string{}, original...)
 	t.Cleanup(func() { substrateContainerCapabilitiesAdd = original })
 
 	// Same capability set: hash must not change from this alone.
-	same := substrateTemplateName(image, cfg, nil)
+	same := substrateTemplateName(image, cfg, mustResolveSubstrateResources(t, nil))
 	if before != same {
 		t.Errorf("substrateTemplateName() changed with no actual capability-set change: %q != %q", before, same)
 	}
 
 	substrateContainerCapabilitiesAdd = []string{"SETUID", "SETGID", "CHOWN", "FOWNER"}
-	after := substrateTemplateName(image, cfg, nil)
+	after := substrateTemplateName(image, cfg, mustResolveSubstrateResources(t, nil))
 	if before == after {
 		t.Error("substrateTemplateName() did not change when the capability set changed — an existing golden template would be silently reused without the new capability")
 	}
@@ -1352,22 +1223,22 @@ func TestSubstrateList_MappingAndLabelFilter(t *testing.T) {
 	}
 	substrateAgentStateMu.Unlock()
 
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		return &ateapipb.ListActorsResponse{
-			Actors: []*ateapipb.Actor{
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+		return &ateapi.ListActorsResponse{
+			Actors: []*ateapi.Actor{
 				{
-					Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: "agent-a", Uid: "uid-a"},
-					Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+					Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: "agent-a", Uid: "uid-a"},
+					Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 				},
 				{
-					Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: "agent-b", Uid: "uid-b"},
-					Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
+					Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: "agent-b", Uid: "uid-b"},
+					Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_SUSPENDED},
 				},
 				{
 					// No agentRecords entry — should still be listed, with
 					// empty synthesised fields.
-					Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: "agent-c", Uid: "uid-c"},
-					Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_CRASHED},
+					Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: "agent-c", Uid: "uid-c"},
+					Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_CRASHED},
 				},
 			},
 		}, nil
@@ -1611,14 +1482,14 @@ func TestSubstrateDelete_FallsBackToDeleteActorUIDWhenGetActorFails(t *testing.T
 		t.Fatalf("test setup: no record for uid %q after Run()", fakeActorUID)
 	}
 
-	fc.getActor = func(*ateapipb.GetActorRequest) (*ateapipb.Actor, error) {
+	fc.getActor = func(*ateapi.GetActorRequest) (*ateapi.Actor, error) {
 		return nil, status.Error(codes.Unavailable, "simulated transient GetActor failure")
 	}
-	fc.deleteActor = func(req *ateapipb.DeleteActorRequest) (*ateapipb.Actor, error) {
+	fc.deleteActor = func(req *ateapi.DeleteActorRequest) (*ateapi.Actor, error) {
 		// A real ateapi DeleteActor response names the actor it just
 		// removed — this is what Delete must fall back to.
-		return &ateapipb.Actor{
-			Metadata: &ateapipb.ResourceMetadata{
+		return &ateapi.Actor{
+			Metadata: &ateapi.ResourceMetadata{
 				Atespace: req.GetActor().GetAtespace(),
 				Name:     req.GetActor().GetName(),
 				Uid:      fakeActorUID,
@@ -2309,7 +2180,7 @@ func TestSubstrateRun_ErrorDoesNotLeakEnvValues(t *testing.T) {
 	// interpolate the whole request — resumeActor's error text stands in
 	// for a hypothetical verbose upstream error that echoes back
 	// everything the runtime sent it, regardless of source.
-	fc.resumeActor = func(*ateapipb.ResumeActorRequest) (*ateapipb.ResumeActorResponse, error) {
+	fc.resumeActor = func(*ateapi.ResumeActorRequest) (*ateapi.ResumeActorResponse, error) {
 		return nil, status.Error(codes.Internal, "resume boom, env dump: "+
 			"CFG_ENV_KEY="+envSentinel+" "+
 			"RESOLVED_AUTH_KEY="+resolvedAuthSentinel+" "+
@@ -2375,27 +2246,27 @@ func TestSubstrateList_Pagination(t *testing.T) {
 	defer closeServer()
 
 	var pageTokensSeen []string
-	fc.listActors = func(req *ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		pageTokensSeen = append(pageTokensSeen, req.GetPageToken())
-		switch req.GetPageToken() {
+	fc.listActors = func(req *ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+		pageTokensSeen = append(pageTokensSeen, req.GetOptions().GetPageToken())
+		switch req.GetOptions().GetPageToken() {
 		case "":
-			return &ateapipb.ListActorsResponse{
-				Actors: []*ateapipb.Actor{
-					{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: "agent-a", Uid: "uid-a"},
-						Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+			return &ateapi.ListActorsResponse{
+				Actors: []*ateapi.Actor{
+					{Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: "agent-a", Uid: "uid-a"},
+						Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
 				},
 				NextPageToken: "page-2",
 			}, nil
 		case "page-2":
-			return &ateapipb.ListActorsResponse{
-				Actors: []*ateapipb.Actor{
-					{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: "agent-b", Uid: "uid-b"},
-						Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+			return &ateapi.ListActorsResponse{
+				Actors: []*ateapi.Actor{
+					{Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: "agent-b", Uid: "uid-b"},
+						Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
 				},
 				NextPageToken: "",
 			}, nil
 		default:
-			t.Fatalf("unexpected page token %q", req.GetPageToken())
+			t.Fatalf("unexpected page token %q", req.GetOptions().GetPageToken())
 			return nil, nil
 		}
 	}
@@ -2422,9 +2293,9 @@ func TestSubstrateList_RepeatedPageTokenIsAnError(t *testing.T) {
 	defer closeServer()
 
 	calls := 0
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 		calls++
-		return &ateapipb.ListActorsResponse{NextPageToken: "stuck"}, nil
+		return &ateapi.ListActorsResponse{NextPageToken: "stuck"}, nil
 	}
 
 	agents, err := rt.List(context.Background(), nil)
@@ -2456,12 +2327,12 @@ func TestSubstrateList_EndlessPagingHitsPageCap(t *testing.T) {
 	t.Cleanup(func() { maxActorListPages = origCap })
 
 	calls := 0
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 		calls++
 		if calls > maxActorListPages+1 {
 			return nil, fmt.Errorf("List exceeded the page cap (call %d)", calls)
 		}
-		return &ateapipb.ListActorsResponse{NextPageToken: fmt.Sprintf("p%d", calls)}, nil
+		return &ateapi.ListActorsResponse{NextPageToken: fmt.Sprintf("p%d", calls)}, nil
 	}
 
 	agents, err := rt.List(context.Background(), nil)
@@ -2481,13 +2352,13 @@ func TestSubstrateList_SkipsNonScionAtespaces(t *testing.T) {
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		return &ateapipb.ListActorsResponse{
-			Actors: []*ateapipb.Actor{
-				{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: "agent-a", Uid: "uid-a"},
-					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
-				{Metadata: &ateapipb.ResourceMetadata{Atespace: "other-tenant", Name: "not-ours", Uid: "uid-x"},
-					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+		return &ateapi.ListActorsResponse{
+			Actors: []*ateapi.Actor{
+				{Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: "agent-a", Uid: "uid-a"},
+					Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
+				{Metadata: &ateapi.ResourceMetadata{Atespace: "other-tenant", Name: "not-ours", Uid: "uid-x"},
+					Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
 			},
 		}, nil
 	}
@@ -2512,11 +2383,11 @@ func TestSubstrateList_SynthesisesNameAndAgentLabelsWithoutRecord(t *testing.T) 
 	defer closeServer()
 
 	const actorName = "myproj--orphaned-agent" // containerName("myproj", "orphaned-agent")
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		return &ateapipb.ListActorsResponse{
-			Actors: []*ateapipb.Actor{
-				{Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: actorName, Uid: "uid-orphan"},
-					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+		return &ateapi.ListActorsResponse{
+			Actors: []*ateapi.Actor{
+				{Metadata: &ateapi.ResourceMetadata{Atespace: "scion-proj", Name: actorName, Uid: "uid-orphan"},
+					Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
 			},
 		}, nil
 	}
@@ -2564,11 +2435,11 @@ func TestSubstrateList_NameIsAgentSlugNotActorName(t *testing.T) {
 		defer closeServer()
 
 		const uid = "uid-with-record"
-		fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-			return &ateapipb.ListActorsResponse{
-				Actors: []*ateapipb.Actor{
-					{Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: actorName, Uid: uid},
-						Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+		fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+			return &ateapi.ListActorsResponse{
+				Actors: []*ateapi.Actor{
+					{Metadata: &ateapi.ResourceMetadata{Atespace: atespace, Name: actorName, Uid: uid},
+						Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
 				},
 			}, nil
 		}
@@ -2595,11 +2466,11 @@ func TestSubstrateList_NameIsAgentSlugNotActorName(t *testing.T) {
 		rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 		defer closeServer()
 
-		fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-			return &ateapipb.ListActorsResponse{
-				Actors: []*ateapipb.Actor{
-					{Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: actorName, Uid: "uid-no-record"},
-						Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+		fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+			return &ateapi.ListActorsResponse{
+				Actors: []*ateapi.Actor{
+					{Metadata: &ateapi.ResourceMetadata{Atespace: atespace, Name: actorName, Uid: "uid-no-record"},
+						Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
 				},
 			}, nil
 		}
@@ -2632,16 +2503,16 @@ func TestSubstrateList_NameIsAgentSlugNotActorName(t *testing.T) {
 // one of the two depending on ListActors' return order. Run with both
 // actor orderings to confirm that explicitly.
 func TestSubstrateList_RecordlessActorsNeverMatchedBySlug(t *testing.T) {
-	actorA := &ateapipb.Actor{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: "uid-a"},
-		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	actorA := &ateapi.Actor{
+		Metadata: &ateapi.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: "uid-a"},
+		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
-	actorB := &ateapipb.Actor{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-bbbbbbbbbbbb", Name: "projB--dev", Uid: "uid-b"},
-		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	actorB := &ateapi.Actor{
+		Metadata: &ateapi.ResourceMetadata{Atespace: "scion-bbbbbbbbbbbb", Name: "projB--dev", Uid: "uid-b"},
+		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
 
-	orderings := map[string][]*ateapipb.Actor{
+	orderings := map[string][]*ateapi.Actor{
 		"A then B": {actorA, actorB},
 		"B then A": {actorB, actorA},
 	}
@@ -2651,8 +2522,8 @@ func TestSubstrateList_RecordlessActorsNeverMatchedBySlug(t *testing.T) {
 			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 			defer closeServer()
 
-			fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-				return &ateapipb.ListActorsResponse{Actors: order}, nil
+			fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+				return &ateapi.ListActorsResponse{Actors: order}, nil
 			}
 
 			agents, err := rt.List(context.Background(), map[string]string{"scion.name": "dev"})
@@ -2696,11 +2567,11 @@ func TestSubstrateList_RecordlessActorNotMatchedEvenWhenProjectScoped(t *testing
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		return &ateapipb.ListActorsResponse{
-			Actors: []*ateapipb.Actor{
-				{Metadata: &ateapipb.ResourceMetadata{Atespace: atespaceA, Name: "projA--dev", Uid: "uid-a"},
-					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+		return &ateapi.ListActorsResponse{
+			Actors: []*ateapi.Actor{
+				{Metadata: &ateapi.ResourceMetadata{Atespace: atespaceA, Name: "projA--dev", Uid: "uid-a"},
+					Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
 			},
 		}, nil
 	}
@@ -2723,16 +2594,16 @@ func TestSubstrateList_RecordlessActorNotMatchedEvenWhenProjectScoped(t *testing
 // that down for both possible ListActors return orders.
 func TestSubstrateList_RecordExistsAndRecordlessSameSlug(t *testing.T) {
 	const uid = "uid-with-record"
-	actorWithRecord := &ateapipb.Actor{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: uid},
-		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	actorWithRecord := &ateapi.Actor{
+		Metadata: &ateapi.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: uid},
+		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
-	actorWithoutRecord := &ateapipb.Actor{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-bbbbbbbbbbbb", Name: "projB--dev", Uid: "uid-no-record"},
-		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	actorWithoutRecord := &ateapi.Actor{
+		Metadata: &ateapi.ResourceMetadata{Atespace: "scion-bbbbbbbbbbbb", Name: "projB--dev", Uid: "uid-no-record"},
+		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
 
-	orderings := map[string][]*ateapipb.Actor{
+	orderings := map[string][]*ateapi.Actor{
 		"record-having first": {actorWithRecord, actorWithoutRecord},
 		"record-less first":   {actorWithoutRecord, actorWithRecord},
 	}
@@ -2742,8 +2613,8 @@ func TestSubstrateList_RecordExistsAndRecordlessSameSlug(t *testing.T) {
 			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 			defer closeServer()
 
-			fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-				return &ateapipb.ListActorsResponse{Actors: order}, nil
+			fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+				return &ateapi.ListActorsResponse{Actors: order}, nil
 			}
 			substrateAgentStateMu.Lock()
 			substrateAgentRecords[uid] = &substrateAgentRecord{
@@ -2782,16 +2653,16 @@ func TestSubstrateList_SameSlugDifferentProjects_UnscopedReturnsNothing(t *testi
 		uidA = "uid-projA-dev"
 		uidB = "uid-projB-dev"
 	)
-	actorA := &ateapipb.Actor{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: uidA},
-		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	actorA := &ateapi.Actor{
+		Metadata: &ateapi.ResourceMetadata{Atespace: "scion-aaaaaaaaaaaa", Name: "projA--dev", Uid: uidA},
+		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
-	actorB := &ateapipb.Actor{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-bbbbbbbbbbbb", Name: "projB--dev", Uid: uidB},
-		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	actorB := &ateapi.Actor{
+		Metadata: &ateapi.ResourceMetadata{Atespace: "scion-bbbbbbbbbbbb", Name: "projB--dev", Uid: uidB},
+		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
 
-	orderings := map[string][]*ateapipb.Actor{
+	orderings := map[string][]*ateapi.Actor{
 		"projA first": {actorA, actorB},
 		"projB first": {actorB, actorA},
 	}
@@ -2801,8 +2672,8 @@ func TestSubstrateList_SameSlugDifferentProjects_UnscopedReturnsNothing(t *testi
 			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 			defer closeServer()
 
-			fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-				return &ateapipb.ListActorsResponse{Actors: order}, nil
+			fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+				return &ateapi.ListActorsResponse{Actors: order}, nil
 			}
 
 			substrateAgentStateMu.Lock()
@@ -2916,12 +2787,12 @@ func TestNewSubstrateRuntime_MemoizedAcrossCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("splitSubstrateID(%q) error = %v", id, err)
 	}
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		return &ateapipb.ListActorsResponse{
-			Actors: []*ateapipb.Actor{
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+		return &ateapi.ListActorsResponse{
+			Actors: []*ateapi.Actor{
 				{
-					Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: actorName, Uid: fakeActorUID},
-					Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+					Metadata: &ateapi.ResourceMetadata{Atespace: atespace, Name: actorName, Uid: fakeActorUID},
+					Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 				},
 			},
 		}, nil
@@ -3038,12 +2909,12 @@ func TestSubstrateAgentState_SharedAcrossConfigChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("splitSubstrateID(%q) error = %v", id, err)
 	}
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		return &ateapipb.ListActorsResponse{
-			Actors: []*ateapipb.Actor{
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+		return &ateapi.ListActorsResponse{
+			Actors: []*ateapi.Actor{
 				{
-					Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: actorName, Uid: fakeActorUID},
-					Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+					Metadata: &ateapi.ResourceMetadata{Atespace: atespace, Name: actorName, Uid: fakeActorUID},
+					Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 				},
 			},
 		}, nil

@@ -30,7 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 )
 
 // Additional broker-level coverage for the record-less-actor delete/stop
@@ -61,8 +61,8 @@ func simulateBrokerRestart(t *testing.T) {
 // onlyScopedListFails fails only an atespace-scoped ListActors call — the
 // shape RecordlessActors' probe makes — leaving an unscoped call (List's own
 // cluster-wide listing) unaffected.
-func onlyScopedListFails(err error) func(*ateapipb.ListActorsRequest) error {
-	return func(in *ateapipb.ListActorsRequest) error {
+func onlyScopedListFails(err error) func(*ateapi.ListActorsRequest) error {
+	return func(in *ateapi.ListActorsRequest) error {
 		if in.GetAtespace() != "" {
 			return err
 		}
@@ -73,8 +73,8 @@ func onlyScopedListFails(err error) func(*ateapipb.ListActorsRequest) error {
 // onlyUnscopedListFails fails only an unscoped ListActors call — the shape
 // SubstrateRuntime.List makes internally (and therefore LookupContainerID,
 // through it) — leaving an atespace-scoped probe call unaffected.
-func onlyUnscopedListFails(err error) func(*ateapipb.ListActorsRequest) error {
-	return func(in *ateapipb.ListActorsRequest) error {
+func onlyUnscopedListFails(err error) func(*ateapi.ListActorsRequest) error {
+	return func(in *ateapi.ListActorsRequest) error {
 		if in.GetAtespace() == "" {
 			return err
 		}
@@ -347,7 +347,7 @@ func TestSubstrateBroker_StopThenDeleteWhileActorStillListedDeleting_StaysIdempo
 	// process's own Delete already dropped it), state DELETING.
 	fc.putActor(gapAtespaceB, "projb--dev", uid)
 	fc.mu.Lock()
-	fc.actors[gapAtespaceB+"/projb--dev"].Status.State = ateapipb.ActorState_ACTOR_STATE_DELETING
+	fc.actors[gapAtespaceB+"/projb--dev"].Status.State = ateapi.ActorState_ACTOR_STATE_DELETING
 	fc.mu.Unlock()
 
 	w = httptest.NewRecorder()
@@ -373,9 +373,9 @@ func TestSubstrateBroker_StopThenDeleteWhileActorStillListedDeleting_StaysIdempo
 // from a second, independent call (masking the first call's transient
 // failure) apart from a fix that correctly decides from the first call's
 // own error.
-func unscopedListFailsOnlyOnCallN(n int, err error) func(*ateapipb.ListActorsRequest) error {
+func unscopedListFailsOnlyOnCallN(n int, err error) func(*ateapi.ListActorsRequest) error {
 	calls := 0
-	return func(in *ateapipb.ListActorsRequest) error {
+	return func(in *ateapi.ListActorsRequest) error {
 		if in.GetAtespace() != "" {
 			return nil
 		}

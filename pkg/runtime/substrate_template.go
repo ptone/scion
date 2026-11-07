@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -28,9 +29,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 	"github.com/GoogleCloudPlatform/scion/pkg/substrateenv"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // substrateServeEntrypointVersion is folded into the template's
@@ -78,7 +80,7 @@ const substrateWakeupProbeTimeoutSeconds = 120
 // bootstrapped actor ("running" or "init-failed"). It gates each wakeup on
 // substrate-serve actually serving: the probe is polled on every wakeup,
 // including a cold boot, and a miss within the timeout crashes the actor
-// (ateapi.proto, ContainerWakeupProbe). The golden actor's cold boot is
+// (ateapi.proto, WakeupProbe). The golden actor's cold boot is
 // gated the same way, so an image whose entrypoint exits fails template
 // creation rather than producing a golden that cannot be restored.
 // Substrate's API guide further states that when every container declares
@@ -87,9 +89,9 @@ const substrateWakeupProbeTimeoutSeconds = 120
 //
 // A fresh value on every call, so no caller can mutate a shared probe and
 // change what substrateTemplateName hashes without changing its input.
-func substrateWakeupProbe() *ateapipb.ContainerWakeupProbe {
-	return &ateapipb.ContainerWakeupProbe{
-		HttpGet: &ateapipb.HTTPGetAction{
+func substrateWakeupProbe() *ateapi.WakeupProbe {
+	return &ateapi.WakeupProbe{
+		HttpGet: &ateapi.HttpGetAction{
 			Path: substrateHealthzPath,
 			Port: substrateServePort,
 		},
@@ -135,54 +137,71 @@ const templateReadyPollInterval = 5 * time.Second
 // so concurrent Runs for the same effective template converge on one
 // CreateActorTemplate instead of racing to create distinct ones.
 //
-// The hash covers every input that changes what buildActorTemplate
-// produces: image digest, sandbox class, sandbox config name, worker
-// selector, snapshot storage location, the *effective* resources (resolved
-// against config.BuiltinDefaultResources when resources is nil — hashing
-// the nil pointer as "" while buildActorTemplate substitutes a real default
-// would let a change to that default silently reuse the old golden
-// template), the hardcoded snapshot scope, the container's added
-// capabilities, the entrypoint version, the container's wakeup probe,
-// and the conditional
-// egress_trust_bundle input (appended only when non-empty) — every
-// template-content input listed in substrate-runtime.md §3. All of these
-// are template content, so changing any of them in settings — or in this
-// runtime's own code, for the capability set — must not silently reuse a
-// stale golden template.
-func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) string {
-	effectiveResources := resources
-	if effectiveResources == nil {
-		effectiveResources = config.BuiltinDefaultResources()
-	}
+// The hash covers an explicit, ordered list of every input that changes
+// what buildActorTemplate produces, behind a "v1|" prefix (never a proto
+// serialisation, whose bytes are not a stable contract):
+//
+//  1. the image digest;
+//  2. the worker selector (sorted key=value);
+//  3. the resolved cpu_millicores and 4. memory_bytes (after the per-field
+//     defaulting in resolveSubstrateResources, so a change to a default
+//     never silently reuses a template built at the old size);
+//  5. the added capabilities (sorted);
+//  6. the substrate-serve entrypoint version;
+//  7. the wakeup probe's path, port and timeout;
+//  8. the trust bundle names (sorted);
+//  9. the volume names and kinds.
+//
+// All of these are template content, so changing any of them in settings,
+// or in this runtime's own code, must not silently reuse a stale golden
+// template.
+func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, res substrateResources) string {
+	caps := slices.Clone(substrateContainerCapabilitiesAdd)
+	sort.Strings(caps)
+	return substrateTemplateHashInput{
+		image:             imageDigest,
+		workerSelector:    workerSelectorCacheKey(sc.WorkerSelector),
+		cpuMillicores:     res.cpuMillicores,
+		memoryBytes:       res.memoryBytes,
+		caps:              strings.Join(caps, ","),
+		entrypointVersion: substrateServeEntrypointVersion,
+		probe:             substrateWakeupProbeCacheKey(),
+		trustBundleNames:  strings.Join(substrateTrustBundleNames(sc), ","),
+		volumes:           substrateVolumesCacheKey(substrateTemplateVolumes(sc)),
+	}.name()
+}
 
+// substrateTemplateHashInput is substrateTemplateName's explicit, ordered
+// hash field list, each field already rendered to a stable string.
+type substrateTemplateHashInput struct {
+	image             string
+	workerSelector    string
+	cpuMillicores     int64
+	memoryBytes       int64
+	caps              string
+	entrypointVersion string
+	probe             string
+	trustBundleNames  string
+	volumes           string
+}
+
+// name hashes the fields in order behind the "v1|" prefix.
+func (in substrateTemplateHashInput) name() string {
 	h := sha256.New()
 	// hash.Hash.Write never returns an error (see the hash.Hash doc
 	// comment), so the error from Fprintf is deliberately discarded rather
 	// than checked.
-	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
-		imageDigest,
-		sc.SandboxClass,
-		sc.SandboxConfigName,
-		workerSelectorCacheKey(sc.WorkerSelector),
-		sc.SnapshotStorage,
-		resourcesCacheKey(effectiveResources),
-		"DATA", // on_pause/on_commit scope, hardcoded
-		strings.Join(substrateContainerCapabilitiesAdd, ","),
-		substrateServeEntrypointVersion,
-		substrateWakeupProbeCacheKey(),
+	_, _ = fmt.Fprintf(h, "v1|%s|%s|%d|%d|%s|%s|%s|%s|%s",
+		in.image,
+		in.workerSelector,
+		in.cpuMillicores,
+		in.memoryBytes,
+		in.caps,
+		in.entrypointVersion,
+		in.probe,
+		in.trustBundleNames,
+		in.volumes,
 	)
-	// EgressTrustBundle is appended as its own hash-input segment ONLY when
-	// set, rather than always written as an extra "%s" field (which would be
-	// "" on every existing plain install and still change the hash from
-	// what it was before this field existed). This is deliberate: an unset
-	// EgressTrustBundle must keep producing the exact template name it
-	// always has, so existing templates and golden snapshots on plain
-	// installs are reused unchanged; setting it must produce a new name,
-	// since buildActorTemplate's output genuinely differs (a system-info
-	// volume, a mount, and five Env vars that were not there before).
-	if sc.EgressTrustBundle != "" {
-		_, _ = fmt.Fprintf(h, "|%s", sc.EgressTrustBundle)
-	}
 	sum := hex.EncodeToString(h.Sum(nil))
 	return "scion-" + sum[:12]
 }
@@ -211,34 +230,134 @@ func workerSelectorCacheKey(m map[string]string) string {
 	return b.String()
 }
 
-// resourcesCacheKey renders a *api.ResourceSpec into a stable string for
-// substrateTemplateName's hash input.
-func resourcesCacheKey(r *api.ResourceSpec) string {
-	if r == nil {
-		return ""
+// substrateVolumesCacheKey renders volume names and kinds into a stable
+// string for substrateTemplateName's hash input, sorted by name.
+func substrateVolumesCacheKey(vols []*ateapi.Volume) string {
+	keys := make([]string, 0, len(vols))
+	for _, v := range vols {
+		kind := "unknown"
+		switch {
+		case v.GetDurableDir() != nil:
+			kind = "durable_dir"
+		case v.GetSystemInfo() != nil:
+			kind = "system_info"
+		case v.GetExternal() != nil:
+			kind = "external"
+		case v.GetImage() != nil:
+			kind = "image"
+		}
+		keys = append(keys, v.GetName()+":"+kind)
 	}
-	return fmt.Sprintf("req(cpu=%s,mem=%s)limit(cpu=%s,mem=%s)disk=%s",
-		r.Requests.CPU, r.Requests.Memory, r.Limits.CPU, r.Limits.Memory, r.Disk)
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }
 
-// substrateSandboxClass maps the config string ("gvisor"/"microvm", default
-// gvisor) to the proto enum.
-func substrateSandboxClass(name string) ateapipb.SandboxClass {
-	switch name {
-	case "microvm":
-		return ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM
-	default:
-		return ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR
+// Built-in substrate resource defaults, used for a field the agent's
+// resolved resources leave unset. v1 requires both a cpu and a memory limit
+// on every ActorTemplate.
+//
+// The memory default deliberately reverses scion's choice to leave memory
+// unset (config.BuiltinDefaultResources, pkg/config/resource_defaults.go:
+// a hard memory limit OOM-kills the largest process, often the harness).
+// v1 requires a memory limit and boots a micro-VM of that size, so substrate
+// agents always get one; 4Gi is sized for a harness plus its tools.
+const (
+	substrateBuiltinDefaultCPU    = "2"
+	substrateBuiltinDefaultMemory = "4Gi"
+)
+
+// substrateResources is the template-level compute size: both fields are
+// always positive once resolveSubstrateResources returns without error.
+type substrateResources struct {
+	cpuMillicores int64
+	memoryBytes   int64
+}
+
+// resolveSubstrateResources resolves cpu and memory independently: the
+// agent's resolved limit when set, else the built-in substrate default.
+// Phase 2 adds the operator's default_resources as a middle step in
+// resolveSubstrateQuantity; nothing else changes.
+func resolveSubstrateResources(agent *api.ResourceSpec) (substrateResources, error) {
+	var agentCPU, agentMemory string
+	if agent != nil {
+		agentCPU, agentMemory = agent.Limits.CPU, agent.Limits.Memory
 	}
+
+	cpuQ, err := parseSubstrateQuantity("cpu", resolveSubstrateQuantity(agentCPU, substrateBuiltinDefaultCPU), resource.NewMilliQuantity(math.MaxInt64, resource.DecimalSI))
+	if err != nil {
+		return substrateResources{}, err
+	}
+	memQ, err := parseSubstrateQuantity("memory", resolveSubstrateQuantity(agentMemory, substrateBuiltinDefaultMemory), resource.NewQuantity(math.MaxInt64, resource.BinarySI))
+	if err != nil {
+		return substrateResources{}, err
+	}
+	res := substrateResources{cpuMillicores: cpuQ.MilliValue(), memoryBytes: memQ.Value()}
+	if res.cpuMillicores <= 0 || res.memoryBytes <= 0 {
+		return substrateResources{}, fmt.Errorf("substrate: resources must be positive (cpu %dm, memory %d bytes)", res.cpuMillicores, res.memoryBytes)
+	}
+	return res, nil
+}
+
+// resolveSubstrateQuantity picks one field's quantity string: the agent's
+// value if set, else the built-in default. The operator default_resources
+// step (Phase 2) goes between the two.
+func resolveSubstrateQuantity(agentValue, builtinDefault string) string {
+	if agentValue != "" {
+		return agentValue
+	}
+	return builtinDefault
+}
+
+// parseSubstrateQuantity parses a Kubernetes quantity string and rejects
+// non-positive values and values above limit (which would overflow the
+// int64 the v1 API carries).
+func parseSubstrateQuantity(field, value string, limit *resource.Quantity) (resource.Quantity, error) {
+	q, err := resource.ParseQuantity(value)
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("substrate: invalid %s limit %q: %w", field, value, err)
+	}
+	if q.Sign() <= 0 {
+		return resource.Quantity{}, fmt.Errorf("substrate: %s limit %q must be positive", field, value)
+	}
+	if q.Cmp(*limit) > 0 {
+		return resource.Quantity{}, fmt.Errorf("substrate: %s limit %q is too large", field, value)
+	}
+	return q, nil
+}
+
+// substrateRemovedKeys lists the substrate settings keys the v1 API has no
+// target for, with what replaces each. checkSubstrateRemovedKeys refuses a
+// Run that sets any of them, so they are never silently ignored.
+var substrateRemovedKeys = []struct {
+	key         string
+	value       func(config.V1SubstrateConfig) string
+	replacement string
+}{
+	{"sandbox_class", func(sc config.V1SubstrateConfig) string { return sc.SandboxClass },
+		"select the sandbox class with worker_selector, matching a WorkerPool whose spec.sandboxClasses lists it"},
+	{"sandbox_config_name", func(sc config.V1SubstrateConfig) string { return sc.SandboxConfigName },
+		"select the sandbox config with worker_selector, matching a WorkerPool whose spec.sandboxClasses references it"},
+	{"snapshot_storage", func(sc config.V1SubstrateConfig) string { return sc.SnapshotStorage },
+		"set the snapshot location server-wide with the ate-api-server --snapshot-location flag"},
+}
+
+// checkSubstrateRemovedKeys returns an error naming the first removed
+// settings key sc sets, and its v1 replacement.
+func checkSubstrateRemovedKeys(sc config.V1SubstrateConfig) error {
+	for _, k := range substrateRemovedKeys {
+		if k.value(sc) != "" {
+			return fmt.Errorf("substrate: setting %q is not supported by the Substrate v1 API; remove it from the substrate runtime settings and %s", k.key, k.replacement)
+		}
+	}
+	return nil
 }
 
 // substrateTrustBundleMountPath is the fixed, non-secret mount path for the
 // projected trust-bundle system-info volume. Kept as a constant, not derived
 // from sc, because the bundle's consumers (buildActorTemplate's own Env
 // values below, and every doc/support reference) all need the same literal
-// path — see docs/egress-trust-bundle.md (agent-substrate/substrate
-// d277088b) and demos/egress/egress-mitm-template.yaml.tmpl, which this
-// mirrors exactly.
+// path — see substrate's docs/egress-trust-bundle.md and
+// demos/egress/egress-mitm-template.yaml.tmpl, which this mirrors exactly.
 const substrateTrustBundleMountPath = "/run/ate"
 
 // substrateTrustBundleFileName is the projected file's name within the
@@ -251,49 +370,68 @@ const substrateTrustBundleFileName = "trust-bundle.pem"
 // used for every CA-related env var below.
 const substrateTrustBundleFile = substrateTrustBundleMountPath + "/" + substrateTrustBundleFileName
 
+// substrateTrustBundleNames returns the trust bundle names projected into
+// the actor: sc.EgressTrustBundle when set, else none.
+func substrateTrustBundleNames(sc config.V1SubstrateConfig) []string {
+	if sc.EgressTrustBundle == "" {
+		return nil
+	}
+	return []string{sc.EgressTrustBundle}
+}
+
+// substrateTemplateVolumes returns the template's volumes: the workspace
+// durableDir, plus the system-info volume projecting the trust bundle when
+// one is configured. substrateTemplateName hashes the same value.
+func substrateTemplateVolumes(sc config.V1SubstrateConfig) []*ateapi.Volume {
+	vols := []*ateapi.Volume{
+		{Name: "workspace", DurableDir: &ateapi.DurableDirVolumeSource{}},
+	}
+	if names := substrateTrustBundleNames(sc); len(names) > 0 {
+		vols = append(vols, &ateapi.Volume{
+			Name: "system-info",
+			SystemInfo: &ateapi.SystemInfoVolumeSource{
+				DataSources: []*ateapi.SystemInfoDataSource{
+					{
+						TrustBundle: &ateapi.TrustBundleDataSource{
+							Names: names,
+							Path:  substrateTrustBundleFileName,
+						},
+					},
+				},
+			},
+		})
+	}
+	return vols
+}
+
 // buildActorTemplate constructs the ActorTemplate for CreateActorTemplate
 // (substrate-runtime.md §3). Env carries no secrets and no per-agent
 // config, ever (substrate-runtime.md §3; that is pushed after the actor starts, via
 // POST /scion/v1/bootstrap) — the only Env this function ever sets is the
 // fixed set of CA-bundle paths below, and only when
 // sc.EgressTrustBundle is non-empty.
-func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) *ateapipb.ActorTemplate {
-	if resources == nil {
-		resources = config.BuiltinDefaultResources()
+//
+// Resources are set at template level only, where v1 requires both a cpu
+// and a memory limit; the container carries none, so nothing is booked
+// twice. A res missing either value is refused, so no template is ever
+// built without both.
+//
+// snapshot_config is omitted: every field then takes its v1 default, and
+// golden snapshots are enabled by default. The snapshot location is the
+// ate-api-server's --snapshot-location.
+func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1SubstrateConfig, res substrateResources) (*ateapi.ActorTemplate, error) {
+	if res.cpuMillicores <= 0 || res.memoryBytes <= 0 {
+		return nil, fmt.Errorf("substrate: actor template %s/%s needs both a cpu and a memory limit (cpu %dm, memory %d bytes)", atespace, templateName, res.cpuMillicores, res.memoryBytes)
 	}
 
-	var limits []*ateapipb.Limits
-	if resources.Limits.CPU != "" {
-		limits = append(limits, &ateapipb.Limits{Name: "cpu", Quantity: resources.Limits.CPU})
-	}
-	if resources.Limits.Memory != "" {
-		limits = append(limits, &ateapipb.Limits{Name: "memory", Quantity: resources.Limits.Memory})
-	}
-
-	// env, volumes, and volumeMounts for the projected egress-gateway trust
-	// bundle — added only when sc.EgressTrustBundle is set (opt-in, default
-	// off). Off must stay byte-identical to before this field existed: no
-	// system-info volume, no /run/ate mount, Env nil.
-	var trustBundleEnv []*ateapipb.EnvVar
-	var trustBundleVolumes []*ateapipb.Volume
-	var trustBundleMounts []*ateapipb.VolumeMount
+	// env and volumeMounts for the projected egress-gateway trust bundle
+	// (its volume comes from substrateTemplateVolumes) — added only when
+	// sc.EgressTrustBundle is set (opt-in, default off): no /run/ate mount
+	// and Env nil when off.
+	var trustBundleEnv []*ateapi.EnvVar
+	var trustBundleMounts []*ateapi.VolumeMount
 	if sc.EgressTrustBundle != "" {
-		trustBundleVolumes = []*ateapipb.Volume{
-			{
-				Name: "system-info",
-				SystemInfo: &ateapipb.SystemInfoVolumeSource{
-					DataSources: []*ateapipb.SystemInfoDataSource{
-						{
-							TrustBundle: &ateapipb.TrustBundleDataSource{
-								Name: sc.EgressTrustBundle,
-								Path: substrateTrustBundleFileName,
-							},
-						},
-					},
-				},
-			},
-		}
-		trustBundleMounts = []*ateapipb.VolumeMount{
+		trustBundleMounts = []*ateapi.VolumeMount{
 			{Name: "system-info", MountPath: substrateTrustBundleMountPath},
 		}
 		// NODE_EXTRA_CA_CERTS, GIT_SSL_CAINFO, SSL_CERT_FILE, CURL_CA_BUNDLE,
@@ -321,19 +459,19 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 		// trusting public roots. The cost: if the hub is ever reached
 		// without the gateway re-originating the connection, status
 		// reports fail TLS.
-		trustBundleEnv = make([]*ateapipb.EnvVar, 0, len(substrateenv.TrustBundleVarNames))
+		trustBundleEnv = make([]*ateapi.EnvVar, 0, len(substrateenv.TrustBundleVarNames))
 		for _, name := range substrateenv.TrustBundleVarNames {
 			value := substrateTrustBundleFile
 			if name == "SSL_CERT_DIR" {
 				value = substrateTrustBundleMountPath
 			}
-			trustBundleEnv = append(trustBundleEnv, &ateapipb.EnvVar{Name: name, Value: value})
+			trustBundleEnv = append(trustBundleEnv, &ateapi.EnvVar{Name: name, Value: value})
 		}
 	}
 
-	tmpl := &ateapipb.ActorTemplate{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: templateName},
-		Containers: []*ateapipb.Container{
+	tmpl := &ateapi.ActorTemplate{
+		Metadata: &ateapi.ResourceMetadata{Atespace: atespace, Name: templateName},
+		Containers: []*ateapi.Container{
 			{
 				Name:  "scion-agent",
 				Image: imageDigest,
@@ -351,7 +489,7 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 				// image installs it (image-build/scion-base/Dockerfile).
 				Command: []string{"/usr/local/bin/sciontool", "substrate-serve"},
 				Env:     trustBundleEnv, // no secrets, ever (substrate-runtime.md §3); only fixed CA-bundle paths when egress_trust_bundle is set
-				VolumeMounts: append([]*ateapipb.VolumeMount{
+				VolumeMounts: append([]*ateapi.VolumeMount{
 					{Name: "workspace", MountPath: "/workspace"},
 				}, trustBundleMounts...),
 				// Substrate always starts the actor process as UID 0 / GID 0
@@ -377,8 +515,8 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 				// sentry the actor runs in; a direct credential drop grants
 				// the dropped-to process none of them, so nothing
 				// scion-owned ever runs privileged.
-				SecurityContext: &ateapipb.SecurityContext{
-					Capabilities: &ateapipb.Capabilities{
+				SecurityContext: &ateapi.SecurityContext{
+					Capabilities: &ateapi.Capabilities{
 						// Clone, not the package-level slice itself: any
 						// caller that mutated tmpl...Capabilities.Add in
 						// place would otherwise corrupt
@@ -389,7 +527,6 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 						Add: slices.Clone(substrateContainerCapabilitiesAdd),
 					},
 				},
-				Resources: &ateapipb.Resources{Limits: limits},
 				// Gates every wakeup, including the golden actor's first
 				// boot, on substrate-serve answering healthz. See
 				// substrateWakeupProbe for what it checks and
@@ -397,25 +534,17 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 				WakeupProbe: substrateWakeupProbe(),
 			},
 		},
-		Volumes: append([]*ateapipb.Volume{
-			{Name: "workspace", DurableDir: &ateapipb.DurableDirVolumeSource{}},
-		}, trustBundleVolumes...),
-		SnapshotsConfig: &ateapipb.SnapshotsConfig{
-			OnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
-			OnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
-			StorageLocation: sc.SnapshotStorage,
-		},
-		SandboxConfig: &ateapipb.SandboxConfig{
-			SandboxClass: substrateSandboxClass(sc.SandboxClass),
-			ConfigName:   sc.SandboxConfigName,
+		Volumes: substrateTemplateVolumes(sc),
+		Resources: &ateapi.ResourceRequirements{
+			Limits: &ateapi.Resources{CpuMillicores: res.cpuMillicores, MemoryBytes: res.memoryBytes},
 		},
 	}
 
 	if len(sc.WorkerSelector) > 0 {
-		tmpl.WorkerSelector = &ateapipb.Selector{MatchLabels: sc.WorkerSelector}
+		tmpl.WorkerSelector = &ateapi.Selector{MatchLabels: sc.WorkerSelector}
 	}
 
-	return tmpl
+	return tmpl, nil
 }
 
 // templateReadyTimeout resolves V1SubstrateConfig.TemplateReadyTimeout,
@@ -437,15 +566,21 @@ func templateReadyTimeout(sc config.V1SubstrateConfig) time.Duration {
 // (substrate-runtime.md §3), so Run must not proceed to CreateActor until
 // that snapshot is ready. clock lets tests replace time.Sleep with an
 // instant no-op.
-func ensureActorTemplate(ctx context.Context, client ateapipb.ControlClient, atespace, templateName string, tmpl *ateapipb.ActorTemplate, timeout time.Duration, sleep func(time.Duration)) error {
-	existing, err := client.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{
-		ActorTemplate: &ateapipb.ObjectRef{Atespace: atespace, Name: templateName},
+func ensureActorTemplate(ctx context.Context, client ateapi.ControlClient, atespace, templateName string, tmpl *ateapi.ActorTemplate, timeout time.Duration, sleep func(time.Duration)) error {
+	existing, err := client.GetActorTemplate(ctx, &ateapi.GetActorTemplateRequest{
+		ActorTemplate: &ateapi.ObjectRef{Atespace: atespace, Name: templateName},
 	})
 	if err != nil {
 		if status.Code(err) != codes.NotFound {
 			return fmt.Errorf("substrate: get actor template %s/%s: %w", atespace, templateName, err)
 		}
-		created, err := client.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{ActorTemplate: tmpl})
+		created, err := client.CreateActorTemplate(ctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: tmpl})
+		if status.Code(err) == codes.FailedPrecondition {
+			// The v1 server refuses a template with FailedPrecondition when
+			// it has no snapshot location (scion sets no per-template
+			// location).
+			return fmt.Errorf("substrate: create actor template %s/%s: Substrate has no snapshot location; set the ate-api-server --snapshot-location flag: %w", atespace, templateName, err)
+		}
 		if err != nil && status.Code(err) != codes.AlreadyExists {
 			return fmt.Errorf("substrate: create actor template %s/%s: %w", atespace, templateName, err)
 		}
@@ -463,8 +598,8 @@ func ensureActorTemplate(ctx context.Context, client ateapipb.ControlClient, ate
 		}
 		sleep(templateReadyPollInterval)
 
-		existing, err = client.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{
-			ActorTemplate: &ateapipb.ObjectRef{Atespace: atespace, Name: templateName},
+		existing, err = client.GetActorTemplate(ctx, &ateapi.GetActorTemplateRequest{
+			ActorTemplate: &ateapi.ObjectRef{Atespace: atespace, Name: templateName},
 		})
 		if err != nil {
 			return fmt.Errorf("substrate: poll actor template %s/%s: %w", atespace, templateName, err)
@@ -483,8 +618,8 @@ func ensureActorTemplate(ctx context.Context, client ateapipb.ControlClient, ate
 			// fails either way), and the next Run's own GetActorTemplate
 			// will simply find the same broken template again and retry
 			// this same cleanup.
-			if _, delErr := client.DeleteActorTemplate(ctx, &ateapipb.DeleteActorTemplateRequest{
-				ActorTemplate: &ateapipb.ObjectRef{Atespace: atespace, Name: templateName},
+			if _, delErr := client.DeleteActorTemplate(ctx, &ateapi.DeleteActorTemplateRequest{
+				ActorTemplate: &ateapi.ObjectRef{Atespace: atespace, Name: templateName},
 			}); delErr != nil && status.Code(delErr) != codes.NotFound {
 				runtimeLog().Warn("substrate: failed to clean up a failed golden-snapshot template",
 					"atespace", atespace, "template", templateName, "error", delErr)
@@ -496,7 +631,7 @@ func ensureActorTemplate(ctx context.Context, client ateapipb.ControlClient, ate
 
 // templateIsReady reports whether tmpl's golden snapshot has been taken
 // (GoldenSnapshotStatus.golden_tag is set).
-func templateIsReady(tmpl *ateapipb.ActorTemplate) bool {
+func templateIsReady(tmpl *ateapi.ActorTemplate) bool {
 	return tmpl != nil &&
 		tmpl.GetStatus() != nil &&
 		tmpl.GetStatus().GetGoldenSnapshotStatus() != nil &&
@@ -505,7 +640,7 @@ func templateIsReady(tmpl *ateapipb.ActorTemplate) bool {
 }
 
 // templateErrorMessage returns the golden-snapshot error message, if any.
-func templateErrorMessage(tmpl *ateapipb.ActorTemplate) string {
+func templateErrorMessage(tmpl *ateapi.ActorTemplate) string {
 	if tmpl == nil || tmpl.GetStatus() == nil || tmpl.GetStatus().GetGoldenSnapshotStatus() == nil {
 		return ""
 	}

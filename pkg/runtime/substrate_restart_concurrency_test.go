@@ -20,7 +20,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 )
 
 // RecordlessActors reads substrateAgentRecords while Run/Delete may write
@@ -32,10 +32,10 @@ func TestSubstrateRestart_RecordlessActors_ConcurrentWithRecordWrites(t *testing
 
 	const projectID = "550e8400-e29b-41d4-a716-446655440000"
 	const atespace = "scion-550e8400-e29"
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		return &ateapipb.ListActorsResponse{Actors: []*ateapipb.Actor{{
-			Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: "a", Uid: "uid-a"},
-			Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+		return &ateapi.ListActorsResponse{Actors: []*ateapi.Actor{{
+			Metadata: &ateapi.ResourceMetadata{Atespace: atespace, Name: "a", Uid: "uid-a"},
+			Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 		}}}, nil
 	}
 

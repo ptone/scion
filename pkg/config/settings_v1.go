@@ -2927,7 +2927,7 @@ type V1SubstrateConfig struct {
 	// EgressTrustBundle names a Substrate trust bundle to project into every
 	// actor as a system-info volume, so the actor can validate the egress
 	// gateway's own TLS certificate (docs/egress-trust-bundle.md, vendored
-	// Substrate d277088b).
+	// Substrate v1.0.0).
 	//
 	// Required iff the cluster runs the sdsmint egress gateway
 	// (`hack/install-ate.sh --deploy-atenet --experimental-use-sdsmint`) and
@@ -2942,7 +2942,7 @@ type V1SubstrateConfig struct {
 	// Empty (the default) is off, and off is byte-identical to today: no
 	// system-info volume, no mount, no env. Validated by
 	// pkg/runtime/substrate.Validate: when non-empty it must be exactly
-	// "egress-mitm.ate.dev", the only trust bundle name Substrate d277088b
+	// "egress-mitm.ate.dev", the only trust bundle name Substrate v1.0.0
 	// supports. Kept as a string validated against a one-name allowlist,
 	// not a bool, deliberately: it mirrors Substrate's own
 	// trustBundle.name, and a future additional name needs only an

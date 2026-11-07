@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 )
 
 // wipeSubstrateAgentStateForRestart clears substrateControlTokens and
@@ -97,13 +97,13 @@ func TestSubstrateRestart_RecordlessActors_ReportsOnlyUnrecorded(t *testing.T) {
 	// CreateActor's response carries) and the pre-restart one under a UID
 	// nothing was ever recorded for, exactly like two ListActors entries
 	// from a real cluster after a restart would differ.
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		return &ateapipb.ListActorsResponse{
-			Actors: []*ateapipb.Actor{
-				{Metadata: &ateapipb.ResourceMetadata{Atespace: wantAtespace, Name: "pre-restart-agent", Uid: "uid-pre-restart"},
-					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
-				{Metadata: &ateapipb.ResourceMetadata{Atespace: wantAtespace, Name: "post-restart-agent", Uid: fakeActorUID},
-					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+		return &ateapi.ListActorsResponse{
+			Actors: []*ateapi.Actor{
+				{Metadata: &ateapi.ResourceMetadata{Atespace: wantAtespace, Name: "pre-restart-agent", Uid: "uid-pre-restart"},
+					Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
+				{Metadata: &ateapi.ResourceMetadata{Atespace: wantAtespace, Name: "post-restart-agent", Uid: fakeActorUID},
+					Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
 			},
 		}, nil
 	}
@@ -159,13 +159,13 @@ func TestSubstrateRestart_RecordlessActors_ExcludesGoldenAtespace(t *testing.T) 
 
 	const projectID = "550e8400-e29b-41d4-a716-446655440000"
 	wantAtespace := substrateAtespaceName(projectID)
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		return &ateapipb.ListActorsResponse{
-			Actors: []*ateapipb.Actor{
-				{Metadata: &ateapipb.ResourceMetadata{Atespace: wantAtespace, Name: "record-less-agent", Uid: "uid-real"},
-					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
-				{Metadata: &ateapipb.ResourceMetadata{Atespace: "ate-golden", Name: "golden", Uid: "uid-golden"},
-					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}},
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+		return &ateapi.ListActorsResponse{
+			Actors: []*ateapi.Actor{
+				{Metadata: &ateapi.ResourceMetadata{Atespace: wantAtespace, Name: "record-less-agent", Uid: "uid-real"},
+					Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
+				{Metadata: &ateapi.ResourceMetadata{Atespace: "ate-golden", Name: "golden", Uid: "uid-golden"},
+					Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING}},
 			},
 		}, nil
 	}
@@ -193,7 +193,7 @@ func TestSubstrateRestart_RecordlessActors_ProbeErrorIsExplicit(t *testing.T) {
 	defer closeServer()
 
 	wantErr := "substrate: simulated list failure"
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 		return nil, errString(wantErr)
 	}
 
@@ -230,13 +230,13 @@ func TestSubstrateRestart_RecordlessActors_ExcludesDeletingState(t *testing.T) {
 
 	const projectID = "550e8400-e29b-41d4-a716-446655440000"
 	wantAtespace := substrateAtespaceName(projectID)
-	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		return &ateapipb.ListActorsResponse{
-			Actors: []*ateapipb.Actor{
-				{Metadata: &ateapipb.ResourceMetadata{Atespace: wantAtespace, Name: "deleting-agent", Uid: "uid-deleting"},
-					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_DELETING}},
-				{Metadata: &ateapipb.ResourceMetadata{Atespace: wantAtespace, Name: "crashed-agent", Uid: "uid-crashed"},
-					Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_CRASHED}},
+	fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
+		return &ateapi.ListActorsResponse{
+			Actors: []*ateapi.Actor{
+				{Metadata: &ateapi.ResourceMetadata{Atespace: wantAtespace, Name: "deleting-agent", Uid: "uid-deleting"},
+					Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_DELETING}},
+				{Metadata: &ateapi.ResourceMetadata{Atespace: wantAtespace, Name: "crashed-agent", Uid: "uid-crashed"},
+					Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_CRASHED}},
 			},
 		}, nil
 	}

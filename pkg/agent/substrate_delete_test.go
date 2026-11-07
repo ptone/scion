@@ -31,23 +31,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 )
 
 // fakeSubstrateControlClient is a minimal, package-local
-// ateapipb.ControlClient fake covering exactly the calls SubstrateRuntime's
+// ateapi.ControlClient fake covering exactly the calls SubstrateRuntime's
 // Run/List/Delete make. It embeds the interface so any call this test never
 // exercises panics loudly (nil pointer dereference) rather than silently
 // doing nothing, instead of duplicating pkg/runtime's own more complete
 // fake — that one lives in a _test.go file, so it isn't importable from
 // here, and this test only needs a small slice of the interface.
 type fakeSubstrateControlClient struct {
-	ateapipb.ControlClient
+	ateapi.ControlClient
 
 	mu                sync.Mutex
-	actors            map[string]*ateapipb.Actor // key: "<atespace>/<name>"
-	deleteActorCalls  []*ateapipb.DeleteActorRequest
-	deleteEgressCalls []*ateapipb.DeleteActorEgressPolicyRequest
+	actors            map[string]*ateapi.Actor // key: "<atespace>/<name>"
+	deleteActorCalls  []*ateapi.DeleteActorRequest
+	deleteEgressCalls []*ateapi.DeleteActorEgressPolicyRequest
 
 	// forceListOrder, when non-nil, makes ListActors return exactly this
 	// slice in exactly this order instead of ranging over the (unordered)
@@ -55,11 +55,11 @@ type fakeSubstrateControlClient struct {
 	// actors in a specific, adversarial order deterministically, rather
 	// than relying on Go's randomized map iteration to happen to produce
 	// it on some fraction of runs.
-	forceListOrder []*ateapipb.Actor
+	forceListOrder []*ateapi.Actor
 }
 
 func newFakeSubstrateControlClient() *fakeSubstrateControlClient {
-	return &fakeSubstrateControlClient{actors: make(map[string]*ateapipb.Actor)}
+	return &fakeSubstrateControlClient{actors: make(map[string]*ateapi.Actor)}
 }
 
 // putActor directly registers an actor as if some earlier CreateActor call
@@ -69,54 +69,54 @@ func newFakeSubstrateControlClient() *fakeSubstrateControlClient {
 func (f *fakeSubstrateControlClient) putActor(atespace, name, uid string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.actors[atespace+"/"+name] = &ateapipb.Actor{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: name, Uid: uid},
-		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	f.actors[atespace+"/"+name] = &ateapi.Actor{
+		Metadata: &ateapi.ResourceMetadata{Atespace: atespace, Name: name, Uid: uid},
+		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
 }
 
-func (f *fakeSubstrateControlClient) CreateAtespace(ctx context.Context, in *ateapipb.CreateAtespaceRequest, opts ...grpc.CallOption) (*ateapipb.Atespace, error) {
-	return &ateapipb.Atespace{}, nil
+func (f *fakeSubstrateControlClient) CreateAtespace(ctx context.Context, in *ateapi.CreateAtespaceRequest, opts ...grpc.CallOption) (*ateapi.Atespace, error) {
+	return &ateapi.Atespace{}, nil
 }
 
-func (f *fakeSubstrateControlClient) GetActorTemplate(ctx context.Context, in *ateapipb.GetActorTemplateRequest, opts ...grpc.CallOption) (*ateapipb.ActorTemplate, error) {
+func (f *fakeSubstrateControlClient) GetActorTemplate(ctx context.Context, in *ateapi.GetActorTemplateRequest, opts ...grpc.CallOption) (*ateapi.ActorTemplate, error) {
 	return nil, status.Error(codes.NotFound, "not found")
 }
 
-func (f *fakeSubstrateControlClient) CreateActorTemplate(ctx context.Context, in *ateapipb.CreateActorTemplateRequest, opts ...grpc.CallOption) (*ateapipb.ActorTemplate, error) {
+func (f *fakeSubstrateControlClient) CreateActorTemplate(ctx context.Context, in *ateapi.CreateActorTemplateRequest, opts ...grpc.CallOption) (*ateapi.ActorTemplate, error) {
 	tmpl := in.GetActorTemplate()
-	tmpl.Status = &ateapipb.ActorTemplateStatus{
-		GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{
-			GoldenTag: &ateapipb.ObjectRef{Atespace: "ate-golden", Name: "golden"},
+	tmpl.Status = &ateapi.ActorTemplateStatus{
+		GoldenSnapshotStatus: &ateapi.GoldenSnapshotStatus{
+			GoldenTag: &ateapi.ObjectRef{Atespace: "ate-golden", Name: "golden"},
 		},
 	}
 	return tmpl, nil
 }
 
-func (f *fakeSubstrateControlClient) CreateActor(ctx context.Context, in *ateapipb.CreateActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
+func (f *fakeSubstrateControlClient) CreateActor(ctx context.Context, in *ateapi.CreateActorRequest, opts ...grpc.CallOption) (*ateapi.Actor, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	actor := &ateapipb.Actor{
-		Metadata: &ateapipb.ResourceMetadata{
+	actor := &ateapi.Actor{
+		Metadata: &ateapi.ResourceMetadata{
 			Atespace: in.GetActor().GetMetadata().GetAtespace(),
 			Name:     in.GetActor().GetMetadata().GetName(),
 			Uid:      "uid-" + in.GetActor().GetMetadata().GetName(),
 		},
-		Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+		Status: &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
 	f.actors[actor.GetMetadata().GetAtespace()+"/"+actor.GetMetadata().GetName()] = actor
 	return actor, nil
 }
 
-func (f *fakeSubstrateControlClient) CreateActorEgressPolicy(ctx context.Context, in *ateapipb.CreateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
-	return &ateapipb.EgressPolicy{}, nil
+func (f *fakeSubstrateControlClient) CreateActorEgressPolicy(ctx context.Context, in *ateapi.CreateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapi.EgressPolicy, error) {
+	return &ateapi.EgressPolicy{}, nil
 }
 
-func (f *fakeSubstrateControlClient) ResumeActor(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
-	return &ateapipb.ResumeActorResponse{}, nil
+func (f *fakeSubstrateControlClient) ResumeActor(ctx context.Context, in *ateapi.ResumeActorRequest, opts ...grpc.CallOption) (*ateapi.ResumeActorResponse, error) {
+	return &ateapi.ResumeActorResponse{}, nil
 }
 
-func (f *fakeSubstrateControlClient) GetActor(ctx context.Context, in *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
+func (f *fakeSubstrateControlClient) GetActor(ctx context.Context, in *ateapi.GetActorRequest, opts ...grpc.CallOption) (*ateapi.Actor, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if a, ok := f.actors[in.GetActor().GetAtespace()+"/"+in.GetActor().GetName()]; ok {
@@ -125,32 +125,32 @@ func (f *fakeSubstrateControlClient) GetActor(ctx context.Context, in *ateapipb.
 	return nil, status.Error(codes.NotFound, "not found")
 }
 
-func (f *fakeSubstrateControlClient) ListActors(ctx context.Context, in *ateapipb.ListActorsRequest, opts ...grpc.CallOption) (*ateapipb.ListActorsResponse, error) {
+func (f *fakeSubstrateControlClient) ListActors(ctx context.Context, in *ateapi.ListActorsRequest, opts ...grpc.CallOption) (*ateapi.ListActorsResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.forceListOrder != nil {
-		return &ateapipb.ListActorsResponse{Actors: f.forceListOrder}, nil
+		return &ateapi.ListActorsResponse{Actors: f.forceListOrder}, nil
 	}
-	var actors []*ateapipb.Actor
+	var actors []*ateapi.Actor
 	for _, a := range f.actors {
 		actors = append(actors, a)
 	}
-	return &ateapipb.ListActorsResponse{Actors: actors}, nil
+	return &ateapi.ListActorsResponse{Actors: actors}, nil
 }
 
-func (f *fakeSubstrateControlClient) DeleteActor(ctx context.Context, in *ateapipb.DeleteActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
+func (f *fakeSubstrateControlClient) DeleteActor(ctx context.Context, in *ateapi.DeleteActorRequest, opts ...grpc.CallOption) (*ateapi.Actor, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleteActorCalls = append(f.deleteActorCalls, in)
 	delete(f.actors, in.GetActor().GetAtespace()+"/"+in.GetActor().GetName())
-	return &ateapipb.Actor{}, nil
+	return &ateapi.Actor{}, nil
 }
 
-func (f *fakeSubstrateControlClient) DeleteActorEgressPolicy(ctx context.Context, in *ateapipb.DeleteActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
+func (f *fakeSubstrateControlClient) DeleteActorEgressPolicy(ctx context.Context, in *ateapi.DeleteActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapi.EgressPolicy, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleteEgressCalls = append(f.deleteEgressCalls, in)
-	return &ateapipb.EgressPolicy{}, nil
+	return &ateapi.EgressPolicy{}, nil
 }
 
 // newFakeSubstrateActorServer stands in for sciontool substrate-serve,
@@ -189,10 +189,7 @@ func TestSubstrateAgentManagerDelete_RecordExists(t *testing.T) {
 	actorServer := newFakeSubstrateActorServer()
 	defer actorServer.Close()
 
-	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{
-		SnapshotStorage:   "gs://bucket/prefix/",
-		SandboxConfigName: "gvisor-default",
-	})
+	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
 
 	const agentSlug = "sb-smoke-2"
 	cfg := scionruntime.RunConfig{
@@ -378,7 +375,7 @@ func TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug(t *testin
 			}
 
 			fc.mu.Lock()
-			var recordHaving, recordLess *ateapipb.Actor
+			var recordHaving, recordLess *ateapi.Actor
 			for key, a := range fc.actors {
 				if key == otherAtespace+"/"+otherActor {
 					recordLess = a
@@ -387,9 +384,9 @@ func TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug(t *testin
 				}
 			}
 			if orderName == "record-having first" {
-				fc.forceListOrder = []*ateapipb.Actor{recordHaving, recordLess}
+				fc.forceListOrder = []*ateapi.Actor{recordHaving, recordLess}
 			} else {
-				fc.forceListOrder = []*ateapipb.Actor{recordLess, recordHaving}
+				fc.forceListOrder = []*ateapi.Actor{recordLess, recordHaving}
 			}
 			fc.mu.Unlock()
 
@@ -449,7 +446,7 @@ func TestSubstrateAgentManagerDelete_SameSlugDifferentProjectsFailsClosed(t *tes
 
 			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
 
-			runProjectAgent := func(projectName, projectID, projectPath string) *ateapipb.Actor {
+			runProjectAgent := func(projectName, projectID, projectPath string) *ateapi.Actor {
 				labels := map[string]string{"scion.name": "dev", "scion.agent": "true"}
 				for k, v := range projectkeys.ProjectNameLabels(projectName) {
 					labels[k] = v
@@ -483,9 +480,9 @@ func TestSubstrateAgentManagerDelete_SameSlugDifferentProjectsFailsClosed(t *tes
 
 			fc.mu.Lock()
 			if orderName == "projA first" {
-				fc.forceListOrder = []*ateapipb.Actor{actorA, actorB}
+				fc.forceListOrder = []*ateapi.Actor{actorA, actorB}
 			} else {
-				fc.forceListOrder = []*ateapipb.Actor{actorB, actorA}
+				fc.forceListOrder = []*ateapi.Actor{actorB, actorA}
 			}
 			fc.mu.Unlock()
 

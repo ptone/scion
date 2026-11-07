@@ -28,7 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 )
 
 // Edge coverage for the stop lookup on a broker with a RecordlessActorProber
@@ -82,7 +82,7 @@ func TestLookupAgentTarget_AnyListFailureIsCouldNotDetermine(t *testing.T) {
 				runSubstrateAgentForProject(t, srv.manager, "dev", "projb", gapProjBID, testProjectScionDir(t, "projb"))
 				calls, injected := 0, false
 				fc.mu.Lock()
-				fc.listActorsErrFor = func(*ateapipb.ListActorsRequest) error {
+				fc.listActorsErrFor = func(*ateapi.ListActorsRequest) error {
 					calls++
 					if calls == n {
 						injected = true

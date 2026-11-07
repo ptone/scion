@@ -32,7 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 )
 
 // putActor directly registers an actor as if some earlier CreateActor call
@@ -42,9 +42,9 @@ import (
 func (f *fakeSubstrateControlClient) putActor(atespace, name, uid string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.actors[atespace+"/"+name] = &ateapipb.Actor{
-		Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: name, Uid: uid},
-		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+	f.actors[atespace+"/"+name] = &ateapi.Actor{
+		Metadata: &ateapi.ResourceMetadata{Atespace: atespace, Name: name, Uid: uid},
+		Status:   &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_RUNNING},
 	}
 }
 
@@ -929,9 +929,9 @@ func TestSubstrateBroker_SameSlugDifferentProjects_StopScopedToOwnProject(t *tes
 			actorAObj := fc.actors[atespaceA+"/"+actorA]
 			actorBObj := fc.actors[atespaceB+"/"+actorB]
 			if tt.listAFirst {
-				fc.forceListOrder = []*ateapipb.Actor{actorAObj, actorBObj}
+				fc.forceListOrder = []*ateapi.Actor{actorAObj, actorBObj}
 			} else {
-				fc.forceListOrder = []*ateapipb.Actor{actorBObj, actorAObj}
+				fc.forceListOrder = []*ateapi.Actor{actorBObj, actorAObj}
 			}
 			fc.mu.Unlock()
 
