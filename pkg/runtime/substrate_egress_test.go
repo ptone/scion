@@ -432,14 +432,27 @@ func TestSubstrateEgressHostnames_ScpStyleGitURLSilentlyDropped(t *testing.T) {
 func TestSubstrateEgressHostnames_TenantHostCannotWidenToArbitraryDomain(t *testing.T) {
 	sc := config.V1SubstrateConfig{EgressAllow: []string{"*.example.com"}}
 
-	t.Run("covered subdomain is added", func(t *testing.T) {
+	t.Run("covered subdomain adds no rule", func(t *testing.T) {
+		// Tenant-derived hosts never emit a rule (design §3.5 R3-1, §9 AC9
+		// GENERAL): the operator's *.example.com rule already admits
+		// ci.example.com, so the rule set equals the one without the
+		// tenant value, and nothing is warned about.
+		logs := &syncBuffer{}
+		setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
 		cfg := RunConfig{GitClone: &api.GitCloneConfig{URL: "https://ci.example.com/acme/repo.git"}}
-		hosts, hostsErr := substrateEgressTargetHosts(cfg, map[string]string{}, sc)
-		if hostsErr != nil {
-			t.Fatalf("substrateEgressTargetHosts() error = %v", hostsErr)
+		with, err := substrateEgressTargets(cfg, map[string]string{}, sc)
+		if err != nil {
+			t.Fatalf("substrateEgressTargets() error = %v", err)
 		}
-		if !containsHost(hosts, "ci.example.com") {
-			t.Errorf("substrateEgressTargetHosts() = %v, want ci.example.com covered by *.example.com", hosts)
+		without, err := substrateEgressTargets(RunConfig{}, map[string]string{}, sc)
+		if err != nil {
+			t.Fatalf("substrateEgressTargets() error = %v", err)
+		}
+		if !slices.Equal(with, without) {
+			t.Errorf("covered tenant host changed the rules:\nwith:    %+v\nwithout: %+v", with, without)
+		}
+		if out := logs.String(); strings.Contains(out, "ci.example.com") {
+			t.Errorf("log = %q, want no warning for a covered tenant host", out)
 		}
 	})
 

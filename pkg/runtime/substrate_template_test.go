@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -75,6 +76,32 @@ func TestResolveSubstrateResources_PerField(t *testing.T) {
 				t.Errorf("resolveSubstrateResources() = %+v, want cpu %dm, memory %d", got, tc.wantCPU, tc.wantMem)
 			}
 		})
+	}
+}
+
+// The int64 boundary: MaxInt64 is accepted, MaxInt64+1 and 8Ei are refused,
+// and the error names the field.
+func TestResolveSubstrateResources_Int64Boundary(t *testing.T) {
+	got, err := resolveSubstrateResources(&api.ResourceSpec{Limits: api.ResourceList{Memory: "9223372036854775807", CPU: "9223372036854775807m"}})
+	if err != nil || got.memoryBytes != math.MaxInt64 || got.cpuMillicores != math.MaxInt64 {
+		t.Errorf("MaxInt64: resolveSubstrateResources() = %+v, %v; want both fields MaxInt64", got, err)
+	}
+	for _, tc := range []struct {
+		limits api.ResourceList
+		field  string
+	}{
+		{api.ResourceList{Memory: "9223372036854775808"}, "memory"},
+		{api.ResourceList{Memory: "8Ei"}, "memory"},
+		{api.ResourceList{CPU: "9223372036854775808m"}, "cpu"},
+	} {
+		got, err := resolveSubstrateResources(&api.ResourceSpec{Limits: tc.limits})
+		if err == nil {
+			t.Errorf("resolveSubstrateResources(%+v) = %+v, nil; want an error", tc.limits, got)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.field) {
+			t.Errorf("error = %q, want it to name the %s field", err, tc.field)
+		}
 	}
 }
 

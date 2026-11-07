@@ -319,7 +319,9 @@ func parseSubstrateQuantity(field, value string, limit *resource.Quantity) (reso
 	if q.Sign() <= 0 {
 		return resource.Quantity{}, fmt.Errorf("substrate: %s limit %q must be positive", field, value)
 	}
-	if q.Cmp(*limit) > 0 {
+	// Compared as decimals: a value above the int64 range (such as 8Ei)
+	// does not compare above an int64-sized Quantity otherwise.
+	if q.AsDec().Cmp(limit.AsDec()) > 0 {
 		return resource.Quantity{}, fmt.Errorf("substrate: %s limit %q is too large", field, value)
 	}
 	return q, nil

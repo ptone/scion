@@ -362,7 +362,9 @@ func parseEgressPort(raw, p string) (int32, error) {
 // :683-685, the syntax tls_passthrough and https rules share, :726, :755),
 // so the entry is sent as the same pattern, never a broader one.
 func NormalizeEgressAllowEntry(raw string) (EgressAllowEntry, error) {
-	e := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
+	lowered := strings.ToLower(strings.TrimSpace(raw))
+	e := strings.TrimSuffix(lowered, ".")
+	dotStripped := e != lowered
 	if e == "" {
 		return EgressAllowEntry{}, nil
 	}
@@ -411,8 +413,6 @@ func NormalizeEgressAllowEntry(raw string) (EgressAllowEntry, error) {
 			}
 			rest = rest[:i] // a single trailing "/" is allowed
 		}
-		// The whole-entry trailing-dot strip above saw the "/" last.
-		rest = strings.TrimSuffix(rest, ".")
 	}
 	hostPart := rest
 	if h, p, found := strings.Cut(rest, ":"); found {
@@ -424,6 +424,13 @@ func NormalizeEgressAllowEntry(raw string) (EgressAllowEntry, error) {
 		if port, err = parseEgressPort(raw, p); err != nil {
 			return EgressAllowEntry{}, err
 		}
+	}
+	// At most one trailing dot is stripped, ever: when the whole-entry
+	// strip above did not take one (a port or "/" came last), one may be
+	// taken from the host part. A second dot stays and fails the label
+	// check.
+	if !dotStripped {
+		hostPart = strings.TrimSuffix(hostPart, ".")
 	}
 
 	host, err := normalizeEgressAllowHost(raw, hostPart)
@@ -439,7 +446,10 @@ func NormalizeEgressAllowEntry(raw string) (EgressAllowEntry, error) {
 // normalizeEgressAllowHost applies every host check to host (the host part
 // of raw) and returns its canonical form; errors name raw as written.
 func normalizeEgressAllowHost(raw, host string) (string, error) {
-	e := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".") // at most one trailing dot; see the doc on egressAllowLabelPattern for why a second one isn't stripped too.
+	// No trailing-dot strip here: NormalizeEgressAllowEntry strips at most
+	// one (see the doc on egressAllowLabelPattern for why a second one
+	// isn't stripped too).
+	e := strings.ToLower(strings.TrimSpace(host))
 	if e == "" {
 		return "", nil
 	}

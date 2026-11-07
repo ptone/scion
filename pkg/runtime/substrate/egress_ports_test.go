@@ -241,3 +241,15 @@ func TestNormalizeEgressAllowEntry_SchemeByLiteralPrefixOnly(t *testing.T) {
 		t.Errorf("NormalizeEgressAllowEntry(HTTPS://Example.com:8443) = %+v, %v; want %+v", got, err, want)
 	}
 }
+
+// At most one trailing dot is ever stripped, in every form.
+func TestNormalizeEgressAllowEntry_OneTrailingDotOnly(t *testing.T) {
+	for _, ok := range []string{"api.example.com.", "api.example.com.:8443", "https://api.example.com.", "https://api.example.com./", "http://api.example.com.:8080"} {
+		if got, err := NormalizeEgressAllowEntry(ok); err != nil || got.Host != "api.example.com" {
+			t.Errorf("NormalizeEgressAllowEntry(%q) = %+v, %v; want host api.example.com", ok, got, err)
+		}
+	}
+	for _, bad := range []string{"api.example.com..", "api.example.com..:8443", "https://api.example.com..", "https://api.example.com../", "http://api.example.com..:8080"} {
+		assertNormalizeRefused(t, bad, "invalid DNS label")
+	}
+}
