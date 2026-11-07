@@ -138,13 +138,18 @@ func TestSubstrateEgressTargets_TrustedHubDefaults(t *testing.T) {
 
 	// Anything else refuses the Run, naming the setting and never the
 	// value.
-	for _, endpoint := range []string{"ftp://tokhub.example.com", "https://tokuser:tokpass@tokhub.example.com", "https://tokhub.example.com/p?x=https://tok", "tok://tokhub.example.com", "https://[tok"} {
+	for _, endpoint := range []string{
+		"ftp://tokhub.example.com", "https://tokuser:tokpass@tokhub.example.com", "https://tokhub.example.com/p?x=https://tok", "tok://tokhub.example.com", "https://[tok",
+		// SEC-R3-1: the host must be plain DNS labels: no "*", no
+		// catch-all spelling, no other characters.
+		"https://*.tokhub.example.com", "https://*", "http://all:8080", "https://tok_hub.example.com", "https://tok!hub.example.com:8443", "tok$hub",
+	} {
 		_, err := substrateEgressTargets(RunConfig{TrustedHubEndpoint: endpoint}, map[string]string{}, config.V1SubstrateConfig{})
 		if err == nil {
 			t.Errorf("TrustedHubEndpoint %q: error = nil, want a refusal", endpoint)
 			continue
 		}
-		if !strings.Contains(err.Error(), "trusted hub endpoint") || strings.Contains(err.Error(), "tok") {
+		if !strings.Contains(err.Error(), "hub endpoint (hub server dispatch endpoint or broker HubEndpoint)") || strings.Contains(err.Error(), "tok") {
 			t.Errorf("TrustedHubEndpoint %q: error = %q, want it to name the setting and not the value", endpoint, err)
 		}
 	}
@@ -976,5 +981,17 @@ func TestSubstrateEgressTargets_AC9ReductionLiteral(t *testing.T) {
 		if strings.Contains(out, leak) {
 			t.Errorf("log = %q, leaks %q", out, leak)
 		}
+	}
+}
+
+// SEC-R3-1: in-cluster single-label hub names stay allowed.
+func TestSubstrateEgressTargets_TrustedHubSingleLabelAllowed(t *testing.T) {
+	targets, err := substrateEgressTargets(RunConfig{TrustedHubEndpoint: "http://scion-hub:8080"}, map[string]string{}, config.V1SubstrateConfig{})
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	want := []substrateEgressTarget{{protocol: substrate.EgressProtocolHTTP, host: "scion-hub", port: 8080}}
+	if got := targetsFor(targets, "scion-hub"); !slices.Equal(got, want) {
+		t.Errorf("targets = %+v, want %+v", got, want)
 	}
 }

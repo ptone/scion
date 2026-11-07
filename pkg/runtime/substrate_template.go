@@ -380,6 +380,9 @@ func quantityRat(value string) (*big.Rat, bool) {
 	}
 	if suffix[0] == 'e' || suffix[0] == 'E' {
 		exp, err := strconv.Atoi(suffix[1:])
+		// The +/-64 bound is intentional: it keeps the exact arithmetic
+		// small, and a value with a larger exponent is refused as invalid
+		// (fail closed), never accepted.
 		if err != nil || exp > 64 || exp < -64 {
 			return nil, false
 		}

@@ -32,7 +32,9 @@ template, egress translation and test fake to the v1 shapes.
     Limits are set on the template only; the container-level limits are gone.
     `buildActorTemplate` refuses a template without both. cpu is capped at
     v1's 999999 millicores and memory at the int64 range, each refused with
-    an error naming the field.
+    an error naming the field. The range is checked exactly from the
+    quantity string (number times suffix), because `resource.ParseQuantity`
+    clamps values beyond the int64 range.
   - `sandbox_config` and `snapshot_config` are not sent. A FailedPrecondition
     from CreateActorTemplate names the ate-api-server `--snapshot-location`.
   - `sandbox_class`, `sandbox_config_name` and `snapshot_storage` refuse the
@@ -69,6 +71,14 @@ template, egress translation and test fake to the v1 shapes.
     an error that names `CLOUD_ML_REGION` and never its value. Egress targets
     are resolved before the first control-plane call, so a refusal creates
     nothing.
+  - The trusted hub endpoint is parsed by operator rules: a leading
+    `http://`/`https://` in any letter case, the host lowercased and limited
+    to plain DNS labels (no `*`, no catch-all spelling, no other
+    characters; in-cluster single-label names allowed). Anything else
+    refuses the Run with an error naming the setting's sources, never its
+    value.
+  - egress_allow refusals never echo the entry or any part of it; they name
+    the problem class, and the list check adds "entry N".
   - Rules are grouped per protocol and exact port, sorted and deterministic.
 - **Fakes.** `fakeControlClient` embeds `ateapi.ControlClient` and overrides
   only the methods the runtime calls.

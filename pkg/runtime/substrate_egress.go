@@ -270,7 +270,7 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 			// would otherwise reach CreateActorEgressPolicy and fail
 			// only there: v1 egress rule hostnames do not accept IP
 			// addresses. Fail here instead, as a clear config error.
-			return nil, errors.New("substrate: the trusted hub endpoint resolves to IP address form; configure the hub endpoint with a DNS hostname — substrate's egress policy supports hostname patterns only, not IP addresses")
+			return nil, errors.New("substrate: the hub endpoint (hub server dispatch endpoint or broker HubEndpoint) resolves to IP address form; configure it with a DNS hostname — substrate's egress policy supports hostname patterns only, not IP addresses")
 		}
 		t := substrateEgressTarget{protocol: substrate.EgressProtocolTLSPassthrough, host: trustedHubHost, port: port}
 		if scheme == "http" {
@@ -412,28 +412,49 @@ func substrateEgressTargetLess(a, b substrateEgressTarget) bool {
 	return a.host < b.host
 }
 
-// parseTrustedHubEndpoint parses the operator-trusted hub endpoint (design
-// §3.5 v0.5.3, M1): a leading scheme token matched case-insensitively
-// against http/https is lowercased, the host is lowercased, and the value
-// then goes through parseDerivedEndpoint. Anything else (another scheme, an
-// embedded "://", userinfo, an unparseable value) refuses the Run with an
-// error that names the setting and never its value.
-func parseTrustedHubEndpoint(raw string) (scheme, host string, port int32, err error) {
-	s := strings.TrimSpace(raw)
-	lower := strings.ToLower(s)
+// errTrustedHubEndpoint is the refusal for a trusted hub endpoint scion
+// cannot use. It names the operator sources of the setting and never its
+// value.
+var errTrustedHubEndpoint = errors.New("substrate: the hub endpoint (hub server dispatch endpoint or broker HubEndpoint) is not an http:// or https:// URL, or a host[:port], with a plain DNS host name and no userinfo; fix the hub endpoint configuration")
+
+// trustedHubHostPattern is the host form the trusted hub endpoint may use:
+// lowercase DNS labels only (in-cluster single-label names allowed), no
+// wildcard and no other characters (design §3.5 v0.5.4, SEC-R3-1).
+var trustedHubHostPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+// foldHubScheme lowercases a leading scheme token that matches http:// or
+// https:// case-insensitively, and leaves anything else as it is.
+func foldHubScheme(s string) string {
 	for _, p := range []string{"https://", "http://"} {
-		if strings.HasPrefix(lower, p) {
-			s = p + s[len(p):]
-			break
+		if len(s) >= len(p) && strings.EqualFold(s[:len(p)], p) {
+			return p + s[len(p):]
 		}
 	}
-	refusal := errors.New("substrate: the trusted hub endpoint is not an http:// or https:// URL, or a host[:port], without userinfo; fix the hub endpoint configuration")
+	return s
+}
+
+// parseTrustedHubEndpoint parses the operator-trusted hub endpoint (design
+// §3.5 v0.5.3/v0.5.4, M1 and SEC-R3-1): a leading scheme token matched
+// case-insensitively against http/https is lowercased, the host is
+// lowercased, and the value then goes through parseDerivedEndpoint. The host
+// must be an IP literal (refused later, with its own error) or plain DNS
+// labels: no "*", no catch-all spelling, no other characters. Anything else
+// (another scheme, an embedded "://", userinfo, an unparseable value, an
+// illegal host) refuses the Run with errTrustedHubEndpoint.
+func parseTrustedHubEndpoint(raw string) (scheme, host string, port int32, err error) {
+	s := foldHubScheme(strings.TrimSpace(raw))
 	if strings.Contains(s, "@") {
-		return "", "", 0, refusal
+		return "", "", 0, errTrustedHubEndpoint
 	}
 	scheme, host, port, ok := parseDerivedEndpoint(s)
 	if !ok {
-		return "", "", 0, refusal
+		return "", "", 0, errTrustedHubEndpoint
+	}
+	if substrate.IsIPLiteralHost(host) {
+		return scheme, host, port, nil
+	}
+	if host == "all" || !trustedHubHostPattern.MatchString(host) {
+		return "", "", 0, errTrustedHubEndpoint
 	}
 	return scheme, host, port, nil
 }
@@ -528,11 +549,13 @@ func firstEnv(env map[string]string, key string) string {
 }
 
 // hostFromURLEnv returns the hostname portion of the first non-empty env
-// value found among keys, or "" if none are set or parseable.
+// value found among keys, or "" if none are set or parseable. The scheme is
+// folded as for the trusted hub (foldHubScheme), so the mismatch log
+// compares like with like; the result is only ever logged.
 func hostFromURLEnv(env map[string]string, keys ...string) string {
 	for _, k := range keys {
 		if v := env[k]; v != "" {
-			if h := hostFromURL(v); h != "" {
+			if h := hostFromURL(foldHubScheme(strings.TrimSpace(v))); h != "" {
 				return h
 			}
 		}

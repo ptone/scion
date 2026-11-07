@@ -282,7 +282,11 @@ func TestNormalizeEgressAllowEntry_AtAnywhereRefusedWithoutEcho(t *testing.T) {
 // SEC-3: interior whitespace anywhere in an entry is refused (outer
 // whitespace is trimmed), without echoing the entry.
 func TestNormalizeEgressAllowEntry_InteriorWhitespaceRefused(t *testing.T) {
-	for _, bad := range []string{"api. example.com", "api.example.com :443", "api.example.com:\t443", "http://api.example .com", "https://api.example.com/ x"} {
+	for _, bad := range []string{"api. example.com", "api.example.com :443", "api.example.com:\t443", "http://api.example .com", "https://api.example.com/ x",
+		// Whitespace combined with forms the whole-entry checks refuse:
+		// the whitespace refusal runs first.
+		"10.0.0.1 x", "* x", "0.0.0.0/0 x", "[::1] x",
+	} {
 		got, err := NormalizeEgressAllowEntry(bad)
 		if err == nil || !strings.Contains(err.Error(), "whitespace") {
 			t.Errorf("NormalizeEgressAllowEntry(%q) = %+v, %v; want the whitespace refusal", bad, got, err)
