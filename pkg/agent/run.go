@@ -2609,6 +2609,13 @@ authDone:
 		}
 	}
 
+	// The metadata interception, and the operator-only opt-out the Podman
+	// runtime checks when rootless Podman cannot install it. Only Podman
+	// reads the opt-out, so other runtimes skip the settings read.
+	metadataInterception := metadataInterceptionGranted(m.Runtime.Name(), networkMode, agentEnv)
+	allowUninterceptedMetadata, uninterceptedMetadataCloudAck := uninterceptedMetadataOptOut(opts.Name,
+		metadataInterception && m.Runtime.Name() == "podman")
+
 	runCfg := runtime.RunConfig{
 		Name:                   containerName(projectName, opts.Name),
 		PrivateGitConfigSource: privateGitConfigSource,
@@ -2809,11 +2816,13 @@ authDone:
 			}
 			return ""
 		}(),
-		Debug:                util.DebugEnabled(),
-		Resume:               opts.Resume,
-		MetadataInterception: metadataInterceptionGranted(m.Runtime.Name(), networkMode, agentEnv),
-		ExtraHosts:           runExtraHosts,
-		NetworkMode:          networkMode,
+		Debug:                         util.DebugEnabled(),
+		Resume:                        opts.Resume,
+		MetadataInterception:          metadataInterception,
+		AllowUninterceptedMetadata:    allowUninterceptedMetadata,
+		UninterceptedMetadataCloudAck: uninterceptedMetadataCloudAck,
+		ExtraHosts:                    runExtraHosts,
+		NetworkMode:                   networkMode,
 		Labels: func() map[string]string {
 			l := map[string]string{
 				"scion.agent":          "true",

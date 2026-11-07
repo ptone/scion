@@ -273,6 +273,27 @@
           "description": "Apply built-in resource defaults (limits.cpu '2') to agents with no limits from any other tier. Defaults to true when unset. Set false to restore unlimited Docker/Podman containers.",
           "x-scope": "any",
           "x-since": "1"
+        },
+        "allow_unintercepted_metadata": {
+          "type": "object",
+          "description": "Operator opt-out that lets rootless Podman start agents in GCP metadata block or assign mode without the in-container metadata interception. Read only from the broker's global settings; ignored in project settings. A start is allowed only when both fields are true.",
+          "x-scope": "global",
+          "x-since": "1",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Allow such starts. Defaults to false.",
+              "x-scope": "global",
+              "x-since": "1"
+            },
+            "acknowledge_cloud_host": {
+              "type": "boolean",
+              "description": "Acknowledge that on a cloud host the agent can reach the instance metadata server and the broker's cloud identity. Required with enabled. Defaults to false.",
+              "x-scope": "global",
+              "x-since": "1"
+            }
+          }
         }
       }
     },

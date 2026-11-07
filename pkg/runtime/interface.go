@@ -104,6 +104,15 @@ type RunConfig struct {
 	Project              string   // Project name (e.g., "global" or "my-project")
 	ProjectID            string   // Project ID (e.g., "550e8400-e29b-41d4-a716-446655440000")
 
+	// AllowUninterceptedMetadata and UninterceptedMetadataCloudAck are the
+	// operator's runtime.allow_unintercepted_metadata opt-out (enabled and
+	// acknowledge_cloud_host), read from the broker's global settings only.
+	// A runtime that cannot install the interception MetadataInterception
+	// requests refuses the start unless both are true (see the Podman
+	// runtime's checkUninterceptedMetadata).
+	AllowUninterceptedMetadata    bool
+	UninterceptedMetadataCloudAck bool
+
 	// PrivateGitConfigSource is the host path to the per-agent private copy of
 	// the repository's .git/config, seeded by the broker into the agent's
 	// (broker-owned, agent-scoped) state dir. For git-backed worktree and

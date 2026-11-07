@@ -3054,6 +3054,23 @@ type V1RuntimeDefaultsConfig struct {
 	// Set to false to restore the pre-2026-07 behaviour of running Docker and
 	// Podman containers with no cgroup limits at all.
 	EnforceResourceDefaults *bool `json:"enforce_resource_defaults,omitempty" yaml:"enforce_resource_defaults,omitempty" koanf:"enforce_resource_defaults"`
+
+	// AllowUninterceptedMetadata lets a runtime that cannot install the
+	// in-container metadata interception start a block- or assign-mode agent
+	// anyway. Operator-only:
+	// it is honored only from the broker's global settings (see
+	// UninterceptedMetadataOptOut), never from project settings.
+	AllowUninterceptedMetadata *V1UninterceptedMetadataOptOut `json:"allow_unintercepted_metadata,omitempty" yaml:"allow_unintercepted_metadata,omitempty" koanf:"allow_unintercepted_metadata"`
+}
+
+// V1UninterceptedMetadataOptOut is runtime.allow_unintercepted_metadata.
+// Both fields default to false, and a start is allowed only when both are
+// true: Enabled is the opt-out, AcknowledgeCloudHost the explicit
+// acknowledgement that the agent can then reach the host's instance
+// metadata server and the broker's cloud identity.
+type V1UninterceptedMetadataOptOut struct {
+	Enabled              bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	AcknowledgeCloudHost bool `json:"acknowledge_cloud_host,omitempty" yaml:"acknowledge_cloud_host,omitempty" koanf:"acknowledge_cloud_host"`
 }
 
 // HarnessConfigEntry defines a harness configuration entry in versioned settings.
