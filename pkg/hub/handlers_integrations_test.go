@@ -3100,6 +3100,13 @@ func TestSupervisionConfigProvider_ReportsUnreadableInputs(t *testing.T) {
 			rec := &supervisionWiringRecorder{mockIntegrationManager: newMockIntegrationManager()}
 			rec.plugins["discord"] = map[string]string{}
 			srv, st := testServer(t)
+			// Close the server's own broker auth service before dropping it:
+			// Shutdown closes only srv.brokerAuthService, so a dropped service
+			// would keep its nonce cache goroutine until the package exits,
+			// which the package-exit goroutine guard counts.
+			if svc := srv.brokerAuthService; svc != nil {
+				svc.Close()
+			}
 			srv.brokerAuthService = nil
 			tc.setup(t, srv, st, rec)
 			srv.SetPluginManager(rec)
