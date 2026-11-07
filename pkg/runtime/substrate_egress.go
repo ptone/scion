@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -74,9 +75,9 @@ var vertexRegionLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z
 // Google-owned regional endpoint is reached, never redirect to
 // infrastructure outside Google's own, so this needs no egress_allow
 // coverage gate, the same trust basis as the other entries in
-// hardcodedModelEgressHosts. An invalid region adds no host and logs a
-// warning; it never refuses the Run (design-addenda A4: binary-fixed hosts
-// never refuse a Run).
+// hardcodedModelEgressHosts. An empty or unset region maps to the global
+// endpoint; an invalid region refuses the Run, fail closed, with an error
+// that names CLOUD_ML_REGION and never its value (design §3.5 N5-1, N5-5).
 //
 // This covers ONLY the Claude harness's Vertex AI integration — the sole
 // one substrate currently wires through container_script_harness.go's
@@ -85,48 +86,45 @@ var vertexRegionLabelPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z
 // treatment — a validated, fixed-Google-suffix host via add(), or a tenant
 // host via checkTenantHost's coverage check — added here when that harness is
 // wired for substrate.
-func addVertexAIHost(add func(string), env map[string]string) {
+func addVertexAIHost(add func(string), env map[string]string) error {
 	usesVertex := env["CLAUDE_CODE_USE_VERTEX"] != "" ||
 		env["ANTHROPIC_VERTEX_PROJECT_ID"] != "" ||
 		env["CLOUD_ML_REGION"] != ""
 	if !usesVertex {
-		return
+		return nil
 	}
 	region := env["CLOUD_ML_REGION"]
 	var host string
 	switch {
-	case region == "":
-		// Refused, with no rule (sec-review-3 condition on design-addenda
-		// A4): the host is only ever built from one validated label.
-		slog.Warn("substrate: CLOUD_ML_REGION is empty; no Vertex AI egress host added")
-		return
-	case region == "global":
+	case region == "" || region == "global":
+		// Empty or unset maps to the global endpoint, a fixed name.
 		host = "aiplatform.googleapis.com"
-	default:
-		if !vertexRegionLabelPattern.MatchString(region) {
-			// The region value is not logged: it is agent input.
-			slog.Warn("substrate: CLOUD_ML_REGION is not a single valid DNS label; no Vertex AI egress host added")
-			return
-		}
+	case vertexRegionLabelPattern.MatchString(region):
 		host = region + "-aiplatform.googleapis.com"
+	default:
+		// Fail closed. The value is agent input and never appears in this
+		// error or in any log line.
+		return errors.New("substrate: CLOUD_ML_REGION is not \"global\" or a single lowercase DNS label (a GCP region name); refusing to build a Vertex AI egress host from it")
 	}
 	normalized, err := substrate.NormalizeEgressAllowEntry(host)
 	if err != nil {
-		slog.Warn("substrate: constructed Vertex AI host failed validation; no Vertex AI egress host added", "error", err)
-		return
+		return errors.New("substrate: the Vertex AI egress host built from CLOUD_ML_REGION failed validation")
 	}
 	add(normalized.Host)
+	return nil
 }
 
 // addBinaryFixedHosts adds the BINARY-FIXED source class (design-addenda
 // A4): hardcodedModelEgressHosts, and the Vertex AI regional host (one
 // validated label under the fixed googleapis.com suffix). Moving the Vertex
-// host to the tenant-derived class is a one-line edit here.
-func addBinaryFixedHosts(addFixed func(string), env map[string]string) {
+// host to the tenant-derived class is a one-line edit here. The only error
+// is an invalid CLOUD_ML_REGION (design §3.5 N5-1, fail closed); an
+// operator-protocol conflict on a fixed host is skipped, never refused.
+func addBinaryFixedHosts(addFixed func(string), env map[string]string) error {
 	for _, h := range hardcodedModelEgressHosts {
 		addFixed(h)
 	}
-	addVertexAIHost(addFixed, env)
+	return addVertexAIHost(addFixed, env)
 }
 
 // substrateEgressTarget is one allowed egress destination: a host pattern
@@ -173,10 +171,10 @@ const substrateHTTPSPort int32 = 443
 //  3. BINARY-FIXED, the hosts fixed in this binary:
 //     hardcodedModelEgressHosts and the Vertex AI host (a validated region
 //     label under the fixed googleapis.com suffix), TLS passthrough on 443.
-//     They never refuse a Run: when an operator-trusted source already has
-//     the same host and port under another protocol, the fixed host is
-//     skipped with a warning, so the operator's choice stands; an invalid
-//     region adds no Vertex host.
+//     An operator conflict never refuses a Run: when an operator-trusted
+//     source already has the same host and port under another protocol,
+//     the fixed host is skipped with a warning, so the operator's choice
+//     stands. The one refusal is an invalid CLOUD_ML_REGION (N5-1).
 //
 // The same host and port from two operator-trusted sources under different
 // protocols is a config refusal (v1 would rank them as a tie).
@@ -294,7 +292,9 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 	}
 
 	// Source class BINARY-FIXED.
-	addBinaryFixedHosts(addFixed, env)
+	if err := addBinaryFixedHosts(addFixed, env); err != nil {
+		return nil, err
+	}
 
 	// covered reports whether an operator-trusted rule with the same
 	// protocol and port covers host.
@@ -421,8 +421,9 @@ func substrateEgressTargetLess(a, b substrateEgressTarget) bool {
 // "<name>://" yields that name, which callers refuse); a value with no
 // scheme is https. A missing port is the scheme's default (443 for https,
 // 80 for http, 0 for anything else). An IPv6 literal must be bracketed. ok
-// is false when no host can be extracted or the port is not a number from
-// 1 to 65535. No URL parser is used.
+// is false when no host can be extracted, the port is not a number from 1
+// to 65535, or an "@" appears after the first "/", "?" or "#". No URL
+// parser is used.
 func parseDerivedEndpoint(raw string) (scheme, host string, port int32, ok bool) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -441,8 +442,13 @@ func parseDerivedEndpoint(raw string) (scheme, host string, port int32, ok bool)
 		scheme = "https"
 	}
 	// The authority ends at the first "/", "?" or "#"; userinfo ends at
-	// the last "@" before it.
+	// the last "@" before it. An "@" anywhere after that first delimiter
+	// means a malformed userinfo held one of those characters, so the
+	// value is unparseable: callers then log the source setting only.
 	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		if strings.Contains(s[i:], "@") {
+			return "", "", 0, false
+		}
 		s = s[:i]
 	}
 	if i := strings.LastIndex(s, "@"); i >= 0 {

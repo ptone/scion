@@ -777,10 +777,41 @@ func TestParseDerivedEndpoint(t *testing.T) {
 		"https://[::1":                                {"", "", 0, false},
 		"2001:db8::1":                                 {"", "", 0, false},
 		"":                                            {"", "", 0, false},
+		// An "@" after the first "/", "?" or "#" (a malformed userinfo
+		// holding that delimiter) makes the value unparseable (N5-2).
+		"https://tok/user@host.example.com":  {"", "", 0, false},
+		"https://tok?user@host.example.com":  {"", "", 0, false},
+		"https://tok#user@host.example.com":  {"", "", 0, false},
+		"https://host.example.com/path@x":    {"", "", 0, false},
+		"https://u@host.example.com/p?x=1#y": {"https", "host.example.com", 443, true},
 	} {
 		s, h, p, ok := parseDerivedEndpoint(raw)
 		if got := (res{s, h, p, ok}); got != want {
 			t.Errorf("parseDerivedEndpoint(%q) = %+v, want %+v", raw, got, want)
 		}
+	}
+}
+
+// Design §9 AC9 (N5-2): a tenant value with an "@" after the first "/", "?"
+// or "#" is unparseable: no rule, and a warning that names the source
+// setting only (no host, userinfo, path or query).
+func TestSubstrateEgressTargets_AtAfterDelimiterUnparseable(t *testing.T) {
+	for _, delim := range []string{"/", "?", "#"} {
+		t.Run(delim, func(t *testing.T) {
+			logs := &syncBuffer{}
+			setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
+			sc := config.V1SubstrateConfig{EgressAllow: []string{"tokhost.example.com", "real.example.com"}}
+			env := map[string]string{"SCION_OTEL_ENDPOINT": "https://tokhost.example.com" + delim + "tok-secret@real.example.com:4317"}
+			assertTenantOnlyUnchanged(t, RunConfig{}, sc, env)
+			out := logs.String()
+			if !strings.Contains(out, "source=SCION_OTEL_ENDPOINT") {
+				t.Errorf("log = %q, want a warning naming the source setting", out)
+			}
+			for _, leak := range []string{"tokhost", "tok-secret", "real.example.com"} {
+				if strings.Contains(out, leak) {
+					t.Errorf("log = %q, leaks %q", out, leak)
+				}
+			}
+		})
 	}
 }

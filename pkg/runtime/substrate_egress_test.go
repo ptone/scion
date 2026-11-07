@@ -148,6 +148,16 @@ func TestSubstrateEgressHostnames_VertexAIHost(t *testing.T) {
 			want: "us-central1-aiplatform.googleapis.com",
 		},
 		{
+			name: "Vertex indicated with no region set",
+			env:  map[string]string{"CLAUDE_CODE_USE_VERTEX": "1"},
+			want: "aiplatform.googleapis.com",
+		},
+		{
+			name: "Vertex indicated with an empty region",
+			env:  map[string]string{"CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": ""},
+			want: "aiplatform.googleapis.com",
+		},
+		{
 			name: "explicit global region",
 			env:  map[string]string{"CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": "global"},
 			want: "aiplatform.googleapis.com",
@@ -181,11 +191,11 @@ func TestSubstrateEgressHostnames_NoVertexHostWithoutVertexAuth(t *testing.T) {
 	}
 }
 
-// TestSubstrateEgressHostnames_InvalidVertexRegionDropped proves an invalid
-// CLOUD_ML_REGION adds no Vertex AI host (never a wildcard or extra label)
-// and does not refuse the Run (design-addenda A4: binary-fixed hosts never
-// refuse a Run); a warning is logged without the region value.
-func TestSubstrateEgressHostnames_InvalidVertexRegionDropped(t *testing.T) {
+// TestSubstrateEgressHostnames_InvalidVertexRegionRefused proves an invalid
+// CLOUD_ML_REGION (not "global", not one lowercase DNS label) refuses the
+// Run, fail closed, with no host built (design §3.5 N5-1), and that the
+// region value appears neither in the error nor in any log line (N5-5).
+func TestSubstrateEgressHostnames_InvalidVertexRegionRefused(t *testing.T) {
 	cases := []struct {
 		name   string
 		region string
@@ -198,11 +208,10 @@ func TestSubstrateEgressHostnames_InvalidVertexRegionDropped(t *testing.T) {
 		{name: "empty trailing label", region: "us."},
 		{name: "empty leading label", region: ".us"},
 		{name: "empty inner label", region: "us..east1"},
-		{name: "label over 63 chars", region: strings.Repeat("a", 64)},
+		{name: "label over 63 chars", region: strings.Repeat("q", 64)},
 		{name: "percent-encoded dot", region: "us%2eeast1"},
 		{name: "escape form", region: "us\\x2eeast1"},
 		{name: "space", region: "us east1"},
-		{name: "empty", region: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -210,16 +219,17 @@ func TestSubstrateEgressHostnames_InvalidVertexRegionDropped(t *testing.T) {
 			setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
 			env := map[string]string{"CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": tc.region}
 			hosts, err := substrateEgressTargetHosts(RunConfig{}, env, config.V1SubstrateConfig{})
-			if err != nil {
-				t.Fatalf("substrateEgressTargetHosts() with CLOUD_ML_REGION=%q: error = %v, want the host dropped, not a refusal", tc.region, err)
+			if err == nil {
+				t.Fatalf("substrateEgressTargetHosts() with CLOUD_ML_REGION=%q: error = nil (hosts %v), want a refusal", tc.region, hosts)
 			}
-			for _, h := range hosts {
-				if strings.Contains(h, "aiplatform") || strings.Contains(h, "*") {
-					t.Errorf("host %q reached the result for an invalid region", h)
-				}
+			if !strings.Contains(err.Error(), "CLOUD_ML_REGION") {
+				t.Errorf("error = %q, want it to name CLOUD_ML_REGION", err)
 			}
-			if !strings.Contains(logs.String(), "CLOUD_ML_REGION") {
-				t.Errorf("log = %q, want the invalid-region warning", logs.String())
+			if strings.Contains(err.Error(), tc.region) {
+				t.Errorf("error = %q contains the region value", err)
+			}
+			if strings.Contains(logs.String(), tc.region) {
+				t.Errorf("log = %q contains the region value", logs.String())
 			}
 		})
 	}
