@@ -619,7 +619,8 @@ func TestValidateEgressAllow_KnownBypasses(t *testing.T) {
 		{"IP/CIDR: partial dotted-quad", "127.1", reasonIPCIDR},
 		{"unsupported character: bracketed IPv6", "[::1]", reasonUnsupportedChar},
 		{"unsupported character: IPv6 zone id", "fe80::1%eth0", reasonUnsupportedChar},
-		{"invalid hostname: host:port", "10.0.0.1:443", reasonNotValidHost},
+		// host:port is valid syntax; the IP host is what is refused.
+		{"IP/CIDR: IP host with a port", "10.0.0.1:443", reasonIPCIDR},
 		{"IP/CIDR: Class E reserved", "240.0.0.0/4", reasonIPCIDR},
 		{"IP/CIDR: 6to4", "2002::/16", reasonIPCIDR},
 		{"IP/CIDR: NAT64 (well-known prefix)", "64:ff9b::/96", reasonIPCIDR},
@@ -844,7 +845,7 @@ func TestValidateEgressAllow_LocalhostForms(t *testing.T) {
 }
 
 // TestEgressAllowCovers exercises the exact-match and single-level wildcard
-// coverage rule directly, independent of substrateEgressHostnames' own
+// coverage rule directly, independent of substrateEgressTargets' own
 // caller.
 func TestEgressAllowCovers(t *testing.T) {
 	cases := []struct {

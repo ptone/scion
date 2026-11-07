@@ -1586,7 +1586,7 @@ authDone:
 	// api.StartOptions.TrustedHubEndpoint's own doc comment), a field set
 	// separately from opts.Env so a creator-controlled env value can never
 	// reach it even when every operator tier is empty; if empty, no hub host
-	// is trusted at all (fail closed; see substrateEgressHostnames). Outside
+	// is trusted at all (fail closed; see substrateEgressTargets). Outside
 	// broker mode, callerHubEndpoint (opts.Env, captured at the top of Start
 	// before any override could touch it), falling back to
 	// projectSettingsHubEndpoint (an operator-controlled file). The

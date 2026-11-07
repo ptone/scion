@@ -80,7 +80,7 @@ type RunConfig struct {
 	// env-resolution behaviour for every other runtime is unchanged.
 	// Substrate uses it as the one egress-allowlisted hub host, independent
 	// of whatever SCION_HUB_ENDPOINT/SCION_HUB_URL end up in the final
-	// agent env (see substrateEgressHostnames) — an agent/template env
+	// agent env (see substrateEgressTargets) — an agent/template env
 	// override can point the *agent's own* hub calls at a different value,
 	// but must never widen the egress allowlist to match it.
 	TrustedHubEndpoint string

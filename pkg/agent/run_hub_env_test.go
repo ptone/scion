@@ -690,7 +690,7 @@ func setupTrustedHubEndpointTestProject(t *testing.T, agentName, agentLevelHubEn
 }
 
 // TestStartTrustedHubEndpoint pins the Start->RunConfig.TrustedHubEndpoint
-// path directly (not just substrateEgressHostnames), so that capturing
+// path directly (not just substrateEgressTargets), so that capturing
 // callerHubEndpoint anywhere other than the top of Start — in particular,
 // after the agent-level Hub-config override applies — fails one of these
 // cases. The broker-mode cases are hub-dispatched starts, so each carries a

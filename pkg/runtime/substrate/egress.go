@@ -17,7 +17,9 @@ package substrate
 import (
 	"fmt"
 	"net/netip"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -134,9 +136,9 @@ func Validate(s *config.V1SubstrateConfig) error {
 }
 
 // supportedEgressTrustBundle is the only trust bundle name the vendored
-// Substrate version (d277088b) resolves — see
-// docs/egress-trust-bundle.md and demos/egress/egress-mitm-template.yaml.tmpl
-// in agent-substrate/substrate. Kept as a single named constant rather than
+// Substrate version (v1.0.0, third_party/substrate/ateapi/v1) resolves —
+// see docs/egress-trust-bundle.md and
+// demos/egress/egress-mitm-template.yaml.tmpl in agent-substrate/substrate. Kept as a single named constant rather than
 // a slice: ValidateEgressTrustBundle's doc comment explains why a future
 // second name is meant to grow this into an allowlist, not change the
 // field's type.
@@ -144,7 +146,7 @@ const supportedEgressTrustBundle = "egress-mitm.ate.dev"
 
 // ValidateEgressTrustBundle rejects an egress_trust_bundle value that is not
 // empty (off) and not exactly supportedEgressTrustBundle — the only name
-// Substrate d277088b's atelet actually resolves. An unsupported name would
+// the vendored Substrate version's atelet actually resolves. An unsupported name would
 // not fail here; it would fail much later and much less clearly, at actor
 // start, with atelet's own "ClusterTrustBundle ... not found" (a name not on
 // its allowlist gets the same wording as one simply missing from the
@@ -161,9 +163,10 @@ func ValidateEgressTrustBundle(name string) error {
 }
 
 // ValidateEgressAllow is allowlist-first: it accepts only public FQDNs —
-// no IP addresses or CIDRs at all (Substrate's own HostnameRule.patterns,
-// which is what these entries feed, explicitly rejects IP addresses;
-// CIDRRule support is future work). The full public-suffix
+// no IP addresses or CIDRs at all (Substrate's v1 egress rule hostnames,
+// which is what these entries feed, explicitly reject IP addresses). Each
+// entry may name a port or an http:// scheme (see NormalizeEgressAllowEntry);
+// the host part is checked as described below. The full public-suffix
 // acceptance rule is isolated in egressAllowSuffixOK; see its doc comment
 // for the exact checks (a special-use-TLD block ahead of everything else,
 // an ICANN-listed-TLD check, at least one label beneath the domain's own
@@ -245,12 +248,69 @@ func ValidateEgressTrustBundle(name string) error {
 // Empty entries are ignored. The returned error names the offending entry
 // as originally written, before normalization.
 func ValidateEgressAllow(entries []string) error {
+	_, err := ParseEgressAllow(entries)
+	return err
+}
+
+// EgressProtocol is the v1 egress rule kind an egress_allow entry becomes.
+type EgressProtocol string
+
+const (
+	// EgressProtocolHTTP is a cleartext HTTP rule (v1 HttpRule).
+	EgressProtocolHTTP EgressProtocol = "http"
+	// EgressProtocolTLSPassthrough is TLS forwarded without decryption
+	// (v1 TlsPassthroughRule).
+	EgressProtocolTLSPassthrough EgressProtocol = "tls_passthrough"
+)
+
+// Default ports for an egress_allow entry that names none.
+const (
+	defaultHTTPPort  int32 = 80
+	defaultHTTPSPort int32 = 443
+)
+
+// EgressAllowTarget is one parsed egress_allow entry: a host pattern (the
+// canonical form NormalizeEgressAllowEntry returns: an exact hostname or a
+// single-label "*." wildcard) on exactly one port, never a range or all
+// ports.
+type EgressAllowTarget struct {
+	Protocol EgressProtocol
+	Host     string
+	Port     int32
+}
+
+// ParseEgressAllow validates every entry exactly as NormalizeEgressAllowEntry
+// does (the same implementation, normalizeEgressAllowEntry) and returns the
+// typed targets, skipping empty entries. It rejects a list that names the
+// same host and port with both http and TLS: v1 would rank them as a tie.
+func ParseEgressAllow(entries []string) ([]EgressAllowTarget, error) {
+	var targets []EgressAllowTarget
+	protoByHostPort := make(map[string]EgressProtocol)
 	for _, raw := range entries {
-		if _, err := NormalizeEgressAllowEntry(raw); err != nil {
-			return err
+		t, ok, err := normalizeEgressAllowEntry(raw)
+		if err != nil {
+			return nil, err
 		}
+		if !ok {
+			continue
+		}
+		key := t.Host + ":" + strconv.Itoa(int(t.Port))
+		if prev, seen := protoByHostPort[key]; seen && prev != t.Protocol {
+			return nil, fmt.Errorf("egress_allow names %s as both %s and %s; one host and port can have only one protocol", key, prev, t.Protocol)
+		}
+		protoByHostPort[key] = t.Protocol
+		targets = append(targets, t)
 	}
-	return nil
+	return targets, nil
+}
+
+// parseEgressPort parses an exact TCP port, 1 to 65535.
+func parseEgressPort(raw, p string) (int32, error) {
+	n, err := strconv.ParseUint(p, 10, 16)
+	if err != nil || n == 0 {
+		return 0, fmt.Errorf("egress_allow entry %q has invalid port %q; a port is a number from 1 to 65535", raw, p)
+	}
+	return int32(n), nil
 }
 
 // NormalizeEgressAllowEntry validates raw as an egress_allow entry and
@@ -259,12 +319,133 @@ func ValidateEgressAllow(entries []string) error {
 // should skip). This function is deliberately both the validator and the
 // normalizer: the string it returns is exactly the string that passed
 // every check, so what's validated and what's sent cannot drift apart.
-// ValidateEgressAllow and pkg/runtime.substrateEgressHostnames both call
-// this; neither should reimplement or bypass it.
+// ValidateEgressAllow, ParseEgressAllow and pkg/runtime.substrateEgressTargets
+// all go through it (or normalizeEgressAllowEntry, its implementation);
+// none should reimplement or bypass it.
+//
+// Accepted forms, and the canonical string each returns:
+//
+//   - "host" or "*.host": TLS passthrough on 443 (canonical "host"). A bare
+//     host narrows from any port (the pre-1.0 API) to 443 (v1), by design;
+//   - "host:port" or "*.host:port": TLS passthrough on that port
+//     (canonical "host:port", or "host" for 443);
+//   - "https://host[:port]": the same as the bare forms;
+//   - "http://host[:port]": cleartext HTTP on that port, default 80
+//     (canonical "http://host:port").
+//
+// The port is an integer from 1 to 65535. A URL form carries no userinfo,
+// path (other than "/"), query or fragment. The host part passes every
+// host check below (validatePublicHostname and the catch-all, IP/CIDR and
+// blocked-suffix refusals), so no syntax admits an in-cluster or IP host.
+//
+// A "*.host" wildcard keeps today's meaning without widening: the v1 rule
+// pattern syntax matches exactly one leftmost label, as EgressAllowCovers
+// does ("*.example.com" matches "api.example.com", not "example.com" or
+// "nested.api.example.com": third_party/substrate/ateapi/v1/ateapi.proto
+// :683-685, the syntax tls_passthrough and https rules share, :726, :755),
+// so the entry is sent as the same pattern, never a broader one.
 func NormalizeEgressAllowEntry(raw string) (string, error) {
-	e := strings.TrimSpace(raw)
-	e = strings.ToLower(e)
-	e = strings.TrimSuffix(e, ".") // at most one trailing dot; see the doc on egressAllowLabelPattern for why a second one isn't stripped too.
+	t, ok, err := normalizeEgressAllowEntry(raw)
+	if err != nil || !ok {
+		return "", err
+	}
+	switch {
+	case t.Protocol == EgressProtocolHTTP:
+		return "http://" + t.Host + ":" + strconv.Itoa(int(t.Port)), nil
+	case t.Port != defaultHTTPSPort:
+		return t.Host + ":" + strconv.Itoa(int(t.Port)), nil
+	default:
+		return t.Host, nil
+	}
+}
+
+// normalizeEgressAllowEntry is NormalizeEgressAllowEntry's implementation,
+// returning the typed target. ok is false (with a nil error) for an empty
+// entry.
+func normalizeEgressAllowEntry(raw string) (target EgressAllowTarget, ok bool, err error) {
+	e := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
+	if e == "" {
+		return EgressAllowTarget{}, false, nil
+	}
+	// Catch-alls, IP and CIDR spellings (including IPv6, whose colons are
+	// not a port separator) and bracketed or zoned forms are refused by
+	// the host checks on the whole entry, with the same errors as before
+	// ports existed.
+	if egressAllowCatchAllValues[e] || isBareWildcard(e) || strings.ContainsAny(e, "[]%") || looksLikeIPAttempt(e) {
+		if _, herr := normalizeEgressAllowHost(raw, e); herr != nil {
+			return EgressAllowTarget{}, false, herr
+		}
+		return EgressAllowTarget{}, false, fmt.Errorf("egress_allow entry %q is not permitted", raw)
+	}
+
+	protocol := EgressProtocolTLSPassthrough
+	port := defaultHTTPSPort
+	hostPart := e
+	switch {
+	case strings.Contains(e, "://"):
+		u, perr := url.Parse(e)
+		if perr != nil {
+			if strings.Contains(perr.Error(), "invalid port") {
+				return EgressAllowTarget{}, false, fmt.Errorf("egress_allow entry %q has invalid port; a port is a number from 1 to 65535", raw)
+			}
+			return EgressAllowTarget{}, false, fmt.Errorf("egress_allow entry %q is not a valid URL", raw)
+		}
+		if u.User != nil {
+			// The entry is not echoed: userinfo may carry a credential.
+			return EgressAllowTarget{}, false, fmt.Errorf("an egress_allow URL entry carries userinfo, which is not permitted; write it as http://host[:port] or host:port")
+		}
+		if u.Path != "" && u.Path != "/" {
+			return EgressAllowTarget{}, false, fmt.Errorf("egress_allow entry %q may not carry a path; write it as http://host[:port] or host:port", raw)
+		}
+		if u.RawQuery != "" || u.ForceQuery {
+			return EgressAllowTarget{}, false, fmt.Errorf("egress_allow entry %q may not carry a query; write it as http://host[:port] or host:port", raw)
+		}
+		if u.Fragment != "" || strings.Contains(e, "#") {
+			return EgressAllowTarget{}, false, fmt.Errorf("egress_allow entry %q may not carry a fragment; write it as http://host[:port] or host:port", raw)
+		}
+		if u.Opaque != "" {
+			return EgressAllowTarget{}, false, fmt.Errorf("egress_allow entry %q is not a valid URL", raw)
+		}
+		switch u.Scheme {
+		case "http":
+			protocol, port = EgressProtocolHTTP, defaultHTTPPort
+		case "https":
+		default:
+			return EgressAllowTarget{}, false, fmt.Errorf("egress_allow entry %q has unsupported scheme %q; use http:// or https://, or host:port", raw, u.Scheme)
+		}
+		hostPart = u.Hostname()
+		if p := u.Port(); p != "" {
+			if port, err = parseEgressPort(raw, p); err != nil {
+				return EgressAllowTarget{}, false, err
+			}
+		} else if strings.HasSuffix(u.Host, ":") {
+			return EgressAllowTarget{}, false, fmt.Errorf("egress_allow entry %q has invalid port %q; a port is a number from 1 to 65535", raw, "")
+		}
+	case strings.Contains(e, ":"):
+		h, p, _ := strings.Cut(e, ":")
+		if strings.Contains(p, ":") {
+			return EgressAllowTarget{}, false, fmt.Errorf("egress_allow entry %q is not host:port", raw)
+		}
+		hostPart = h
+		if port, err = parseEgressPort(raw, p); err != nil {
+			return EgressAllowTarget{}, false, err
+		}
+	}
+
+	host, err := normalizeEgressAllowHost(raw, hostPart)
+	if err != nil {
+		return EgressAllowTarget{}, false, err
+	}
+	if host == "" {
+		return EgressAllowTarget{}, false, fmt.Errorf("egress_allow entry %q names no host", raw)
+	}
+	return EgressAllowTarget{Protocol: protocol, Host: host, Port: port}, true, nil
+}
+
+// normalizeEgressAllowHost applies every host check to host (the host part
+// of raw) and returns its canonical form; errors name raw as written.
+func normalizeEgressAllowHost(raw, host string) (string, error) {
+	e := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".") // at most one trailing dot; see the doc on egressAllowLabelPattern for why a second one isn't stripped too.
 	if e == "" {
 		return "", nil
 	}
@@ -288,10 +469,9 @@ func NormalizeEgressAllowEntry(raw string) (string, error) {
 	if wildcard {
 		final = "*." + ascii
 	}
-	// Enforce the total length against the exact string about to be
-	// returned (and sent), including a wildcard prefix — not just the
-	// hostname portion — so what's validated matches what's sendable, same
-	// as everywhere else in this function.
+	// Enforce the total length against the exact host about to be sent,
+	// including a wildcard prefix — not just the hostname portion — so
+	// what's validated matches what's sendable.
 	if len(final) > egressAllowMaxLength {
 		return "", fmt.Errorf("egress_allow entry %q is %d characters long, over the %d-character limit for a DNS name", raw, len(final), egressAllowMaxLength)
 	}
