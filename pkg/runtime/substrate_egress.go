@@ -271,7 +271,7 @@ func substrateEgressTargets(cfg RunConfig, env map[string]string, sc config.V1Su
 			// would otherwise reach CreateActorEgressPolicy and fail
 			// only there: v1 egress rule hostnames do not accept IP
 			// addresses. Fail here instead, as a clear config error.
-			return nil, errors.New("substrate: the hub endpoint (hub server dispatch endpoint, hub connection endpoint or broker HubEndpoint) resolves to IP address form; configure it with a DNS hostname — substrate's egress policy supports hostname patterns only, not IP addresses")
+			return nil, errors.New("substrate: the " + trustedHubSetting + " resolves to IP address form; configure it with a DNS hostname — substrate's egress policy supports hostname patterns only, not IP addresses")
 		}
 		t := substrateEgressTarget{protocol: substrate.EgressProtocolTLSPassthrough, host: trustedHubHost, port: port}
 		if scheme == "http" {
@@ -416,7 +416,11 @@ func substrateEgressTargetLess(a, b substrateEgressTarget) bool {
 // errTrustedHubEndpoint is the refusal for a trusted hub endpoint scion
 // cannot use. It names the operator sources of the setting and never its
 // value.
-var errTrustedHubEndpoint = errors.New("substrate: the hub endpoint (hub server dispatch endpoint, hub connection endpoint or broker HubEndpoint) is not an http:// or https:// URL, or a host[:port], with a plain DNS host name and no userinfo; fix the hub endpoint configuration")
+var errTrustedHubEndpoint = errors.New("substrate: the " + trustedHubSetting + " is not an http:// or https:// URL, or a host[:port], with a plain DNS host name and no userinfo; fix the hub endpoint configuration")
+
+// trustedHubSetting names the trusted hub endpoint setting by its three
+// operator-derived tiers, for every hub refusal; the value is never named.
+const trustedHubSetting = "hub endpoint (hub server dispatch endpoint, hub connection endpoint or broker HubEndpoint)"
 
 // trustedHubHostPattern is the host form the trusted hub endpoint may use:
 // lowercase DNS labels only (in-cluster single-label names allowed), no

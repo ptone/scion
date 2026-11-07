@@ -562,7 +562,7 @@ func TestSubstrateEgressHostnames_IPLiteralTrustedHubRefused(t *testing.T) {
 			if hostsErr == nil {
 				t.Fatalf("substrateEgressTargetHosts() error = nil, want a config error for IP-literal trusted hub endpoint %q (hosts = %v)", tc.endpoint, hosts)
 			}
-			if !strings.Contains(hostsErr.Error(), "resolves to IP address") || !strings.Contains(hostsErr.Error(), "hostname") {
+			if !strings.Contains(hostsErr.Error(), "resolves to IP address") || !strings.Contains(hostsErr.Error(), "hostname") || !strings.Contains(hostsErr.Error(), "hub endpoint (hub server dispatch endpoint, hub connection endpoint or broker HubEndpoint)") {
 				t.Errorf("substrateEgressTargetHosts() error = %q, want the IP-address refusal explaining that only hostname patterns are supported", hostsErr.Error())
 			}
 			if len(hosts) != 0 {

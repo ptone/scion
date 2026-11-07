@@ -73,10 +73,13 @@ template, egress translation and test fake to the v1 shapes.
     nothing.
   - The trusted hub endpoint is parsed by operator rules: a leading
     `http://`/`https://` in any letter case, the host lowercased and limited
-    to plain DNS labels (no `*`, no catch-all spelling, no other
-    characters; in-cluster single-label names allowed). Anything else
-    refuses the Run with an error naming the setting's sources, never its
-    value.
+    to plain DNS labels (no `*`, no catch-all spelling, no trailing dot, no
+    other characters; in-cluster single-label names allowed). A bracketed
+    authority must hold an IP literal (`https://[name]` refuses), and an IP
+    literal gets its own refusal. Anything else refuses the Run with an
+    error naming the setting's three sources, never its value. Stripping a
+    trailing dot, IDNA normalisation (SEC-5) and label-length bounds
+    (SEC-R4-2(a)) are deliberate Phase 1b deferrals (decisions.md).
   - egress_allow refusals never echo the entry or any part of it; they name
     the problem class, and the list check adds "entry N".
   - Rules are grouped per protocol and exact port, sorted and deterministic.
