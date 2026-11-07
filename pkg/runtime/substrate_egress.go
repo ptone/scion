@@ -136,8 +136,10 @@ const substrateHTTPSPort int32 = 443
 // Ports and the cleartext http protocol come ONLY from two
 // operator-trusted sources:
 //
-//  1. cfg.TrustedHubEndpoint, the hub endpoint resolved from broker
-//     configuration (RunConfig's own doc comment; pkg/agent/run.go). An
+//  1. cfg.TrustedHubEndpoint, resolved (unchanged by this code) from the
+//     operator-derived tiers only, never from agent, template, harness or
+//     project settings or env (RunConfig's own doc comment;
+//     pkg/agent/run.go). An
 //     http:// endpoint becomes an http target on its port (default 80);
 //     https:// or a bare host becomes TLS passthrough on its port (default
 //     443). It is not validated as a public hostname: an in-cluster hub
@@ -147,8 +149,11 @@ const substrateHTTPSPort int32 = 443
 //     SCION_HUB_ENDPOINT/SCION_HUB_URL, which an agent/template override
 //     can change, is read only to detect and log a mismatch; it never
 //     adds a target, on any port.
-//  2. Operator egress_allow entries (substrate.NormalizeEgressAllowEntry, via substrate.ParseEgressAllow):
+//  2. Operator egress_allow entries, validated by
+//     substrate.NormalizeEgressAllowEntry (via substrate.ParseEgressAllow):
 //     "host", "host:port", "https://host[:port]" or "http://host[:port]".
+//     A bare host narrows from any port (the pre-1.0 API) to 443, by
+//     design.
 //     egress_allow is operator-only (substrate_operator_only.go).
 //
 // Every other host is TLS passthrough on 443 only:
