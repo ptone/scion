@@ -313,6 +313,8 @@ func TestSubstrateDelete_LaterIncarnationPolicySurvives(t *testing.T) {
 		rec := &callRecorder{}
 		rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 		defer closeServer()
+		// readUID pol-old with current pol-new models the policy being
+		// replaced by a later incarnation between the read and the delete.
 		ps := &policyServer{current: "pol-new", readUID: "pol-old"}
 		ps.install(fc)
 		fc.deleteActor = func(*ateapi.DeleteActorRequest) (*ateapi.Actor, error) {
@@ -541,5 +543,8 @@ func TestSubstrateRun_CleanupNoPolicyDeleteWithoutUID(t *testing.T) {
 	}
 	if indexOf(calls, "DeleteActorEgressPolicy") >= 0 {
 		t.Errorf("calls = %v, want no DeleteActorEgressPolicy without a policy uid", calls)
+	}
+	if indexOf(calls, "ResumeActor") >= 0 {
+		t.Errorf("calls = %v, want no ResumeActor after a failed policy create", calls)
 	}
 }

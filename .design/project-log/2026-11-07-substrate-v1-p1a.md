@@ -113,3 +113,4 @@ template, egress translation and test fake to the v1 shapes.
 
 See the Phase 1a developer report for the compile windows, commands and
 results.
+r12 (comments and tests only): the ErrSubstrateIncarnationChanged doc names the refused actor delete only, and both policy-create-failure tests assert no ResumeActor.

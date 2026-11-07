@@ -654,10 +654,12 @@ func (r *SubstrateRuntime) bootstrapNonce(ctx context.Context, atespace, actorNa
 	return generateControlToken()
 }
 
-// ErrSubstrateIncarnationChanged reports that DeleteActorEgressPolicy or
-// DeleteActor refused a delete because the policy or actor now holding the
-// name is not the one Delete read (its uid differs): a different
-// incarnation exists, and nothing more was deleted.
+// ErrSubstrateIncarnationChanged reports that DeleteActor refused Delete's
+// uid-conditioned actor delete because the actor now holding the name is not
+// the one Delete read (its uid differs): a different incarnation exists, and
+// nothing was deleted. A refused uid-conditioned policy delete after the
+// actor delete is not this error: Delete returns nil, because the policy
+// Delete read is gone and the later incarnation's policy is left in place.
 var ErrSubstrateIncarnationChanged = errors.New("substrate: a different incarnation of the actor exists; nothing deleted")
 
 // substrateDeleteEgressPolicyRequest builds a DeleteActorEgressPolicyRequest
@@ -757,7 +759,8 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, ref RunRef) error {
 	// The actor is gone. With no policy uid there is no policy delete. A
 	// refused policy delete means the policy at the name belongs to a
 	// later incarnation: it is not this Run's to remove, and this Run's
-	// policy is gone.
+	// policy is gone, so Delete returns nil (not
+	// ErrSubstrateIncarnationChanged).
 	if policyUID != "" {
 		_, err = r.client.DeleteActorEgressPolicy(ctx, substrateDeleteEgressPolicyRequest(atespace, actorName, policyUID))
 		if err != nil && status.Code(err) != codes.NotFound && !isSubstrateUIDPreconditionFailure(err, true) {

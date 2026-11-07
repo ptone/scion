@@ -663,7 +663,8 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 		wantErr    string
 		wantAbsent string // optional; asserts this string does NOT appear in the error
 		// noPolicyDelete: the policy create failed, so its uid is unknown
-		// and cleanup issues no policy delete.
+		// and cleanup issues no policy delete; Run also stops before
+		// ResumeActor.
 		noPolicyDelete bool
 	}{
 		{
@@ -800,6 +801,9 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 			}
 			if got := containsCall(calls, "DeleteActorEgressPolicy"); got == tc.noPolicyDelete {
 				t.Errorf("Run() failure: DeleteActorEgressPolicy called = %v, want %v; calls = %v", got, !tc.noPolicyDelete, calls)
+			}
+			if tc.noPolicyDelete && containsCall(calls, "ResumeActor") {
+				t.Errorf("Run() failure: ResumeActor called after a failed policy create; calls = %v", calls)
 			}
 		})
 	}

@@ -255,7 +255,7 @@ func TestSubstrateEgressHostnames_VertexBaseURLOverrideGoesThroughCoverageGate(t
 	})
 
 	t.Run("covered, adds no rule", func(t *testing.T) {
-		// Tenant-derived hosts never emit a rule (design §3.5 R3-1): the
+		// Tenant-derived hosts never emit a rule (design §3.5): the
 		// operator's own entry admits the host, and the tenant value
 		// leaves the rule set unchanged.
 		sc := config.V1SubstrateConfig{EgressAllow: []string{"attacker-controlled.example.com"}}
@@ -827,11 +827,10 @@ func TestSubstrateEgressHostnames_NipIoStyleHostRequiresCoverage(t *testing.T) {
 			})
 			t.Run("covered, adds no rule", func(t *testing.T) {
 				// The operator entry admits the host; the tenant value
-				// adds no rule of its own (design §3.5 R3-1).
+				// adds no rule of its own (design §3.5).
 				sc := config.V1SubstrateConfig{EgressAllow: []string{tc.host}}
 				assertTenantOnlyUnchanged(t, RunConfig{}, sc, env)
 			})
-
 		})
 	}
 }
