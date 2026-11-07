@@ -490,6 +490,12 @@ type Server struct {
 	auxiliaryRuntimes   map[string]auxiliaryRuntime
 	auxiliaryRuntimesMu sync.RWMutex
 
+	// servedProjects is the broker's ProjectSet: the projects it is a
+	// registered provider for on its hub connections. installProjectSet
+	// gives it to every runtime that enters the broker (New, SwapRuntime,
+	// newAuxiliaryRuntime). Set once in New.
+	servedProjects *servedProjects
+
 	// auxDiscoveryDone is closed when the background auxiliary runtime
 	// discovery pass (startAuxiliaryRuntimeDiscovery) has finished, nil
 	// when none was started; auxDiscoveryCancel stops the running pass
@@ -719,6 +725,12 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 		srv.envSecretLog = srv.envSecretLog.With(attrs...)
 	}
 
+	// The served-project set feeds an unfiltered substrate List (substrate
+	// v1 design §3.3). It is loaded by startServedProjectsRefresh; until
+	// then it is cold and such a List fails rather than listing nothing.
+	srv.servedProjects = newServedProjects(srv.servedProjectsSources, logging.Subsystem("broker.served-projects"))
+	srv.installProjectSet(rt)
+
 	srv.workspaceLocks = cfg.WorkspaceLocks
 	if srv.workspaceLocks == nil {
 		srv.workspaceLocks = NewWorkspaceLocks()
@@ -924,6 +936,7 @@ func (s *Server) currentRuntime() scionrt.Runtime {
 // the old (possibly missing) runtime binary. rec is rt's build record; it
 // replaces the old runtime's record in the same critical section.
 func (s *Server) SwapRuntime(rt scionrt.Runtime, rec config.RuntimeBuildRecord) {
+	s.installProjectSet(rt)
 	s.mu.Lock()
 	old := s.runtime.Name()
 	s.runtime = rt
@@ -1740,6 +1753,10 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 		s.onHubConnectionsStarted()
 	}
 
+	// Load the served-project set now that the hub connections run, then
+	// on every reconnect and every 5 minutes (substrate v1 design §3.3).
+	s.startServedProjectsRefresh(ctx)
+
 	// Log a summary of all hub connections
 	s.logHubConnections()
 
@@ -2126,9 +2143,9 @@ func (s *Server) discoverAuxiliaryRuntimesForProjectsCtx(ctx context.Context, pr
 		}
 		discoveredIdentities[identity] = true
 
-		mgr := agent.NewManager(r.rt)
+		aux := s.newAuxiliaryRuntime(r.rt, agent.NewManager(r.rt), r.rec)
 		s.auxiliaryRuntimesMu.Lock()
-		s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: r.rt, Manager: mgr, Record: r.rec}
+		s.auxiliaryRuntimes[identity] = aux
 		s.auxiliaryRuntimesMu.Unlock()
 
 		slog.Info("Discovered auxiliary runtime from project settings",
@@ -2276,7 +2293,7 @@ func (s *Server) applyLateAuxResult(ctx context.Context, c auxProfileCandidate, 
 	s.auxiliaryRuntimesMu.Lock()
 	_, exists := s.auxiliaryRuntimes[identity]
 	if !exists {
-		s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: r.rt, Manager: agent.NewManager(r.rt), Record: r.rec}
+		s.auxiliaryRuntimes[identity] = s.newAuxiliaryRuntime(r.rt, agent.NewManager(r.rt), r.rec)
 	}
 	s.auxiliaryRuntimesMu.Unlock()
 	if !exists {

@@ -282,6 +282,11 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 				OnConnectionStateChange: func(connected bool) {
 					if connected {
 						hc.setStatus(ConnectionStatusConnected)
+						// Every (re)connect reloads the served-project
+						// set (substrate v1 design §3.3).
+						if server.servedProjects != nil {
+							server.servedProjects.requestReload()
+						}
 					} else {
 						hc.setStatus(ConnectionStatusReconnecting)
 					}

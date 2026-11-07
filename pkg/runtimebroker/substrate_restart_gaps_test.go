@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -58,28 +59,77 @@ func simulateBrokerRestart(t *testing.T) {
 	t.Cleanup(runtime.WipeSubstrateAgentStateForTest())
 }
 
-// onlyScopedListFails fails only an atespace-scoped ListActors call — the
-// shape RecordlessActors' probe makes — leaving an unscoped call (List's own
-// cluster-wide listing) unaffected.
-func onlyScopedListFails(err error) func(*ateapi.ListActorsRequest) error {
-	return func(in *ateapi.ListActorsRequest) error {
-		if in.GetAtespace() != "" {
-			return err
-		}
-		return nil
-	}
+// substrateFaults wraps the real SubstrateRuntime so a test can fail its
+// List calls (by call number, counting every List call) or its record-less
+// probe (RecordlessActors) independently. Before operator mode the fake
+// ateapi told the two apart by request shape: List's ListActors was
+// unscoped, the probe's atespace-scoped. Operator-mode List is
+// atespace-scoped too (substrate v1 design §3.3), so the fault is injected
+// at the method. Before operator mode each List call was exactly one
+// unscoped ListActors call, so "List call N" here is what "unscoped call
+// N" was. Every other method and optional capability (the prober,
+// SetProjectSet) is the embedded runtime's.
+type substrateFaults struct {
+	*runtime.SubstrateRuntime
+
+	mu        sync.Mutex
+	listCalls int
+	listErr   func(call int) error
+	probeErr  error
 }
 
-// onlyUnscopedListFails fails only an unscoped ListActors call — the shape
-// SubstrateRuntime.List makes internally (and therefore LookupContainerID,
-// through it) — leaving an atespace-scoped probe call unaffected.
-func onlyUnscopedListFails(err error) func(*ateapi.ListActorsRequest) error {
-	return func(in *ateapi.ListActorsRequest) error {
-		if in.GetAtespace() == "" {
-			return err
+func (f *substrateFaults) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	f.mu.Lock()
+	f.listCalls++
+	n, fail := f.listCalls, f.listErr
+	f.mu.Unlock()
+	if fail != nil {
+		if err := fail(n); err != nil {
+			return nil, err
 		}
-		return nil
 	}
+	return f.SubstrateRuntime.List(ctx, filter)
+}
+
+func (f *substrateFaults) RecordlessActors(ctx context.Context, projectID string) (string, []runtime.RecordlessActor, error) {
+	f.mu.Lock()
+	err := f.probeErr
+	f.mu.Unlock()
+	if err != nil {
+		return runtime.SubstrateAtespaceNameForTest(projectID), nil, err
+	}
+	return f.SubstrateRuntime.RecordlessActors(ctx, projectID)
+}
+
+// failProbe makes every record-less probe fail with err; List is unaffected.
+func (f *substrateFaults) failProbe(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.probeErr = err
+}
+
+// failList makes List call N fail when fail(N) returns an error.
+func (f *substrateFaults) failList(fail func(call int) error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listErr = fail
+}
+
+// everyListFails fails every List call with err.
+func everyListFails(err error) func(int) error {
+	return func(int) error { return err }
+}
+
+// newTestSubstrateBrokerServerWithFaults is newTestSubstrateBrokerServer
+// with the runtime wrapped in substrateFaults.
+func newTestSubstrateBrokerServerWithFaults(t *testing.T) (*Server, *fakeSubstrateControlClient, *substrateFaults) {
+	t.Helper()
+	var faults *substrateFaults
+	srv, fc := newTestSubstrateBrokerServerWith(t, func(rt *runtime.SubstrateRuntime) runtime.Runtime {
+		faults = &substrateFaults{SubstrateRuntime: rt}
+		return faults
+	})
+	return srv, fc, faults
 }
 
 // TestSubstrateBroker_RealRestart_PreRestartAgentIs409_NewAgentDeletes is an
@@ -171,16 +221,13 @@ func TestSubstrateBroker_AbsentSlug_OwnAtespaceAllRecorded_StaysIdempotent(t *te
 }
 
 // TestSubstrateBroker_ProbeOnlyError_ExplicitFailure covers the probe itself
-// failing (only the atespace-scoped ListActors call errors; the resolve-time
-// unscoped List succeeds) — this must be an explicit 5xx for delete and
+// failing (only RecordlessActors errors; the resolve-time List succeeds) — this must be an explicit 5xx for delete and
 // stop, never 404/202. The original probe-error test fails every
 // ListActors, so it returns at listErr (delete) or a clean not-found
 // (stop) before the probe itself ever runs.
 func TestSubstrateBroker_ProbeOnlyError_ExplicitFailure(t *testing.T) {
-	srv, fc := newTestSubstrateBrokerServer(t)
-	fc.mu.Lock()
-	fc.listActorsErrFor = onlyScopedListFails(errors.New("simulated probe failure"))
-	fc.mu.Unlock()
+	srv, _, faults := newTestSubstrateBrokerServerWithFaults(t)
+	faults.failProbe(errors.New("simulated probe failure"))
 
 	w := httptest.NewRecorder()
 	srv.deleteAgent(w, httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil), "dev", gapProjBID)
@@ -195,17 +242,15 @@ func TestSubstrateBroker_ProbeOnlyError_ExplicitFailure(t *testing.T) {
 }
 
 // TestSubstrateBroker_StopLookupErrorNoRecordless_ExplicitErrorNot202 covers
-// a persistent slug lookup failure (every unscoped List call fails) while
+// a persistent slug lookup failure (every List call fails) while
 // the probe would find zero record-less actors. The outcome is unknown, so
 // it must be an explicit error, not the idempotent 202. The actor here is
 // RECORDED — exactly the case the record-less-actor probe alone cannot
 // catch.
 func TestSubstrateBroker_StopLookupErrorNoRecordless_ExplicitErrorNot202(t *testing.T) {
-	srv, fc := newTestSubstrateBrokerServer(t)
+	srv, fc, faults := newTestSubstrateBrokerServerWithFaults(t)
 	runSubstrateAgentForProject(t, srv.manager, "dev", "projb", gapProjBID, testProjectScionDir(t, "projb"))
-	fc.mu.Lock()
-	fc.listActorsErrFor = onlyUnscopedListFails(errors.New("simulated transient list failure"))
-	fc.mu.Unlock()
+	faults.failList(everyListFails(errors.New("simulated transient list failure")))
 
 	w := httptest.NewRecorder()
 	srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", gapProjBID)
@@ -226,11 +271,9 @@ func TestSubstrateBroker_StopLookupErrorNoRecordless_ExplicitErrorNot202(t *test
 // stop agent" message; the raw error is logged server-side only.
 func TestSubstrateBroker_StopLookupError_BodyNeverNamesRuntimeScope(t *testing.T) {
 	leakyDetail := "rpc error: atespace=" + gapAtespaceB + " backend=10.1.2.3:9443 unreachable"
-	srv, fc := newTestSubstrateBrokerServer(t)
+	srv, _, faults := newTestSubstrateBrokerServerWithFaults(t)
 	runSubstrateAgentForProject(t, srv.manager, "dev", "projb", gapProjBID, testProjectScionDir(t, "projb"))
-	fc.mu.Lock()
-	fc.listActorsErrFor = onlyUnscopedListFails(errors.New(leakyDetail))
-	fc.mu.Unlock()
+	faults.failList(everyListFails(errors.New(leakyDetail)))
 
 	w := httptest.NewRecorder()
 	srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", gapProjBID)
@@ -364,23 +407,16 @@ func TestSubstrateBroker_StopThenDeleteWhileActorStillListedDeleting_StaysIdempo
 	}
 }
 
-// unscopedListFailsOnlyOnCallN fails only the Nth unscoped ListActors call
-// (1-indexed, counting only calls whose request carries no Atespace — the
-// shape LookupContainerID's own List makes) and succeeds on every other
-// call, including any later retry. This is what distinguishes a single
-// transient failure from a persistent one: onlyUnscopedListFails above
-// fails every such call, so it cannot tell a fix that re-derives the answer
-// from a second, independent call (masking the first call's transient
-// failure) apart from a fix that correctly decides from the first call's
-// own error.
-func unscopedListFailsOnlyOnCallN(n int, err error) func(*ateapi.ListActorsRequest) error {
-	calls := 0
-	return func(in *ateapi.ListActorsRequest) error {
-		if in.GetAtespace() != "" {
-			return nil
-		}
-		calls++
-		if calls == n {
+// listFailsOnlyOnCallN fails only the Nth List call (1-indexed; see
+// substrateFaults) and succeeds on every other call, including any later
+// retry. This is what distinguishes a single transient failure from a
+// persistent one: everyListFails above fails every call, so it cannot tell
+// a fix that re-derives the answer from a second, independent call
+// (masking the first call's transient failure) apart from a fix that
+// correctly decides from the first call's own error.
+func listFailsOnlyOnCallN(n int, err error) func(int) error {
+	return func(call int) error {
+		if call == n {
 			return err
 		}
 		return nil
@@ -434,11 +470,9 @@ func TestSubstrateBroker_StopTransientLookupFailure_ExplicitErrorNot202(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			for n, wantErr := range tc.wantErr {
 				t.Run(fmt.Sprintf("call_%d", n), func(t *testing.T) {
-					srv, fc := newTestSubstrateBrokerServer(t)
+					srv, fc, faults := newTestSubstrateBrokerServerWithFaults(t)
 					runSubstrateAgentForProject(t, srv.manager, "dev", "projb", gapProjBID, testProjectScionDir(t, "projb"))
-					fc.mu.Lock()
-					fc.listActorsErrFor = unscopedListFailsOnlyOnCallN(n, errors.New("simulated transient list failure"))
-					fc.mu.Unlock()
+					faults.failList(listFailsOnlyOnCallN(n, errors.New("simulated transient list failure")))
 
 					w := httptest.NewRecorder()
 					srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+tc.slug+"/stop", nil), tc.slug, gapProjBID)

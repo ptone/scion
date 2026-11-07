@@ -8085,9 +8085,10 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	// two profiles resolving to distinct runtimes of the same type (e.g.
 	// two Kubernetes clusters) must not overwrite each other's entry.
 	identity := auxiliaryRuntimeIdentity(resolved)
-	mgr := agent.NewManager(resolved)
+	aux := s.newAuxiliaryRuntime(resolved, agent.NewManager(resolved), rec)
+	mgr := aux.Manager
 	s.auxiliaryRuntimesMu.Lock()
-	s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: resolved, Manager: mgr, Record: rec}
+	s.auxiliaryRuntimes[identity] = aux
 	s.auxiliaryRuntimesMu.Unlock()
 
 	return fromProfile(runtimeResolution{Manager: mgr, Runtime: resolved, Record: rec, RuntimeType: resolved.Name(), How: selHow}), nil

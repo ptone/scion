@@ -94,6 +94,28 @@ type SubstrateRuntime struct {
 	// defaultHealthzTimeout directly) so tests can shrink it and exercise
 	// the timeout path in well under defaultHealthzTimeout's 5 minutes.
 	healthzTimeout time.Duration
+
+	// projectSet is the source of an unfiltered List in operator mode
+	// (substrate v1 design §3.3): the projects whose atespaces List reads.
+	// The runtime broker sets it (SetProjectSet); nil means an unfiltered
+	// List fails as cold rather than returning an empty result.
+	projectSetMu sync.RWMutex
+	projectSet   ProjectSet
+}
+
+var _ ProjectSetReceiver = (*SubstrateRuntime)(nil)
+
+// SetProjectSet implements ProjectSetReceiver.
+func (r *SubstrateRuntime) SetProjectSet(ps ProjectSet) {
+	r.projectSetMu.Lock()
+	defer r.projectSetMu.Unlock()
+	r.projectSet = ps
+}
+
+func (r *SubstrateRuntime) currentProjectSet() ProjectSet {
+	r.projectSetMu.RLock()
+	defer r.projectSetMu.RUnlock()
+	return r.projectSet
 }
 
 // substrateAgentStateMu guards substrateControlTokens and
@@ -1543,6 +1565,14 @@ func substrateAtespaceName(projectID string) string {
 // outside a test; exported directly rather than behind a call-site guard.
 func SubstrateAtespaceNameForTest(projectID string) string {
 	return substrateAtespaceName(projectID)
+}
+
+// ProjectSetForTest returns the ProjectSet the runtime broker installed
+// (nil if none), so pkg/runtimebroker's tests can assert that every
+// runtime entry path installs one. A read with no side effects, like
+// SubstrateAtespaceNameForTest.
+func (r *SubstrateRuntime) ProjectSetForTest() ProjectSet {
+	return r.currentProjectSet()
 }
 
 // splitSubstrateID splits a runtime ID of the form "<atespace>/<actor>",

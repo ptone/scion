@@ -54,6 +54,27 @@ func (f *fakeSubstrateControlClient) putActor(atespace, name, uid string) {
 // can both inject actors directly and inspect which calls it received.
 func newTestSubstrateBrokerServer(t *testing.T) (*Server, *fakeSubstrateControlClient) {
 	t.Helper()
+	return newTestSubstrateBrokerServerWith(t, nil)
+}
+
+// substrateTestServedProjects is the served-project set the substrate
+// broker tests run with: the two project IDs they use. The broker's own
+// set is cold in a test (no hub connection), and a cold set fails every
+// unfiltered substrate List (substrate v1 design §3.3).
+var substrateTestServedProjects = staticProjectSet{"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+
+// staticProjectSet is a fixed runtime.ProjectSet.
+type staticProjectSet []string
+
+func (s staticProjectSet) ServedProjects(context.Context) ([]string, error) {
+	return append([]string(nil), s...), nil
+}
+
+// newTestSubstrateBrokerServerWith is newTestSubstrateBrokerServer with the
+// runtime optionally wrapped (wrap nil: the SubstrateRuntime itself) before
+// the manager and server are built over it.
+func newTestSubstrateBrokerServerWith(t *testing.T, wrap func(*runtime.SubstrateRuntime) runtime.Runtime) (*Server, *fakeSubstrateControlClient) {
+	t.Helper()
 	// substrateAgentRecords/substrateControlTokens are process-wide
 	// (pkg/runtime/substrate_runtime.go), not scoped to the *SubstrateRuntime
 	// instance this test builds below. Without resetting them, a record left
@@ -67,7 +88,11 @@ func newTestSubstrateBrokerServer(t *testing.T) (*Server, *fakeSubstrateControlC
 	actorServer := newFakeSubstrateActorServer()
 	t.Cleanup(actorServer.Close)
 
-	rt := runtime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
+	srt := runtime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
+	var rt runtime.Runtime = srt
+	if wrap != nil {
+		rt = wrap(srt)
+	}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
 
@@ -75,7 +100,14 @@ func newTestSubstrateBrokerServer(t *testing.T) (*Server, *fakeSubstrateControlC
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = ""
-	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), fc
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+	// New installed the broker's served-project set, which is cold here;
+	// replace it with a loaded one.
+	if srt.ProjectSetForTest() == nil {
+		t.Fatal("New did not install a ProjectSet on the substrate runtime")
+	}
+	srt.SetProjectSet(substrateTestServedProjects)
+	return srv, fc
 }
 
 // testProjectScionDir creates a real, on-disk project directory named
