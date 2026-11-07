@@ -364,10 +364,13 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 	// only work by the test's own construction, not for the reason it
 	// actually works in production.
 	sharedClient := newFakeSubstrateControlClient(recorder)
+	var built []*runtime.SubstrateRuntime
 	restore := runtime.SetSubstrateRuntimeBuilderForTest(func(cfg config.V1SubstrateConfig) (*runtime.SubstrateRuntime, error) {
 		actorServer := newFakeSubstrateActorServer()
 		actorServers = append(actorServers, actorServer)
-		return runtime.NewSubstrateRuntimeForTest(sharedClient, substrate.NewRouterClient(actorServer.URL), nil, cfg), nil
+		rt := runtime.NewSubstrateRuntimeForTest(sharedClient, substrate.NewRouterClient(actorServer.URL), nil, cfg)
+		built = append(built, rt)
+		return rt, nil
 	})
 	t.Cleanup(restore)
 
@@ -416,6 +419,13 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 	nipPatterns := recorder.patternsFor("proj--nip-agent")
 	if !containsPattern(nipPatterns, "*.nip.io") {
 		t.Errorf("nip agent's EgressPolicy patterns = %v, want *.nip.io present (from the substrate-nip profile's egress_allow)", nipPatterns)
+	}
+
+	// The broker installs its served-project set on every runtime, and it
+	// is cold here (no hub connection), so an unfiltered List would fail.
+	// Serve the two projects this test runs, as a loaded set would.
+	for _, rt := range built {
+		rt.SetProjectSet(staticProjectSet{"550e8400-e29b-41d4-a716-446655440010", "550e8400-e29b-41d4-a716-446655440011"})
 	}
 
 	// resolveAgentRuntimeTarget/List/Delete must still work for BOTH

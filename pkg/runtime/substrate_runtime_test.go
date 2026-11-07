@@ -227,6 +227,7 @@ func (f *fakeControlClient) ListActors(ctx context.Context, in *ateapi.ListActor
 	f.rec.record("ListActors")
 	return f.listActors(in)
 }
+
 // GetAtespace backs ensureAtespace's verify-or-fail check. There is no
 // CreateAtespace override: operator mode never creates an atespace, so a
 // CreateAtespace call reaches the nil embedded interface and panics.

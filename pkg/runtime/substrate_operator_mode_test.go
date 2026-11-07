@@ -485,26 +485,42 @@ func TestSubstrateAtespaceProvisioningError_NeverCarriesServerText(t *testing.T)
 }
 
 // TestSubstrateList_NeverReturnsActorReportingAnotherAtespace: each
-// atespace's listing keeps only actors that report that atespace. An actor
-// a server returns under the wrong atespace is dropped there: it is listed
-// once if its own atespace is served, and not at all otherwise.
+// atespace's listing keeps only actors that report that atespace, through
+// List itself, unfiltered and project-scoped.
+//
+// Every atespace's response also carries actors that report another
+// atespace. Unfiltered, each actor is listed once, from its own atespace,
+// and an actor of an unserved atespace is never listed. Project-scoped (a
+// project ID in labelFilter), List returns (a) no actor that reports
+// another atespace, even one whose record names the requested project, and
+// (b) no record-less actor, because a record-less actor carries no project
+// label and never matches a project filter (List's doc comment).
 func TestSubstrateList_NeverReturnsActorReportingAnotherAtespace(t *testing.T) {
 	rec := &callRecorder{}
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 	rt.SetProjectSet(newFakeProjectSet(testProjAID, testProjBID))
 	notServed := substrateAtespaceName("not-served")
+	// ownA has a record for project A; orphanA and ownB have none;
+	// strayInA reports atespace B but has a record for project A; unserved
+	// is in an atespace no served project maps to.
 	ownA := runningActor(testAtespaceA, "projA--dev", "uid-a")
+	orphanA := runningActor(testAtespaceA, "projA--orphan", "uid-o")
 	ownB := runningActor(testAtespaceB, "projB--dev", "uid-b")
-	stray := runningActor(notServed, "other--dev", "uid-x")
+	strayInA := runningActor(testAtespaceB, "projA--stray", "uid-s")
+	unserved := runningActor(notServed, "other--dev", "uid-x")
+	substrateAgentStateMu.Lock()
+	substrateAgentRecords["uid-a"] = &substrateAgentRecord{Labels: map[string]string{"scion.name": "dev"}, Project: "projA", ProjectID: testProjAID}
+	substrateAgentRecords["uid-s"] = &substrateAgentRecord{Labels: map[string]string{"scion.name": "stray"}, Project: "projA", ProjectID: testProjAID}
+	substrateAgentStateMu.Unlock()
 	log := &atespaceRequestLog{}
-	// Every atespace's response also carries the other atespaces' actors.
 	fc.listActors = listActorsByAtespace(log, map[string][]*ateapi.Actor{
-		testAtespaceA: {ownA, ownB, stray},
-		testAtespaceB: {ownB, ownA, stray},
+		testAtespaceA: {ownA, orphanA, strayInA, ownB, unserved},
+		testAtespaceB: {ownB, ownA, unserved},
 	}, nil)
 
-	for _, filter := range []map[string]string{nil, {projectkeys.LabelProjectID: testProjAID}} {
+	containerIDs := func(filter map[string]string) []string {
+		t.Helper()
 		agents, err := rt.List(context.Background(), filter)
 		if err != nil {
 			t.Fatalf("List(%v) error = %v", filter, err)
@@ -513,12 +529,33 @@ func TestSubstrateList_NeverReturnsActorReportingAnotherAtespace(t *testing.T) {
 		for _, a := range agents {
 			ids = append(ids, a.ContainerID)
 		}
-		want := []string{testAtespaceA + "/projA--dev", testAtespaceB + "/projB--dev"}
-		if filter != nil {
-			want = want[:1]
-		}
-		if !reflect.DeepEqual(ids, want) {
-			t.Errorf("List(%v) = %v, want %v (each actor only from its own atespace, the unserved one never)", filter, ids, want)
-		}
+		return ids
+	}
+
+	// Unfiltered: each actor once, from its own atespace; strayInA is not
+	// in atespace B's response, so it is not listed; the unserved one never.
+	if got, want := containerIDs(nil), []string{testAtespaceA + "/projA--dev", testAtespaceA + "/projA--orphan", testAtespaceB + "/projB--dev"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("List() = %v, want %v", got, want)
+	}
+
+	// Project-scoped, through List: only project A's record-having actor
+	// from atespace A. (a) strayInA reports atespace B, so it is dropped
+	// although its record names project A. (b) orphanA is record-less, so
+	// the project filter does not match it.
+	if got, want := containerIDs(map[string]string{projectkeys.LabelProjectID: testProjAID}), []string{testAtespaceA + "/projA--dev"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("List(project A) = %v, want %v", got, want)
+	}
+
+	// The raw actors read for project A: only those reporting atespace A.
+	actors, skipped, err := rt.listOperatorModeActors(context.Background(), map[string]string{projectkeys.LabelProjectID: testProjAID})
+	if err != nil || len(skipped) != 0 {
+		t.Fatalf("listOperatorModeActors(project A) = %v, skipped %v, err %v", actors, skipped, err)
+	}
+	var raw []string
+	for _, a := range actors {
+		raw = append(raw, a.GetMetadata().GetAtespace()+"/"+a.GetMetadata().GetUid())
+	}
+	if want := []string{testAtespaceA + "/uid-a", testAtespaceA + "/uid-o"}; !reflect.DeepEqual(raw, want) {
+		t.Errorf("listOperatorModeActors(project A) = %v, want %v", raw, want)
 	}
 }
