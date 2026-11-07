@@ -94,7 +94,7 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 			// else in sciontool.
 			ctl := control.New(control.Options{
 				KickTokenRefresh: c.KickTokenRefresh,
-				Deliver:          deliverRouteOptions(ptyUser, childArgs, getenv, deliverLookPath),
+				Deliver:          deliverRouteOptions(ptyUser, childArgs, getenv, deliverResolveTool),
 			})
 			a, err := conduit.New(conduit.Options{
 				HubURL:                c.HubURL(),

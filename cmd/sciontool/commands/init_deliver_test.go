@@ -113,39 +113,49 @@ func TestHarnessInScionSession_FailsClosed(t *testing.T) {
 }
 
 // TestDeliverRouteOptions_Conditions: the route is offered only when the
-// experiment is listed, tmux is on PATH and the harness runs in the
-// scion session; the runner runs as the PTY user (design r3 §1.5).
+// experiment is listed, tmux and sh resolve in the fixed tool path and
+// the harness runs in the scion session; the runner runs as the PTY user
+// and execs the resolved absolute paths (design r3 §1.5).
 func TestDeliverRouteOptions_Conditions(t *testing.T) {
-	tmuxOK := func(string) (string, error) { return "/usr/bin/tmux", nil }
-	noTmux := func(string) (string, error) { return "", errors.New("not found") }
+	resolveAll := func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	missing := func(miss string) func(string) (string, error) {
+		return func(name string) (string, error) {
+			if name == miss {
+				return "", errors.New("not found")
+			}
+			return "/usr/bin/" + name, nil
+		}
+	}
 	argv := []string{"sh", "-c", fixtureTmuxAttach}
 	flags := map[string]string{conduit.EnvHubExperiments: conduit.ExperimentConduit + ", " + experiments.ConduitDeliver}
 	user := conduit.PTYUser{UID: 1000, GID: 1000, Username: "scion", RequirePrivilegeDrop: true}
 
-	opts := deliverRouteOptions(user, argv, envOf(flags), tmuxOK)
+	opts := deliverRouteOptions(user, argv, envOf(flags), resolveAll)
 	if opts == nil {
 		t.Fatal("route not offered with all conditions met")
 	}
-	want := control.LocalRunner{UID: 1000, GID: 1000, Username: "scion", RequirePrivilegeDrop: true}
+	want := control.LocalRunner{UID: 1000, GID: 1000, Username: "scion", RequirePrivilegeDrop: true,
+		TmuxPath: "/usr/bin/tmux", ShPath: "/usr/bin/sh"}
 	if got, ok := opts.Runner.(control.LocalRunner); !ok || got != want {
 		t.Fatalf("runner %#v, want %#v", opts.Runner, want)
 	}
 
 	cases := []struct {
-		name     string
-		env      map[string]string
-		lookPath func(string) (string, error)
-		argv     []string
+		name    string
+		env     map[string]string
+		resolve func(string) (string, error)
+		argv    []string
 	}{
-		{"flag off", map[string]string{conduit.EnvHubExperiments: conduit.ExperimentConduit}, tmuxOK, argv},
-		{"no experiments", nil, tmuxOK, argv},
-		{"similar name only", map[string]string{conduit.EnvHubExperiments: experiments.ConduitDeliver + "x"}, tmuxOK, argv},
-		{"no tmux", flags, noTmux, argv},
-		{"not in the scion session", flags, tmuxOK, []string{"sh", "-c", "claude"}},
+		{"flag off", map[string]string{conduit.EnvHubExperiments: conduit.ExperimentConduit}, resolveAll, argv},
+		{"no experiments", nil, resolveAll, argv},
+		{"similar name only", map[string]string{conduit.EnvHubExperiments: experiments.ConduitDeliver + "x"}, resolveAll, argv},
+		{"no tmux in the fixed tool path", flags, missing("tmux"), argv},
+		{"no sh in the fixed tool path", flags, missing("sh"), argv},
+		{"not in the scion session", flags, resolveAll, []string{"sh", "-c", "claude"}},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			if deliverRouteOptions(user, tt.argv, envOf(tt.env), tt.lookPath) != nil {
+			if deliverRouteOptions(user, tt.argv, envOf(tt.env), tt.resolve) != nil {
 				t.Fatal("route offered")
 			}
 		})
@@ -158,9 +168,9 @@ func TestDeliverRouteOptions_Conditions(t *testing.T) {
 // without it the route is neither advertised nor served (design r3 §1.5,
 // §6.3 route exposure).
 func TestPortForwardingConduitDeliverRoute(t *testing.T) {
-	orig := deliverLookPath
-	deliverLookPath = func(string) (string, error) { return "/usr/bin/tmux", nil }
-	t.Cleanup(func() { deliverLookPath = orig })
+	orig := deliverResolveTool
+	deliverResolveTool = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	t.Cleanup(func() { deliverResolveTool = orig })
 
 	for _, tt := range []struct {
 		name     string

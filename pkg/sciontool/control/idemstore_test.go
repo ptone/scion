@@ -23,7 +23,7 @@ import (
 func key(i int) idemKey { return idemKey{brokerID: "b", deliveryID: fmt.Sprintf("d-%d", i)} }
 
 // TestIdemStore_Bounds: the store holds 1024 entries for 15 minutes,
-// outcome only (design r3 §5.5 line 296).
+// outcome only (design r3 §5.5 layer 2).
 func TestIdemStore_Bounds(t *testing.T) {
 	if idemMaxEntries != 1024 || idemTTL != 15*time.Minute {
 		t.Fatalf("bounds %d / %s, want 1024 / 15m", idemMaxEntries, idemTTL)

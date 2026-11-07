@@ -516,7 +516,7 @@ func TestDeliverPartial(t *testing.T) {
 
 // TestDeliverFailedBeforePaste: a load-buffer failure happens before any
 // step the harness can see, so it answers 422 stage load_buffer (a
-// failure before paste, r3 §1.3 line 64), is not stored, and the same
+// failure before paste, r3 §1.3 422 row), is not stored, and the same
 // delivery id retried goes through. The error text never reaches the
 // response.
 func TestDeliverFailedBeforePaste(t *testing.T) {
@@ -543,7 +543,7 @@ func TestDeliverFailedBeforePaste(t *testing.T) {
 // TestDeliverFailedAtVisibleStep: once a step the harness can see was
 // attempted (an interrupt key, the paste), a failure there answers 200
 // partial with that stage and is stored, so a replay of the same key
-// runs nothing (r3 §1.3 line 56, §5.5).
+// runs nothing (r3 §1.3 200 partial row, §5.5).
 func TestDeliverFailedAtVisibleStep(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -663,7 +663,7 @@ func notAfter(agentNow time.Time, agentAhead time.Duration, plus time.Duration) 
 }
 
 // TestHardStop_EarlierOf: the hard stop is the earlier of receipt +
-// deadline_ms and not_after_unix_ms (r3 §1.2 line 45, §6.3 line 350).
+// deadline_ms and not_after_unix_ms (r3 §1.2 not_after_unix_ms row, §6.3 hard stop item).
 func TestHardStop_EarlierOf(t *testing.T) {
 	receipt := newFakeClock().Now()
 	ms := func(d time.Duration) *int64 { v := receipt.Add(d).UnixMilli(); return &v }
@@ -675,10 +675,10 @@ func TestHardStop_EarlierOf(t *testing.T) {
 	}{
 		{"no not_after", nil, 92 * time.Second, false},
 		{"not_after later than receipt bound", ms(100 * time.Second), 92 * time.Second, false},
-		{"not_after at receipt + 70 s is used (r3 §6.3 line 351)", ms(70 * time.Second), 70 * time.Second, false},
-		{"not_after at receipt + 62 s is used (the r3 §2.2 line 159 cut-off)", ms(62 * time.Second), 62 * time.Second, false},
-		{"not_after at receipt + 61 s is skew (below receipt + 62 s, r3 §6.3 line 351)", ms(61 * time.Second), 92 * time.Second, true},
-		{"not_after at receipt is skew (already past, r3 §2.2 line 159)", ms(0), 92 * time.Second, true},
+		{"not_after at receipt + 70 s is used (r3 §6.3 skew guard item)", ms(70 * time.Second), 70 * time.Second, false},
+		{"not_after at receipt + 62 s is used (the r3 §2.2 skew guard cut-off)", ms(62 * time.Second), 62 * time.Second, false},
+		{"not_after at receipt + 61 s is skew (below receipt + 62 s, r3 §6.3 skew guard item)", ms(61 * time.Second), 92 * time.Second, true},
+		{"not_after at receipt is skew (already past, r3 §2.2 skew guard)", ms(0), 92 * time.Second, true},
 		{"not_after in the past is skew", ms(-time.Second), 92 * time.Second, true},
 	}
 	for _, tt := range cases {
@@ -694,8 +694,8 @@ func TestHardStop_EarlierOf(t *testing.T) {
 // TestSkewGuard_AgentClock120sAhead: with the agent clock 120 s ahead of
 // the hub's, the hub's not_after is already past at receipt; the guard
 // ignores it, the delivery pastes on the receipt bound, and the skew is
-// counted at warn without times or ids (r3 §2.2 lines 158-160, §6.3
-// line 351, §6.4 line 401).
+// counted at warn without times or ids (r3 §2.2 skew guard, §6.3
+// skew guard item, §6.4 skew failure row).
 func TestSkewGuard_AgentClock120sAhead(t *testing.T) {
 	h := newHarness(t)
 	r := h.post(t, body(func(m map[string]any) {
@@ -713,7 +713,7 @@ func TestSkewGuard_AgentClock120sAhead(t *testing.T) {
 }
 
 // TestSkewGuard_NotAfterBelow62sIgnored: a not_after earlier than
-// receipt + 62 s (92 s - the 30 s tolerance, r3 §2.2 line 159) is
+// receipt + 62 s (92 s - the 30 s tolerance, r3 §2.2 skew guard) is
 // ignored; a readiness wait past it still pastes before the receipt
 // bound.
 func TestSkewGuard_NotAfterBelow62sIgnored(t *testing.T) {
@@ -731,7 +731,7 @@ func TestSkewGuard_NotAfterBelow62sIgnored(t *testing.T) {
 // TestHardStop_NotAfter70sReadinessPastIt408: a not_after at receipt +
 // 70 s is inside the tolerance and used; a readiness wait that runs past
 // it answers 408 expired_before_paste and never calls load-buffer or
-// paste-buffer (r3 §6.3 lines 351 and 359). It is not stored: nothing
+// paste-buffer (r3 §6.3 skew guard and hard stop items). It is not stored: nothing
 // was done, so a retry runs.
 func TestHardStop_NotAfter70sReadinessPastIt408(t *testing.T) {
 	h := newHarness(t)
@@ -756,7 +756,7 @@ func TestHardStop_NotAfter70sReadinessPastIt408(t *testing.T) {
 }
 
 // TestHardStop_SubmitOpFirstKeyRefused: for the *_submit ops the hard
-// stop gates the first key (r3 §1.2 line 45). The clock passes the stop
+// stop gates the first key (r3 §1.2 not_after_unix_ms row). The clock passes the stop
 // during the target check, so no key is sent.
 func TestHardStop_SubmitOpFirstKeyRefused(t *testing.T) {
 	h := newHarness(t)
@@ -777,7 +777,7 @@ func TestHardStop_SubmitOpFirstKeyRefused(t *testing.T) {
 
 // TestDeliverLogging_NoTextOrKeysAtInfo: the message text and key names
 // never reach info or warn; info carries the delivery id, size, op and
-// outcome (r3 §5.6 line 304).
+// outcome (r3 §5.6 never at info).
 func TestDeliverLogging_NoTextOrKeysAtInfo(t *testing.T) {
 	h := newHarness(t)
 	const text = "SENTINEL-TEXT-91c2"

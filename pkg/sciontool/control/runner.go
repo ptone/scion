@@ -18,7 +18,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/tmuxdeliver"
@@ -45,7 +48,7 @@ var allowedTmuxVerbs = map[string]bool{
 
 // allowedArgv accepts only a tmux command or the exact readiness probe:
 // exec.Command("tmux", fixed-verb, ...) with no shell and no
-// caller-supplied argv (design r3 §5.3 line 281). The verbs come from
+// caller-supplied argv (design r3 §5.3 exec item). The verbs come from
 // tmuxdeliver's step builder and targetCheckArgv; any other verb (for
 // example run-shell or if-shell) is refused (§5.3, "no tmux command
 // passthrough").
@@ -57,6 +60,51 @@ func allowedArgv(argv []string) error {
 		return nil
 	}
 	return errArgvNotAllowed
+}
+
+// ToolPath is the fixed system PATH tmux and the probe's shell are
+// resolved from, never this process's own PATH: a directory on that PATH
+// the agent user can write would otherwise let a planted binary run with
+// sciontool's identity (S2 review S-1).
+const ToolPath = "/usr/bin:/bin"
+
+// ResolveTool returns the absolute path of name in ToolPath: the first
+// entry that is a regular file with an execute bit.
+func ResolveTool(name string) (string, error) {
+	return resolveToolIn(strings.Split(ToolPath, ":"), name)
+}
+
+func resolveToolIn(dirs []string, name string) (string, error) {
+	if name == "" || strings.ContainsRune(name, '/') {
+		return "", fmt.Errorf("control: invalid tool name %q", name)
+	}
+	for _, dir := range dirs {
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		p := filepath.Join(dir, name)
+		fi, err := os.Stat(p)
+		if err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0 {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("control: %s not found in %s", name, strings.Join(dirs, ":"))
+}
+
+// execPath maps a step's logical command name to the absolute path that
+// is run.
+func (r LocalRunner) execPath(name string) (string, error) {
+	var p string
+	switch name {
+	case "tmux":
+		p = r.TmuxPath
+	case "sh":
+		p = r.ShPath
+	}
+	if p == "" || !filepath.IsAbs(p) {
+		return "", fmt.Errorf("control: no resolved path for %s", name)
+	}
+	return p, nil
 }
 
 // runnerError is the error for a failed step: the verb and the cause,

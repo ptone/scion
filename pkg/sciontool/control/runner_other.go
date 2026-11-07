@@ -29,6 +29,7 @@ type LocalRunner struct {
 	UID, GID             int
 	Username             string
 	RequirePrivilegeDrop bool
+	TmuxPath, ShPath     string
 }
 
 // Run fails closed on this platform.

@@ -15,7 +15,6 @@
 package commands
 
 import (
-	"os/exec"
 	"slices"
 	"strings"
 
@@ -25,9 +24,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
-// deliverLookPath finds tmux for deliverRouteOptions (a variable so
-// tests need no tmux).
-var deliverLookPath = exec.LookPath
+// deliverResolveTool resolves tmux and the readiness probe's shell from
+// the fixed control.ToolPath (a variable so tests need no tmux).
+var deliverResolveTool = control.ResolveTool
 
 // envStartCmd carries the tmux start command when a runtime passes it
 // through the environment instead of argv.
@@ -41,16 +40,25 @@ const startCmdFUSESuffix = `exec sh -c "$SCION_START_CMD"`
 
 // deliverRouteOptions returns the options that enable the deliver-message
 // control route, or nil when the route must be absent (design r3 §1.5,
-// line 75): the hub must list experiments.ConduitDeliver in the agent env
-// set at create time, tmux must be on PATH, and the harness must run in
-// the "scion" tmux session. The tmux steps run as ptyUser, the agent
-// user that owns the tmux server.
-func deliverRouteOptions(ptyUser conduit.PTYUser, childArgs []string, getenv func(string) string, lookPath func(string) (string, error)) *control.DeliverOptions {
+// registration conditions): the hub must list experiments.ConduitDeliver
+// in the agent env set at create time, tmux must be found, and the
+// harness must run in the "scion" tmux session. tmux and the probe's
+// shell are resolved once, here, to absolute paths in control.ToolPath
+// (never this process's PATH); if either is missing the route is absent.
+// The tmux steps run as ptyUser, the agent user that owns the tmux
+// server.
+func deliverRouteOptions(ptyUser conduit.PTYUser, childArgs []string, getenv func(string) string, resolve func(string) (string, error)) *control.DeliverOptions {
 	if !hubExperimentListed(getenv, experiments.ConduitDeliver) {
 		return nil
 	}
-	if _, err := lookPath("tmux"); err != nil {
-		log.Debug("Conduit: deliver-message not offered: tmux not on PATH")
+	tmuxPath, err := resolve("tmux")
+	if err != nil {
+		log.Debug("Conduit: deliver-message not offered: tmux not found in %s", control.ToolPath)
+		return nil
+	}
+	shPath, err := resolve("sh")
+	if err != nil {
+		log.Debug("Conduit: deliver-message not offered: sh not found in %s", control.ToolPath)
 		return nil
 	}
 	if !harnessInScionSession(childArgs, getenv) {
@@ -61,6 +69,8 @@ func deliverRouteOptions(ptyUser conduit.PTYUser, childArgs []string, getenv fun
 		GID:                  ptyUser.GID,
 		Username:             ptyUser.Username,
 		RequirePrivilegeDrop: ptyUser.RequirePrivilegeDrop,
+		TmuxPath:             tmuxPath,
+		ShPath:               shPath,
 	}}
 }
 

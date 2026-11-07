@@ -62,7 +62,15 @@ func realTmux(t *testing.T, paneCmd string) *Handler {
 		t.Skipf("cannot start tmux: %v", err)
 	}
 	t.Cleanup(func() { _ = tmux("kill-server") })
-	return New(Options{KickTokenRefresh: func() {}, Deliver: &DeliverOptions{Runner: LocalRunner{}}})
+	tmuxPath, err := ResolveTool("tmux")
+	if err != nil {
+		t.Fatalf("tmux runs but is not in %s: %v", ToolPath, err)
+	}
+	shPath, err := ResolveTool("sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return New(Options{KickTokenRefresh: func() {}, Deliver: &DeliverOptions{Runner: LocalRunner{TmuxPath: tmuxPath, ShPath: shPath}}})
 }
 
 func withoutVar(env []string, name string) []string {

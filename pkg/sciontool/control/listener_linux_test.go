@@ -86,7 +86,7 @@ func scanLines(t *testing.T, path string, fn func([]string)) {
 
 // TestDeliverRoute_NoListener: enabling and serving the deliver-message
 // route opens no listening socket; the route is reached only as an
-// RpcRequest through RPCHandler (design r3 §5.2 line 272). A planted
+// RpcRequest through RPCHandler (design r3 §5.2 no-listener item). A planted
 // listener shows the check sees this process's sockets.
 func TestDeliverRoute_NoListener(t *testing.T) {
 	before := listeningSockets(t)

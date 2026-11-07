@@ -30,18 +30,20 @@ import (
 
 // runnerPassEnv are the variables of this process passed to tmux as they
 // are: what it needs to find the server socket. Everything else (notably
-// credentials, and TMUX) stays out of its environment, so the child
-// holds nothing the route's caller could not already reach (design r3
-// §5.2 line 275).
-var runnerPassEnv = []string{"PATH", "TMUX_TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ"}
+// credentials, TMUX and this process's PATH) stays out of its
+// environment, so the child holds nothing the route's caller could not
+// already reach (design r3 §5.2 in-container process item). The child's
+// PATH is the fixed ToolPath, so the probe script's commands resolve
+// there too.
+var runnerPassEnv = []string{"TMUX_TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ"}
 
 // LocalRunner runs the tmuxdeliver steps as local processes (design r3
-// §3.4 line 249), as the agent user that owns the tmux server: the same
+// §3.4 Runner item), as the agent user that owns the tmux server: the same
 // container user an in-container process already is, so the route adds
-// no privilege (§5.2 line 275). It runs only tmux and the readiness probe
+// no privilege (§5.2 in-container process item). It runs only tmux and the readiness probe
 // (allowedArgv): no shell other than the probe's constant script, and
 // nothing from a request reaches argv except through the tmuxdeliver
-// step builder (§5.3 lines 279-281).
+// step builder (§5.3 schema and exec items).
 type LocalRunner struct {
 	// UID and GID are the agent user; zero means this process's identity.
 	UID, GID int
@@ -49,6 +51,10 @@ type LocalRunner struct {
 	Username string
 	// RequirePrivilegeDrop refuses to run as this process's identity.
 	RequirePrivilegeDrop bool
+	// TmuxPath and ShPath are the absolute paths run for tmux and for the
+	// readiness probe's shell, resolved once by ResolveTool. Run refuses
+	// to start anything until both are set.
+	TmuxPath, ShPath string
 }
 
 // Run implements tmuxdeliver.Runner. The child is started with
@@ -59,12 +65,18 @@ func (r LocalRunner) Run(ctx context.Context, argv []string, stdin io.Reader) (s
 		return "", err
 	}
 	// Run as the agent user, never as sciontool's own (possibly root)
-	// identity when a drop is required (§5.2 line 275).
+	// identity when a drop is required (§5.2 in-container process item).
 	drop := r.UID > 0 && r.GID > 0
 	if r.RequirePrivilegeDrop && !drop {
 		return "", errors.New("control: privilege drop required but no agent user is set")
 	}
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	path, err := r.execPath(argv[0])
+	if err != nil {
+		return "", err
+	}
+	// Exec the resolved absolute path; argv[0] stays the logical name.
+	cmd := exec.CommandContext(ctx, path, argv[1:]...)
+	cmd.Args[0] = argv[0]
 	cmd.Env = runnerEnv(r.Username)
 	cmd.Stdin = stdin
 	out := &cappedBuffer{max: runnerMaxOutput}
@@ -81,7 +93,7 @@ func (r LocalRunner) Run(ctx context.Context, argv []string, stdin io.Reader) (s
 }
 
 func runnerEnv(username string) []string {
-	var env []string
+	env := []string{"PATH=" + ToolPath}
 	for _, k := range runnerPassEnv {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)

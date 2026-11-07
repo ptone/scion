@@ -43,20 +43,20 @@ import (
 // a finished key answers the stored outcome and never acts again.
 const RouteDeliverMessage = "deliver-message"
 
-// Request bounds (r3 §1.2, lines 34-48).
+// Request bounds (r3 §1.2, the request table).
 const (
 	// MaxDeliverText is the largest text accepted, in bytes (r3 §1.2
-	// line 42, §1.6 line 90).
+	// text row, §1.6 MaxDeliverText).
 	MaxDeliverText = 512 << 10
-	// MaxDeliverDeadline is the largest deadline_ms (r3 §1.2 line 44,
-	// §2.2 line 149).
+	// MaxDeliverDeadline is the largest deadline_ms (r3 §1.2 deadline_ms row,
+	// §2.2 hard stop row).
 	MaxDeliverDeadline = 92 * time.Second
-	// maxMessageIDs is the most message ids per flush (r3 §1.2 line 40).
+	// maxMessageIDs is the most message ids per flush (r3 §1.2 message_ids row).
 	maxMessageIDs = 64
 	// skewTolerance: a not_after earlier than receipt + deadline_ms
-	// minus this is treated as clock skew and ignored (r3 §1.2 line 45,
-	// §2.2 line 159). With the 92 s deadline the cut-off is receipt +
-	// 62 s (r3 §6.3 line 351).
+	// minus this is treated as clock skew and ignored (r3 §1.2 not_after_unix_ms row,
+	// §2.2 skew guard). With the 92 s deadline the cut-off is receipt +
+	// 62 s (r3 §6.3 skew guard item).
 	skewTolerance = 30 * time.Second
 	// flushBudget bounds the steps after the hard stop: the paste, the
 	// submits and at most 3 extra submits of 2 s (r3 §2.2, the 8 s
@@ -65,7 +65,7 @@ const (
 	flushBudget = 18 * time.Second
 )
 
-// Response outcomes and stages (r3 §1.3, lines 52-68).
+// Response outcomes and stages (r3 §1.3, the response table).
 const (
 	outcomeDelivered  = "delivered"
 	outcomePartial    = "partial"
@@ -79,7 +79,7 @@ const (
 )
 
 // idPattern is the delivery, broker and message id shape (r3 §1.2,
-// lines 37-40), and the readiness nonce's.
+// the id rows), and the readiness nonce's.
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
 
 // DeliverOptions enable the deliver-message route.
@@ -182,7 +182,7 @@ func (e *fieldError) Error() string { return "invalid field: " + e.field }
 func bad(field string) error { return &fieldError{field: field} }
 
 // decodeDeliverRequest decodes exactly one JSON object with no unknown
-// fields (r3 §5.3 line 279).
+// fields (r3 §5.3 schema item).
 func decodeDeliverRequest(body io.Reader) (*deliverRequest, error) {
 	dec := json.NewDecoder(body)
 	dec.DisallowUnknownFields()
@@ -254,7 +254,7 @@ func (req *deliverRequest) validate() error {
 		}
 	}
 	if r := req.Ready; r != nil {
-		// Readiness applies to op=paste only (r3 §1.2 line 48, §3.1).
+		// Readiness applies to op=paste only (r3 §1.2 ready row, §3.1).
 		if req.Op != tmuxdeliver.OpPaste {
 			return bad("ready")
 		}
@@ -278,7 +278,7 @@ func (req *deliverRequest) validate() error {
 
 // hardStop is the instant after which no paste or first key may start:
 // the earlier of receipt + deadline_ms and not_after_unix_ms (r3 §1.2
-// line 45, §2.2 lines 158-160). The skew guard ignores a not_after that
+// not_after_unix_ms row, §2.2 skew guard). The skew guard ignores a not_after that
 // is already past at receipt, or earlier than receipt + deadline_ms -
 // skewTolerance, and uses the receipt bound alone. skewed reports that.
 func hardStop(receipt time.Time, deadline time.Duration, notAfterUnixMS *int64) (stop time.Time, skewed bool) {
@@ -308,7 +308,7 @@ const (
 
 // gatedRunner runs a flush's steps. It refuses the first acting step
 // once the hard stop has passed, so no paste or first key starts late
-// (r3 §1.2 line 45); later steps of a flush that has started run. It
+// (r3 §1.2 not_after_unix_ms row); later steps of a flush that has started run. It
 // also records whether a step the harness can see (paste-buffer or
 // send-keys) was attempted, and the stage of the first failed step.
 type gatedRunner struct {
@@ -433,7 +433,7 @@ type flushResult struct {
 	store bool
 }
 
-// For S4's unbind mapping (design r3 §2.4 lines 175-177, §2.6 line 197):
+// For S4's unbind mapping (design r3 §2.4 unbind list, §2.6 state machine):
 // 422 (stage target or load_buffer) and 408 mean nothing was pasted and
 // the rows go back to dispatched; 200 partial (stages interrupt, paste,
 // submit, extra_submit) keeps the binding and finalises it as partial.
@@ -441,7 +441,7 @@ type flushResult struct {
 func (d *deliverer) flush(ctx context.Context, req *deliverRequest, receipt time.Time, seq uint64) flushResult {
 	stop, skewed := hardStop(receipt, time.Duration(*req.DeadlineMS)*time.Millisecond, req.NotAfterUnixMS)
 	if skewed {
-		// Counts only: no times or ids at warn (r3 §2.2 line 159).
+		// Counts only: no times or ids at warn (r3 §2.2 skew guard).
 		n := d.skewIgnored.Add(1)
 		d.logf.warn("deliver-message: not_after ignored as clock skew (%d so far)", n)
 		d.logf.debug("deliver-message: observed skew %dms (not_after minus the receipt bound)",
@@ -471,7 +471,7 @@ func (d *deliverer) flush(ctx context.Context, req *deliverRequest, receipt time
 	}
 
 	// The tmux target must exist before anything is attempted (r3 §1.3
-	// line 64, 422 stage target). The check is not an acting step.
+	// 422 row, 422 stage target). The check is not an acting step.
 	if _, err := d.runner.Run(ctx, targetCheckArgv(), nil); err != nil {
 		return flushResult{idemOutcome: idemOutcome{status: statusBeforePaste, outcome: outcomeFailed, stage: stageTarget}}
 	}
@@ -507,8 +507,8 @@ func (d *deliverer) flush(ctx context.Context, req *deliverRequest, receipt time
 		return flushResult{idemOutcome: idemOutcome{status: http.StatusBadRequest, outcome: outcomeFailed, stage: "text"}}
 	case !gate.visible:
 		// Nothing the harness can see happened (a failed load-buffer):
-		// a failure before paste, retryable, not stored (r3 §1.3 line 64,
-		// §2.4 line 177). Errors carry the verb only (runnerError).
+		// a failure before paste, retryable, not stored (r3 §1.3 422 row,
+		// §2.4 failed before paste list). Errors carry the verb only (runnerError).
 		d.logf.debug("deliver-message: flush failed before any visible step: %v", err)
 		stage := gate.failedStep
 		if stage == "" {
@@ -518,7 +518,7 @@ func (d *deliverer) flush(ctx context.Context, req *deliverRequest, receipt time
 	default:
 		// A visible step (an interrupt key, the paste) was attempted and
 		// the flush failed at or after it: partial with that stage,
-		// stored so a replay never repeats it (r3 §1.3 line 56).
+		// stored so a replay never repeats it (r3 §1.3 200 partial row).
 		d.logf.debug("deliver-message: flush failed after a visible step: %v", err)
 		stage := gate.failedStep
 		if stage == "" {
