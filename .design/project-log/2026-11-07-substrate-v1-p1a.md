@@ -55,8 +55,9 @@ template, egress translation and test fake to the v1 shapes.
 - In v1 a template's temporary golden actor lives in the template's (project)
   atespace, so it can count as record-less or be listed during a build. No
   filter yet; planned after the Phase 1d observation.
-- With `egress_trust_bundle` set, rules are still TLS passthrough; https
-  (MITM) rules are Phase 3.
+- `egress_trust_bundle` refuses the Run in Phase 1 and the template projects
+  no trust bundle; projection and https (MITM) rules return together in
+  Phase 3 (design addenda A3).
 
 ## Verification
 

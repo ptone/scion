@@ -418,6 +418,9 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	if err := checkSubstrateRemovedKeys(r.cfg); err != nil {
 		return "", err
 	}
+	if err := checkSubstrateEgressTrustBundle(r.cfg); err != nil {
+		return "", err
+	}
 	// Resolved before any control-plane call: v1 needs both a cpu and a
 	// memory limit on the template, and an invalid value fails here.
 	resources, err := resolveSubstrateResources(cfg.Resources)

@@ -24,7 +24,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
-	"github.com/GoogleCloudPlatform/scion/pkg/substrateenv"
 	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 )
 
@@ -78,104 +77,42 @@ func TestBuildActorTemplate_EgressTrustBundleUnset_MatchesPreChangeGolden(t *tes
 	}
 
 	if !proto.Equal(got, want) {
-		t.Errorf("mustBuildActorTemplate(t, ) with EgressTrustBundle unset differs from the pre-change golden template:\ngot:  %s\nwant: %s", got, want)
+		t.Errorf("buildActorTemplate() with EgressTrustBundle unset differs from the pre-change golden template:\ngot:  %s\nwant: %s", got, want)
 	}
 }
 
-// TestBuildActorTemplate_EgressTrustBundleSet confirms the exact volume,
-// mount, and five env vars buildActorTemplate adds when EgressTrustBundle
-// is set — mirroring substrate's demos/egress/egress-mitm-template.yaml.tmpl
-// and docs/egress-trust-bundle.md.
-func TestBuildActorTemplate_EgressTrustBundleSet(t *testing.T) {
+// TestBuildActorTemplate_NoTrustBundleProjection confirms Phase 1 projects
+// no egress trust bundle even when EgressTrustBundle is set (Run refuses
+// the setting; see TestSubstrateRun_EgressTrustBundleRefused): no
+// system-info volume, no /run/ate mount, no Env, so the template is the
+// same as with the setting unset. Phase 3 brings the projection back
+// together with https (MITM) egress rules.
+func TestBuildActorTemplate_NoTrustBundleProjection(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("d", 64)
-	sc := config.V1SubstrateConfig{EgressTrustBundle: "egress-mitm.ate.dev"}
-
-	tmpl := mustBuildActorTemplate(t, "scion-test", "scion-def456", image, sc, nil)
-
-	wantVolumes := []*ateapi.Volume{
-		{Name: "workspace", DurableDir: &ateapi.DurableDirVolumeSource{}},
-		{
-			Name: "system-info",
-			SystemInfo: &ateapi.SystemInfoVolumeSource{
-				DataSources: []*ateapi.SystemInfoDataSource{
-					{
-						TrustBundle: &ateapi.TrustBundleDataSource{
-							Names: []string{"egress-mitm.ate.dev"},
-							Path:  "trust-bundle.pem",
-						},
-					},
-				},
-			},
-		},
+	with := mustBuildActorTemplate(t, "scion-test", "scion-def456", image, config.V1SubstrateConfig{EgressTrustBundle: "egress-mitm.ate.dev"}, nil)
+	without := mustBuildActorTemplate(t, "scion-test", "scion-def456", image, config.V1SubstrateConfig{}, nil)
+	if !proto.Equal(with, without) {
+		t.Errorf("buildActorTemplate() with EgressTrustBundle set differs from unset:\nwith:    %s\nwithout: %s", with, without)
 	}
-	if len(tmpl.GetVolumes()) != len(wantVolumes) {
-		t.Fatalf("Volumes = %d, want %d: %v", len(tmpl.GetVolumes()), len(wantVolumes), tmpl.GetVolumes())
-	}
-	for i, want := range wantVolumes {
-		if !proto.Equal(tmpl.GetVolumes()[i], want) {
-			t.Errorf("Volumes[%d] = %s, want %s", i, tmpl.GetVolumes()[i], want)
+	for _, v := range with.GetVolumes() {
+		if v.GetSystemInfo() != nil {
+			t.Errorf("volume %q is a system-info volume; no trust bundle is projected in Phase 1", v.GetName())
 		}
 	}
-
-	wantMounts := []*ateapi.VolumeMount{
-		{Name: "workspace", MountPath: "/workspace"},
-		{Name: "system-info", MountPath: "/run/ate"},
-	}
-	if len(tmpl.GetContainers()) != 1 {
-		t.Fatalf("Containers = %d, want 1", len(tmpl.GetContainers()))
-	}
-	gotMounts := tmpl.GetContainers()[0].GetVolumeMounts()
-	if len(gotMounts) != len(wantMounts) {
-		t.Fatalf("VolumeMounts = %d, want %d: %v", len(gotMounts), len(wantMounts), gotMounts)
-	}
-	for i, want := range wantMounts {
-		if !proto.Equal(gotMounts[i], want) {
-			t.Errorf("VolumeMounts[%d] = %s, want %s", i, gotMounts[i], want)
+	for _, c := range with.GetContainers() {
+		if len(c.GetEnv()) != 0 {
+			t.Errorf("container %q Env = %v, want none", c.GetName(), c.GetEnv())
 		}
-	}
-
-	wantEnv := []*ateapi.EnvVar{
-		{Name: "NODE_EXTRA_CA_CERTS", Value: "/run/ate/trust-bundle.pem"},
-		{Name: "GIT_SSL_CAINFO", Value: "/run/ate/trust-bundle.pem"},
-		{Name: "SSL_CERT_FILE", Value: "/run/ate/trust-bundle.pem"},
-		{Name: "CURL_CA_BUNDLE", Value: "/run/ate/trust-bundle.pem"},
-		{Name: "SSL_CERT_DIR", Value: "/run/ate"},
-	}
-	gotEnv := tmpl.GetContainers()[0].GetEnv()
-	if len(gotEnv) != len(wantEnv) {
-		t.Fatalf("Env = %d entries, want %d: %v", len(gotEnv), len(wantEnv), gotEnv)
-	}
-	for i, want := range wantEnv {
-		if !proto.Equal(gotEnv[i], want) {
-			t.Errorf("Env[%d] = %s, want %s", i, gotEnv[i], want)
+		for _, m := range c.GetVolumeMounts() {
+			if m.GetMountPath() == "/run/ate" {
+				t.Errorf("container %q mounts /run/ate; no trust bundle is projected in Phase 1", c.GetName())
+			}
 		}
-	}
-}
-
-// TestBuildActorTemplate_EnvNamesMatchSharedTrustBundleVarNames is the
-// template-side half of the tie between buildActorTemplate's Env and
-// pkg/sciontool/substrate's own trustBundleEnvPairs candidate list: both
-// derive from substrateenv.TrustBundleVarNames directly, so a name added to
-// the template without updating that shared slice (or vice versa) is
-// caught here rather than surfacing as exec silently losing a var the
-// template already carries.
-func TestBuildActorTemplate_EnvNamesMatchSharedTrustBundleVarNames(t *testing.T) {
-	image := "repo/image@sha256:" + strings.Repeat("f", 64)
-	sc := config.V1SubstrateConfig{EgressTrustBundle: "egress-mitm.ate.dev"}
-
-	tmpl := mustBuildActorTemplate(t, "scion-test", "scion-fedcba", image, sc, nil)
-
-	gotNames := make([]string, len(tmpl.GetContainers()[0].GetEnv()))
-	for i, e := range tmpl.GetContainers()[0].GetEnv() {
-		gotNames[i] = e.GetName()
-	}
-	if !slices.Equal(gotNames, substrateenv.TrustBundleVarNames) {
-		t.Errorf("buildActorTemplate() Env names = %v, want substrateenv.TrustBundleVarNames = %v", gotNames, substrateenv.TrustBundleVarNames)
 	}
 }
 
 // -----------------------------------------------------------------------
-// substrateTemplateName: unchanged when unset, different when set
+// substrateTemplateName: pinned names
 // -----------------------------------------------------------------------
 
 // substrateTemplateNameFixture is one row of the table-driven
@@ -256,28 +193,6 @@ func TestSubstrateTemplateName_UnchangedWhenEgressTrustBundleUnset(t *testing.T)
 			got := substrateTemplateName(tc.image, tc.sc, mustResolveSubstrateResources(t, tc.resources))
 			if got != tc.wantUnset {
 				t.Errorf("substrateTemplateName() with EgressTrustBundle unset = %q, want pinned value %q", got, tc.wantUnset)
-			}
-		})
-	}
-}
-
-// TestSubstrateTemplateName_ChangesWhenEgressTrustBundleSet confirms
-// setting EgressTrustBundle changes the template's content-address, across
-// the same fixture table — an existing golden template built before the
-// setting was turned on must not be silently reused once it is, since it
-// lacks the volume/mount/env a resumed or newly-scheduled actor would
-// otherwise need.
-func TestSubstrateTemplateName_ChangesWhenEgressTrustBundleSet(t *testing.T) {
-	for _, tc := range substrateTemplateNameFixtures() {
-		t.Run(tc.name, func(t *testing.T) {
-			before := substrateTemplateName(tc.image, tc.sc, mustResolveSubstrateResources(t, tc.resources))
-
-			sc := tc.sc
-			sc.EgressTrustBundle = "egress-mitm.ate.dev"
-			after := substrateTemplateName(tc.image, sc, mustResolveSubstrateResources(t, tc.resources))
-
-			if before == after {
-				t.Error("substrateTemplateName() did not change when EgressTrustBundle was set — an existing golden template would be silently reused without the trust-bundle volume/mount/env")
 			}
 		})
 	}

@@ -172,7 +172,8 @@ func TestSubstrateTemplateHashInput_EachFieldChangesName(t *testing.T) {
 }
 
 // The real inputs reach the hash: worker selector (order-insensitive),
-// resolved resources, image and the trust bundle (names and volumes).
+// resolved resources and image. No trust bundle is projected in Phase 1, so
+// egress_trust_bundle does not change the name (Run refuses it).
 func TestSubstrateTemplateName_InputsReachHash(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("a", 64)
 	res := mustResolveSubstrateResources(t, nil)
@@ -182,12 +183,14 @@ func TestSubstrateTemplateName_InputsReachHash(t *testing.T) {
 	if again := substrateTemplateName(image, config.V1SubstrateConfig{WorkerSelector: map[string]string{"b": "2", "a": "1"}}, res); again != base {
 		t.Errorf("equal inputs gave %q and %q", base, again)
 	}
+	if tb := substrateTemplateName(image, config.V1SubstrateConfig{WorkerSelector: sc.WorkerSelector, EgressTrustBundle: "egress-mitm.ate.dev"}, res); tb != base {
+		t.Errorf("egress_trust_bundle changed the template name (%q vs %q); nothing is projected in Phase 1", tb, base)
+	}
 	for name, got := range map[string]string{
 		"image":           substrateTemplateName(image+"0", sc, res),
 		"worker selector": substrateTemplateName(image, config.V1SubstrateConfig{WorkerSelector: map[string]string{"a": "1"}}, res),
 		"cpu":             substrateTemplateName(image, sc, substrateResources{cpuMillicores: res.cpuMillicores + 1, memoryBytes: res.memoryBytes}),
 		"memory":          substrateTemplateName(image, sc, substrateResources{cpuMillicores: res.cpuMillicores, memoryBytes: res.memoryBytes + 1}),
-		"trust bundle":    substrateTemplateName(image, config.V1SubstrateConfig{WorkerSelector: sc.WorkerSelector, EgressTrustBundle: "egress-mitm.ate.dev"}, res),
 	} {
 		if got == base {
 			t.Errorf("changing the %s did not change the template name", name)
@@ -266,5 +269,25 @@ func TestEnsureActorTemplate_FailedPreconditionNamesSnapshotLocation(t *testing.
 	}
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Errorf("status.Code(error) = %v, want FailedPrecondition preserved", status.Code(err))
+	}
+}
+
+// egress_trust_bundle refuses the Run before any control-plane call: Phase 1
+// projects no trust bundle and emits no https (MITM) rules.
+func TestSubstrateRun_EgressTrustBundleRefused(t *testing.T) {
+	resetSubstrateAgentStateForTest(t)
+	rec := &callRecorder{}
+	rt := NewSubstrateRuntimeForTest(newFakeControlClient(rec), substrate.NewRouterClient("http://example.invalid"), nil, config.V1SubstrateConfig{EgressTrustBundle: "egress-mitm.ate.dev"})
+	_, err := rt.Run(context.Background(), testSubstrateRunConfig())
+	if err == nil {
+		t.Fatal("Run() with egress_trust_bundle set = nil error, want a refusal")
+	}
+	for _, want := range []string{"egress_trust_bundle", "Phase 3", "unset it"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Run() error = %q, want it to contain %q", err, want)
+		}
+	}
+	if calls := rec.list(); len(calls) != 0 {
+		t.Errorf("Run() made control-plane calls %v before refusing", calls)
 	}
 }

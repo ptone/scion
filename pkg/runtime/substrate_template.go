@@ -28,7 +28,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
-	"github.com/GoogleCloudPlatform/scion/pkg/substrateenv"
 	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -149,7 +148,8 @@ const templateReadyPollInterval = 5 * time.Second
 //  5. the added capabilities (sorted);
 //  6. the substrate-serve entrypoint version;
 //  7. the wakeup probe's path, port and timeout;
-//  8. the trust bundle names (sorted);
+//  8. the trust bundle names (sorted; always empty in Phase 1, which
+//     projects none);
 //  9. the volume names and kinds.
 //
 // All of these are template content, so changing any of them in settings,
@@ -166,7 +166,7 @@ func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, res 
 		caps:              strings.Join(caps, ","),
 		entrypointVersion: substrateServeEntrypointVersion,
 		probe:             substrateWakeupProbeCacheKey(),
-		trustBundleNames:  strings.Join(substrateTrustBundleNames(sc), ","),
+		trustBundleNames:  "", // no trust bundle is projected in Phase 1 (see substrateTemplateVolumes)
 		volumes:           substrateVolumesCacheKey(substrateTemplateVolumes(sc)),
 	}.name()
 }
@@ -341,6 +341,16 @@ var substrateRemovedKeys = []struct {
 		"set the snapshot location server-wide with the ate-api-server --snapshot-location flag"},
 }
 
+// checkSubstrateEgressTrustBundle refuses a config that sets
+// egress_trust_bundle: Phase 1 projects no trust bundle and emits no https
+// (MITM) egress rules, so the setting would otherwise be silently ignored.
+func checkSubstrateEgressTrustBundle(sc config.V1SubstrateConfig) error {
+	if sc.EgressTrustBundle != "" {
+		return fmt.Errorf("substrate: setting \"egress_trust_bundle\" is not supported yet: MITM egress (egress_trust_bundle) arrives in Phase 3; unset it in the substrate runtime settings for now")
+	}
+	return nil
+}
+
 // checkSubstrateRemovedKeys returns an error naming the first removed
 // settings key sc sets, and its v1 replacement.
 func checkSubstrateRemovedKeys(sc config.V1SubstrateConfig) error {
@@ -352,64 +362,21 @@ func checkSubstrateRemovedKeys(sc config.V1SubstrateConfig) error {
 	return nil
 }
 
-// substrateTrustBundleMountPath is the fixed, non-secret mount path for the
-// projected trust-bundle system-info volume. Kept as a constant, not derived
-// from sc, because the bundle's consumers (buildActorTemplate's own Env
-// values below, and every doc/support reference) all need the same literal
-// path — see substrate's docs/egress-trust-bundle.md and
-// demos/egress/egress-mitm-template.yaml.tmpl, which this mirrors exactly.
-const substrateTrustBundleMountPath = "/run/ate"
-
-// substrateTrustBundleFileName is the projected file's name within the
-// system-info volume (SystemInfoDataSource.TrustBundle.Path is relative to
-// the volume root), so its absolute path is
-// substrateTrustBundleMountPath + "/" + substrateTrustBundleFileName.
-const substrateTrustBundleFileName = "trust-bundle.pem"
-
-// substrateTrustBundleFile is the bundle's full absolute path once mounted,
-// used for every CA-related env var below.
-const substrateTrustBundleFile = substrateTrustBundleMountPath + "/" + substrateTrustBundleFileName
-
-// substrateTrustBundleNames returns the trust bundle names projected into
-// the actor: sc.EgressTrustBundle when set, else none.
-func substrateTrustBundleNames(sc config.V1SubstrateConfig) []string {
-	if sc.EgressTrustBundle == "" {
-		return nil
-	}
-	return []string{sc.EgressTrustBundle}
-}
-
 // substrateTemplateVolumes returns the template's volumes: the workspace
-// durableDir, plus the system-info volume projecting the trust bundle when
-// one is configured. substrateTemplateName hashes the same value.
-func substrateTemplateVolumes(sc config.V1SubstrateConfig) []*ateapi.Volume {
-	vols := []*ateapi.Volume{
+// durableDir. substrateTemplateName hashes the same value. Phase 1 does not
+// project the egress trust bundle (a system-info volume); Phase 3 adds it
+// back together with https (MITM) egress rules, and Run refuses
+// egress_trust_bundle until then (checkSubstrateEgressTrustBundle).
+func substrateTemplateVolumes(config.V1SubstrateConfig) []*ateapi.Volume {
+	return []*ateapi.Volume{
 		{Name: "workspace", DurableDir: &ateapi.DurableDirVolumeSource{}},
 	}
-	if names := substrateTrustBundleNames(sc); len(names) > 0 {
-		vols = append(vols, &ateapi.Volume{
-			Name: "system-info",
-			SystemInfo: &ateapi.SystemInfoVolumeSource{
-				DataSources: []*ateapi.SystemInfoDataSource{
-					{
-						TrustBundle: &ateapi.TrustBundleDataSource{
-							Names: names,
-							Path:  substrateTrustBundleFileName,
-						},
-					},
-				},
-			},
-		})
-	}
-	return vols
 }
 
 // buildActorTemplate constructs the ActorTemplate for CreateActorTemplate
 // (substrate-runtime.md §3). Env carries no secrets and no per-agent
 // config, ever (substrate-runtime.md §3; that is pushed after the actor starts, via
-// POST /scion/v1/bootstrap) — the only Env this function ever sets is the
-// fixed set of CA-bundle paths below, and only when
-// sc.EgressTrustBundle is non-empty.
+// POST /scion/v1/bootstrap); this function sets no Env at all.
 //
 // Resources are set at template level only, where v1 requires both a cpu
 // and a memory limit; the container carries none, so nothing is booked
@@ -422,51 +389,6 @@ func substrateTemplateVolumes(sc config.V1SubstrateConfig) []*ateapi.Volume {
 func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1SubstrateConfig, res substrateResources) (*ateapi.ActorTemplate, error) {
 	if res.cpuMillicores <= 0 || res.memoryBytes <= 0 {
 		return nil, fmt.Errorf("substrate: actor template %s/%s needs both a cpu and a memory limit (cpu %dm, memory %d bytes)", atespace, templateName, res.cpuMillicores, res.memoryBytes)
-	}
-
-	// env and volumeMounts for the projected egress-gateway trust bundle
-	// (its volume comes from substrateTemplateVolumes) — added only when
-	// sc.EgressTrustBundle is set (opt-in, default off): no /run/ate mount
-	// and Env nil when off.
-	var trustBundleEnv []*ateapi.EnvVar
-	var trustBundleMounts []*ateapi.VolumeMount
-	if sc.EgressTrustBundle != "" {
-		trustBundleMounts = []*ateapi.VolumeMount{
-			{Name: "system-info", MountPath: substrateTrustBundleMountPath},
-		}
-		// NODE_EXTRA_CA_CERTS, GIT_SSL_CAINFO, SSL_CERT_FILE, CURL_CA_BUNDLE,
-		// and SSL_CERT_DIR are all fixed, non-secret paths into the
-		// projected bundle — never per-agent config or a secret, so setting
-		// them here does not weaken the "Env carries no secrets" invariant
-		// above. The names come from substrateenv.TrustBundleVarNames, the
-		// single source of truth shared with pkg/sciontool/substrate's
-		// runExec (which passes exactly the subset of these names that are
-		// actually set into its exec-invoked commands' own environment
-		// explicitly, since that environment is built from scratch rather
-		// than inherited) — see that package's doc comment.
-		//
-		// SSL_CERT_DIR=/run/ate is set deliberately, not left at its
-		// default. SSL_CERT_DIR makes the gateway CA exclusive for Go and Python
-		// `ssl` (crypto/x509's SystemCertPool and OpenSSL's default-path
-		// lookup both replace their default directory list with it); it is
-		// additive or ignored for curl, git, and Node — see
-		// deploy/substrate/README.md's egress_trust_bundle section for why
-		// (Debian's curl/git are built with a compiled-in CApath and never
-		// consult SSL_CERT_DIR; Node doesn't read it at all). What it buys:
-		// sciontool's own Go client trusts only the gateway CA, so a hub
-		// status report succeeding is positive proof for Go, and a path
-		// that bypasses the gateway fails closed rather than silently
-		// trusting public roots. The cost: if the hub is ever reached
-		// without the gateway re-originating the connection, status
-		// reports fail TLS.
-		trustBundleEnv = make([]*ateapi.EnvVar, 0, len(substrateenv.TrustBundleVarNames))
-		for _, name := range substrateenv.TrustBundleVarNames {
-			value := substrateTrustBundleFile
-			if name == "SSL_CERT_DIR" {
-				value = substrateTrustBundleMountPath
-			}
-			trustBundleEnv = append(trustBundleEnv, &ateapi.EnvVar{Name: name, Value: value})
-		}
 	}
 
 	tmpl := &ateapi.ActorTemplate{
@@ -488,10 +410,11 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 				// of that hazard. /usr/local/bin/sciontool is where the
 				// image installs it (image-build/scion-base/Dockerfile).
 				Command: []string{"/usr/local/bin/sciontool", "substrate-serve"},
-				Env:     trustBundleEnv, // no secrets, ever (substrate-runtime.md §3); only fixed CA-bundle paths when egress_trust_bundle is set
-				VolumeMounts: append([]*ateapi.VolumeMount{
+				// No Env: no secrets and no per-agent config, ever
+				// (substrate-runtime.md §3).
+				VolumeMounts: []*ateapi.VolumeMount{
 					{Name: "workspace", MountPath: "/workspace"},
-				}, trustBundleMounts...),
+				},
 				// Substrate always starts the actor process as UID 0 / GID 0
 				// (ContainerSpec has no user field — agent-substrate/substrate
 				// internal/ocispec/ocispec.go) with a minimal default
