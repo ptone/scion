@@ -1388,7 +1388,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			} else {
 				go newPortForwarding(hubClient, opts.DisableConduit,
 					conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop),
-					conduitSSH, os.Getenv).run(ctx)
+					conduitSSH, childArgs, os.Getenv).run(ctx)
 
 				// Auto-expose: detect and register listening ports
 				if autoExposeCfg := autoexpose.ConfigFromEnv(); autoExposeCfg.Enabled && hubClient != nil {
