@@ -184,11 +184,15 @@ func substrateRuntimeCacheKey(cfg config.V1SubstrateConfig) (string, error) {
 // Errors fall into two classes, and only the first matches
 // ErrSubstrateProfileInvalid:
 //   - deterministic config validation failures (a missing required endpoint,
-//     or a block substrate.Validate rejects): the same settings fail the same
-//     way on every attempt, so they are tagged with the sentinel;
+//     or a block substrate.Validate rejects; and, from the production
+//     substrateRuntimeBuilder, a router_endpoint that is not
+//     https://<host>:443 or a router client certificate that is not
+//     configured): the same settings fail the same way on every attempt, so
+//     they are tagged with the sentinel;
 //   - construct-time dependency failures from substrateRuntimeBuilder
-//     (building the Kubernetes client, substrate.Dial's trust-bundle/CA load
-//     and API dial): these can be transient, so they are returned untagged
+//     (building the Kubernetes client, the trust-bundle/CA load for the
+//     router client and substrate.Dial, the router client certificate read,
+//     and the API dial): these can be transient, so they are returned untagged
 //     and a broker whose default runtime hits one starts degraded rather
 //     than refusing to start.
 func NewSubstrateRuntime(sc *config.V1SubstrateConfig) (*SubstrateRuntime, error) {
@@ -287,16 +291,45 @@ func WipeSubstrateAgentStateForTest() (restore func()) {
 	}
 }
 
-// newSubstrateRuntimeFromConfig builds a fresh SubstrateRuntime by dialing
-// ateapi and building an in-cluster Kubernetes client. This is
-// substrateRuntimeBuilder's production implementation.
+// newSubstrateK8sClient builds the in-cluster Kubernetes client for
+// newSubstrateRuntimeFromConfig. It is a variable only so a test can prove
+// the router_endpoint check runs before any client is built.
+var newSubstrateK8sClient = func() (*k8s.Client, error) {
+	return k8s.NewClientWithContext("", "")
+}
+
+// newSubstrateRuntimeFromConfig builds a fresh SubstrateRuntime by building
+// an in-cluster Kubernetes client, the mTLS router client and the ateapi
+// connection. This is substrateRuntimeBuilder's production implementation.
 func newSubstrateRuntimeFromConfig(sc config.V1SubstrateConfig) (*SubstrateRuntime, error) {
-	k8sClient, err := k8s.NewClientWithContext("", "")
+	// First, before any Kubernetes client or dial: the Substrate v1 router
+	// serves only mTLS on 443. The check is deterministic, so a refusal is
+	// an invalid profile (NewSubstrateRuntime returns it unwrapped).
+	if err := substrate.ValidateRouterEndpoint(sc.RouterEndpoint); err != nil {
+		return nil, substrateProfileInvalid(err)
+	}
+
+	k8sClient, err := newSubstrateK8sClient()
 	if err != nil {
 		return nil, fmt.Errorf("substrate: build Kubernetes client: %w", err)
 	}
 
 	ctx := context.Background()
+	// The router's CA source is the dialer's (design §3.6). The client
+	// certificate and key paths are supplied by Phase 1d's configuration;
+	// until then construction refuses with ErrRouterClientCertNotConfigured.
+	router, err := substrate.NewMTLSRouterClient(ctx, k8sClient.Clientset, substrate.RouterTLSConfig{
+		Endpoint:           sc.RouterEndpoint,
+		ClusterTrustBundle: sc.ClusterTrustBundle,
+		CAFile:             sc.CAFile,
+	})
+	if err != nil {
+		if errors.Is(err, substrate.ErrRouterClientCertNotConfigured) || errors.Is(err, substrate.ErrInvalidRouterEndpoint) {
+			return nil, substrateProfileInvalid(err)
+		}
+		return nil, err
+	}
+
 	conn, err := substrate.Dial(ctx, k8sClient.Clientset, substrate.DialerConfig{
 		APIEndpoint:        sc.APIEndpoint,
 		TokenAudience:      sc.TokenAudience,
@@ -311,7 +344,7 @@ func newSubstrateRuntimeFromConfig(sc config.V1SubstrateConfig) (*SubstrateRunti
 		cfg:            sc,
 		client:         substrate.NewControlClient(conn),
 		conn:           conn,
-		router:         substrate.NewRouterClient(sc.RouterEndpoint),
+		router:         router,
 		k8sClient:      k8sClient.Clientset,
 		now:            time.Now,
 		sleep:          time.Sleep,
