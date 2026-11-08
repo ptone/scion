@@ -42,8 +42,7 @@
     composite literal outside the two constructors.
   - `RouterClient.Do` refuses a nil HTTP client instead of falling back to
     `http.DefaultClient`. A RouterClient not built by a constructor is
-    refused; an mTLS client refuses non-https and every redirect. The
-    refusals are typed and do not echo the endpoint.
+    refused; an mTLS client refuses non-https and every redirect.
 - **router_endpoint validation:** `substrate.ValidateRouterEndpoint`
   accepts only `https://<host>:443`, with the port written out and no
   userinfo, path, query or fragment. Refusals name the rule, not the value.
