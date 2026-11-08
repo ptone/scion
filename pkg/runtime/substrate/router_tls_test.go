@@ -636,27 +636,26 @@ func plaintextListener(t *testing.T) (*httptest.Server, *atomic.Int64) {
 	return srv, &hits
 }
 
-// TestRouterClientDo_RefusesPlaintextLiteral: a literal RouterClient (not
-// built by NewRouterClient) never sends plaintext; the refusal does not
-// echo the endpoint.
+// TestRouterClientDo_RefusesPlaintextLiteral: a RouterClient not built by
+// a constructor never sends, here pointed at a plaintext listener. The
+// refusal is typed and does not echo the endpoint.
 func TestRouterClientDo_RefusesPlaintextLiteral(t *testing.T) {
 	plain, hits := plaintextListener(t)
+	var zero RouterClient // a real zero value, fields assigned afterwards
+	zero.Endpoint = plain.URL
+	zero.HTTPClient = &http.Client{}
 	for name, rc := range map[string]*RouterClient{
-		"literal":    {Endpoint: plain.URL, HTTPClient: &http.Client{}},
-		"zero value": {HTTPClient: &http.Client{}},
+		"literal":                     {Endpoint: plain.URL, HTTPClient: &http.Client{}},
+		"zero value, fields assigned": &zero,
 	} {
 		t.Run(name, func(t *testing.T) {
-			rc := rc
-			if rc.Endpoint == "" {
-				rc.Endpoint = plain.URL
-			}
 			resp, err := rc.Do(context.Background(), "ns", "a", http.MethodGet, "/healthz", nil, nil)
 			if err == nil {
 				_ = resp.Body.Close()
-				t.Fatal("Do() sent a plaintext request from a literal RouterClient")
+				t.Fatal("Do() sent a request from a RouterClient no constructor built")
 			}
-			if !errors.Is(err, ErrRouterPlaintextRefused) {
-				t.Errorf("Do() error = %v, want ErrRouterPlaintextRefused", err)
+			if !errors.Is(err, ErrRouterClientNotConstructed) {
+				t.Errorf("Do() error = %v, want ErrRouterClientNotConstructed", err)
 			}
 			u, _ := url.Parse(plain.URL)
 			if strings.Contains(err.Error(), u.Host) {
@@ -666,6 +665,49 @@ func TestRouterClientDo_RefusesPlaintextLiteral(t *testing.T) {
 	}
 	if n := hits.Load(); n != 0 {
 		t.Errorf("plaintext listener got %d request(s), want 0", n)
+	}
+}
+
+// TestRouterClientDo_RefusesUnconstructedClient: an https endpoint does not
+// help a RouterClient that no constructor built. new(RouterClient) or a zero
+// value with a bare http.Client would otherwise send with no client
+// certificate, through an environment proxy, following redirects.
+func TestRouterClientDo_RefusesUnconstructedClient(t *testing.T) {
+	var hits atomic.Int64
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	viaNew := new(RouterClient)
+	viaNew.Endpoint = tlsSrv.URL
+	viaNew.HTTPClient = tlsSrv.Client() // trusts the test server: only the marker can refuse
+	var zero RouterClient
+	zero.Endpoint = tlsSrv.URL
+	zero.HTTPClient = tlsSrv.Client()
+
+	for name, rc := range map[string]*RouterClient{
+		"new(RouterClient), https endpoint, bare client": viaNew,
+		"zero value, https endpoint, bare client":        &zero,
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, err := rc.Do(context.Background(), "ns", "a", http.MethodGet, "/healthz", nil, nil)
+			if err == nil {
+				_ = resp.Body.Close()
+				t.Fatal("Do() sent a request from a RouterClient no constructor built")
+			}
+			if !errors.Is(err, ErrRouterClientNotConstructed) {
+				t.Errorf("Do() error = %v, want ErrRouterClientNotConstructed", err)
+			}
+			u, _ := url.Parse(tlsSrv.URL)
+			if strings.Contains(err.Error(), u.Host) {
+				t.Errorf("error %q echoes the endpoint", err)
+			}
+		})
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("TLS server got %d request(s), want 0", n)
 	}
 }
 
@@ -708,7 +750,8 @@ func TestNewRouterClient_PlaintextFixtureStillWorks(t *testing.T) {
 }
 
 func TestRouterClientDo_RefusesWithoutHTTPClient(t *testing.T) {
-	rc := &RouterClient{Endpoint: testRouterEndpoint}
+	rc := NewRouterClient(testRouterEndpoint) // constructed, then its client removed
+	rc.HTTPClient = nil
 	if _, err := rc.Do(context.Background(), "ns", "a", http.MethodGet, "/", nil, nil); err == nil {
 		t.Fatal("Do() succeeded with no HTTP client, want a refusal")
 	}

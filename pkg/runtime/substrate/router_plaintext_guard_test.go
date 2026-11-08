@@ -274,6 +274,9 @@ var _ = &sub.RouterClient{}`,
 		"slice element type": `package p
 import "example.test/mod/pkg/runtime/substrate"
 var _ = []*substrate.RouterClient{{}}`,
+		"dot import": `package p
+import . "example.test/mod/pkg/runtime/substrate"
+var _ = RouterClient{}`,
 	}
 	for name, src := range positive {
 		t.Run("positive "+name, func(t *testing.T) {

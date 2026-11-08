@@ -41,12 +41,16 @@ var ErrInvalidRouterEndpoint = errors.New("substrate: invalid router_endpoint")
 // them.
 var ErrRouterClientCertNotConfigured = errors.New("substrate: router client certificate not configured: router mTLS needs both the client certificate file and the client key file")
 
-// ErrRouterPlaintextRefused is returned by Do when the request URL is not
-// https and the client was not built by NewRouterClient. Only the
-// test-only NewRouterClient may send plaintext; a zero-value or literal
-// RouterClient, or an mTLS client whose Endpoint was changed to http, is
-// refused. The error does not echo the endpoint.
-var ErrRouterPlaintextRefused = errors.New("substrate: router request is not https; plaintext is refused (only the test-only NewRouterClient may send it)")
+// ErrRouterClientNotConstructed is returned by Do for a RouterClient that
+// neither constructor built (a zero value, new(RouterClient) or a literal).
+// A RouterClient not built by a constructor is refused; an mTLS client
+// refuses non-https and every redirect. The error does not echo the endpoint.
+var ErrRouterClientNotConstructed = errors.New("substrate: RouterClient was not built by a constructor; use NewMTLSRouterClient")
+
+// ErrRouterPlaintextRefused is returned by Do when an mTLS client's request
+// URL is not https (for example after its Endpoint was changed). The error
+// does not echo the endpoint.
+var ErrRouterPlaintextRefused = errors.New("substrate: router request is not https; an mTLS router client refuses plaintext")
 
 // errRouterClientCertLoad marks a failure to load the client certificate
 // pair, from construction or from a handshake's GetClientCertificate.
@@ -78,11 +82,21 @@ type RouterClient struct {
 	// whose timeout_s was 60s).
 	HTTPClient *http.Client
 
-	// allowPlaintext is set ONLY by NewRouterClient. Without it Do refuses
-	// any request whose URL is not https, so the safe behaviour is the
-	// default for zero-value and literal clients.
-	allowPlaintext bool
+	// kind records which constructor built the client; only the two
+	// constructors set it. A RouterClient not built by a constructor is
+	// refused; an mTLS client refuses non-https and every redirect.
+	kind routerClientKind
 }
+
+// routerClientKind is the construction marker on a RouterClient. The zero
+// value means "not built by a constructor".
+type routerClientKind uint8
+
+const (
+	routerClientUnconstructed routerClientKind = iota
+	routerClientMTLS
+	routerClientTestPlaintext
+)
 
 // NewRouterClient builds a PLAINTEXT RouterClient targeting endpoint, with no
 // TLS configuration of its own. It exists for tests against httptest
@@ -91,9 +105,9 @@ type RouterClient struct {
 // fails if any non-test file under pkg/ or cmd/ refers to NewRouterClient).
 func NewRouterClient(endpoint string) *RouterClient {
 	return &RouterClient{
-		Endpoint:       strings.TrimRight(endpoint, "/"),
-		HTTPClient:     &http.Client{},
-		allowPlaintext: true,
+		Endpoint:   strings.TrimRight(endpoint, "/"),
+		HTTPClient: &http.Client{},
+		kind:       routerClientTestPlaintext,
 	}
 }
 
@@ -190,6 +204,7 @@ func newMTLSRouterClient(ctx context.Context, lookup ctbLookup, cfg RouterTLSCon
 			Transport:     transport,
 			CheckRedirect: refuseRedirect,
 		},
+		kind: routerClientMTLS,
 	}, nil
 }
 
@@ -274,6 +289,9 @@ func ValidateRouterEndpoint(endpoint string) error {
 // the router, with the given body and extra headers (may be nil). The
 // caller is responsible for closing the returned response body.
 func (c *RouterClient) Do(ctx context.Context, atespace, actor, method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
+	if c.kind == routerClientUnconstructed {
+		return nil, ErrRouterClientNotConstructed
+	}
 	if c.HTTPClient == nil {
 		return nil, errors.New("substrate: RouterClient has no HTTP client; build it with NewMTLSRouterClient")
 	}
@@ -281,7 +299,7 @@ func (c *RouterClient) Do(ctx context.Context, atespace, actor, method, path str
 	if err != nil {
 		return nil, err
 	}
-	if req.URL.Scheme != "https" && !c.allowPlaintext {
+	if c.kind == routerClientMTLS && req.URL.Scheme != "https" {
 		return nil, ErrRouterPlaintextRefused
 	}
 	req.Header.Set(TargetActorHeader, atespace+"/"+actor)
