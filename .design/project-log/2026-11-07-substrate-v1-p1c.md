@@ -57,17 +57,16 @@
 
 ## Decisions
 
-- Q1: a new constructor; the old one stays test-only, enforced by a guard test.
-- Q2 (B): production switches to mTLS now and fails closed until 1d.
-- Q3 (b): the v1 leg is a raw REST GET, with no go.mod change. Inspecting the
-  v0.35.0 module sources confirmed that k8s.io v0.35.0 has no typed certificates/v1
-  ClusterTrustBundle type or client, so (b) stands.
-- Q4 (A): the endpoint check lives in the production builder, so test
-  builder seams, including `substrate_operator_only_test.go` (not
-  modified), keep their `http://` fixtures. An explicit `:443` is required.
-- Security review: `Proxy = nil` and redirects refused (commits 4 and 5).
-- The router client refuses redirects; this was recorded as a design
-  clarification to section 3.6.
+- A new mTLS constructor; `NewRouterClient` stays test-only, enforced by a
+  guard test.
+- Production fails closed until the certificate paths are plumbed.
+- The v1 leg is a raw REST GET, with no go.mod change: k8s.io v0.35.0 has no
+  typed certificates/v1 ClusterTrustBundle type or client.
+- The `router_endpoint` check lives in the production builder, so test
+  builder seams keep their `http://` fixtures. An explicit `:443` is
+  required.
+- The router client refuses redirects, and its transport uses no
+  environment proxy.
 
 ## Tests
 
@@ -94,8 +93,8 @@ All checks ran offline from a private module cache.
 - Tests:
   - `./pkg/runtime/substrate/...` at the final tip: the 24 named tests,
     covering every AC 11 item, pass.
-  - `./pkg/runtime`: green, including the 5 named wiring and
-    operator-only tests.
+  - `./pkg/runtime`: green, including the 4 wiring tests and the
+    operator-only profile test.
 - Lint: `golangci-lint --new-from-rev=de18c73c` over the seven directories
   touched since Phase 1a's base reports 0 issues at the final tip. An
   earlier run flagged two unchecked `resp.Body.Close` calls in test code,
@@ -103,14 +102,11 @@ All checks ran offline from a private module cache.
 - Build: `go build -buildvcs=false ./...` is green.
 - gofmt: 0 unformatted out of 38 changed Go files.
 
-Two test environment lessons, both from the test kit and not the code:
+Two test environment notes:
 
-- A kit-wide `umask 077` breaks tests that assert default file modes. Run
-  `go test` under `umask 022` and without `GIT_CONFIG_GLOBAL=/dev/null`.
-- A long private `TMPDIR` pushes AF_UNIX socket paths under `t.TempDir()`
-  past the 108-byte `sun_path` limit
-  (`TestHomeBootstrapFiles_SkipsSymlinkFifoSocketAndCountsThem`). Keep it
-  short, for example `mktemp -d /tmp/p1cXXXXXX`.
+- Tests that assert default file modes depend on the process umask.
+- A long `TMPDIR` can push unix socket paths under `t.TempDir()` past the
+  platform limit (`TestHomeBootstrapFiles_SkipsSymlinkFifoSocketAndCountsThem`).
 
 ## Notes for later phases
 
