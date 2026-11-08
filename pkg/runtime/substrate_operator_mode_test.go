@@ -653,6 +653,49 @@ type sliceProjectSet []string
 
 func (s sliceProjectSet) ServedProjects(context.Context) ([]string, error) { return s, nil }
 
+// ifaceFieldProjectSet is a comparable ProjectSet type (a non-pointer
+// struct) whose interface field can hold an uncomparable value.
+type ifaceFieldProjectSet struct {
+	v any
+}
+
+func (ifaceFieldProjectSet) ServedProjects(context.Context) ([]string, error) { return nil, nil }
+
+// TestSubstrateSameProjectSet_UncomparableValuesOfSameTypeRefused: two
+// values of one comparable struct type whose interface fields both hold a
+// slice. Interface == on them would reach the slices and panic, so
+// sameProjectSet counts them as different without comparing, and
+// InstallProjectSet refuses the second.
+func TestSubstrateSameProjectSet_UncomparableValuesOfSameTypeRefused(t *testing.T) {
+	first := ifaceFieldProjectSet{v: []string{"p1"}}
+	second := ifaceFieldProjectSet{v: []string{"p1"}}
+	noPanic := func(what string, f func()) {
+		t.Helper()
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("%s panicked: %v", what, r)
+			}
+		}()
+		f()
+	}
+
+	noPanic("sameProjectSet", func() {
+		if sameProjectSet(first, second) {
+			t.Error("sameProjectSet(two slice-holding values) = true, want false")
+		}
+	})
+
+	rt := NewSubstrateRuntimeForTest(nil, nil, nil, config.V1SubstrateConfig{})
+	if err := rt.InstallProjectSet(first); err != nil {
+		t.Fatalf("first install error = %v", err)
+	}
+	noPanic("InstallProjectSet", func() {
+		if err := rt.InstallProjectSet(second); !errors.Is(err, ErrSubstrateRuntimeShared) {
+			t.Errorf("second install error = %v, want ErrSubstrateRuntimeShared", err)
+		}
+	})
+}
+
 // TestSubstrateList_SkipNoteLoggedOnChange: the skip note is logged at Warn
 // when the skipped set changes, not on every List (the heartbeat lists
 // every interval), and at Info once when it clears. A project-scoped List

@@ -147,11 +147,15 @@ func (r *SubstrateRuntime) ReleaseProjectSet(ps ProjectSet) {
 }
 
 // sameProjectSet reports whether a and b are the same ProjectSet value.
-// Values of different or uncomparable dynamic types count as different, so
-// the comparison never panics.
+// Two sets count as the same only when they have the same dynamic type, both
+// values are comparable at run time, and they are equal; anything else counts
+// as different and the install is refused, so the comparison never panics.
 func sameProjectSet(a, b ProjectSet) bool {
-	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
-	if ta != tb || ta == nil || !ta.Comparable() {
+	ta := reflect.TypeOf(a)
+	if ta == nil || ta != reflect.TypeOf(b) {
+		return false
+	}
+	if !reflect.ValueOf(a).Comparable() || !reflect.ValueOf(b).Comparable() {
 		return false
 	}
 	return a == b

@@ -49,7 +49,10 @@ clarifications to §3.3:
   process can resolve the same runtime. `InstallProjectSet` refuses a runtime
   that already carries another instance's set with
   `ErrSubstrateRuntimeShared` ("operator mode supports one broker instance
-  per process"), and accepts the same instance's set again.
+  per process"), and accepts the same instance's set again. Two sets count
+  as the same only when they have the same dynamic type, both values are
+  comparable at run time and they are equal; otherwise the install is
+  refused.
   - An instance whose default runtime is refused does not start.
   - A refused `SwapRuntime` keeps the current runtime.
   - A refused auxiliary runtime is not registered. A refused late-profile
