@@ -406,18 +406,24 @@ func (ifaceFieldRuntime) InstallProjectSet(runtime.ProjectSet) error { return ni
 func (ifaceFieldRuntime) ReleaseProjectSet(runtime.ProjectSet)       {}
 
 // TestServedProjects_RecordReceiverNeverPanicsOnUncomparableValue: the
-// record-once check never compares a receiver holding an uncomparable value
-// (interface == would panic), in either operand position; such a receiver
-// is recorded, and a comparable receiver installed twice is recorded once.
+// record-once check never compares a receiver holding an uncomparable value.
+// Interface == panics when both operands hold an uncomparable value of the
+// same dynamic type (two slice holders meet); holders of different dynamic
+// types compare false. A receiver holding an uncomparable value is recorded
+// on every install, and a comparable receiver installed twice is recorded
+// once.
 func TestServedProjects_RecordReceiverNeverPanicsOnUncomparableValue(t *testing.T) {
 	withSlice := ifaceFieldRuntime{v: []int{1}}
+	withSlice2 := ifaceFieldRuntime{v: []int{2}}
 	withInt := ifaceFieldRuntime{v: 1}
 	for _, tc := range []struct {
 		name  string
 		order []ifaceFieldRuntime
+		want  int
 	}{
-		{"slice then int", []ifaceFieldRuntime{withSlice, withInt, withInt}},
-		{"int then slice", []ifaceFieldRuntime{withInt, withSlice, withInt}},
+		{"slice then int", []ifaceFieldRuntime{withSlice, withInt, withInt}, 2},
+		{"int then slice", []ifaceFieldRuntime{withInt, withSlice, withInt}, 2},
+		{"slice then slice", []ifaceFieldRuntime{withSlice, withSlice2, withInt, withInt}, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _, _ := testServedProjects()
@@ -434,8 +440,8 @@ func TestServedProjects_RecordReceiverNeverPanicsOnUncomparableValue(t *testing.
 					}
 				}()
 			}
-			if n := len(s.projectSetInstalled); n != 2 {
-				t.Fatalf("recorded receivers = %d, want 2 (the slice holder once, the int holder once)", n)
+			if n := len(s.projectSetInstalled); n != tc.want {
+				t.Fatalf("recorded receivers = %d, want %d (each slice-holder install, the int holder once)", n, tc.want)
 			}
 		})
 	}
