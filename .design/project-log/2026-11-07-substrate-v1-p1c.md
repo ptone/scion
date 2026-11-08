@@ -99,11 +99,10 @@ All checks ran offline from a private module cache.
 
 - Dependencies: `go mod download` from proxy.golang.org, then
   `go mod verify`.
-- Tests:
-  - `./pkg/runtime/substrate/...` at the final tip: the 29 named tests,
-    covering every AC 11 item, pass.
-  - `./pkg/runtime`: green, including the 4 wiring tests and the
-    operator-only profile test.
+- Tests: one `go test` over `./pkg/runtime/substrate/...`,
+  `./pkg/runtime`, `./pkg/agent` and `./pkg/runtimebroker` at the final
+  tip passes, including the 29 named substrate tests (covering every AC 11
+  item), the 4 wiring tests and the operator-only profile test.
 - Lint: `golangci-lint --new-from-rev=de18c73c` over the seven directories
   touched since de18c73c, Phase 1a's base, reports 0 issues at the final tip. An
   earlier run flagged two unchecked `resp.Body.Close` calls in test code,
