@@ -205,6 +205,21 @@ func (hc *HubConnection) setStatus(status ConnectionStatus) {
 	hc.Status = status
 }
 
+// onControlChannelState handles the control channel's connection state:
+// connected sets the status to connected and requests a reload of the
+// broker's served-project set (substrate v1 design §3.3: every hub
+// reconnect); disconnected sets it to reconnecting.
+func (hc *HubConnection) onControlChannelState(server *Server, connected bool) {
+	if !connected {
+		hc.setStatus(ConnectionStatusReconnecting)
+		return
+	}
+	hc.setStatus(ConnectionStatusConnected)
+	if server != nil && server.servedProjects != nil {
+		server.servedProjects.requestReload()
+	}
+}
+
 // Start starts the heartbeat and control channel services for this connection.
 // If services from an earlier Start are still running, they are stopped first.
 func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
@@ -280,16 +295,7 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 				TransportSource:     hc.TransportSource,
 				TransportMode:       hc.TransportMode,
 				OnConnectionStateChange: func(connected bool) {
-					if connected {
-						hc.setStatus(ConnectionStatusConnected)
-						// Every (re)connect reloads the served-project
-						// set (substrate v1 design §3.3).
-						if server.servedProjects != nil {
-							server.servedProjects.requestReload()
-						}
-					} else {
-						hc.setStatus(ConnectionStatusReconnecting)
-					}
+					hc.onControlChannelState(server, connected)
 				},
 			}
 

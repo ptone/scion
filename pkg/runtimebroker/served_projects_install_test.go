@@ -29,7 +29,7 @@ import (
 )
 
 // The broker installs its served-project set on every runtime that enters
-// it (substrate-lead ruling Q2): New, SwapRuntime and the three auxiliary
+// it, through one helper: New, SwapRuntime and the three auxiliary
 // inserts, which all build their entry through newAuxiliaryRuntime. The
 // test below covers each path; the source guard after it keeps a future
 // entry path from skipping the install.
@@ -55,7 +55,10 @@ func TestServedProjects_InstalledOnEveryRuntimeEntryPath(t *testing.T) {
 	aux := runtime.NewSubstrateRuntimeForTest(nil, nil, nil, config.V1SubstrateConfig{})
 	auxMgr := agent.NewManager(aux)
 	t.Cleanup(auxMgr.Close)
-	entry := srv.newAuxiliaryRuntime(aux, auxMgr, config.RuntimeBuildRecord{})
+	entry, err := srv.newAuxiliaryRuntime(aux, auxMgr, config.RuntimeBuildRecord{})
+	if err != nil {
+		t.Fatalf("newAuxiliaryRuntime() error = %v", err)
+	}
 	if got := aux.ProjectSetForTest(); got != srv.servedProjects {
 		t.Errorf("newAuxiliaryRuntime: runtime ProjectSet = %v, want the broker's served-project set", got)
 	}
@@ -64,15 +67,145 @@ func TestServedProjects_InstalledOnEveryRuntimeEntryPath(t *testing.T) {
 	}
 }
 
+// auxEntryViolations reports, for one function body, the ways it could
+// install a runtime into an auxiliaryRuntime entry without
+// newAuxiliaryRuntime:
+//   - a non-empty auxiliaryRuntime literal (only newAuxiliaryRuntime may
+//     build one);
+//   - an empty auxiliaryRuntime literal that is not a return value (the
+//     zero-value returns of lookups are allowed);
+//   - an assignment to .Runtime or .Manager on a value the function binds
+//     to an auxiliaryRuntime (a var, a literal, a map entry of
+//     auxiliaryRuntimes, a range value over them, a newAuxiliaryRuntime
+//     result) or on an embedded .auxiliaryRuntime field.
+//
+// isBuilder is true for newAuxiliaryRuntime itself.
+func auxEntryViolations(body *ast.BlockStmt, isBuilder bool) []string {
+	var out []string
+	isAuxType := func(e ast.Expr) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && (id.Name == "auxiliaryRuntime" || id.Name == "namedAuxiliaryRuntime")
+	}
+	mentionsAux := func(e ast.Node) bool {
+		found := false
+		ast.Inspect(e, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				if x.Sel.Name == "auxiliaryRuntimes" || x.Sel.Name == "sortedAuxiliaryRuntimes" || x.Sel.Name == "newAuxiliaryRuntime" {
+					found = true
+				}
+			case *ast.CompositeLit:
+				if isAuxType(x.Type) {
+					found = true
+				}
+			}
+			return !found
+		})
+		return found
+	}
+	returned := map[ast.Node]bool{}
+	bound := map[string]bool{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.ReturnStmt:
+			for _, r := range x.Results {
+				returned[r] = true
+			}
+		case *ast.ValueSpec:
+			if x.Type != nil && isAuxType(x.Type) {
+				for _, nm := range x.Names {
+					bound[nm.Name] = true
+				}
+			}
+		case *ast.AssignStmt:
+			for _, rhs := range x.Rhs {
+				if mentionsAux(rhs) {
+					for _, lhs := range x.Lhs {
+						if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
+							bound[id.Name] = true
+						}
+					}
+				}
+			}
+		case *ast.RangeStmt:
+			if mentionsAux(x.X) {
+				if id, ok := x.Value.(*ast.Ident); ok && id.Name != "_" {
+					bound[id.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CompositeLit:
+			if isAuxType(x.Type) {
+				if len(x.Elts) > 0 && !isBuilder {
+					out = append(out, "builds a non-empty auxiliaryRuntime literal")
+				}
+				if len(x.Elts) == 0 && !returned[x] {
+					out = append(out, "builds an empty auxiliaryRuntime literal outside a return")
+				}
+			}
+		case *ast.AssignStmt:
+			for _, lhs := range x.Lhs {
+				sel, ok := lhs.(*ast.SelectorExpr)
+				if !ok || (sel.Sel.Name != "Runtime" && sel.Sel.Name != "Manager") {
+					continue
+				}
+				if id, ok := sel.X.(*ast.Ident); ok && bound[id.Name] {
+					out = append(out, "assigns ."+sel.Sel.Name+" on an auxiliaryRuntime value")
+				}
+				if inner, ok := sel.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "auxiliaryRuntime" {
+					out = append(out, "assigns ."+sel.Sel.Name+" on an embedded auxiliaryRuntime")
+				}
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// TestServedProjects_AuxEntryGuardCatchesBypasses proves the guard flags
+// the bypasses it exists for, on synthetic source.
+func TestServedProjects_AuxEntryGuardCatchesBypasses(t *testing.T) {
+	cases := map[string]string{
+		"non-empty literal":           `e := auxiliaryRuntime{Runtime: rt}; _ = e`,
+		"empty literal then .Runtime": `e := auxiliaryRuntime{}; e.Runtime = rt; s.auxiliaryRuntimes[k] = e`,
+		"var then .Runtime":           `var e auxiliaryRuntime; e.Runtime = rt; _ = e`,
+		"map entry then .Runtime":     `e := s.auxiliaryRuntimes[k]; e.Runtime = rt; s.auxiliaryRuntimes[k] = e`,
+		"range value then .Manager":   `for _, e := range s.sortedAuxiliaryRuntimes() { e.Manager = m }`,
+		"embedded field":              `n.auxiliaryRuntime.Runtime = rt`,
+	}
+	for name, stmt := range cases {
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", "package p\nfunc f() {\n"+stmt+"\n}\n", 0)
+		if err != nil {
+			t.Fatalf("%s: parse: %v", name, err)
+		}
+		body := f.Decls[0].(*ast.FuncDecl).Body
+		if got := auxEntryViolations(body, false); len(got) == 0 {
+			t.Errorf("%s: guard found nothing", name)
+		}
+	}
+	ok := `if x { return auxiliaryRuntime{}, false }; return nil, auxiliaryRuntime{}, nil`
+	f, err := parser.ParseFile(token.NewFileSet(), "x.go", "package p\nfunc f() {\n"+ok+"\n}\n", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := auxEntryViolations(f.Decls[0].(*ast.FuncDecl).Body, false); len(got) != 0 {
+		t.Errorf("zero-value returns flagged: %v", got)
+	}
+}
+
 // TestServedProjects_RuntimeEntryPathsGoThroughInstall is a source guard
 // over this package's non-test files:
-//   - a non-empty auxiliaryRuntime composite literal appears only in
-//     newAuxiliaryRuntime (the three auxiliary inserts call it);
+//   - only newAuxiliaryRuntime builds an auxiliaryRuntime entry, and no code
+//     installs a runtime into one any other way (auxEntryViolations);
 //   - the default runtime is set only by New (the Server literal's runtime
 //     field) and SwapRuntime (an assignment to .runtime), and both call
 //     installProjectSet.
 //
-// A sixth entry path fails here until it installs the served-project set.
+// A new entry path fails here until it installs the served-project set.
 func TestServedProjects_RuntimeEntryPathsGoThroughInstall(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -97,6 +230,9 @@ func TestServedProjects_RuntimeEntryPathsGoThroughInstall(t *testing.T) {
 				continue
 			}
 			where := name + ":" + fn.Name.Name
+			for _, v := range auxEntryViolations(fn.Body, fn.Name.Name == "newAuxiliaryRuntime") {
+				t.Errorf("%s %s; install runtimes into auxiliaryRuntime entries only through newAuxiliaryRuntime", where, v)
+			}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				switch x := n.(type) {
 				case *ast.CompositeLit:

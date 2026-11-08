@@ -106,7 +106,7 @@ func newTestSubstrateBrokerServerWith(t *testing.T, wrap func(*runtime.Substrate
 	if srt.ProjectSetForTest() == nil {
 		t.Fatal("New did not install a ProjectSet on the substrate runtime")
 	}
-	srt.SetProjectSet(substrateTestServedProjects)
+	srt.SetProjectSetForTest(substrateTestServedProjects)
 	return srv, fc
 }
 

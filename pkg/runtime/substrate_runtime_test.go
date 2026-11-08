@@ -352,7 +352,7 @@ func newTestSubstrateHarness(t *testing.T, rec *callRecorder) (*SubstrateRuntime
 	rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, config.V1SubstrateConfig{})
 	// The runtime broker installs a ProjectSet in production; the harness
 	// serves one project, so an unfiltered List reads testServedAtespace.
-	rt.SetProjectSet(newFakeProjectSet(testServedProjectID))
+	rt.SetProjectSetForTest(newFakeProjectSet(testServedProjectID))
 	return rt, fc, fa, server.Close
 }
 
@@ -2596,7 +2596,7 @@ func TestSubstrateList_RecordlessActorsNeverMatchedBySlug(t *testing.T) {
 			rec := &callRecorder{}
 			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 			defer closeServer()
-			rt.SetProjectSet(newFakeProjectSet(servedInActorOrder(order)...))
+			rt.SetProjectSetForTest(newFakeProjectSet(servedInActorOrder(order)...))
 
 			fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 				return &ateapi.ListActorsResponse{Actors: order}, nil
@@ -2688,7 +2688,7 @@ func TestSubstrateList_RecordExistsAndRecordlessSameSlug(t *testing.T) {
 			rec := &callRecorder{}
 			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 			defer closeServer()
-			rt.SetProjectSet(newFakeProjectSet(servedInActorOrder(order)...))
+			rt.SetProjectSetForTest(newFakeProjectSet(servedInActorOrder(order)...))
 
 			fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 				return &ateapi.ListActorsResponse{Actors: order}, nil
@@ -2748,7 +2748,7 @@ func TestSubstrateList_SameSlugDifferentProjects_UnscopedReturnsNothing(t *testi
 			rec := &callRecorder{}
 			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 			defer closeServer()
-			rt.SetProjectSet(newFakeProjectSet(servedInActorOrder(order)...))
+			rt.SetProjectSetForTest(newFakeProjectSet(servedInActorOrder(order)...))
 
 			fc.listActors = func(*ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 				return &ateapi.ListActorsResponse{Actors: order}, nil
@@ -2838,7 +2838,7 @@ func TestNewSubstrateRuntime_MemoizedAcrossCalls(t *testing.T) {
 		built++
 		rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg)
 		// As the runtime broker would: serve the project Run uses.
-		rt.SetProjectSet(newFakeProjectSet(testSubstrateRunConfig().ProjectID))
+		rt.SetProjectSetForTest(newFakeProjectSet(testSubstrateRunConfig().ProjectID))
 		return rt, nil
 	}
 	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
@@ -2969,7 +2969,7 @@ func TestSubstrateAgentState_SharedAcrossConfigChange(t *testing.T) {
 	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
 		rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, cfg)
 		// As the runtime broker would: serve the project Run uses.
-		rt.SetProjectSet(newFakeProjectSet(testSubstrateRunConfig().ProjectID))
+		rt.SetProjectSetForTest(newFakeProjectSet(testSubstrateRunConfig().ProjectID))
 		return rt, nil
 	}
 	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })

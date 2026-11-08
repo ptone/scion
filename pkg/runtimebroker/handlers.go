@@ -8085,7 +8085,14 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	// two profiles resolving to distinct runtimes of the same type (e.g.
 	// two Kubernetes clusters) must not overwrite each other's entry.
 	identity := auxiliaryRuntimeIdentity(resolved)
-	aux := s.newAuxiliaryRuntime(resolved, agent.NewManager(resolved), rec)
+	aux, err := s.newAuxiliaryRuntime(resolved, agent.NewManager(resolved), rec)
+	if err != nil {
+		// The runtime serves another broker instance's ProjectSet. Fail
+		// closed through an error runtime, the same contract as any other
+		// runtime that cannot be built: its calls return err.
+		errRT := &scionrt.ErrorRuntime{Err: err}
+		return fromProfile(runtimeResolution{Manager: agent.NewManager(errRT), Runtime: errRT, RuntimeType: errRT.Name(), How: resolutionErrorRuntime}), nil
+	}
 	mgr := aux.Manager
 	s.auxiliaryRuntimesMu.Lock()
 	s.auxiliaryRuntimes[identity] = aux

@@ -24,6 +24,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	ateapi "github.com/GoogleCloudPlatform/scion/third_party/substrate/ateapi/v1"
 	"google.golang.org/grpc/codes"
@@ -167,7 +168,7 @@ func TestSubstrateList_PerAtespaceFromProjectSet(t *testing.T) {
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 	ps := newFakeProjectSet(testProjAID, testProjBID)
-	rt.SetProjectSet(ps)
+	rt.SetProjectSetForTest(ps)
 	log := &atespaceRequestLog{}
 	fc.listActors = listActorsByAtespace(log, map[string][]*ateapi.Actor{
 		testAtespaceA: {runningActor(testAtespaceA, "projA--dev", "uid-a")},
@@ -201,7 +202,7 @@ func TestSubstrateList_SingleProjectFromLabelFilter(t *testing.T) {
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 	ps := newFakeProjectSet(testProjAID, testProjBID)
-	rt.SetProjectSet(ps)
+	rt.SetProjectSetForTest(ps)
 	log := &atespaceRequestLog{}
 	fc.listActors = listActorsByAtespace(log, map[string][]*ateapi.Actor{
 		testAtespaceA: {runningActor(testAtespaceA, "projA--dev", "uid-a")},
@@ -228,7 +229,7 @@ func TestSubstrateList_RestartKeepsServedRecordlessActorVisible(t *testing.T) {
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
 	cfg := testSubstrateRunConfig()
-	rt.SetProjectSet(newFakeProjectSet(cfg.ProjectID))
+	rt.SetProjectSetForTest(newFakeProjectSet(cfg.ProjectID))
 	// ListActors serves what CreateActor created, per atespace.
 	fc.listActors = func(req *ateapi.ListActorsRequest) (*ateapi.ListActorsResponse, error) {
 		fc.mu.Lock()
@@ -287,7 +288,7 @@ func TestSubstrateList_UnprovisionedServedProjectSkippedAndCounted(t *testing.T)
 			rec := &callRecorder{}
 			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 			defer closeServer()
-			rt.SetProjectSet(newFakeProjectSet(testProjAID, testProjBID, projCID))
+			rt.SetProjectSetForTest(newFakeProjectSet(testProjAID, testProjBID, projCID))
 			log := &atespaceRequestLog{}
 			fc.listActors = listActorsByAtespace(log, map[string][]*ateapi.Actor{
 				testAtespaceA: {runningActor(testAtespaceA, "projA--dev", "uid-a")},
@@ -298,8 +299,8 @@ func TestSubstrateList_UnprovisionedServedProjectSkippedAndCounted(t *testing.T)
 			if err != nil {
 				t.Fatalf("listOperatorModeActors() error = %v", err)
 			}
-			if !reflect.DeepEqual(skipped, []string{testAtespaceB}) {
-				t.Errorf("skipped = %v, want [%s]", skipped, testAtespaceB)
+			if want := []skippedAtespace{{Atespace: testAtespaceB, Code: code}}; !reflect.DeepEqual(skipped, want) {
+				t.Errorf("skipped = %v, want %v", skipped, want)
 			}
 			if len(actors) != 2 {
 				t.Errorf("actors = %v, want projA's and projC's", actors)
@@ -327,7 +328,7 @@ func TestSubstrateList_UnfilteredOtherErrorFailsList(t *testing.T) {
 	rec := &callRecorder{}
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
-	rt.SetProjectSet(newFakeProjectSet(testProjAID, testProjBID))
+	rt.SetProjectSetForTest(newFakeProjectSet(testProjAID, testProjBID))
 	log := &atespaceRequestLog{}
 	fc.listActors = listActorsByAtespace(log, map[string][]*ateapi.Actor{
 		testAtespaceA: {runningActor(testAtespaceA, "projA--dev", "uid-a")},
@@ -359,7 +360,7 @@ func TestSubstrateList_ProjectSetColdOrUnavailableIsError(t *testing.T) {
 			rec := &callRecorder{}
 			rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
 			defer closeServer()
-			rt.SetProjectSet(tc.ps)
+			rt.SetProjectSetForTest(tc.ps)
 
 			agents, err := rt.List(context.Background(), map[string]string{"scion.agent": "true"})
 			if !errors.Is(err, tc.want) {
@@ -408,7 +409,7 @@ func TestSubstrateList_MaxPagesAppliesPerAtespace(t *testing.T) {
 	origCap := maxActorListPages
 	maxActorListPages = 3
 	t.Cleanup(func() { maxActorListPages = origCap })
-	rt.SetProjectSet(newFakeProjectSet(testProjAID, testProjBID))
+	rt.SetProjectSetForTest(newFakeProjectSet(testProjAID, testProjBID))
 	var mu sync.Mutex
 	calls := 0
 	// Each atespace answers exactly maxActorListPages pages.
@@ -474,9 +475,27 @@ func TestSubstrateAtespaceProvisioningError_NeverCarriesServerText(t *testing.T)
 				if !errors.Is(err, ErrSubstrateAtespaceNotProvisioned) {
 					t.Fatalf("%s: err = %v, want the typed provisioning error", name, err)
 				}
-				for _, part := range []string{"PLANTED", "7f3a9c", "ate-api.example", "principal="} {
-					if strings.Contains(err.Error(), part) {
-						t.Errorf("%s: error text %q carries server text %q", name, err.Error(), part)
+				// The text, the unwrapped chain and the gRPC status a caller
+				// can extract (errors.As / status.FromError) carry the code
+				// only, never the server's message.
+				st, ok := status.FromError(err)
+				if !ok || st.Code() != code {
+					t.Errorf("%s: status.FromError = %v, %v; want code %v", name, st, ok, code)
+				}
+				var texts []string
+				texts = append(texts, err.Error(), st.Message())
+				for e := errors.Unwrap(err); e != nil; e = errors.Unwrap(e) {
+					texts = append(texts, e.Error())
+				}
+				var se interface{ GRPCStatus() *status.Status }
+				if errors.As(err, &se) {
+					texts = append(texts, se.GRPCStatus().Message())
+				}
+				for _, text := range texts {
+					for _, part := range []string{"PLANTED", "7f3a9c", "ate-api.example", "principal="} {
+						if strings.Contains(text, part) {
+							t.Errorf("%s: %q carries server text %q", name, text, part)
+						}
 					}
 				}
 			}
@@ -499,7 +518,7 @@ func TestSubstrateList_NeverReturnsActorReportingAnotherAtespace(t *testing.T) {
 	rec := &callRecorder{}
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
-	rt.SetProjectSet(newFakeProjectSet(testProjAID, testProjBID))
+	rt.SetProjectSetForTest(newFakeProjectSet(testProjAID, testProjBID))
 	notServed := substrateAtespaceName("not-served")
 	// ownA has a record for project A; orphanA and ownB have none;
 	// strayInA reports atespace B but has a record for project A; unserved
@@ -557,5 +576,118 @@ func TestSubstrateList_NeverReturnsActorReportingAnotherAtespace(t *testing.T) {
 	}
 	if want := []string{testAtespaceA + "/uid-a", testAtespaceA + "/uid-o"}; !reflect.DeepEqual(raw, want) {
 		t.Errorf("listOperatorModeActors(project A) = %v, want %v", raw, want)
+	}
+}
+
+// TestSubstrateList_UnreadableAtespaceMarksListIncomplete: an unfiltered
+// List that skips a PermissionDenied atespace marks the caller's
+// ListCompleteness incomplete (the atespace may hold live actors) and still
+// returns the readable atespaces' actors. A NotFound skip hides nothing
+// and leaves it complete, and so does a List with nothing skipped.
+func TestSubstrateList_UnreadableAtespaceMarksListIncomplete(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		errs           map[string]error
+		wantIncomplete bool
+	}{
+		{"PermissionDenied", map[string]error{testAtespaceB: status.Error(codes.PermissionDenied, "x")}, true},
+		{"NotFound", map[string]error{testAtespaceB: status.Error(codes.NotFound, "x")}, false},
+		{"none skipped", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &callRecorder{}
+			rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+			defer closeServer()
+			rt.SetProjectSetForTest(newFakeProjectSet(testProjAID, testProjBID))
+			log := &atespaceRequestLog{}
+			fc.listActors = listActorsByAtespace(log, map[string][]*ateapi.Actor{
+				testAtespaceA: {runningActor(testAtespaceA, "projA--dev", "uid-a")},
+			}, tc.errs)
+
+			c := &ListCompleteness{}
+			agents, err := rt.List(WithListCompleteness(context.Background(), c), nil)
+			if err != nil {
+				t.Fatalf("List() error = %v", err)
+			}
+			if len(agents) != 1 || agents[0].ContainerID != testAtespaceA+"/projA--dev" {
+				t.Errorf("List() = %v, want projA's actor", agents)
+			}
+			if got, reason := c.Incomplete(); got != tc.wantIncomplete {
+				t.Errorf("Incomplete() = %v (%q), want %v", got, reason, tc.wantIncomplete)
+			}
+		})
+	}
+}
+
+// TestSubstrateInstallProjectSet_RefusesAnotherOwner: InstallProjectSet
+// accepts a set on an empty runtime and the same set again, refuses a
+// different set with ErrSubstrateRuntimeShared and keeps the first, and
+// treats uncomparable values as different without panicking.
+func TestSubstrateInstallProjectSet_RefusesAnotherOwner(t *testing.T) {
+	rt := NewSubstrateRuntimeForTest(nil, nil, nil, config.V1SubstrateConfig{})
+	first, second := newFakeProjectSet("p1"), newFakeProjectSet("p1")
+	if err := rt.InstallProjectSet(first); err != nil {
+		t.Fatalf("first install error = %v", err)
+	}
+	if err := rt.InstallProjectSet(first); err != nil {
+		t.Fatalf("same-set re-install error = %v, want nil", err)
+	}
+	if err := rt.InstallProjectSet(second); !errors.Is(err, ErrSubstrateRuntimeShared) {
+		t.Fatalf("other-set install error = %v, want ErrSubstrateRuntimeShared", err)
+	}
+	if got := rt.ProjectSetForTest(); got != ProjectSet(first) {
+		t.Errorf("ProjectSet = %v, want the first set kept", got)
+	}
+
+	rt2 := NewSubstrateRuntimeForTest(nil, nil, nil, config.V1SubstrateConfig{})
+	if err := rt2.InstallProjectSet(sliceProjectSet{"p1"}); err != nil {
+		t.Fatalf("uncomparable first install error = %v", err)
+	}
+	if err := rt2.InstallProjectSet(sliceProjectSet{"p1"}); !errors.Is(err, ErrSubstrateRuntimeShared) {
+		t.Errorf("uncomparable second install error = %v, want ErrSubstrateRuntimeShared", err)
+	}
+}
+
+// sliceProjectSet is an uncomparable ProjectSet (a slice type).
+type sliceProjectSet []string
+
+func (s sliceProjectSet) ServedProjects(context.Context) ([]string, error) { return s, nil }
+
+// TestSubstrateList_SkipNoteLoggedOnChange: the skip note is logged at Warn
+// when the skipped set changes, not on every List (the heartbeat lists
+// every interval), and at Info once when it clears.
+func TestSubstrateList_SkipNoteLoggedOnChange(t *testing.T) {
+	rec := &callRecorder{}
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+	rt.SetProjectSetForTest(newFakeProjectSet(testProjAID, testProjBID))
+	errs := map[string]error{testAtespaceB: status.Error(codes.NotFound, "x")}
+	log := &atespaceRequestLog{}
+	fc.listActors = listActorsByAtespace(log, nil, errs)
+	buf := captureSlog(t)
+	warns := func() int { return strings.Count(buf.String(), "level=WARN") }
+
+	for i := 0; i < 3; i++ {
+		if _, err := rt.List(context.Background(), nil); err != nil {
+			t.Fatalf("List() error = %v", err)
+		}
+	}
+	if n := warns(); n != 1 {
+		t.Fatalf("Warn lines after 3 Lists with the same skip = %d, want 1", n)
+	}
+	errs[testAtespaceA] = status.Error(codes.PermissionDenied, "x")
+	if _, err := rt.List(context.Background(), nil); err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if n := warns(); n != 2 {
+		t.Errorf("Warn lines after the skipped set changed = %d, want 2", n)
+	}
+	delete(errs, testAtespaceA)
+	delete(errs, testAtespaceB)
+	if _, err := rt.List(context.Background(), nil); err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if !strings.Contains(buf.String(), "level=INFO") {
+		t.Errorf("no Info line when the skips cleared: %q", buf.String())
 	}
 }

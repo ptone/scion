@@ -495,6 +495,16 @@ type Server struct {
 	// gives it to every runtime that enters the broker (New, SwapRuntime,
 	// newAuxiliaryRuntime). Set once in New.
 	servedProjects *servedProjects
+	// projectSetSetupErr refuses to start an instance whose default
+	// runtime already serves another broker instance's ProjectSet (a
+	// substrate runtime shared within the process).
+	projectSetSetupErr error
+	// servedProjectsOnce starts the refresher at most once;
+	// servedProjectsCancel stops it and servedProjectsDone is closed when
+	// it has returned (Shutdown). Cancel and done are guarded by mu.
+	servedProjectsOnce   sync.Once
+	servedProjectsCancel context.CancelFunc
+	servedProjectsDone   chan struct{}
 
 	// auxDiscoveryDone is closed when the background auxiliary runtime
 	// discovery pass (startAuxiliaryRuntimeDiscovery) has finished, nil
@@ -729,7 +739,10 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 	// v1 design §3.3). It is loaded by startServedProjectsRefresh; until
 	// then it is cold and such a List fails rather than listing nothing.
 	srv.servedProjects = newServedProjects(srv.servedProjectsSources, logging.Subsystem("broker.served-projects"))
-	srv.installProjectSet(rt)
+	if err := srv.installProjectSet(rt); err != nil {
+		srv.projectSetSetupErr = fmt.Errorf("runtime broker: %w", err)
+		slog.Error("Runtime Broker will not start", "error", srv.projectSetSetupErr)
+	}
 
 	srv.workspaceLocks = cfg.WorkspaceLocks
 	if srv.workspaceLocks == nil {
@@ -936,7 +949,12 @@ func (s *Server) currentRuntime() scionrt.Runtime {
 // the old (possibly missing) runtime binary. rec is rt's build record; it
 // replaces the old runtime's record in the same critical section.
 func (s *Server) SwapRuntime(rt scionrt.Runtime, rec config.RuntimeBuildRecord) {
-	s.installProjectSet(rt)
+	if err := s.installProjectSet(rt); err != nil {
+		// Fail closed: keep the current runtime rather than serve one
+		// that lists with another broker instance's projects.
+		slog.Error("Runtime broker did not swap its container runtime", "new", rt.Name(), "error", err)
+		return
+	}
 	s.mu.Lock()
 	old := s.runtime.Name()
 	s.runtime = rt
@@ -1667,6 +1685,9 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	if s.hostSetupErr != nil {
 		return s.hostSetupErr
 	}
+	if s.projectSetSetupErr != nil {
+		return s.projectSetSetupErr
+	}
 
 	s.mu.Lock()
 	s.startTime = time.Now()
@@ -1887,6 +1908,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if sweepCancel != nil {
 		sweepCancel()
 	}
+	s.stopServedProjectsRefresh()
 	s.stopShareHealthLoop()
 
 	// Cancel every start still running on a start, restart or create
@@ -2143,7 +2165,12 @@ func (s *Server) discoverAuxiliaryRuntimesForProjectsCtx(ctx context.Context, pr
 		}
 		discoveredIdentities[identity] = true
 
-		aux := s.newAuxiliaryRuntime(r.rt, agent.NewManager(r.rt), r.rec)
+		aux, err := s.newAuxiliaryRuntime(r.rt, agent.NewManager(r.rt), r.rec)
+		if err != nil {
+			slog.Error("Auxiliary runtime from project settings not registered",
+				"runtime", r.rt.Name(), "identity", identity, "profile", c.profile, "error", err)
+			continue
+		}
 		s.auxiliaryRuntimesMu.Lock()
 		s.auxiliaryRuntimes[identity] = aux
 		s.auxiliaryRuntimesMu.Unlock()
@@ -2293,7 +2320,14 @@ func (s *Server) applyLateAuxResult(ctx context.Context, c auxProfileCandidate, 
 	s.auxiliaryRuntimesMu.Lock()
 	_, exists := s.auxiliaryRuntimes[identity]
 	if !exists {
-		s.auxiliaryRuntimes[identity] = s.newAuxiliaryRuntime(r.rt, agent.NewManager(r.rt), r.rec)
+		aux, err := s.newAuxiliaryRuntime(r.rt, agent.NewManager(r.rt), r.rec)
+		if err != nil {
+			s.auxiliaryRuntimesMu.Unlock()
+			slog.Error("Auxiliary runtime from project settings not registered",
+				"runtime", r.rt.Name(), "identity", identity, "profile", c.profile, "error", err)
+			return
+		}
+		s.auxiliaryRuntimes[identity] = aux
 	}
 	s.auxiliaryRuntimesMu.Unlock()
 	if !exists {

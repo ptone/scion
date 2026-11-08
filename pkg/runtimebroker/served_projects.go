@@ -140,9 +140,16 @@ func (p *servedProjects) run(ctx context.Context) {
 }
 
 // reload loads every current source once. A failure keeps that source's
-// last good snapshot.
+// last good snapshot. After a full pass, snapshots of connections that are
+// no longer sources are dropped, so a connection removed and added again
+// starts cold instead of answering from its old snapshot.
 func (p *servedProjects) reload(ctx context.Context) {
-	for _, src := range p.sources() {
+	sources := p.sources()
+	current := make(map[string]bool, len(sources))
+	for _, src := range sources {
+		current[src.key()] = true
+	}
+	for _, src := range sources {
 		if ctx.Err() != nil {
 			return
 		}
@@ -173,6 +180,13 @@ func (p *servedProjects) reload(ctx context.Context) {
 		p.mu.Unlock()
 		p.log.Debug("Loaded served projects from the hub", "hub", src.name, "count", len(ids))
 	}
+	p.mu.Lock()
+	for key := range p.snaps {
+		if !current[key] {
+			delete(p.snaps, key)
+		}
+	}
+	p.mu.Unlock()
 }
 
 // ServedProjects implements scionrt.ProjectSet: the sorted, de-duplicated
@@ -214,21 +228,29 @@ func (p *servedProjects) ServedProjects(ctx context.Context) ([]string, error) {
 // runtime that enters the broker passes through here: New, SwapRuntime and
 // newAuxiliaryRuntime. A runtime that missed it fails an unfiltered List
 // as cold, never as empty.
-func (s *Server) installProjectSet(rt scionrt.Runtime) {
+//
+// A runtime that already serves another broker instance's set is refused
+// (scionrt.ErrSubstrateRuntimeShared), fail closed; installing this
+// instance's own set again is accepted.
+func (s *Server) installProjectSet(rt scionrt.Runtime) error {
 	if s.servedProjects == nil {
-		return
+		return nil
 	}
 	if r, ok := rt.(scionrt.ProjectSetReceiver); ok {
-		r.SetProjectSet(s.servedProjects)
+		return r.InstallProjectSet(s.servedProjects)
 	}
+	return nil
 }
 
 // newAuxiliaryRuntime is the only constructor of a registered
-// auxiliaryRuntime entry: it installs the served-project set on rt first.
+// auxiliaryRuntime entry: it installs the served-project set on rt first,
+// and returns the install error instead of an entry when that is refused.
 // served_projects_install_test.go guards that no other code builds one.
-func (s *Server) newAuxiliaryRuntime(rt scionrt.Runtime, mgr agent.Manager, rec config.RuntimeBuildRecord) auxiliaryRuntime {
-	s.installProjectSet(rt)
-	return auxiliaryRuntime{Runtime: rt, Manager: mgr, Record: rec}
+func (s *Server) newAuxiliaryRuntime(rt scionrt.Runtime, mgr agent.Manager, rec config.RuntimeBuildRecord) (auxiliaryRuntime, error) {
+	if err := s.installProjectSet(rt); err != nil {
+		return auxiliaryRuntime{}, err
+	}
+	return auxiliaryRuntime{Runtime: rt, Manager: mgr, Record: rec}, nil
 }
 
 // servedProjectsSources returns one source per hub connection that is
@@ -253,13 +275,38 @@ func (s *Server) servedProjectsSources() []servedProjectsSource {
 	return out
 }
 
-// startServedProjectsRefresh starts the served-project refresher: a load
-// now, on every hub reconnect (requestReload from the control channel's
-// connect callback) and every servedProjectsRefreshInterval, until ctx
-// ends.
+// startServedProjectsRefresh starts the served-project refresher, at most
+// once: a load now, on every hub reconnect (requestReload from
+// onControlChannelState) and every servedProjectsRefreshInterval, until
+// ctx ends or Shutdown stops it.
 func (s *Server) startServedProjectsRefresh(ctx context.Context) {
 	if s.servedProjects == nil {
 		return
 	}
-	go s.servedProjects.run(ctx)
+	s.servedProjectsOnce.Do(func() {
+		runCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		s.mu.Lock()
+		s.servedProjectsCancel = cancel
+		s.servedProjectsDone = done
+		s.mu.Unlock()
+		go func() {
+			defer close(done)
+			s.servedProjects.run(runCtx)
+		}()
+	})
+}
+
+// stopServedProjectsRefresh stops the refresher started by
+// startServedProjectsRefresh and waits for it to return. A load in progress
+// is cancelled through its context. It does nothing if none was started.
+func (s *Server) stopServedProjectsRefresh() {
+	s.mu.RLock()
+	cancel, done := s.servedProjectsCancel, s.servedProjectsDone
+	s.mu.RUnlock()
+	if cancel == nil {
+		return
+	}
+	cancel()
+	<-done
 }

@@ -425,7 +425,7 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 	// is cold here (no hub connection), so an unfiltered List would fail.
 	// Serve the two projects this test runs, as a loaded set would.
 	for _, rt := range built {
-		rt.SetProjectSet(staticProjectSet{"550e8400-e29b-41d4-a716-446655440010", "550e8400-e29b-41d4-a716-446655440011"})
+		rt.SetProjectSetForTest(staticProjectSet{"550e8400-e29b-41d4-a716-446655440010", "550e8400-e29b-41d4-a716-446655440011"})
 	}
 
 	// resolveAgentRuntimeTarget/List/Delete must still work for BOTH

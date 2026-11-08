@@ -211,7 +211,7 @@ func TestSubstrateAgentManagerDelete_RecordExists(t *testing.T) {
 	defer actorServer.Close()
 
 	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
-	rt.SetProjectSet(servedProjects{"550e8400-e29b-41d4-a716-446655440002"})
+	rt.SetProjectSetForTest(servedProjects{"550e8400-e29b-41d4-a716-446655440002"})
 
 	const agentSlug = "sb-smoke-2"
 	cfg := scionruntime.RunConfig{
@@ -279,7 +279,7 @@ func TestSubstrateAgentManagerDelete_NoRecord(t *testing.T) {
 	fc.putActor(atespace, actorName, "uid-orphan")
 
 	rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient("http://unused"), nil, config.V1SubstrateConfig{})
-	rt.SetProjectSet(servedProjects{projectID})
+	rt.SetProjectSetForTest(servedProjects{projectID})
 
 	mgr := NewManager(rt)
 	defer mgr.Close()
@@ -336,9 +336,9 @@ func TestSubstrateAgentManagerDelete_RecordlessAmbiguousSlugDeletesNothing(t *te
 
 			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient("http://unused"), nil, config.V1SubstrateConfig{})
 			if order == "A then B" {
-				rt.SetProjectSet(servedProjects{projAID, projBID})
+				rt.SetProjectSetForTest(servedProjects{projAID, projBID})
 			} else {
-				rt.SetProjectSet(servedProjects{projBID, projAID})
+				rt.SetProjectSetForTest(servedProjects{projBID, projAID})
 			}
 			mgr := NewManager(rt)
 			defer mgr.Close()
@@ -393,9 +393,9 @@ func TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug(t *testin
 
 			rt := scionruntime.NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(actorServer.URL), nil, config.V1SubstrateConfig{})
 			if orderName == "record-having first" {
-				rt.SetProjectSet(servedProjects{recordedProjID, otherProjectID})
+				rt.SetProjectSetForTest(servedProjects{recordedProjID, otherProjectID})
 			} else {
-				rt.SetProjectSet(servedProjects{otherProjectID, recordedProjID})
+				rt.SetProjectSetForTest(servedProjects{otherProjectID, recordedProjID})
 			}
 
 			// The record-less other-project actor, injected directly (never
@@ -522,10 +522,10 @@ func TestSubstrateAgentManagerDelete_SameSlugDifferentProjectsFailsClosed(t *tes
 			fc.mu.Lock()
 			if orderName == "projA first" {
 				fc.forceListOrder = []*ateapi.Actor{actorA, actorB}
-				rt.SetProjectSet(servedProjects{"aaaaaaaaaaaa", "bbbbbbbbbbbb"})
+				rt.SetProjectSetForTest(servedProjects{"aaaaaaaaaaaa", "bbbbbbbbbbbb"})
 			} else {
 				fc.forceListOrder = []*ateapi.Actor{actorB, actorA}
-				rt.SetProjectSet(servedProjects{"bbbbbbbbbbbb", "aaaaaaaaaaaa"})
+				rt.SetProjectSetForTest(servedProjects{"bbbbbbbbbbbb", "aaaaaaaaaaaa"})
 			}
 			fc.mu.Unlock()
 

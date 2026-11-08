@@ -193,15 +193,24 @@ type HeartbeatService struct {
 // is cancelled, every heartbeat waiting on the listing reports the target
 // incomplete.
 type targetListing struct {
-	done     chan struct{} // closed when agents and err are set
+	done     chan struct{} // closed when agents, err and incomplete are set
 	deadline time.Time
 	agents   []api.AgentInfo
 	err      error
+	// incomplete is set when the listing succeeded but the runtime
+	// reported that it did not read its whole scope (for example a
+	// substrate atespace it is not allowed to read). Its agents are still
+	// reported; the target is reported incomplete.
+	incomplete bool
 }
 
 // errListingPending marks a target whose listing did not finish before
 // the heartbeat's deadline.
 var errListingPending = errors.New("agent listing did not finish before the heartbeat deadline")
+
+// errListingIncomplete is noted for a target whose listing succeeded but
+// did not cover the target's whole scope.
+var errListingIncomplete = errors.New("agent listing did not cover the whole runtime target")
 
 // SwapManager replaces the agent manager used by the heartbeat service.
 // This is called when the broker's container runtime changes (e.g. via
@@ -545,7 +554,7 @@ type listTarget struct {
 // whose listing has run past its deadline and not returned is reported
 // pending without starting another. A listing that returns after its own
 // deadline counts as failed, so its result is never reported.
-func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget, deadline time.Time) ([][]api.AgentInfo, []error) {
+func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget, deadline time.Time) ([][]api.AgentInfo, []error, []bool) {
 	now := time.Now()
 	listings := make([]*targetListing, len(targets))
 	var joined []string
@@ -579,6 +588,7 @@ func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget
 	expired := false
 	agents := make([][]api.AgentInfo, len(targets))
 	errs := make([]error, len(targets))
+	incomplete := make([]bool, len(targets))
 	for i, l := range listings {
 		if l == nil {
 			errs[i] = errListingPending
@@ -595,12 +605,12 @@ func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget
 		}
 		select {
 		case <-l.done:
-			agents[i], errs[i] = l.agents, l.err
+			agents[i], errs[i], incomplete[i] = l.agents, l.err, l.incomplete
 		default:
 			errs[i] = errListingPending
 		}
 	}
-	return agents, errs
+	return agents, errs, incomplete
 }
 
 // runListing lists one target for l, bounded by l.deadline, then publishes
@@ -610,7 +620,11 @@ func (s *HeartbeatService) runListing(ctx context.Context, key string, mgr agent
 	// The heartbeat is the one caller that also gets entries for
 	// Kubernetes agent pods removed by a preemption or eviction before any
 	// listing saw them terminal, so the hub can record that reason.
-	agents, err := mgr.List(scionrt.WithVanishedPodReports(listCtx), nil)
+	// A runtime that skips part of its scope marks completeness; the
+	// target is then reported incomplete so its unseen agents are not
+	// reconciled as missing.
+	completeness := &scionrt.ListCompleteness{}
+	agents, err := mgr.List(scionrt.WithListCompleteness(scionrt.WithVanishedPodReports(listCtx), completeness), nil)
 	if err == nil {
 		// Returned only after its deadline passed (or ctx ended): too old
 		// to report. Check the clock too: listCtx's own timer may not have
@@ -624,6 +638,9 @@ func (s *HeartbeatService) runListing(ctx context.Context, key string, mgr agent
 	}
 	cancel()
 	l.agents, l.err = agents, err
+	if err == nil {
+		l.incomplete, _ = completeness.Incomplete()
+	}
 	s.mu.Lock()
 	if s.listings[key] == l {
 		delete(s.listings, key)
@@ -762,10 +779,16 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context, startsBefore
 	if listingDeadline <= 0 {
 		listingDeadline = defaultListingDeadline(s.interval)
 	}
-	listed, listErrs := s.listTargets(ctx, targets, time.Now().Add(listingDeadline))
+	listed, listErrs, listIncomplete := s.listTargets(ctx, targets, time.Now().Add(listingDeadline))
 	for i, t := range targets {
-		s.noteListResult(t.key, listErrs[i])
-		addTarget(t.id, t.runtimeName, listErrs[i] == nil)
+		noted := listErrs[i]
+		if noted == nil && listIncomplete[i] {
+			noted = errListingIncomplete
+		}
+		s.noteListResult(t.key, noted)
+		// A successful but incomplete listing still reports its agents
+		// (below); only the target's completeness changes.
+		addTarget(t.id, t.runtimeName, listErrs[i] == nil && !listIncomplete[i])
 	}
 
 	// The default runtime's agents. If its listing failed (e.g. its runtime

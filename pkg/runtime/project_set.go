@@ -31,8 +31,10 @@ type ProjectSet interface {
 }
 
 // ProjectSetReceiver is the optional capability of a runtime that takes a
-// ProjectSet. The runtime broker sets its ProjectSet on every runtime it
-// registers that implements it.
+// ProjectSet. The runtime broker installs its ProjectSet on every runtime it
+// registers that implements it. InstallProjectSet refuses a runtime that
+// already serves a different ProjectSet (another broker instance), and
+// accepts the same set again.
 type ProjectSetReceiver interface {
-	SetProjectSet(ps ProjectSet)
+	InstallProjectSet(ps ProjectSet) error
 }

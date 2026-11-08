@@ -26,6 +26,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -98,16 +100,55 @@ type SubstrateRuntime struct {
 
 	// projectSet is the source of an unfiltered List in operator mode
 	// (substrate v1 design §3.3): the projects whose atespaces List reads.
-	// The runtime broker sets it (SetProjectSet); nil means an unfiltered
+	// The runtime broker installs it (InstallProjectSet); nil means an unfiltered
 	// List fails as cold rather than returning an empty result.
 	projectSetMu sync.RWMutex
 	projectSet   ProjectSet
+
+	// lastSkipKey is the set of atespaces the previous unfiltered List
+	// skipped, so the skip note is logged at Warn only when it changes.
+	skipLogMu   sync.Mutex
+	lastSkipKey string
 }
 
 var _ ProjectSetReceiver = (*SubstrateRuntime)(nil)
 
-// SetProjectSet implements ProjectSetReceiver.
-func (r *SubstrateRuntime) SetProjectSet(ps ProjectSet) {
+// ErrSubstrateRuntimeShared is returned by InstallProjectSet when the
+// runtime already serves another broker instance's ProjectSet.
+// NewSubstrateRuntime memoizes runtimes per config process-wide, so two
+// broker instances in one process that resolve the same substrate config
+// share one runtime; operator mode refuses that rather than let one
+// instance list with the other's projects.
+var ErrSubstrateRuntimeShared = errors.New("substrate runtime is shared by another broker instance in this process; operator mode supports one broker instance per process")
+
+// InstallProjectSet implements ProjectSetReceiver. It installs ps when the
+// runtime has none, or when ps is the set already installed (the same
+// broker instance installing again). A runtime that carries a different
+// set is refused with ErrSubstrateRuntimeShared and keeps its set.
+func (r *SubstrateRuntime) InstallProjectSet(ps ProjectSet) error {
+	r.projectSetMu.Lock()
+	defer r.projectSetMu.Unlock()
+	if r.projectSet != nil && !sameProjectSet(r.projectSet, ps) {
+		return ErrSubstrateRuntimeShared
+	}
+	r.projectSet = ps
+	return nil
+}
+
+// sameProjectSet reports whether a and b are the same ProjectSet value.
+// Values of different or uncomparable dynamic types count as different, so
+// the comparison never panics.
+func sameProjectSet(a, b ProjectSet) bool {
+	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
+	if ta != tb || ta == nil || !ta.Comparable() {
+		return false
+	}
+	return a == b
+}
+
+// SetProjectSetForTest replaces the runtime's ProjectSet unconditionally,
+// for tests that drive a runtime without a broker.
+func (r *SubstrateRuntime) SetProjectSetForTest(ps ProjectSet) {
 	r.projectSetMu.Lock()
 	defer r.projectSetMu.Unlock()
 	r.projectSet = ps
@@ -131,7 +172,6 @@ var ErrSubstrateAtespaceNotProvisioned = errors.New("substrate: atespace not pro
 type SubstrateAtespaceProvisioningError struct {
 	Atespace string
 	Code     codes.Code
-	Err      error
 }
 
 func (e *SubstrateAtespaceProvisioningError) Error() string {
@@ -144,14 +184,17 @@ func (e *SubstrateAtespaceProvisioningError) Is(target error) bool {
 	return target == ErrSubstrateAtespaceNotProvisioned
 }
 
-func (e *SubstrateAtespaceProvisioningError) Unwrap() error { return e.Err }
+// Unwrap returns a gRPC status carrying only the code: the server's message
+// is not kept, so neither the error text nor status.FromError on the
+// returned error can expose it.
+func (e *SubstrateAtespaceProvisioningError) Unwrap() error { return status.Error(e.Code, "") }
 
 // atespaceProvisioningError returns the typed provisioning error for a
 // NotFound or PermissionDenied err on atespace, else nil.
 func atespaceProvisioningError(atespace string, err error) error {
 	switch c := status.Code(err); c {
 	case codes.NotFound, codes.PermissionDenied:
-		return &SubstrateAtespaceProvisioningError{Atespace: atespace, Code: c, Err: err}
+		return &SubstrateAtespaceProvisioningError{Atespace: atespace, Code: c}
 	}
 	return nil
 }
@@ -945,10 +988,7 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	if err != nil {
 		return nil, err
 	}
-	if len(skipped) > 0 {
-		slog.Warn("substrate: list skipped served projects with no provisioned or readable atespace",
-			"skipped", len(skipped), "atespaces", skipped)
-	}
+	r.noteSkipped(ctx, skipped)
 
 	substrateAgentStateMu.Lock()
 	defer substrateAgentStateMu.Unlock()
@@ -1076,6 +1116,56 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	return agents, nil
 }
 
+// skippedAtespace is a served project's atespace an unfiltered List
+// skipped: NotFound (not provisioned) or PermissionDenied (not readable).
+type skippedAtespace struct {
+	Atespace string
+	Code     codes.Code
+}
+
+// noteSkipped reports an unfiltered List's skipped atespaces.
+//
+// A PermissionDenied skip may hide live actors (the atespace may exist and
+// hold them), so it marks the caller's ListCompleteness incomplete: the
+// broker heartbeat then reports that target incomplete instead of letting
+// the hub reconcile the hidden agents as missing. A NotFound skip means no
+// atespace exists, so it hides nothing and the List stays complete.
+//
+// The skip note is logged at Warn only when the skipped set changes (with
+// its count), at Debug while it stays the same, and at Info once when it
+// clears, because the heartbeat lists every interval.
+func (r *SubstrateRuntime) noteSkipped(ctx context.Context, skipped []skippedAtespace) {
+	var hidden int
+	parts := make([]string, 0, len(skipped))
+	for _, sk := range skipped {
+		if sk.Code == codes.PermissionDenied {
+			hidden++
+		}
+		parts = append(parts, sk.Atespace+":"+sk.Code.String())
+	}
+	if hidden > 0 {
+		markListIncomplete(ctx, fmt.Sprintf("substrate: %d served atespace(s) not readable (PermissionDenied); their actors are unknown", hidden))
+	}
+	sort.Strings(parts)
+	key := strings.Join(parts, ",")
+
+	r.skipLogMu.Lock()
+	changed := key != r.lastSkipKey
+	r.lastSkipKey = key
+	r.skipLogMu.Unlock()
+
+	switch {
+	case len(skipped) > 0 && changed:
+		slog.Warn("substrate: list skipped served projects with no provisioned or readable atespace",
+			"skipped", len(skipped), "permission_denied", hidden, "atespaces", parts)
+	case len(skipped) > 0:
+		slog.Debug("substrate: list still skipping served projects with no provisioned or readable atespace",
+			"skipped", len(skipped), "permission_denied", hidden)
+	case changed:
+		slog.Info("substrate: list skips no served project")
+	}
+}
+
 // errSubstrateProjectSetUnset fails an unfiltered List on a runtime the
 // broker never gave a ProjectSet: listing nothing would hide every actor.
 var errSubstrateProjectSetUnset = errors.New("substrate: list actors: no served-project set (the runtime broker has not provided one)")
@@ -1083,7 +1173,7 @@ var errSubstrateProjectSetUnset = errors.New("substrate: list actors: no served-
 // listOperatorModeActors returns the actors List reports, read per atespace
 // (see List's doc comment), and the atespaces an unfiltered listing skipped
 // because they were NotFound or PermissionDenied.
-func (r *SubstrateRuntime) listOperatorModeActors(ctx context.Context, labelFilter map[string]string) ([]*ateapi.Actor, []string, error) {
+func (r *SubstrateRuntime) listOperatorModeActors(ctx context.Context, labelFilter map[string]string) ([]*ateapi.Actor, []skippedAtespace, error) {
 	if projectID := labelFilter[projectkeys.LabelProjectID]; projectID != "" {
 		// A single project: its atespace only. A NotFound or
 		// PermissionDenied comes back as the typed provisioning error.
@@ -1103,7 +1193,7 @@ func (r *SubstrateRuntime) listOperatorModeActors(ctx context.Context, labelFilt
 		return nil, nil, fmt.Errorf("substrate: list actors: served projects unavailable: %w", err)
 	}
 	var actors []*ateapi.Actor
-	var skipped []string
+	var skipped []skippedAtespace
 	for _, projectID := range projectIDs {
 		if projectID == "" {
 			continue
@@ -1116,7 +1206,7 @@ func (r *SubstrateRuntime) listOperatorModeActors(ctx context.Context, labelFilt
 				// A served project with no provisioned (or no
 				// readable) substrate atespace, common on a broker
 				// that also serves other runtimes.
-				skipped = append(skipped, atespace)
+				skipped = append(skipped, skippedAtespace{Atespace: atespace, Code: perr.Code})
 				continue
 			}
 			return nil, nil, err

@@ -15,11 +15,13 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -177,6 +179,8 @@ func TestServedProjects_LoadsOnStartReconnectAndEveryFiveMinutes(t *testing.T) {
 func TestServedProjects_FailedRefreshKeepsLastGood(t *testing.T) {
 	f := newFakeProjectLister("p2", "p1")
 	p, _, now := testServedProjects(servedProjectsSource{name: "hub", brokerID: "b1", lister: f})
+	var logs bytes.Buffer
+	p.log = slog.New(slog.NewTextHandler(&logs, nil))
 	p.reload(context.Background())
 	f.set(errors.New("hub unreachable"))
 	*now = now.Add(12 * time.Minute)
@@ -188,6 +192,9 @@ func TestServedProjects_FailedRefreshKeepsLastGood(t *testing.T) {
 	snap := p.snaps[servedProjectsSource{name: "hub", brokerID: "b1"}.key()]
 	if snap.lastErr == nil || now.Sub(snap.loadedAt) != 12*time.Minute {
 		t.Fatalf("snapshot = %+v, want lastErr set and age 12m", snap)
+	}
+	if out := logs.String(); !strings.Contains(out, "age=12m0s") || !strings.Contains(out, "hub=hub") {
+		t.Errorf("log = %q, want the last-good warning with hub=hub and age=12m0s", out)
 	}
 }
 
@@ -231,9 +238,9 @@ func TestServedProjects_UnionAndColdAcrossHubConnections(t *testing.T) {
 }
 
 // TestServedProjects_RemovedConnectionLeavesUnionAndColdCheck: a hub
-// connection that is removed or stopped is no longer a source, so it
-// neither blocks List as cold nor contributes its last projects
-// (substrate-lead ruling Q1(a)).
+// connection that is removed or stopped is not a source, so it neither
+// blocks List as cold nor contributes its last projects: a deconfigured
+// hub must not hold the set cold forever.
 func TestServedProjects_RemovedConnectionLeavesUnionAndColdCheck(t *testing.T) {
 	a := newFakeProjectLister("p1")
 	b := newFakeProjectLister("p9")
@@ -265,7 +272,8 @@ func TestServedProjects_RemovedConnectionLeavesUnionAndColdCheck(t *testing.T) {
 }
 
 // TestServedProjects_ColdErrorNamesConnectionOnly: the cold error names the
-// hub connection and nothing from the failed load (ruling Q1(b)).
+// hub connection only, and carries nothing from the failed load (no URL,
+// credential or token).
 func TestServedProjects_ColdErrorNamesConnectionOnly(t *testing.T) {
 	f := newFakeProjectLister()
 	f.set(errors.New("dial https://hub.example.invalid: refused"))
@@ -291,7 +299,8 @@ func (c sourcesHubClient) RuntimeBrokers() hubclient.RuntimeBrokerService { retu
 
 // TestServedProjectsSources_OnlyStartedOpenConnections: a hub connection is
 // a source only while it is started (heartbeat or control channel running)
-// and not closed, with a hub client and a broker ID (ruling Q1(a)).
+// and not closed, with a hub client and a broker ID; a removed or stopped
+// connection drops out of the union and the cold check.
 func TestServedProjectsSources_OnlyStartedOpenConnections(t *testing.T) {
 	rt := runtime.NewSubstrateRuntimeForTest(nil, nil, nil, config.V1SubstrateConfig{})
 	mgr := agent.NewManager(rt)
