@@ -41,6 +41,17 @@ var ErrInvalidRouterEndpoint = errors.New("substrate: invalid router_endpoint")
 // them.
 var ErrRouterClientCertNotConfigured = errors.New("substrate: router client certificate not configured: router mTLS needs both the client certificate file and the client key file")
 
+// ErrRouterPlaintextRefused is returned by Do when the request URL is not
+// https and the client was not built by NewRouterClient. Only the
+// test-only NewRouterClient may send plaintext; a zero-value or literal
+// RouterClient, or an mTLS client whose Endpoint was changed to http, is
+// refused. The error does not echo the endpoint.
+var ErrRouterPlaintextRefused = errors.New("substrate: router request is not https; plaintext is refused (only the test-only NewRouterClient may send it)")
+
+// errRouterClientCertLoad marks a failure to load the client certificate
+// pair, from construction or from a handshake's GetClientCertificate.
+var errRouterClientCertLoad = errors.New("substrate: load router client certificate")
+
 // ErrRouterRedirectRefused is returned (wrapped in a *url.Error) when the
 // router answers a request made by an mTLS RouterClient with a redirect.
 // Router calls never need one, and following it could carry the request's
@@ -66,6 +77,11 @@ type RouterClient struct {
 	// from timeout_s; a flat 30s client timeout would cut off exec calls
 	// whose timeout_s was 60s).
 	HTTPClient *http.Client
+
+	// allowPlaintext is set ONLY by NewRouterClient. Without it Do refuses
+	// any request whose URL is not https, so the safe behaviour is the
+	// default for zero-value and literal clients.
+	allowPlaintext bool
 }
 
 // NewRouterClient builds a PLAINTEXT RouterClient targeting endpoint, with no
@@ -75,8 +91,9 @@ type RouterClient struct {
 // fails if any non-test file under pkg/ or cmd/ refers to NewRouterClient).
 func NewRouterClient(endpoint string) *RouterClient {
 	return &RouterClient{
-		Endpoint:   strings.TrimRight(endpoint, "/"),
-		HTTPClient: &http.Client{},
+		Endpoint:       strings.TrimRight(endpoint, "/"),
+		HTTPClient:     &http.Client{},
+		allowPlaintext: true,
 	}
 }
 
@@ -200,7 +217,7 @@ func (c clientCertFiles) load() (*tls.Certificate, error) {
 		pair, err = tls.LoadX509KeyPair(c.certFile, c.keyFile)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("substrate: load router client certificate: %w", err)
+		return nil, fmt.Errorf("%w: %w", errRouterClientCertLoad, err)
 	}
 	return &pair, nil
 }
@@ -263,6 +280,9 @@ func (c *RouterClient) Do(ctx context.Context, atespace, actor, method, path str
 	req, err := http.NewRequestWithContext(ctx, method, c.Endpoint+path, body)
 	if err != nil {
 		return nil, err
+	}
+	if req.URL.Scheme != "https" && !c.allowPlaintext {
+		return nil, ErrRouterPlaintextRefused
 	}
 	req.Header.Set(TargetActorHeader, atespace+"/"+actor)
 	for k, v := range headers {

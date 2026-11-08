@@ -29,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -428,7 +429,10 @@ func TestMTLSRouterClient_RotatedCertificateReRead(t *testing.T) {
 // leaves a certificate and key that do not belong together fails the
 // handshake; the client never falls back to the pair it loaded earlier.
 func TestMTLSRouterClient_MismatchedRotatedPairFailsClosed(t *testing.T) {
-	f := newRouterFixture(t, nil)
+	// The router only VERIFIES a client certificate if one is given, so a
+	// client that regressed to sending none would reach the handler; the
+	// refusal must come from the client's own certificate load.
+	f := newRouterFixture(t, func(c *tls.Config) { c.ClientAuth = tls.VerifyClientCertIfGiven })
 	rc, err := f.build(t, f.config())
 	if err != nil {
 		t.Fatal(err)
@@ -442,8 +446,12 @@ func TestMTLSRouterClient_MismatchedRotatedPairFailsClosed(t *testing.T) {
 	writeFileAtomic(t, f.certFile, newCertPEM) // the key file still holds the old key
 	rc.HTTPClient.CloseIdleConnections()
 
-	if _, err := get(t, rc); err == nil {
+	_, err = get(t, rc)
+	if err == nil {
 		t.Fatal("Do() succeeded with a mismatched certificate and key")
+	}
+	if !errors.Is(err, errRouterClientCertLoad) {
+		t.Errorf("Do() error = %v, want the client-side certificate load error", err)
 	}
 	if n := f.hits.Load(); n != before {
 		t.Errorf("handler ran %d more time(s) after the mismatched rotation, want 0", n-before)
@@ -454,15 +462,21 @@ func TestMTLSRouterClient_MismatchedRotatedPairFailsClosed(t *testing.T) {
 // turn unusable after construction, the next handshake fails rather than
 // going out without a client certificate.
 func TestMTLSRouterClient_UnreadableRotatedCertificateFailsClosed(t *testing.T) {
-	f := newRouterFixture(t, nil)
+	// As above: the router does not require a certificate, so only the
+	// client's own load failure can stop the request.
+	f := newRouterFixture(t, func(c *tls.Config) { c.ClientAuth = tls.VerifyClientCertIfGiven })
 	rc, err := f.build(t, f.config())
 	if err != nil {
 		t.Fatal(err)
 	}
 	writeFileAtomic(t, f.keyFile, []byte("not a key"))
 	rc.HTTPClient.CloseIdleConnections()
-	if _, err := get(t, rc); err == nil {
+	_, err = get(t, rc)
+	if err == nil {
 		t.Fatal("Do() succeeded with an unreadable client key")
+	}
+	if !errors.Is(err, errRouterClientCertLoad) {
+		t.Errorf("Do() error = %v, want the client-side certificate load error", err)
 	}
 	if n := f.hits.Load(); n != 0 {
 		t.Errorf("handler ran %d time(s), want 0", n)
@@ -478,8 +492,15 @@ func TestMTLSRouterClient_BelowTLS12Refused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := get(t, rc); err == nil {
+	_, err = get(t, rc)
+	if err == nil {
 		t.Fatal("Do() succeeded against a router capped at TLS 1.1")
+	}
+	// The failure must be the protocol-version refusal, not some other error.
+	// (Go clients also default to TLS 1.2, so MinVersion itself is pinned by
+	// TestMTLSRouterClient_TLSConfigInvariants.)
+	if !strings.Contains(err.Error(), "protocol version") {
+		t.Errorf("Do() error = %v, want a TLS protocol version failure", err)
 	}
 	if n := f.hits.Load(); n != 0 {
 		t.Errorf("handler ran %d time(s), want 0", n)
@@ -600,6 +621,89 @@ func TestMTLSRouterClient_RedirectRefused(t *testing.T) {
 	}
 	if n := plainHits.Load(); n != 0 {
 		t.Errorf("plaintext listener got %d request(s), want 0", n)
+	}
+}
+
+// plaintextListener is a plain-http httptest server that counts requests.
+func plaintextListener(t *testing.T) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// TestRouterClientDo_RefusesPlaintextLiteral: a literal RouterClient (not
+// built by NewRouterClient) never sends plaintext; the refusal does not
+// echo the endpoint.
+func TestRouterClientDo_RefusesPlaintextLiteral(t *testing.T) {
+	plain, hits := plaintextListener(t)
+	for name, rc := range map[string]*RouterClient{
+		"literal":    {Endpoint: plain.URL, HTTPClient: &http.Client{}},
+		"zero value": {HTTPClient: &http.Client{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rc := rc
+			if rc.Endpoint == "" {
+				rc.Endpoint = plain.URL
+			}
+			resp, err := rc.Do(context.Background(), "ns", "a", http.MethodGet, "/healthz", nil, nil)
+			if err == nil {
+				_ = resp.Body.Close()
+				t.Fatal("Do() sent a plaintext request from a literal RouterClient")
+			}
+			if !errors.Is(err, ErrRouterPlaintextRefused) {
+				t.Errorf("Do() error = %v, want ErrRouterPlaintextRefused", err)
+			}
+			u, _ := url.Parse(plain.URL)
+			if strings.Contains(err.Error(), u.Host) {
+				t.Errorf("error %q echoes the endpoint", err)
+			}
+		})
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("plaintext listener got %d request(s), want 0", n)
+	}
+}
+
+// TestRouterClientDo_RefusesEndpointMutatedToPlaintext: an mTLS client whose
+// Endpoint is changed to http after construction is refused.
+func TestRouterClientDo_RefusesEndpointMutatedToPlaintext(t *testing.T) {
+	plain, hits := plaintextListener(t)
+	f := newRouterFixture(t, nil)
+	rc, err := f.build(t, f.config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc.Endpoint = plain.URL
+	resp, err := rc.Do(context.Background(), "ns", "a", http.MethodGet, "/healthz", nil, nil)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("Do() sent plaintext from an mTLS client with a mutated endpoint")
+	}
+	if !errors.Is(err, ErrRouterPlaintextRefused) {
+		t.Errorf("Do() error = %v, want ErrRouterPlaintextRefused", err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("plaintext listener got %d request(s), want 0", n)
+	}
+}
+
+// TestNewRouterClient_PlaintextFixtureStillWorks: the test-only constructor
+// keeps serving httptest plaintext fixtures.
+func TestNewRouterClient_PlaintextFixtureStillWorks(t *testing.T) {
+	plain, hits := plaintextListener(t)
+	rc := NewRouterClient(plain.URL)
+	resp, err := rc.Do(context.Background(), "ns", "a", http.MethodGet, "/healthz", nil, nil)
+	if err != nil {
+		t.Fatalf("Do() error = %v, want the plaintext fixture to work", err)
+	}
+	_ = resp.Body.Close()
+	if n := hits.Load(); n != 1 {
+		t.Errorf("plaintext listener got %d request(s), want 1", n)
 	}
 }
 

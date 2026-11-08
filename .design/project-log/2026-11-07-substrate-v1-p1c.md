@@ -38,9 +38,13 @@
     `ErrRouterClientCertNotConfigured`.
   - `NewRouterClient(endpoint)` keeps its signature as a plaintext,
     test-only constructor. A go/parser guard test fails if any non-test
-    file under `pkg/` or `cmd/` refers to it.
+    file under `pkg/` or `cmd/` refers to it or builds a `RouterClient`
+    composite literal outside the two constructors.
   - `RouterClient.Do` refuses a nil HTTP client instead of falling back to
-    `http.DefaultClient`.
+    `http.DefaultClient`, and refuses any non-https request
+    (`ErrRouterPlaintextRefused`, no endpoint echo) unless the client came
+    from `NewRouterClient`. A literal or zero-value client, or an mTLS
+    client whose endpoint is changed to http, never sends plaintext.
 - **router_endpoint validation:** `substrate.ValidateRouterEndpoint`
   accepts only `https://<host>:443`, with the port written out and no
   userinfo, path, query or fragment. Refusals name the rule, not the value.
@@ -75,12 +79,17 @@
   both legs), v1beta1 through the fake clientset, and v1 outcomes that never
   reach v1beta1.
 - `router_tls_test.go`: real handshakes against `httptest.NewUnstartedServer`
-  with client auth: wrong CA, wrong ServerName, rotation re-read,
-  mismatched rotation, TLS 1.1 server refused, config invariants, CTB
-  source, construction refusals, redirect refused.
+  with client auth: wrong CA, wrong ServerName, rotation re-read, config
+  invariants, CTB source, construction refusals, redirect refused. The
+  mismatched and unreadable rotation tests run against a router that only
+  verifies a certificate if one is given, and assert the client-side
+  certificate load error. The TLS 1.1 test asserts the protocol-version
+  failure. Plaintext is refused for literal and mutated clients, while the
+  test-only constructor still serves httptest fixtures.
 - `router_endpoint_test.go`: refusal table with a no-echo marker check.
 - `router_plaintext_guard_test.go`: guard test plus positive and negative
-  controls.
+  controls, for both references to `NewRouterClient` and `RouterClient`
+  composite literals.
 - `pkg/runtime/substrate_router_wiring_test.go`: the refusal order and the
   error classes.
 
@@ -91,14 +100,14 @@ All checks ran offline from a private module cache.
 - Dependencies: `go mod download` from proxy.golang.org, then
   `go mod verify`.
 - Tests:
-  - `./pkg/runtime/substrate/...` at the final tip: the 24 named tests,
+  - `./pkg/runtime/substrate/...` at the final tip: the 28 named tests,
     covering every AC 11 item, pass.
   - `./pkg/runtime`: green, including the 4 wiring tests and the
     operator-only profile test.
 - Lint: `golangci-lint --new-from-rev=de18c73c` over the seven directories
   touched since Phase 1a's base reports 0 issues at the final tip. An
   earlier run flagged two unchecked `resp.Body.Close` calls in test code,
-  fixed in commit 6.
+  fixed before the final tip.
 - Build: `go build -buildvcs=false ./...` is green.
 - gofmt: 0 unformatted out of 38 changed Go files.
 
