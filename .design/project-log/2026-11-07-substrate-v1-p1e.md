@@ -57,9 +57,11 @@ clarifications to §3.3:
   - `Shutdown` releases the instance's set from every runtime it installed
     it on, clearing it only if it is still that instance's set, so a
     successor instance in the same process can install its own. Each
-    runtime is recorded once, however often the set is installed on it
-    again. The check compares two receivers only when they have the same
-    type and both values are comparable, so it never panics.
+    comparable runtime (production runtimes are pointers) is recorded once,
+    however often the set is installed on it again. The check compares two
+    receivers only when they have the same type and both values are
+    comparable, so it never panics; a receiver whose value is not comparable
+    is recorded on each install.
 - **Verify-or-fail `ensureAtespace`.** It calls `GetAtespace` and never
   `CreateAtespace`. NotFound or PermissionDenied returns
   `*SubstrateAtespaceProvisioningError` (matches

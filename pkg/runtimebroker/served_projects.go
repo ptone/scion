@@ -277,12 +277,12 @@ func (s *Server) installProjectSet(rt scionrt.Runtime) error {
 	return nil
 }
 
-// containsReceiver reports whether list holds r. Interface == compares both
-// operands and panics if either holds an uncomparable value, which a
-// comparable type can still do (for example an interface field holding a
-// slice). So a recorded value is compared only when it has r's dynamic type
-// and both values are comparable; anything else counts as different, and it
-// never panics.
+// containsReceiver reports whether list holds r. Comparing two interface
+// values with == panics when both hold the same dynamic type and the
+// comparison reaches a value that is not comparable (for example, an
+// interface field holding a slice on both sides). So a recorded value is
+// compared only when it has r's dynamic type and both values are comparable;
+// anything else counts as different, and it never panics.
 func containsReceiver(list []scionrt.ProjectSetReceiver, r scionrt.ProjectSetReceiver) bool {
 	tr := reflect.TypeOf(r)
 	if tr == nil || !reflect.ValueOf(r).Comparable() {
