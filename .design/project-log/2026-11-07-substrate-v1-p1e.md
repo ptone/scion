@@ -51,6 +51,9 @@ clarifications to §3.3:
   - A refused `SwapRuntime` keeps the current runtime.
   - A refused auxiliary runtime is not registered. A refused late-profile
     resolution returns an error runtime.
+  - `Shutdown` releases the instance's set from every runtime it installed
+    it on, clearing it only if it is still that instance's set, so a
+    successor instance in the same process can install its own.
 - **Verify-or-fail `ensureAtespace`.** It calls `GetAtespace` and never
   `CreateAtespace`. NotFound or PermissionDenied returns
   `*SubstrateAtespaceProvisioningError` (matches

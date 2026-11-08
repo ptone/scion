@@ -691,3 +691,30 @@ func TestSubstrateList_SkipNoteLoggedOnChange(t *testing.T) {
 		t.Errorf("no Info line when the skips cleared: %q", buf.String())
 	}
 }
+
+// TestSubstrateReleaseProjectSet_CompareAndClear: ReleaseProjectSet clears
+// the installed set only when it is the given set, so a stopping broker
+// instance never clears another instance's set; after a release another
+// set can be installed.
+func TestSubstrateReleaseProjectSet_CompareAndClear(t *testing.T) {
+	rt := NewSubstrateRuntimeForTest(nil, nil, nil, config.V1SubstrateConfig{})
+	owner, other := newFakeProjectSet("p1"), newFakeProjectSet("p2")
+	if err := rt.InstallProjectSet(owner); err != nil {
+		t.Fatalf("install error = %v", err)
+	}
+	rt.ReleaseProjectSet(other)
+	if got := rt.ProjectSetForTest(); got != ProjectSet(owner) {
+		t.Fatalf("after a release by a non-owner, ProjectSet = %v, want the owner's set kept", got)
+	}
+	rt.ReleaseProjectSet(owner)
+	if got := rt.ProjectSetForTest(); got != nil {
+		t.Fatalf("after the owner's release, ProjectSet = %v, want nil", got)
+	}
+	if err := rt.InstallProjectSet(other); err != nil {
+		t.Fatalf("install after release error = %v, want nil", err)
+	}
+	rt.ReleaseProjectSet(sliceProjectSet{"p1"})
+	if got := rt.ProjectSetForTest(); got != ProjectSet(other) {
+		t.Errorf("after a release with an uncomparable set, ProjectSet = %v, want the installed set kept", got)
+	}
+}

@@ -505,6 +505,11 @@ type Server struct {
 	servedProjectsOnce   sync.Once
 	servedProjectsCancel context.CancelFunc
 	servedProjectsDone   chan struct{}
+	// projectSetInstalled are the runtimes this instance installed its
+	// served-project set on; Shutdown releases the set from each.
+	// Guarded by projectSetInstalledMu.
+	projectSetInstalledMu sync.Mutex
+	projectSetInstalled   []scionrt.ProjectSetReceiver
 
 	// auxDiscoveryDone is closed when the background auxiliary runtime
 	// discovery pass (startAuxiliaryRuntimeDiscovery) has finished, nil
@@ -1909,6 +1914,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		sweepCancel()
 	}
 	s.stopServedProjectsRefresh()
+	s.releaseProjectSets()
 	s.stopShareHealthLoop()
 
 	// Cancel every start still running on a start, restart or create

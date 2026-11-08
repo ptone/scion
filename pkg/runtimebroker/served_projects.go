@@ -237,9 +237,28 @@ func (s *Server) installProjectSet(rt scionrt.Runtime) error {
 		return nil
 	}
 	if r, ok := rt.(scionrt.ProjectSetReceiver); ok {
-		return r.InstallProjectSet(s.servedProjects)
+		if err := r.InstallProjectSet(s.servedProjects); err != nil {
+			return err
+		}
+		s.projectSetInstalledMu.Lock()
+		s.projectSetInstalled = append(s.projectSetInstalled, r)
+		s.projectSetInstalledMu.Unlock()
 	}
 	return nil
+}
+
+// releaseProjectSets releases this instance's served-project set from every
+// runtime it was installed on (default and auxiliary), so a successor
+// broker instance in the same process can install its own. Each release
+// clears the set only if it is still this instance's. Shutdown runs it.
+func (s *Server) releaseProjectSets() {
+	s.projectSetInstalledMu.Lock()
+	installed := s.projectSetInstalled
+	s.projectSetInstalled = nil
+	s.projectSetInstalledMu.Unlock()
+	for _, r := range installed {
+		r.ReleaseProjectSet(s.servedProjects)
+	}
 }
 
 // newAuxiliaryRuntime is the only constructor of a registered

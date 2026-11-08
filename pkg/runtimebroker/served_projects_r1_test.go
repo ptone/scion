@@ -264,13 +264,17 @@ func funcCalls(t *testing.T, file, recv, name string) map[string]bool {
 // TestServedProjects_RefreshWiredIntoStartReconnectAndShutdown guards the
 // production wiring the unit tests cannot reach: startServices starts the
 // refresher, the hub connection's control-channel callback goes through
-// onControlChannelState (which requests a reload), and Shutdown stops it.
+// onControlChannelState (which requests a reload), and Shutdown stops it
+// and releases the instance's set.
 func TestServedProjects_RefreshWiredIntoStartReconnectAndShutdown(t *testing.T) {
 	if !funcCalls(t, "server.go", "Server", "startServices")["startServedProjectsRefresh"] {
 		t.Error("startServices does not call startServedProjectsRefresh")
 	}
 	if !funcCalls(t, "server.go", "Server", "Shutdown")["stopServedProjectsRefresh"] {
 		t.Error("Shutdown does not call stopServedProjectsRefresh")
+	}
+	if !funcCalls(t, "server.go", "Server", "Shutdown")["releaseProjectSets"] {
+		t.Error("Shutdown does not release the instance's served-project set")
 	}
 	if !funcCalls(t, "hub_connection.go", "HubConnection", "start")["onControlChannelState"] {
 		t.Error("HubConnection.start does not route the control channel state through onControlChannelState")
@@ -305,5 +309,52 @@ func TestServedProjects_ReloadPrunesSnapshotsOfRemovedConnections(t *testing.T) 
 	p.reload(context.Background())
 	if _, err := p.ServedProjects(context.Background()); !errors.Is(err, errServedProjectsCold) {
 		t.Fatalf("re-added connection that has not loaded: err = %v, want errServedProjectsCold (no stale snapshot)", err)
+	}
+}
+
+// TestServedProjects_ShutdownReleaseLetsSuccessorInstall: a stopping broker
+// instance releases its set from every runtime it installed it on (default
+// and auxiliary), so a successor instance in the same process installs its
+// own instead of being refused forever; and a stale release by the stopped
+// instance never clears the successor's set.
+func TestServedProjects_ShutdownReleaseLetsSuccessorInstall(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	rt := runtime.NewSubstrateRuntimeForTest(nil, nil, nil, config.V1SubstrateConfig{})
+	aux := runtime.NewSubstrateRuntimeForTest(nil, nil, nil, config.V1SubstrateConfig{})
+	newInstance := func(id string) *Server {
+		mgr := agent.NewManager(rt)
+		t.Cleanup(mgr.Close)
+		cfg := testServerConfig()
+		cfg.BrokerID = id
+		return New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+	}
+
+	srv1 := newInstance("broker-one")
+	auxMgr := agent.NewManager(aux)
+	t.Cleanup(auxMgr.Close)
+	if _, err := srv1.newAuxiliaryRuntime(aux, auxMgr, config.RuntimeBuildRecord{}); err != nil {
+		t.Fatalf("instance 1 aux install error = %v", err)
+	}
+	srv2 := newInstance("broker-two")
+	if !errors.Is(srv2.projectSetSetupErr, runtime.ErrSubstrateRuntimeShared) {
+		t.Fatalf("instance 2 setup error = %v, want ErrSubstrateRuntimeShared while instance 1 holds the runtime", srv2.projectSetSetupErr)
+	}
+
+	srv1.releaseProjectSets() // what Shutdown runs
+	if got := aux.ProjectSetForTest(); got != nil {
+		t.Errorf("auxiliary runtime ProjectSet after instance 1's release = %v, want nil", got)
+	}
+	srv3 := newInstance("broker-three")
+	if srv3.projectSetSetupErr != nil {
+		t.Fatalf("instance 3 setup error = %v, want nil after instance 1 released", srv3.projectSetSetupErr)
+	}
+	if got := rt.ProjectSetForTest(); got != srv3.servedProjects {
+		t.Fatalf("runtime ProjectSet = %v, want instance 3's set", got)
+	}
+
+	rt.ReleaseProjectSet(srv1.servedProjects) // a stale release by the stopped instance
+	srv1.releaseProjectSets()
+	if got := rt.ProjectSetForTest(); got != srv3.servedProjects {
+		t.Errorf("after instance 1's stale release, runtime ProjectSet = %v, want instance 3's set kept", got)
 	}
 }

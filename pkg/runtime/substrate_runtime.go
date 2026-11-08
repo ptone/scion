@@ -135,6 +135,17 @@ func (r *SubstrateRuntime) InstallProjectSet(ps ProjectSet) error {
 	return nil
 }
 
+// ReleaseProjectSet implements ProjectSetReceiver: it clears the installed
+// set only when it is ps (compare-and-clear), so a stopping broker instance
+// never clears another instance's set.
+func (r *SubstrateRuntime) ReleaseProjectSet(ps ProjectSet) {
+	r.projectSetMu.Lock()
+	defer r.projectSetMu.Unlock()
+	if r.projectSet != nil && sameProjectSet(r.projectSet, ps) {
+		r.projectSet = nil
+	}
+}
+
 // sameProjectSet reports whether a and b are the same ProjectSet value.
 // Values of different or uncomparable dynamic types count as different, so
 // the comparison never panics.

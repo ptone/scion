@@ -35,6 +35,11 @@ type ProjectSet interface {
 // registers that implements it. InstallProjectSet refuses a runtime that
 // already serves a different ProjectSet (another broker instance), and
 // accepts the same set again.
+//
+// ReleaseProjectSet clears ps when it is still the installed set, so a
+// broker instance that stops does not keep a successor instance in the same
+// process from installing its own; it leaves any other set in place.
 type ProjectSetReceiver interface {
 	InstallProjectSet(ps ProjectSet) error
+	ReleaseProjectSet(ps ProjectSet)
 }
