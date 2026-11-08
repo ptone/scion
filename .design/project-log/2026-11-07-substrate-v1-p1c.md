@@ -42,7 +42,8 @@
     composite literal outside the two constructors.
   - `RouterClient.Do` refuses a nil HTTP client instead of falling back to
     `http.DefaultClient`. A RouterClient not built by a constructor is
-    refused; an mTLS client refuses non-https and every redirect.
+    refused; an mTLS client, as built by `NewMTLSRouterClient`, refuses
+    non-https and every redirect.
 - **router_endpoint validation:** `substrate.ValidateRouterEndpoint`
   accepts only `https://<host>:443`, with the port written out and no
   userinfo, path, query or fragment. Refusals name the rule, not the value.
@@ -101,12 +102,12 @@ All checks ran offline from a private module cache.
   `go mod verify`.
 - Tests: one `go test` over `./pkg/runtime/substrate/...`,
   `./pkg/runtime`, `./pkg/agent` and `./pkg/runtimebroker` at the final
-  tip passes, including the 29 named substrate tests (covering every AC 11
+  tip passes, including the 30 named substrate tests (covering every AC 11
   item), the 4 wiring tests and the operator-only profile test.
-- Lint: `golangci-lint --new-from-rev=de18c73c` over the seven directories
-  touched since de18c73c, Phase 1a's base, reports 0 issues at the final tip. An
-  earlier run flagged two unchecked `resp.Body.Close` calls in test code,
-  fixed before the final tip.
+- Lint: `golangci-lint --new-from-rev=de18c73c` over the seven
+  directories touched since de18c73c, Phase 1a's base, reports 0 issues at
+  the final tip. An earlier run flagged two unchecked `resp.Body.Close`
+  calls in test code, fixed before the final tip.
 - Build: `go build -buildvcs=false ./...` is green.
 - gofmt: 0 unformatted out of the 38 Go files changed since de18c73c.
 

@@ -734,6 +734,27 @@ func TestRouterClientDo_RefusesEndpointMutatedToPlaintext(t *testing.T) {
 	}
 }
 
+// TestRouterClientDo_UnknownKindRefusesPlaintext: plaintext is allow-listed
+// to the test-only kind. A kind outside the known ones (set here in-package)
+// with an http endpoint and a working transport is refused, so a future kind
+// cannot send plaintext by default.
+func TestRouterClientDo_UnknownKindRefusesPlaintext(t *testing.T) {
+	plain, hits := plaintextListener(t)
+	rc := NewRouterClient(plain.URL)
+	rc.kind = routerClientKind(99)
+	resp, err := rc.Do(context.Background(), "ns", "a", http.MethodGet, "/healthz", nil, nil)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatal("Do() sent plaintext from a client of an unknown kind")
+	}
+	if !errors.Is(err, ErrRouterPlaintextRefused) {
+		t.Errorf("Do() error = %v, want ErrRouterPlaintextRefused", err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("plaintext listener got %d request(s), want 0", n)
+	}
+}
+
 // TestNewRouterClient_PlaintextFixtureStillWorks: the test-only constructor
 // keeps serving httptest plaintext fixtures.
 func TestNewRouterClient_PlaintextFixtureStillWorks(t *testing.T) {

@@ -43,14 +43,16 @@ var ErrRouterClientCertNotConfigured = errors.New("substrate: router client cert
 
 // ErrRouterClientNotConstructed is returned by Do for a RouterClient that
 // neither constructor built (a zero value, new(RouterClient) or a literal).
-// A RouterClient not built by a constructor is refused; an mTLS client
-// refuses non-https and every redirect. The error does not echo the endpoint.
+// A RouterClient not built by a constructor is refused; an mTLS client, as
+// built by NewMTLSRouterClient, refuses non-https and every redirect. The
+// error does not echo the endpoint.
 var ErrRouterClientNotConstructed = errors.New("substrate: RouterClient was not built by a constructor; use NewMTLSRouterClient")
 
-// ErrRouterPlaintextRefused is returned by Do when an mTLS client's request
-// URL is not https (for example after its Endpoint was changed). The error
-// does not echo the endpoint.
-var ErrRouterPlaintextRefused = errors.New("substrate: router request is not https; an mTLS router client refuses plaintext")
+// ErrRouterPlaintextRefused is returned by Do when a non-https request comes
+// from any client other than the test-only plaintext one (for example, an
+// mTLS client whose Endpoint was changed). The error does not echo the
+// endpoint.
+var ErrRouterPlaintextRefused = errors.New("substrate: router request is not https; only the test-only plaintext client may send plaintext")
 
 // errRouterClientCertLoad marks a failure to load the client certificate
 // pair, from construction or from a handshake's GetClientCertificate.
@@ -84,7 +86,7 @@ type RouterClient struct {
 
 	// kind records which constructor built the client; only the two
 	// constructors set it. A RouterClient not built by a constructor is
-	// refused; an mTLS client refuses non-https and every redirect.
+	// refused.
 	kind routerClientKind
 }
 
@@ -299,7 +301,7 @@ func (c *RouterClient) Do(ctx context.Context, atespace, actor, method, path str
 	if err != nil {
 		return nil, err
 	}
-	if c.kind == routerClientMTLS && req.URL.Scheme != "https" {
+	if c.kind != routerClientTestPlaintext && req.URL.Scheme != "https" {
 		return nil, ErrRouterPlaintextRefused
 	}
 	req.Header.Set(TargetActorHeader, atespace+"/"+actor)
