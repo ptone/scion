@@ -345,3 +345,98 @@ func TestServedProjectsSources_OnlyStartedOpenConnections(t *testing.T) {
 		t.Errorf("sources = %v, want %v", got, want)
 	}
 }
+
+// TestServedProjects_LastGoodWarnPrunedWithRemovedConnection: a reload
+// drops the last-good warning state of a connection that is no longer a
+// source, so the connection added again starts a fresh failing stretch:
+// its first successful load logs no recovery Info, and its next failure
+// warns again.
+func TestServedProjects_LastGoodWarnPrunedWithRemovedConnection(t *testing.T) {
+	f := newFakeProjectLister("p1")
+	src := servedProjectsSource{name: "hub", brokerID: "b1", lister: f}
+	current := []servedProjectsSource{src}
+	p, _, _ := testServedProjects()
+	p.sources = func() []servedProjectsSource { return current }
+	var logs bytes.Buffer
+	p.log = slog.New(slog.NewTextHandler(&logs, nil))
+	count := func(msg string) int { return strings.Count(logs.String(), msg) }
+	const lastGood = "Using the last good served-project set"
+	const recovered = "Served projects loaded from the hub again"
+
+	p.reload(context.Background())
+	f.set(errors.New("hub unreachable"))
+	p.reload(context.Background())
+	if _, err := p.ServedProjects(context.Background()); err != nil {
+		t.Fatalf("ServedProjects() while failing error = %v", err)
+	}
+	if n := count(lastGood); n != 1 {
+		t.Fatalf("last-good Warn lines after the first failure = %d, want 1", n)
+	}
+
+	current = nil
+	p.reload(context.Background())
+	if _, ok := p.lastGoodWarned[src.key()]; ok {
+		t.Fatal("removed connection's last-good warning state kept after reload")
+	}
+
+	current = []servedProjectsSource{src}
+	f.set(nil, "p1")
+	p.reload(context.Background())
+	if n := count(recovered); n != 0 {
+		t.Errorf("recovery Info lines for a re-added connection's first load = %d, want 0", n)
+	}
+	f.set(errors.New("hub unreachable"))
+	p.reload(context.Background())
+	if _, err := p.ServedProjects(context.Background()); err != nil {
+		t.Fatalf("ServedProjects() while failing again error = %v", err)
+	}
+	if n := count(lastGood); n != 2 {
+		t.Errorf("last-good Warn lines = %d, want 2 (one per failing stretch)", n)
+	}
+}
+
+// ifaceFieldRuntime is a comparable receiver type whose interface field can
+// hold an uncomparable value. The embedded Runtime is never called.
+type ifaceFieldRuntime struct {
+	runtime.Runtime
+	v any
+}
+
+func (ifaceFieldRuntime) InstallProjectSet(runtime.ProjectSet) error { return nil }
+func (ifaceFieldRuntime) ReleaseProjectSet(runtime.ProjectSet)       {}
+
+// TestServedProjects_RecordReceiverNeverPanicsOnUncomparableValue: the
+// record-once check never compares a receiver holding an uncomparable value
+// (interface == would panic), in either operand position; such a receiver
+// is recorded, and a comparable receiver installed twice is recorded once.
+func TestServedProjects_RecordReceiverNeverPanicsOnUncomparableValue(t *testing.T) {
+	withSlice := ifaceFieldRuntime{v: []int{1}}
+	withInt := ifaceFieldRuntime{v: 1}
+	for _, tc := range []struct {
+		name  string
+		order []ifaceFieldRuntime
+	}{
+		{"slice then int", []ifaceFieldRuntime{withSlice, withInt, withInt}},
+		{"int then slice", []ifaceFieldRuntime{withInt, withSlice, withInt}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _, _ := testServedProjects()
+			s := &Server{servedProjects: p}
+			for i, rt := range tc.order {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							t.Fatalf("install %d panicked: %v", i, r)
+						}
+					}()
+					if err := s.installProjectSet(rt); err != nil {
+						t.Fatalf("install %d error = %v", i, err)
+					}
+				}()
+			}
+			if n := len(s.projectSetInstalled); n != 2 {
+				t.Fatalf("recorded receivers = %d, want 2 (the slice holder once, the int holder once)", n)
+			}
+		})
+	}
+}

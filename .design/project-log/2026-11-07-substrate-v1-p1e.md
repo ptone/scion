@@ -30,7 +30,7 @@ clarifications to §3.3:
   - A failed load keeps that connection's last good snapshot. Using it is
     logged at Warn, with its age, once per failing stretch of that
     connection, at Debug while the loads keep failing, and at Info when a
-    load succeeds again.
+    load succeeds after that warning.
   - Cold rule: `ServedProjects` errors while any current source has never
     loaded, or when there is no source at all. The cold error names only the
     hub connection.
@@ -58,7 +58,8 @@ clarifications to §3.3:
     it on, clearing it only if it is still that instance's set, so a
     successor instance in the same process can install its own. Each
     runtime is recorded once, however often the set is installed on it
-    again.
+    again. The check compares two receivers only when they have the same
+    type and both values are comparable, so it never panics.
 - **Verify-or-fail `ensureAtespace`.** It calls `GetAtespace` and never
   `CreateAtespace`. NotFound or PermissionDenied returns
   `*SubstrateAtespaceProvisioningError` (matches

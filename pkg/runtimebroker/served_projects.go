@@ -224,8 +224,8 @@ func (p *servedProjects) ServedProjects(ctx context.Context) ([]string, error) {
 		}
 		if snap.lastErr != nil {
 			// Warn once per failing stretch of a source (the heartbeat
-			// lists every interval); Debug while it keeps failing. A
-			// successful load logs Info and ends the stretch (reload).
+			// lists every interval); Debug while it keeps failing; and
+			// at Info when a load succeeds after that warning (reload).
 			age := p.now().Sub(snap.loadedAt).Round(time.Second)
 			if !p.lastGoodWarned[src.key()] {
 				p.lastGoodWarned[src.key()] = true
@@ -277,15 +277,19 @@ func (s *Server) installProjectSet(rt scionrt.Runtime) error {
 	return nil
 }
 
-// containsReceiver reports whether list holds r. Values of different or
-// uncomparable dynamic types count as different, so it never panics.
+// containsReceiver reports whether list holds r. Interface == compares both
+// operands and panics if either holds an uncomparable value, which a
+// comparable type can still do (for example an interface field holding a
+// slice). So a recorded value is compared only when it has r's dynamic type
+// and both values are comparable; anything else counts as different, and it
+// never panics.
 func containsReceiver(list []scionrt.ProjectSetReceiver, r scionrt.ProjectSetReceiver) bool {
 	tr := reflect.TypeOf(r)
-	if tr == nil || !tr.Comparable() {
+	if tr == nil || !reflect.ValueOf(r).Comparable() {
 		return false
 	}
 	for _, x := range list {
-		if reflect.TypeOf(x) == tr && x == r {
+		if reflect.TypeOf(x) == tr && reflect.ValueOf(x).Comparable() && x == r {
 			return true
 		}
 	}
