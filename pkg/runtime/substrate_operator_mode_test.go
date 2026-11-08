@@ -664,8 +664,9 @@ func (ifaceFieldProjectSet) ServedProjects(context.Context) ([]string, error) { 
 // TestSubstrateSameProjectSet_UncomparableValuesOfSameTypeRefused: two
 // values of one comparable struct type whose interface fields both hold a
 // slice. Interface == on them would reach the slices and panic, so
-// sameProjectSet counts them as different without comparing, and
-// InstallProjectSet refuses the second.
+// sameProjectSet counts them as different without comparing,
+// InstallProjectSet refuses the second, and ReleaseProjectSet does not
+// clear the first either.
 func TestSubstrateSameProjectSet_UncomparableValuesOfSameTypeRefused(t *testing.T) {
 	first := ifaceFieldProjectSet{v: []string{"p1"}}
 	second := ifaceFieldProjectSet{v: []string{"p1"}}
@@ -692,6 +693,12 @@ func TestSubstrateSameProjectSet_UncomparableValuesOfSameTypeRefused(t *testing.
 	noPanic("InstallProjectSet", func() {
 		if err := rt.InstallProjectSet(second); !errors.Is(err, ErrSubstrateRuntimeShared) {
 			t.Errorf("second install error = %v, want ErrSubstrateRuntimeShared", err)
+		}
+	})
+	noPanic("ReleaseProjectSet", func() {
+		rt.ReleaseProjectSet(first)
+		if err := rt.InstallProjectSet(second); !errors.Is(err, ErrSubstrateRuntimeShared) {
+			t.Errorf("install after releasing the first set error = %v, want ErrSubstrateRuntimeShared (the set stays held)", err)
 		}
 	})
 }
