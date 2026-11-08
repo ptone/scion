@@ -82,9 +82,17 @@ func TestServedProjects_InstalledOnEveryRuntimeEntryPath(t *testing.T) {
 // isBuilder is true for newAuxiliaryRuntime itself.
 func auxEntryViolations(body *ast.BlockStmt, isBuilder bool) []string {
 	var out []string
+	// isAuxType names the types a value can be bound to; isEntryLit the
+	// one literal type that builds an entry. A namedAuxiliaryRuntime
+	// literal only wraps an entry (sortedAuxiliaryRuntimes copies existing
+	// ones); a fresh auxiliaryRuntime literal inside it is still caught.
 	isAuxType := func(e ast.Expr) bool {
 		id, ok := e.(*ast.Ident)
 		return ok && (id.Name == "auxiliaryRuntime" || id.Name == "namedAuxiliaryRuntime")
+	}
+	isEntryLit := func(e ast.Expr) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && id.Name == "auxiliaryRuntime"
 	}
 	mentionsAux := func(e ast.Node) bool {
 		found := false
@@ -139,7 +147,7 @@ func auxEntryViolations(body *ast.BlockStmt, isBuilder bool) []string {
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.CompositeLit:
-			if isAuxType(x.Type) {
+			if isEntryLit(x.Type) {
 				if len(x.Elts) > 0 && !isBuilder {
 					out = append(out, "builds a non-empty auxiliaryRuntime literal")
 				}
@@ -176,6 +184,7 @@ func TestServedProjects_AuxEntryGuardCatchesBypasses(t *testing.T) {
 		"map entry then .Runtime":     `e := s.auxiliaryRuntimes[k]; e.Runtime = rt; s.auxiliaryRuntimes[k] = e`,
 		"range value then .Manager":   `for _, e := range s.sortedAuxiliaryRuntimes() { e.Manager = m }`,
 		"embedded field":              `n.auxiliaryRuntime.Runtime = rt`,
+		"wrapper of a fresh entry":    `e := namedAuxiliaryRuntime{identity: k, auxiliaryRuntime: auxiliaryRuntime{Runtime: rt}}; _ = e`,
 	}
 	for name, stmt := range cases {
 		f, err := parser.ParseFile(token.NewFileSet(), "x.go", "package p\nfunc f() {\n"+stmt+"\n}\n", 0)
@@ -187,13 +196,13 @@ func TestServedProjects_AuxEntryGuardCatchesBypasses(t *testing.T) {
 			t.Errorf("%s: guard found nothing", name)
 		}
 	}
-	ok := `if x { return auxiliaryRuntime{}, false }; return nil, auxiliaryRuntime{}, nil`
+	ok := `entries = append(entries, namedAuxiliaryRuntime{identity: k, auxiliaryRuntime: s.auxiliaryRuntimes[k]}); if x { return auxiliaryRuntime{}, false }; return nil, auxiliaryRuntime{}, nil`
 	f, err := parser.ParseFile(token.NewFileSet(), "x.go", "package p\nfunc f() {\n"+ok+"\n}\n", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := auxEntryViolations(f.Decls[0].(*ast.FuncDecl).Body, false); len(got) != 0 {
-		t.Errorf("zero-value returns flagged: %v", got)
+		t.Errorf("zero-value returns or a wrapper of an existing entry flagged: %v", got)
 	}
 }
 
