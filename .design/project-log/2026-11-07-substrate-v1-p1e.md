@@ -16,7 +16,8 @@ clarifications to §3.3:
 
 - **ProjectSet** (`pkg/runtime/project_set.go`). A one-method interface,
   `ServedProjects(ctx) ([]string, error)`, plus the optional
-  `ProjectSetReceiver` capability (`InstallProjectSet`). pkg/runtime defines
+  `ProjectSetReceiver` capability (`InstallProjectSet`,
+  `ReleaseProjectSet`). pkg/runtime defines
   and consumes the interface and does not import the hub client.
 - **Broker refresher** (`pkg/runtimebroker/served_projects.go`). Reads
   `hubclient.RuntimeBrokers().ListProjects(brokerID)`, once per hub
@@ -26,8 +27,10 @@ clarifications to §3.3:
     start), on every control-channel connect (`onControlChannelState`
     requests a reload), and on a 5-minute ticker. The ticker and the clock
     are injected. `Shutdown` cancels the refresher and waits for it.
-  - A failed load keeps that connection's last good snapshot. Its age is
-    logged when the snapshot is used.
+  - A failed load keeps that connection's last good snapshot. Using it is
+    logged at Warn, with its age, once per failing stretch of that
+    connection, at Debug while the loads keep failing, and at Info when a
+    load succeeds again.
   - Cold rule: `ServedProjects` errors while any current source has never
     loaded, or when there is no source at all. The cold error names only the
     hub connection.
@@ -53,7 +56,9 @@ clarifications to §3.3:
     resolution returns an error runtime.
   - `Shutdown` releases the instance's set from every runtime it installed
     it on, clearing it only if it is still that instance's set, so a
-    successor instance in the same process can install its own.
+    successor instance in the same process can install its own. Each
+    runtime is recorded once, however often the set is installed on it
+    again.
 - **Verify-or-fail `ensureAtespace`.** It calls `GetAtespace` and never
   `CreateAtespace`. NotFound or PermissionDenied returns
   `*SubstrateAtespaceProvisioningError` (matches
@@ -75,6 +80,8 @@ clarifications to §3.3:
     PermissionDenied are skipped:
     - the skip note is logged at Warn with its count when the skipped set
       changes, at Debug while it stays the same, and at Info when it clears;
+      only an unfiltered List updates it, so a project-scoped List does not
+      reset it;
     - a PermissionDenied skip may hide live actors, so it marks the caller's
       `ListCompleteness` (`pkg/runtime/list_completeness.go`) incomplete;
     - a NotFound skip hides nothing and leaves the List complete.

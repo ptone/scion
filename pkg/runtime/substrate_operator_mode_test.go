@@ -655,7 +655,8 @@ func (s sliceProjectSet) ServedProjects(context.Context) ([]string, error) { ret
 
 // TestSubstrateList_SkipNoteLoggedOnChange: the skip note is logged at Warn
 // when the skipped set changes, not on every List (the heartbeat lists
-// every interval), and at Info once when it clears.
+// every interval), and at Info once when it clears. A project-scoped List
+// between two unfiltered Lists with the same skip does not reset it.
 func TestSubstrateList_SkipNoteLoggedOnChange(t *testing.T) {
 	rec := &callRecorder{}
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
@@ -674,6 +675,17 @@ func TestSubstrateList_SkipNoteLoggedOnChange(t *testing.T) {
 	}
 	if n := warns(); n != 1 {
 		t.Fatalf("Warn lines after 3 Lists with the same skip = %d, want 1", n)
+	}
+	// Interleaved: a project-scoped List, then an unfiltered one with the
+	// same skip. Neither logs: still 1 Warn and no Info.
+	if _, err := rt.List(context.Background(), map[string]string{projectkeys.LabelProjectID: testProjAID}); err != nil {
+		t.Fatalf("List(project A) error = %v", err)
+	}
+	if _, err := rt.List(context.Background(), nil); err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if n, infos := warns(), strings.Count(buf.String(), "level=INFO"); n != 1 || infos != 0 {
+		t.Fatalf("after an interleaved project-scoped List: Warn lines = %d, Info lines = %d; want 1 and 0", n, infos)
 	}
 	errs[testAtespaceA] = status.Error(codes.PermissionDenied, "x")
 	if _, err := rt.List(context.Background(), nil); err != nil {

@@ -196,6 +196,20 @@ func TestServedProjects_FailedRefreshKeepsLastGood(t *testing.T) {
 	if out := logs.String(); !strings.Contains(out, "age=12m0s") || !strings.Contains(out, "hub=hub") {
 		t.Errorf("log = %q, want the last-good warning with hub=hub and age=12m0s", out)
 	}
+	// A second call while the source keeps failing does not warn again;
+	// a successful load ends the failing stretch with one Info line.
+	lastGood := func() int { return strings.Count(logs.String(), "Using the last good served-project set") }
+	if _, err := p.ServedProjects(context.Background()); err != nil {
+		t.Fatalf("second ServedProjects() error = %v", err)
+	}
+	if n := lastGood(); n != 1 {
+		t.Errorf("last-good Warn lines after 2 consecutive calls while failing = %d, want 1", n)
+	}
+	f.set(nil, "p3")
+	p.reload(context.Background())
+	if !strings.Contains(logs.String(), "Served projects loaded from the hub again") {
+		t.Errorf("no recovery Info line after a successful load: %q", logs.String())
+	}
 }
 
 func TestServedProjects_UnionAndColdAcrossHubConnections(t *testing.T) {

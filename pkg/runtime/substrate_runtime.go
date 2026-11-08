@@ -999,7 +999,13 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 	if err != nil {
 		return nil, err
 	}
-	r.noteSkipped(ctx, skipped)
+	markSkippedIncomplete(ctx, skipped)
+	// The skip note describes the served-project scope, so only an
+	// unfiltered List updates it: a project-scoped List never skips and
+	// must not reset the note.
+	if labelFilter[projectkeys.LabelProjectID] == "" {
+		r.logSkipped(skipped)
+	}
 
 	substrateAgentStateMu.Lock()
 	defer substrateAgentStateMu.Unlock()
@@ -1134,18 +1140,29 @@ type skippedAtespace struct {
 	Code     codes.Code
 }
 
-// noteSkipped reports an unfiltered List's skipped atespaces.
-//
-// A PermissionDenied skip may hide live actors (the atespace may exist and
-// hold them), so it marks the caller's ListCompleteness incomplete: the
-// broker heartbeat then reports that target incomplete instead of letting
-// the hub reconcile the hidden agents as missing. A NotFound skip means no
+// markSkippedIncomplete marks the caller's ListCompleteness incomplete when
+// a List skipped a PermissionDenied atespace, on any path. Such a skip may
+// hide live actors (the atespace may exist and hold them): the broker
+// heartbeat then reports that target incomplete instead of letting the hub
+// reconcile the hidden agents as missing. A NotFound skip means no
 // atespace exists, so it hides nothing and the List stays complete.
-//
-// The skip note is logged at Warn only when the skipped set changes (with
-// its count), at Debug while it stays the same, and at Info once when it
-// clears, because the heartbeat lists every interval.
-func (r *SubstrateRuntime) noteSkipped(ctx context.Context, skipped []skippedAtespace) {
+func markSkippedIncomplete(ctx context.Context, skipped []skippedAtespace) {
+	var hidden int
+	for _, sk := range skipped {
+		if sk.Code == codes.PermissionDenied {
+			hidden++
+		}
+	}
+	if hidden > 0 {
+		markListIncomplete(ctx, fmt.Sprintf("substrate: %d served atespace(s) not readable (PermissionDenied); their actors are unknown", hidden))
+	}
+}
+
+// logSkipped logs an unfiltered List's skipped atespaces: at Warn only when
+// the skipped set changes (with its count), at Debug while it stays the
+// same, and at Info once when it clears, because the heartbeat lists every
+// interval.
+func (r *SubstrateRuntime) logSkipped(skipped []skippedAtespace) {
 	var hidden int
 	parts := make([]string, 0, len(skipped))
 	for _, sk := range skipped {
@@ -1153,9 +1170,6 @@ func (r *SubstrateRuntime) noteSkipped(ctx context.Context, skipped []skippedAte
 			hidden++
 		}
 		parts = append(parts, sk.Atespace+":"+sk.Code.String())
-	}
-	if hidden > 0 {
-		markListIncomplete(ctx, fmt.Sprintf("substrate: %d served atespace(s) not readable (PermissionDenied); their actors are unknown", hidden))
 	}
 	sort.Strings(parts)
 	key := strings.Join(parts, ",")

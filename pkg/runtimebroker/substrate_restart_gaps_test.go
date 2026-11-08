@@ -68,7 +68,7 @@ func simulateBrokerRestart(t *testing.T) {
 // at the method. Before operator mode each List call was exactly one
 // unscoped ListActors call, so "List call N" here is what "unscoped call
 // N" was. Every other method and optional capability (the prober,
-// SetProjectSet) is the embedded runtime's.
+// InstallProjectSet, ReleaseProjectSet) is the embedded runtime's.
 type substrateFaults struct {
 	*runtime.SubstrateRuntime
 

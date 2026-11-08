@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -90,6 +91,9 @@ type servedProjects struct {
 
 	mu    sync.Mutex
 	snaps map[string]*servedProjectsSnapshot
+	// lastGoodWarned holds the sources (by key) whose last-good warning
+	// was logged at Warn during the current failing stretch.
+	lastGoodWarned map[string]bool
 }
 
 var _ scionrt.ProjectSet = (*servedProjects)(nil)
@@ -105,9 +109,10 @@ func newServedProjects(sources func() []servedProjectsSource, log *slog.Logger) 
 			t := time.NewTicker(d)
 			return t.C, t.Stop
 		},
-		log:      log,
-		reloadCh: make(chan struct{}, 1),
-		snaps:    make(map[string]*servedProjectsSnapshot),
+		log:            log,
+		reloadCh:       make(chan struct{}, 1),
+		snaps:          make(map[string]*servedProjectsSnapshot),
+		lastGoodWarned: make(map[string]bool),
 	}
 }
 
@@ -177,13 +182,23 @@ func (p *servedProjects) reload(ctx context.Context) {
 			}
 		}
 		p.snaps[src.key()] = &servedProjectsSnapshot{projectIDs: ids, loadedAt: p.now()}
+		recovered := p.lastGoodWarned[src.key()]
+		delete(p.lastGoodWarned, src.key())
 		p.mu.Unlock()
+		if recovered {
+			p.log.Info("Served projects loaded from the hub again", "hub", src.name)
+		}
 		p.log.Debug("Loaded served projects from the hub", "hub", src.name, "count", len(ids))
 	}
 	p.mu.Lock()
 	for key := range p.snaps {
 		if !current[key] {
 			delete(p.snaps, key)
+		}
+	}
+	for key := range p.lastGoodWarned {
+		if !current[key] {
+			delete(p.lastGoodWarned, key)
 		}
 	}
 	p.mu.Unlock()
@@ -208,8 +223,18 @@ func (p *servedProjects) ServedProjects(ctx context.Context) ([]string, error) {
 			return nil, fmt.Errorf("%w (hub %q)", errServedProjectsCold, src.name)
 		}
 		if snap.lastErr != nil {
-			p.log.Warn("Using the last good served-project set; the latest hub load failed",
-				"hub", src.name, "age", p.now().Sub(snap.loadedAt).Round(time.Second), "error", snap.lastErr)
+			// Warn once per failing stretch of a source (the heartbeat
+			// lists every interval); Debug while it keeps failing. A
+			// successful load logs Info and ends the stretch (reload).
+			age := p.now().Sub(snap.loadedAt).Round(time.Second)
+			if !p.lastGoodWarned[src.key()] {
+				p.lastGoodWarned[src.key()] = true
+				p.log.Warn("Using the last good served-project set; the latest hub load failed",
+					"hub", src.name, "age", age, "error", snap.lastErr)
+			} else {
+				p.log.Debug("Still using the last good served-project set; the latest hub load failed",
+					"hub", src.name, "age", age)
+			}
 		}
 		for _, id := range snap.projectIDs {
 			if _, ok := seen[id]; ok {
@@ -240,11 +265,31 @@ func (s *Server) installProjectSet(rt scionrt.Runtime) error {
 		if err := r.InstallProjectSet(s.servedProjects); err != nil {
 			return err
 		}
+		// Record each receiver once: a same-set re-install (for example a
+		// profile-bearing start resolving the memoized default runtime)
+		// adds no entry.
 		s.projectSetInstalledMu.Lock()
-		s.projectSetInstalled = append(s.projectSetInstalled, r)
+		if !containsReceiver(s.projectSetInstalled, r) {
+			s.projectSetInstalled = append(s.projectSetInstalled, r)
+		}
 		s.projectSetInstalledMu.Unlock()
 	}
 	return nil
+}
+
+// containsReceiver reports whether list holds r. Values of different or
+// uncomparable dynamic types count as different, so it never panics.
+func containsReceiver(list []scionrt.ProjectSetReceiver, r scionrt.ProjectSetReceiver) bool {
+	tr := reflect.TypeOf(r)
+	if tr == nil || !tr.Comparable() {
+		return false
+	}
+	for _, x := range list {
+		if reflect.TypeOf(x) == tr && x == r {
+			return true
+		}
+	}
+	return false
 }
 
 // releaseProjectSets releases this instance's served-project set from every

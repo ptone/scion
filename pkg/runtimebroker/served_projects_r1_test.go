@@ -358,3 +358,44 @@ func TestServedProjects_ShutdownReleaseLetsSuccessorInstall(t *testing.T) {
 		t.Errorf("after instance 1's stale release, runtime ProjectSet = %v, want instance 3's set kept", got)
 	}
 }
+
+// TestServedProjects_SameSetReinstallRecordedOnce: installing the same set
+// on one memoized runtime several times (for example profile-bearing starts
+// resolving the default runtime) records the runtime once, Shutdown's
+// release clears it, and a successor instance then installs its own.
+func TestServedProjects_SameSetReinstallRecordedOnce(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	rt := runtime.NewSubstrateRuntimeForTest(nil, nil, nil, config.V1SubstrateConfig{})
+	mgr1 := agent.NewManager(rt)
+	t.Cleanup(mgr1.Close)
+	cfg1 := testServerConfig()
+	cfg1.BrokerID = "broker-one"
+	srv1 := New(cfg1, mgr1, rt, config.RuntimeBuildRecord{})
+	for i := 0; i < 3; i++ {
+		if _, err := srv1.newAuxiliaryRuntime(rt, mgr1, config.RuntimeBuildRecord{}); err != nil {
+			t.Fatalf("same-set re-install %d error = %v", i, err)
+		}
+	}
+	srv1.projectSetInstalledMu.Lock()
+	n := len(srv1.projectSetInstalled)
+	srv1.projectSetInstalledMu.Unlock()
+	if n != 1 {
+		t.Fatalf("recorded receivers after 4 installs on one runtime = %d, want 1", n)
+	}
+
+	srv1.releaseProjectSets()
+	if got := rt.ProjectSetForTest(); got != nil {
+		t.Fatalf("runtime ProjectSet after release = %v, want nil", got)
+	}
+	mgr2 := agent.NewManager(rt)
+	t.Cleanup(mgr2.Close)
+	cfg2 := testServerConfig()
+	cfg2.BrokerID = "broker-two"
+	srv2 := New(cfg2, mgr2, rt, config.RuntimeBuildRecord{})
+	if srv2.projectSetSetupErr != nil {
+		t.Fatalf("successor setup error = %v, want nil", srv2.projectSetSetupErr)
+	}
+	if got := rt.ProjectSetForTest(); got != srv2.servedProjects {
+		t.Errorf("runtime ProjectSet = %v, want the successor's set", got)
+	}
+}
