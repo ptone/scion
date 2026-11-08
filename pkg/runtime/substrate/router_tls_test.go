@@ -261,7 +261,7 @@ func get(t *testing.T, rc *RouterClient) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -589,7 +589,7 @@ func TestMTLSRouterClient_RedirectRefused(t *testing.T) {
 	defer cancel()
 	resp, err := rc.Do(ctx, "ns-a", "actor-1", http.MethodPost, "/scion/v1/exec", strings.NewReader("{}"), nil)
 	if err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("Do() = status %d, want the redirect refused", resp.StatusCode)
 	}
 	if !errors.Is(err, ErrRouterRedirectRefused) {
