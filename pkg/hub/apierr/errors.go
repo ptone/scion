@@ -130,6 +130,7 @@ const (
 	ErrCodeRuntimeTargetPinStale            = "runtime_target_pin_stale"             // 409
 	ErrCodeRuntimeBrokerNotLinked           = "runtime_broker_not_linked"            // 422
 	ErrCodeRuntimeBrokerLinkPathUnsupported = "runtime_broker_link_path_unsupported" // 409
+	ErrCodeRuntimeTargetTypeUnsupported     = "runtime_target_type_unsupported"      // 422
 	ErrCodeExperimentDisabled               = "experiment_disabled"                  // 412
 
 	// ErrCodeDeleteInProgress is returned (409) by start, restart,
@@ -284,6 +285,23 @@ const (
 	// details.truncated reports more. GET /api/v1/users/{id}/delete-blockers
 	// returns the same lists without attempting the delete.
 	ErrCodeUserDeleteBlocked = "user_delete_blocked"
+
+	// ErrCodeUserDeleteForceForbidden is returned with 403 when a forced
+	// user delete (DELETE /api/v1/users/{id}?force=true) names agents the
+	// caller may not delete; details.agents lists them ({id, projectId}).
+	// Nothing is written.
+	ErrCodeUserDeleteForceForbidden = "user_delete_force_forbidden"
+
+	// ErrCodeUserDeleteBlockersChanged is returned with 409 when the agents
+	// blocking a forced user delete changed between the authorization
+	// check and the delete transaction. Nothing is written; retry.
+	ErrCodeUserDeleteBlockersChanged = "user_delete_blockers_changed"
+
+	// ErrCodeUserDeletionInProgress is returned with 409 for a plain user
+	// delete, or an update of the user, while a forced deletion of that
+	// user is in progress; details.deletionId and details.state identify
+	// it (GET /api/v1/users/{id}/deletion).
+	ErrCodeUserDeletionInProgress = "user_deletion_in_progress"
 
 	// ErrCodeInvalidCursor is returned for every authorizedList pagination
 	// cursor failure: malformed input, truncation, a tampered byte, a

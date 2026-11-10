@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -38,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	stagedsecrets "github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
@@ -304,6 +306,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	args := []string{"run", "-d", "-i"}
 	addArg := func(flag string, values ...string) {
 		for _, v := range values {
+			if flag == "-e" {
+				// Every container env entry passes here; a reserved name
+				// never reaches the container (reservedAgentEnvName).
+				if name, _, _ := strings.Cut(v, "="); reservedAgentEnvName(name) {
+					continue
+				}
+			}
 			args = append(args, flag, v)
 		}
 	}
@@ -313,46 +322,36 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	hostHome, _ := os.UserHomeDir()
 	expandPath := func(path string, isTarget bool) string {
-		// Expand environment variables first (e.g., ${GOPATH}, $HOME).
-		// Mount paths are visible to the agent, so names refused for
-		// agents expand to empty.
-		expanded, _, refused := util.ExpandEnvRefusing(path, util.IsAgentRefusedHostEnvName)
-		for _, name := range refused {
-			slog.Warn("volume path: host environment variable is reserved and is not expanded", "variable", name)
+		if !isTarget {
+			return expandHostSource(path)
 		}
-
-		// Then handle tilde expansion
+		expanded := expandVolumeEnv(path)
 		if strings.HasPrefix(expanded, "~/") {
-			if isTarget {
-				return filepath.Join(util.GetHomeDir(config.UnixUsername), expanded[2:])
-			}
-			return filepath.Join(hostHome, expanded[2:])
+			return filepath.Join(util.GetHomeDir(config.UnixUsername), expanded[2:])
 		}
 		if expanded == "~" {
-			if isTarget {
-				return util.GetHomeDir(config.UnixUsername)
-			}
-			return hostHome
+			return util.GetHomeDir(config.UnixUsername)
 		}
 		return expanded
 	}
 
-	// Volume deduplication
-	volumeMap := make(map[string]string)
+	// Volume deduplication, by target. The source of each bind is checked
+	// once, when the binds are emitted below (checkBindSource).
+	type bindSpec struct {
+		src string
+		ro  bool
+	}
+	volumeMap := make(map[string]bindSpec)
 	var volumeOrder []string
 
 	registerMount := func(src, tgt string, ro bool, overwrite bool) {
-		val := fmt.Sprintf("%s:%s", src, tgt)
-		if ro {
-			val += ":ro"
-		}
+		spec := bindSpec{src: src, ro: ro}
 		if _, exists := volumeMap[tgt]; !exists {
 			volumeOrder = append(volumeOrder, tgt)
-			volumeMap[tgt] = val
+			volumeMap[tgt] = spec
 		} else if overwrite {
-			volumeMap[tgt] = val
+			volumeMap[tgt] = spec
 		}
 	}
 
@@ -395,17 +394,33 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// own path); registerMount below would not add this one.
 			return
 		}
-		// Agents' own directories under ~/.scion/project-configs hold state
-		// the host relies on; no configured volume may mount them
+		// No configured volume may reach a Runtime Broker control path,
+		// read-only or not (checkConfiguredVolumeSource). Agents' own
+		// directories under ~/.scion/project-configs hold state the host
+		// relies on; no configured volume may mount them either
 		// (checkVolumeSource).
+		if err := checkConfiguredVolumeSource(src); err != nil {
+			if volumeErr == nil {
+				volumeErr = err
+			}
+			return
+		}
 		if err := checkVolumeSource(src, v.ReadOnly); err != nil {
 			if volumeErr == nil {
 				volumeErr = err
 			}
 			return
 		}
+		// The entry is a user-owned Mount realized as a bind mount.
+		realized, err := realizeUserVolume(src, tgt, v.ReadOnly, projectfs.RuntimeBind)
+		if err != nil {
+			if volumeErr == nil {
+				volumeErr = err
+			}
+			return
+		}
 		// Generic volumes from config should NOT overwrite already registered mounts (like workspace)
-		registerMount(src, tgt, v.ReadOnly, false)
+		registerMount(realized.Source, realized.Target, realized.ReadOnly, false)
 	}
 
 	addArg("--name", config.Name)
@@ -463,6 +478,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		return nil, err
 	}
 	config.Workspace = resolvedWorkspace
+	// On NFS project storage, no bind may reach the project root, its
+	// configuration directory or another tree of the share
+	// (checkNFSMountScope); every bind is checked when it is emitted below.
+	nfsScope, err := newNFSBindScope(config)
+	if err != nil {
+		return nil, err
+	}
 
 	// Resolve RepoRoot through any symlinks too, the same way Workspace just
 	// was: the branches below compare the two with filepath.Rel to decide
@@ -615,6 +637,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// <main>/.git (narrowed) plus the workspace are mounted — never the
 			// whole main checkout read-write. Anything else is refused.
 			registered, regErr := util.IsRegisteredWorktree(config.RepoRoot, config.Workspace)
+			// A repository config refusal is returned as is, so the error
+			// names the refused key and its remedy instead of claiming that
+			// the workspace is not registered.
+			var refused *util.RepoConfigRefusedError
+			if errors.As(regErr, &refused) {
+				return nil, fmt.Errorf("agent %q: workspace %q against repository root %q: %w", config.Name, config.Workspace, config.RepoRoot, regErr)
+			}
 			if regErr != nil || !registered {
 				return nil, fmt.Errorf("agent %q: workspace %q against repository root %q: %w", config.Name, config.Workspace, config.RepoRoot, errOutsideRootNotRegistered)
 			}
@@ -622,7 +651,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// Derive the read-write own-worktree overlay target from the common
 			// dir's trusted back-links, not the agent-writable gitfile; refuse if
 			// it cannot be resolved.
-			name, ok := trustedWorktreeAdminName(gitDir, config.Workspace)
+			name, ok := util.TrustedWorktreeAdminName(gitDir, config.Workspace)
 			if !ok {
 				return nil, fmt.Errorf("agent %q: cannot resolve the broker-recorded worktree admin directory for workspace %q against %q; refusing to mount git metadata: %w", config.Name, config.Workspace, gitDir, errWorktreeAdminUnresolved)
 			}
@@ -828,7 +857,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		if s.Type != "environment" && s.Type != "" {
 			continue
 		}
-		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar {
+		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar || reservedAgentEnvName(s.Target) {
 			continue
 		}
 		addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
@@ -841,7 +870,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	if devBinDir := os.Getenv("SCION_DEV_BINARIES"); devBinDir != "" {
 		if abs, err := filepath.Abs(devBinDir); err == nil {
 			if info, err := os.Stat(abs); err == nil && info.IsDir() {
-				registerMount(abs, "/opt/scion/bin", true, true)
+				resolved, err := checkHostFileSource(abs)
+				if err != nil {
+					return nil, err
+				}
+				registerMount(resolved, "/opt/scion/bin", true, true)
 			}
 		}
 	}
@@ -860,9 +893,34 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	// Add all registered volumes
+	// Add all registered volumes. Every bind source, whatever produced it
+	// (workspace, home, configured volume, shared dir, git, auth file), is
+	// checked here against the Runtime Broker control paths, and the
+	// resolved source is what is mounted.
+	var emittedBinds []BindMount
 	for _, tgt := range volumeOrder {
-		addArg("-v", volumeMap[tgt])
+		spec := volumeMap[tgt]
+		src, err := checkBindSource(spec.src)
+		if err != nil {
+			return nil, err
+		}
+		if err := nfsScope.check(src); err != nil {
+			return nil, fmt.Errorf("bind mount at %s: %w", tgt, err)
+		}
+		val := fmt.Sprintf("%s:%s", src, tgt)
+		if spec.ro {
+			val += ":ro"
+		}
+		addArg("-v", val)
+		if !isNamedVolume(src) {
+			emittedBinds = append(emittedBinds, BindMount{Source: src, Destination: tgt})
+		}
+	}
+	// The record of the binds (LabelBindSources) is emitted after every
+	// other label, below.
+	bindSourcesLabel, err := encodeBindSourcesLabel(emittedBinds)
+	if err != nil {
+		return nil, fmt.Errorf("recording container binds: %w", err)
 	}
 
 	// (The whole repo root is never mounted read-write any more: the
@@ -931,10 +989,18 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
+	// LabelBindSources is the broker's own record of the binds: no other
+	// label source may set it.
 	for k, v := range config.Labels {
+		if k == LabelBindSources {
+			continue
+		}
 		addArg("--label", fmt.Sprintf("%s=%s", k, v))
 	}
 	for k, v := range config.Annotations {
+		if k == LabelBindSources {
+			continue
+		}
 		addArg("--label", fmt.Sprintf("%s=%s", k, v))
 	}
 
@@ -949,6 +1015,10 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	if config.Template != "" {
 		addArg("--label", fmt.Sprintf("scion.template=%s", config.Template))
 	}
+
+	// The record of the binds goes last, so no earlier label can stand in
+	// for it (LabelBindSources).
+	addArg("--label", LabelBindSources+"="+bindSourcesLabel)
 
 	// Get command from harness.
 	// No-auth mode builds a raw shell command string that is embedded
@@ -1237,26 +1307,16 @@ func bindReadWriteOverlayDir(registerMount func(string, string, bool, bool), src
 // in-container git for that submodule, so they get the same treatment as the
 // top-level hooks/info/config. Submodules created in-container after start are
 // out of scope (not present at mount time).
+//
+// The admin dirs come from util.SubmoduleAdminDirs, the same discovery the seed
+// checks, so the set bound equals the set checked. Its unsafe and err results
+// are ignored here, as the walk ignored them before; the seed refuses on them.
 func narrowModuleAdminDirs(registerMount func(string, string, bool, bool), gitDir, containerGitDir string) error {
-	modulesDir := filepath.Join(gitDir, "modules")
-	return filepath.WalkDir(modulesDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !d.IsDir() {
-			return nil
-		}
-		// A submodule admin dir is one that directly contains a HEAD file. This is a
-		// discovery predicate, not a bind source; each bound source below is
-		// resolved through checkedBindSource (component-checked, symlink refused).
-		if !fileExists(filepath.Join(path, "HEAD")) {
-			return nil
-		}
-		rel, relErr := filepath.Rel(gitDir, path)
-		if relErr != nil {
-			return nil
-		}
-		relComps := strings.Split(filepath.ToSlash(rel), "/")
+	dirs, _, _ := util.SubmoduleAdminDirs(gitDir)
+	for _, rel := range dirs {
+		// Each bound source below is resolved through checkedBindSource
+		// (component-checked, symlink refused).
+		relComps := strings.Split(rel, "/")
 		leaf := func(name string) []string {
 			c := make([]string, 0, len(relComps)+1)
 			c = append(c, relComps...)
@@ -1267,8 +1327,11 @@ func narrowModuleAdminDirs(registerMount func(string, string, bool, bool), gitDi
 				return e
 			}
 		}
-		return bindChecked(registerMount, gitDir, containerGitDir, true, bindFileRequire, leaf("config")...)
-	})
+		if e := bindChecked(registerMount, gitDir, containerGitDir, true, bindFileRequire, leaf("config")...); e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 // narrowSharerRegistryMounts layers read-only bind mounts over two further
@@ -1330,7 +1393,7 @@ func narrowObjectsInfo(registerMount func(string, string, bool, bool), gitDir, c
 // and config.worktree are pinned read-only here (file binds, below). The whole
 // worktrees/ dir is a directory bind, so the sibling protection works on every
 // runtime.
-// worktreeName must be the broker-trusted admin name (trustedWorktreeAdminName),
+// worktreeName must be the broker-trusted admin name (util.TrustedWorktreeAdminName),
 // or "" for a layout with no own per-agent worktree (shared-plain).
 func narrowWorktreesDir(registerMount func(string, string, bool, bool), gitDir, containerGitDir, worktreeName string) error {
 	// The whole worktrees/ dir is read-only so a container cannot write any
@@ -1410,7 +1473,7 @@ func registerWorktreeGitMounts(registerMount func(string, string, bool, bool), c
 	// `git worktree add` created, identified from the common dir's trusted
 	// back-links — never the agent-writable <workspace>/.git gitfile. If it
 	// cannot be resolved, refuse and mount nothing.
-	name, ok := trustedWorktreeAdminName(gitDir, config.Workspace)
+	name, ok := util.TrustedWorktreeAdminName(gitDir, config.Workspace)
 	if !ok {
 		return fmt.Errorf("agent %q: cannot resolve the broker-recorded worktree admin directory for workspace %q against %q; refusing to mount git metadata: %w", config.Name, config.Workspace, gitDir, errWorktreeAdminUnresolved)
 	}
@@ -1519,7 +1582,7 @@ func registerRwBaseGitNarrowing(registerMount func(string, string, bool, bool), 
 // (packed-refs.lock), git gc / git pack-refs, and a shallow fetch (shallow.lock)
 // all need a writable .git root; objects under modules/<name>/ (submodules) are
 // read-only too. Commit, branch creation, fetch, pull and push work normally.
-// worktreeName must be the broker-trusted admin name (trustedWorktreeAdminName),
+// worktreeName must be the broker-trusted admin name (util.TrustedWorktreeAdminName),
 // or "" when the layout has no own per-agent worktree.
 func registerReadOnlyBaseGitMounts(registerMount func(string, string, bool, bool), gitDir, containerGitDir, worktreeName string) error {
 	registerMount(gitDir, containerGitDir, true, true) // read-only base
@@ -1610,121 +1673,6 @@ func mkdirUnderHome(home *agenthome.Home, rel string) {
 		return
 	}
 	_ = home.MkdirAll(rel, 0755)
-}
-
-// fileExists reports whether path exists (file or directory).
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-// trustedWorktreeAdminName returns the name of the .git/worktrees/<name> admin
-// directory that belongs to the agent's workspace, derived ONLY from
-// broker-trusted data in the common git dir, never from the agent-writable
-// <workspace>/.git gitfile. It enumerates the common dir's worktrees/<name>
-// entries and returns the single one whose own gitdir back-reference resolves to
-// <workspace>/.git. A name must be a single path element (not "." or ".."). If
-// there is no unique match it returns ok=false, and the caller must refuse to
-// bind any read-write worktree overlay (fail closed).
-//
-// This is the control for the read-write own-worktree overlay: the agent must
-// not be able to choose, via its own gitfile, which admin dir it gets mounted
-// read-write (which could reach a sibling's admin dir, the whole worktrees/
-// directory, or — once cleaned — the .git root itself).
-func trustedWorktreeAdminName(gitDir, workspace string) (string, bool) {
-	wantGit := filepath.Join(workspace, ".git")
-	// The workspace .git gitfile is agent-writable. A worktree's .git is always a
-	// regular file (the gitfile); refuse if it is a symlink (or a directory, or
-	// missing), so the agent cannot repoint it at a sibling's gitfile and have the
-	// match resolve through it. Fail closed.
-	if fi, err := os.Lstat(wantGit); err != nil || !fi.Mode().IsRegular() {
-		return "", false
-	}
-	// Canonicalise by resolving the directory only and naming ".git" lexically, so
-	// a symlink the agent controls at the final component is never followed.
-	want := canonicalGitfilePath(wantGit)
-	worktreesDir := filepath.Join(gitDir, "worktrees")
-	entries, err := os.ReadDir(worktreesDir)
-	if err != nil {
-		return "", false
-	}
-	match := ""
-	for _, e := range entries {
-		name := e.Name()
-		// A single, non-traversing path element only.
-		if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
-			continue
-		}
-		adminDir := filepath.Join(worktreesDir, name)
-		if !e.IsDir() {
-			continue
-		}
-		gitdirFile := filepath.Join(adminDir, "gitdir")
-		ptr, ok := readSmallRegularFile(gitdirFile)
-		if !ok {
-			continue
-		}
-		ptr = strings.TrimSpace(ptr)
-		if ptr == "" {
-			continue
-		}
-		// git worktree add --relative-paths writes a path relative to the admin
-		// dir; an absolute path is also valid. Resolve both the same way.
-		resolved := ptr
-		if !filepath.IsAbs(resolved) {
-			resolved = filepath.Join(adminDir, resolved)
-		}
-		if canonicalGitfilePath(resolved) != want {
-			continue
-		}
-		if match != "" {
-			// Two admin dirs claim this workspace — ambiguous; fail closed.
-			return "", false
-		}
-		match = name
-	}
-	if match == "" {
-		return "", false
-	}
-	return match, true
-}
-
-// canonicalGitfilePath returns a comparable absolute path for a worktree .git
-// gitfile. It resolves symlinks in the parent directory (broker-controlled path)
-// but names the final component lexically, so a symlink at the gitfile itself —
-// which the agent can write at <workspace>/.git — is never followed. If the
-// parent cannot be resolved (it may not exist yet) it falls back to the
-// absolute, cleaned form.
-func canonicalGitfilePath(path string) string {
-	abs := path
-	if a, err := filepath.Abs(path); err == nil {
-		abs = a
-	}
-	abs = filepath.Clean(abs)
-	dir, base := filepath.Split(abs)
-	if r, err := filepath.EvalSymlinks(filepath.Clean(dir)); err == nil {
-		return filepath.Join(r, base)
-	}
-	return abs
-}
-
-// readSmallRegularFile reads a small file, refusing symlinks and non-regular
-// files (a FIFO/device/symlink in a shared worktrees dir must not be
-// followed or block). It returns ok=false on any such refusal or error.
-func readSmallRegularFile(path string) (string, bool) {
-	fi, err := os.Lstat(path)
-	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
-		return "", false
-	}
-	const max = 4096
-	if fi.Size() > max {
-		return "", false
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", false
-	}
-	return string(data), true
 }
 
 // resolveContainerID maps an agent identifier (slug, name, or partial
@@ -1874,6 +1822,40 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 	if err != nil {
 		logCommandFailure(ctx, command, len(args), elapsed, out)
 		return string(out), fmt.Errorf("%s failed: %w", command, err)
+	}
+	runtimeLog().Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
+	return strings.TrimSpace(string(out)), nil
+}
+
+// stdoutCommandTimeout bounds runStdoutCommand. A variable so tests can
+// shorten it.
+var stdoutCommandTimeout = 30 * time.Second
+
+// runStdoutCommand runs command and returns its standard output only, for
+// callers that parse it (container inspect, daemon endpoint resolution): a
+// warning the CLI writes to standard error must not corrupt the parse.
+// Standard error is captured separately and logged with the output on
+// failure. The run is bounded by stdoutCommandTimeout, and WaitDelay stops
+// a child that keeps the output pipes open after the kill, so a hung CLI
+// returns an error instead of blocking its caller. Logging otherwise
+// follows runSimpleCommand.
+func runStdoutCommand(ctx context.Context, command string, args ...string) (string, error) {
+	runtimeLog().Debug("Executing command", "cmd", command, "argc", len(args))
+	ctx, cancel := context.WithTimeout(ctx, stdoutCommandTimeout)
+	defer cancel()
+	start := time.Now()
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.WaitDelay = 2 * time.Second
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	elapsed := time.Since(start)
+	if err != nil {
+		logCommandFailure(ctx, command, len(args), elapsed, append(out, stderr.Bytes()...))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("%s failed: %w (%v)", command, err, ctxErr)
+		}
+		return "", fmt.Errorf("%s failed: %w", command, err)
 	}
 	runtimeLog().Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
 	return strings.TrimSpace(string(out)), nil
@@ -2236,8 +2218,10 @@ func BridgeExtraHosts(runtimeName string, env []string) []string {
 func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume func(api.VolumeMount), registerMount func(string, string, bool, bool)) error {
 	ra := config.ResolvedAuth
 
-	// Inject env vars
-	for k, v := range ra.EnvVars {
+	// Inject env vars. Every later -e for the same name wins, so no name
+	// is taken yet here.
+	for _, e := range resolvedAuthEnvEntries(ra, nil) {
+		k, v, _ := strings.Cut(e, "=")
 		addEnv(k, v)
 	}
 
@@ -2255,6 +2239,12 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 			// (SCION_STAGED_SECRETS), not copied from host paths. SourcePath is
 			// intentionally cleared by run.go. Skip the copy/mount.
 			continue
+		}
+		// No auth file may come from a Runtime Broker control path or from
+		// the Scion global directory, whether it is copied or bound.
+		sourcePath, err := checkHostFileSource(f.SourcePath)
+		if err != nil {
+			return err
 		}
 		containerPath := expandTildeTarget(f.ContainerPath, containerHome)
 
@@ -2275,16 +2265,136 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 				}
 				home = h
 			}
-			if err := copyFileIntoHome(f.SourcePath, home, relPath); err != nil {
+			if err := copyFileIntoHome(sourcePath, home, relPath); err != nil {
 				return fmt.Errorf("failed to copy auth file %s → %s: %w", f.SourcePath, dst, err)
 			}
 		} else {
 			// Volume mount mode: register a read-only bind mount
-			registerMount(f.SourcePath, containerPath, true, false)
+			registerMount(sourcePath, containerPath, true, false)
 		}
 	}
 
 	return nil
+}
+
+// resolvedAuthEnvEntries returns the env vars of ra that an agent container
+// receives, as KEY=VALUE entries sorted by name. It is the one place the
+// Docker rules for resolved-auth env are decided, shared by every runtime
+// that follows them:
+//   - an entry with an empty value is skipped (Docker's addEnv skips it);
+//   - an entry whose name taken reports is skipped, because a source that
+//     already set that name wins over resolved auth: config.Env (with the
+//     env-type secrets a runtime folded into it) and the runtime's own keys.
+//     Docker gets the same result by emitting resolved auth first and
+//     keeping the last -e for a name, so it passes a nil taken.
+//
+// Reserved names are not filtered here: the caller emits these entries
+// before the runtime's reserved-name drop, which covers every source.
+func resolvedAuthEnvEntries(ra *api.ResolvedAuth, taken func(name string) bool) []string {
+	if ra == nil || len(ra.EnvVars) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(ra.EnvVars))
+	for k, v := range ra.EnvVars {
+		if v == "" || (taken != nil && taken(k)) {
+			continue
+		}
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	entries := make([]string, 0, len(names))
+	for _, k := range names {
+		entries = append(entries, k+"="+ra.EnvVars[k])
+	}
+	return entries
+}
+
+// harnessEnvEntries returns the harness env an agent container receives,
+// as KEY=VALUE entries sorted by name, with the Docker rules
+// (buildCommonRunArgs):
+//   - Harness.GetEnv(cfg.Name, agentHome, cfg.UnixUsername), then, when
+//     cfg.TelemetryEnabled, Harness.GetTelemetryEnv(), which wins over
+//     GetEnv for a name both set;
+//   - an entry with an empty value is skipped (Docker's addEnv skips it),
+//     so an empty telemetry value leaves a GetEnv value in place.
+//
+// It is nil without a harness. Reserved names are not filtered here: the
+// caller emits these entries before the runtime's reserved-name drop
+// (reservedAgentEnvName, the staged blob markers; not
+// secret.IsReservedEnvTarget), which covers every source.
+//
+// A runtime may call it more than once per start: GetEnv and
+// GetTelemetryEnv are called twice per Cloud Run start (cloudRunHarnessEnv),
+// three times on a native "assign" start, which builds the instance once
+// more for its init firewall check; this assumes they are deterministic and
+// side-effect free, as every in-tree harness is.
+func harnessEnvEntries(cfg RunConfig, agentHome string) []string {
+	if cfg.Harness == nil {
+		return nil
+	}
+	env := make(map[string]string)
+	add := func(src map[string]string) {
+		for k, v := range src {
+			if v != "" {
+				env[k] = v
+			}
+		}
+	}
+	add(cfg.Harness.GetEnv(cfg.Name, agentHome, cfg.UnixUsername))
+	if cfg.TelemetryEnabled {
+		add(cfg.Harness.GetTelemetryEnv())
+	}
+	names := make([]string, 0, len(env))
+	for k := range env {
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	entries := make([]string, 0, len(names))
+	for _, k := range names {
+		entries = append(entries, k+"="+env[k])
+	}
+	return entries
+}
+
+// resolvedAuthPlainEnvNames are the resolved-auth env names a runtime that
+// delivers the instance environment in plain form (Cloud Run) may emit as
+// plain env: discovery settings, never a credential. Every other
+// resolved-auth entry travels in the staged blob (splitResolvedAuthEnv).
+// Extended only by review.
+var resolvedAuthPlainEnvNames = map[string]bool{
+	"SCION_HARNESS_SELECTED_AUTH": true,
+	"GOOGLE_CLOUD_PROJECT":        true,
+	"GOOGLE_CLOUD_REGION":         true,
+	"GOOGLE_CLOUD_LOCATION":       true,
+	"ANTHROPIC_VERTEX_PROJECT_ID": true,
+	"CLOUD_ML_REGION":             true,
+	"CLAUDE_CODE_USE_VERTEX":      true,
+}
+
+// splitResolvedAuthEnv applies resolvedAuthEnvEntries (the Docker rules:
+// empty values and taken names skipped) to ra and splits the result:
+// plain holds the resolvedAuthPlainEnvNames entries as sorted KEY=VALUE
+// entries, staged holds every other entry for the staged blob
+// (stagedExtras.ResolvedAuthEnv). A staged entry whose name is reserved
+// (reservedAgentEnvName, stagedsecrets.ReservedResolvedAuthEnvName) is
+// dropped; sciontool init drops such names again before the harness
+// starts. staged is nil when there is nothing to stage.
+func splitResolvedAuthEnv(ra *api.ResolvedAuth, taken func(name string) bool) (plain []string, staged map[string]string) {
+	for _, e := range resolvedAuthEnvEntries(ra, taken) {
+		k, v, _ := strings.Cut(e, "=")
+		if resolvedAuthPlainEnvNames[k] {
+			plain = append(plain, e)
+			continue
+		}
+		if reservedAgentEnvName(k) || stagedsecrets.ReservedResolvedAuthEnvName(k) {
+			continue
+		}
+		if staged == nil {
+			staged = make(map[string]string)
+		}
+		staged[k] = v
+	}
+	return plain, staged
 }
 
 // copyFileIntoHome copies the host file src to rel in the agent home with
@@ -2317,17 +2427,82 @@ func copyFileIntoHome(src string, home *agenthome.Home, rel string) error {
 // the combined environment at ~128KB.
 const stagedSecretWarnThreshold = 100 * 1024
 
+// reservedAgentEnvName reports whether name may not reach an agent
+// container's environment from any source, secret or not, on any runtime:
+// sciontool init reads it as its own marker and only init itself sets it.
+// A value supplied from outside would make init treat a broker-provided
+// token file as one it staged (stagedsecrets.HubTokenStagedEnvVar), or
+// read a resolved-auth carry file it did not write
+// (stagedsecrets.ResolvedAuthStagedEnvVar). Each runtime drops it where it
+// assembles the container environment.
+func reservedAgentEnvName(name string) bool {
+	return name == stagedsecrets.HubTokenStagedEnvVar || name == stagedsecrets.ResolvedAuthStagedEnvVar
+}
+
+// dropReservedAgentEnv deletes the reservedAgentEnvName entries from an
+// environment map.
+func dropReservedAgentEnv(env map[string]string) {
+	for k := range env {
+		if reservedAgentEnvName(k) {
+			delete(env, k)
+		}
+	}
+}
+
 // prepareContainerSecretEnv adds the shared secret-related environment needed
 // by local container runtimes.
 func prepareContainerSecretEnv(config *RunConfig) error {
-	if len(config.ResolvedSecrets) == 0 {
-		return nil
+	return prepareStagedSecretEnv(config, "")
+}
+
+// prepareStagedSecretEnv is prepareContainerSecretEnv that also stages
+// hubToken (the agent's hub-issued credential) in the blob when it is
+// non-empty. Only the Cloud Run runtime passes a token; every other caller
+// goes through prepareContainerSecretEnv and its output is unchanged.
+func prepareStagedSecretEnv(config *RunConfig, hubToken string) error {
+	return prepareStagedSecretEnvExtras(config, stagedExtras{HubToken: hubToken})
+}
+
+// stagedExtras is what a runtime stages in the blob besides the resolved
+// file and variable secrets. Only the Cloud Run runtime sets any of it.
+type stagedExtras struct {
+	// HubToken is the agent's hub-issued credential (Staged.HubToken).
+	HubToken string
+	// HarnessSecrets are the harness bundle's staged secret files
+	// (Staged.HarnessSecrets).
+	HarnessSecrets []stagedsecrets.HarnessSecret
+	// ResolvedAuthEnv are the resolved-auth env entries a runtime delivers
+	// in the blob rather than as plain env (Staged.ResolvedAuthEnv; see
+	// splitResolvedAuthEnv).
+	ResolvedAuthEnv map[string]string
+	// FieldClassErrors makes an oversize error name only the largest
+	// field class (stagedSizes.largestClass), never a secret name, key or path.
+	FieldClassErrors bool
+}
+
+// empty reports whether e stages nothing.
+func (e stagedExtras) empty() bool {
+	return e.HubToken == "" && len(e.HarnessSecrets) == 0 && len(e.ResolvedAuthEnv) == 0
+}
+
+// prepareStagedSecretEnvExtras is prepareStagedSecretEnv for any extras.
+func prepareStagedSecretEnvExtras(config *RunConfig, extras stagedExtras) error {
+	_, err := stageSecretEnv(config, extras)
+	return err
+}
+
+// stageSecretEnv is prepareStagedSecretEnvExtras that also returns the
+// staged structure it encoded (empty when nothing is staged).
+func stageSecretEnv(config *RunConfig, extras stagedExtras) (stagedsecrets.Staged, error) {
+	if len(config.ResolvedSecrets) == 0 && extras.empty() {
+		return stagedsecrets.Staged{}, nil
 	}
 
 	containerHome := util.GetHomeDir(config.UnixUsername)
-	encoded, err := serializeSecrets(containerHome, config.ResolvedSecrets)
+	built := buildStaged(containerHome, config.ResolvedSecrets, extras)
+	encoded, err := encodeStaged(built)
 	if err != nil {
-		return fmt.Errorf("failed to serialize secrets: %w", err)
+		return stagedsecrets.Staged{}, fmt.Errorf("failed to serialize secrets: %w", err)
 	}
 	if encoded != "" {
 		config.Env = append(config.Env, stagedsecrets.EnvVar+"="+encoded)
@@ -2336,7 +2511,7 @@ func prepareContainerSecretEnv(config *RunConfig) error {
 	if credPath := findGCPTelemetryCredentialPath(config.ResolvedSecrets, containerHome); credPath != "" {
 		config.Env = append(config.Env, telemetryGCPCredentialsEnvVar+"="+credPath)
 	}
-	return nil
+	return built, nil
 }
 
 // envSizeLimit is the largest environment entry a runtime accepts.
@@ -2390,20 +2565,48 @@ func (l envSizeLimit) unit() string {
 // It returns the env-type secret keys it added, in order. config.Env is
 // clipped before appending, so a caller's backing array is never written.
 func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKeys ...string) ([]string, error) {
-	if len(config.ResolvedSecrets) == 0 {
-		return nil, nil
+	return applyStagedSecretsToEnv(config, limit, "", reservedKeys...)
+}
+
+// applyStagedSecretsToEnv is applyResolvedSecretsToEnv that also stages
+// hubToken in the SCION_STAGED_SECRETS blob when it is non-empty (see
+// prepareStagedSecretEnv). The token never becomes an env entry of its own.
+func applyStagedSecretsToEnv(config *RunConfig, limit envSizeLimit, hubToken string, reservedKeys ...string) ([]string, error) {
+	order, _, err := applyStagedSecretsToEnvExtras(config, limit, stagedExtras{HubToken: hubToken}, reservedKeys...)
+	return order, err
+}
+
+// applyStagedSecretsToEnvExtras is applyStagedSecretsToEnv for any extras.
+// It also returns the sizes of the staged blob (stagedSizes, zero when no
+// blob is staged), for a runtime to log.
+func applyStagedSecretsToEnvExtras(config *RunConfig, limit envSizeLimit, extras stagedExtras, reservedKeys ...string) ([]string, stagedSizes, error) {
+	if len(config.ResolvedSecrets) == 0 && extras.empty() {
+		return nil, stagedSizes{}, nil
 	}
 
 	staged := *config
 	staged.Env = nil
-	if err := prepareContainerSecretEnv(&staged); err != nil {
-		return nil, err
+	built, err := stageSecretEnv(&staged, extras)
+	if err != nil {
+		return nil, stagedSizes{}, err
+	}
+	sizes, err := measureStaged(built)
+	if err != nil {
+		return nil, stagedSizes{}, err
 	}
 	for _, e := range staged.Env {
 		key, val, _ := strings.Cut(e, "=")
 		if key == stagedsecrets.EnvVar && limit.exceeds(key, val) {
-			return nil, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q)",
-				stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), largestStagedSecretName(config.ResolvedSecrets))
+			if extras.FieldClassErrors {
+				return nil, sizes, fmt.Errorf("staged secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime; the largest part is the %s",
+					stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), sizes.largestClass())
+			}
+			carries := ""
+			if extras.HubToken != "" {
+				carries = "; it also carries the agent's hub credential"
+			}
+			return nil, sizes, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q%s)",
+				stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), largestStagedSecretName(config.ResolvedSecrets), carries)
 		}
 	}
 
@@ -2415,6 +2618,7 @@ func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKe
 	// The staged keys are reserved even when this call does not set them:
 	// sciontool init reads them, so a secret must not supply them.
 	envKeys[stagedsecrets.EnvVar] = struct{}{}
+	envKeys[stagedsecrets.HubTokenStagedEnvVar] = struct{}{}
 	envKeys[telemetryGCPCredentialsEnvVar] = struct{}{}
 	for _, key := range reservedKeys {
 		envKeys[key] = struct{}{}
@@ -2438,7 +2642,7 @@ func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKe
 	for _, target := range order {
 		s := values[target]
 		if limit.exceeds(target, s.Value) {
-			return nil, fmt.Errorf("secret %q (env %s) is %d bytes, over the %d-byte limit for one %s on this runtime",
+			return nil, sizes, fmt.Errorf("secret %q (env %s) is %d bytes, over the %d-byte limit for one %s on this runtime",
 				s.Name, s.Target, limit.size(target, s.Value), limit.maxBytes, limit.unit())
 		}
 	}
@@ -2448,7 +2652,71 @@ func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKe
 		config.Env = append(config.Env, target+"="+values[target].Value)
 	}
 	config.Env = append(config.Env, staged.Env...)
-	return order, nil
+	return order, sizes, nil
+}
+
+// Field classes of the staged blob, as named in logs and oversize errors.
+const (
+	stagedClassHubToken       = "hub credential"
+	stagedClassFileSecrets    = "file and variable secrets"
+	stagedClassHarnessSecrets = "harness secrets"
+	stagedClassResolvedAuth   = "resolved auth"
+)
+
+// stagedSizes are the encoded sizes, in bytes, of a staged blob and of
+// what each field class adds to it. A class's size is the encoded size of
+// a blob with that class alone, so the parts do not add up exactly to the
+// total. Sizes only: no names, keys or values.
+type stagedSizes struct {
+	Total           int
+	HubToken        int
+	FileSecrets     int
+	HarnessSecrets  int
+	ResolvedAuthEnv int
+}
+
+// measureStaged returns the sizes of staged.
+func measureStaged(staged stagedsecrets.Staged) (stagedSizes, error) {
+	size := func(part stagedsecrets.Staged) (int, error) {
+		if stagedIsEmpty(part) {
+			return 0, nil
+		}
+		enc, err := marshalStaged(part)
+		return len(enc), err
+	}
+	var s stagedSizes
+	var err error
+	if s.Total, err = size(staged); err != nil {
+		return stagedSizes{}, err
+	}
+	if s.HubToken, err = size(stagedsecrets.Staged{HubToken: staged.HubToken}); err != nil {
+		return stagedSizes{}, err
+	}
+	if s.FileSecrets, err = size(stagedsecrets.Staged{FileSecrets: staged.FileSecrets, VariableSecrets: staged.VariableSecrets}); err != nil {
+		return stagedSizes{}, err
+	}
+	if s.HarnessSecrets, err = size(stagedsecrets.Staged{HarnessSecrets: staged.HarnessSecrets}); err != nil {
+		return stagedSizes{}, err
+	}
+	if s.ResolvedAuthEnv, err = size(stagedsecrets.Staged{ResolvedAuthEnv: staged.ResolvedAuthEnv}); err != nil {
+		return stagedSizes{}, err
+	}
+	return s, nil
+}
+
+// largestClass names the field class with the largest size.
+func (s stagedSizes) largestClass() string {
+	class, size := stagedClassFileSecrets, s.FileSecrets
+	if s.HarnessSecrets > size {
+		class, size = stagedClassHarnessSecrets, s.HarnessSecrets
+	}
+	if s.ResolvedAuthEnv > size {
+		class, size = stagedClassResolvedAuth, s.ResolvedAuthEnv
+	}
+	if s.HubToken > size {
+		class = stagedClassHubToken
+	}
+	return class
 }
 
 // largestStagedSecretName returns the name of the largest file or variable
@@ -2471,7 +2739,20 @@ func largestStagedSecretName(secrets []api.ResolvedSecret) string {
 // an environment variable. Returns "" when there are no file or variable secrets.
 // The containerHome parameter is used to expand ~/ prefixes in file target paths.
 func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (string, error) {
-	var staged stagedsecrets.Staged
+	return serializeStaged(containerHome, secrets, "")
+}
+
+// serializeStaged is serializeSecrets that also carries hubToken in the
+// blob's dedicated HubToken field when it is non-empty; the blob is then
+// produced even with no file or variable secrets.
+func serializeStaged(containerHome string, secrets []api.ResolvedSecret, hubToken string) (string, error) {
+	return encodeStaged(buildStaged(containerHome, secrets, stagedExtras{HubToken: hubToken}))
+}
+
+// buildStaged collects the file and variable secrets and the extras into
+// the staged blob's structure.
+func buildStaged(containerHome string, secrets []api.ResolvedSecret, extras stagedExtras) stagedsecrets.Staged {
+	staged := stagedsecrets.Staged{HubToken: extras.HubToken, HarnessSecrets: extras.HarnessSecrets, ResolvedAuthEnv: extras.ResolvedAuthEnv}
 
 	// Collect file secrets, deduplicating by container target path (last wins).
 	targetIndex := make(map[string]int) // target → index in FileSecrets
@@ -2518,22 +2799,42 @@ func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (strin
 		staged.VariableSecrets[s.Target] = s.Value
 	}
 
-	if len(staged.FileSecrets) == 0 && len(staged.VariableSecrets) == 0 {
+	return staged
+}
+
+// stagedIsEmpty reports whether staged carries nothing, so no blob is set.
+func stagedIsEmpty(staged stagedsecrets.Staged) bool {
+	return len(staged.FileSecrets) == 0 && len(staged.VariableSecrets) == 0 &&
+		staged.HubToken == "" && len(staged.HarnessSecrets) == 0 && len(staged.ResolvedAuthEnv) == 0
+}
+
+// encodeStaged serializes staged into the blob's encoded form, or "" when
+// it carries nothing.
+func encodeStaged(staged stagedsecrets.Staged) (string, error) {
+	if stagedIsEmpty(staged) {
 		return "", nil
 	}
 
-	jsonData, err := json.Marshal(staged)
+	encoded, err := marshalStaged(staged)
 	if err != nil {
-		return "", fmt.Errorf("failed to serialize staged secrets: %w", err)
+		return "", err
 	}
-
-	encoded := base64.StdEncoding.EncodeToString(jsonData)
 	if len(encoded) > stagedSecretWarnThreshold {
 		slog.Warn("serialized secrets blob exceeds size warning threshold",
 			"size_bytes", len(encoded), "threshold_bytes", stagedSecretWarnThreshold)
 	}
 
 	return encoded, nil
+}
+
+// marshalStaged is encodeStaged without the empty check and the size
+// warning.
+func marshalStaged(staged stagedsecrets.Staged) (string, error) {
+	jsonData, err := json.Marshal(staged)
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize staged secrets: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(jsonData), nil
 }
 
 // phaseFromContainerStatus derives an agent phase from a container status string.

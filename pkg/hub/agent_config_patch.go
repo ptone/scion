@@ -21,10 +21,12 @@ import (
 	"maps"
 	"net/http"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -89,12 +91,42 @@ func (p configPatch) subset(keep func(agentEditField) bool) configPatch {
 // range. On a failure it writes the error response and returns false. A
 // held edit is validated by the same call when it is saved; the harness is
 // fixed after create, so the check still holds when the edit is applied.
-func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWriter, agent *store.Agent, cfg *api.ScionConfig) bool {
+//
+// nilEnvClears says a nil cfg.Env clears the env, as a held edit that names
+// env with a null value does; on the live path a nil env leaves it as it is.
+func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWriter, agent *store.Agent, cfg *api.ScionConfig, nilEnvClears bool) bool {
 	resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
 	if issues := validateConfigAgainstHarnessCapabilities(cfg, harnessCaps); len(issues) > 0 {
 		ValidationError(w, "Config contains unsupported fields for harness "+resolvedHarness, map[string]interface{}{
 			"harness": resolvedHarness,
 			"fields":  issues,
+		})
+		return false
+	}
+	// config.env never adds, changes or removes a reserved control-plane
+	// key (SCION_*, GCE_METADATA_*; secret.IsReservedEnvTarget, the helper
+	// the env submit and env-secret refusals use): the SCION_METADATA_*
+	// keys carry the hub's own GCP identity decision to the broker. The only
+	// exception is the exact names in patchableReservedEnvKeys, the
+	// user-facing auto-expose keys (patchReservedEnvKey). A key stored with
+	// the agent may be sent back byte-identical (the configure page sends
+	// the whole env), except the native Cloud Run marker, which is always
+	// refused when sent (dropping it is allowed). The stored env compared is
+	// the one this request read, and the write is a compare-and-set on that
+	// same state version, so a concurrent change of it makes the write fail
+	// instead.
+	var stored map[string]string
+	if agent != nil && agent.AppliedConfig != nil {
+		stored = agent.AppliedConfig.Env
+	}
+	requested := cfg.Env
+	if requested == nil && nilEnvClears {
+		requested = map[string]string{}
+	}
+	if key := reservedEnvEditKey(stored, requested); key != "" {
+		ValidationError(w, "config.env may not add, change or remove a key reserved for scion's own control-plane environment variables", map[string]interface{}{
+			"field": "env",
+			"value": key,
 		})
 		return false
 	}
@@ -104,7 +136,96 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 			return false
 		}
 	}
-	return true
+	return s.validateUnlimitedCounts(ctx, w, agent, cfg)
+}
+
+// patchableReservedEnvKeys are the reserved env keys (by exact name, never
+// a prefix) that config.env may add, change or remove: the user-facing
+// auto-expose keys, which the configure page sends and sciontool reads
+// (the same set as autoExposeEnvKeys). Their values are not validated
+// here: sciontool parses them leniently. A name is added only with a test
+// that patches it.
+var patchableReservedEnvKeys = map[string]bool{
+	"SCION_AUTO_EXPOSE_PORTS":      true,
+	"SCION_AUTO_EXPOSE_MODE":       true,
+	"SCION_AUTO_EXPOSE_PORTS_LIST": true,
+	"SCION_AUTO_EXPOSE_INTERVAL":   true,
+}
+
+// patchReservedEnvKey reports whether k is a reserved key a config patch
+// must not add, change or remove.
+func patchReservedEnvKey(k string) bool {
+	return secret.IsReservedEnvTarget(k) && !patchableReservedEnvKeys[k]
+}
+
+// reservedEnvEditKey returns, in sorted order, the first reserved env key
+// (patchReservedEnvKey) that requested, a patch's whole new env,
+// would add, change or remove against stored, or "". The native Cloud Run
+// marker counts whenever requested names it, and its removal does not. A
+// nil requested leaves the env as it is and edits nothing. Only key names
+// are returned, never values.
+func reservedEnvEditKey(stored, requested map[string]string) string {
+	if requested == nil {
+		return ""
+	}
+	var keys []string
+	for k, v := range requested {
+		if !patchReservedEnvKey(k) {
+			continue
+		}
+		if sv, ok := stored[k]; k == envNativeCloudRun || !ok || sv != v {
+			keys = append(keys, k)
+		}
+	}
+	for k := range stored {
+		// Removing the marker is allowed: it is refused whenever sent, so
+		// dropping it is the only edit that leaves an env holding it.
+		if _, ok := requested[k]; !ok && k != envNativeCloudRun && patchReservedEnvKey(k) {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	return keys[0]
+}
+
+// validateUnlimitedCounts refuses a change of a count limit to Unlimited (0)
+// that the agent's broker cannot apply (ptone/scion#5605): 422 with the
+// per-field reasons, or 503 when the broker record cannot be read. Only a
+// change counts, against the value the agent's next run would otherwise
+// use: with held edits on, the applied inline config overlaid by the
+// pending config, except that a count limit pending as 0 counts at its
+// applied value (unlimitedCheckBase); with them off, pending rows are
+// inert, so the applied inline config alone. The broker is looked up only when there is such a
+// change. It runs for the live PATCH and for the held save alike.
+func (s *Server) validateUnlimitedCounts(ctx context.Context, w http.ResponseWriter, agent *store.Agent, cfg *api.ScionConfig) bool {
+	var applied *api.ScionConfig
+	if agent != nil && agent.AppliedConfig != nil {
+		applied = agent.AppliedConfig.InlineConfig
+	}
+	base := applied
+	if s.heldEditsEnabled() {
+		base = unlimitedCheckBase(agent, applied)
+	}
+	fields, err := s.unlimitedCountRefusal(ctx, agent, cfg, base)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"The agent's runtime broker could not be read to check that it supports Unlimited; retry", nil)
+		return false
+	}
+	if len(fields) == 0 {
+		return true
+	}
+	details := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		details[k] = v
+	}
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+		"Unlimited is not supported for this agent's runtime broker; reload the page, or upgrade the broker",
+		map[string]interface{}{"fields": details})
+	return false
 }
 
 // configPatchResult is what applyAgentConfigPatch did: the warnings for the
@@ -244,21 +365,52 @@ func (s *Server) applyAgentConfigPatch(ctx context.Context, agent *store.Agent, 
 	// they take effect at the next start, not at the next
 	// reincarnation (ptone/scion#3982).
 	merged.ChangedFields = nextChangedFields(old.InlineConfig, provision)
-	// A resources edit that drops a stored sub-field keeps that
-	// sub-field at start (the merge applies only non-empty values) and
-	// records no clear, so it waits for the next reincarnation
-	// (ptone/scion#5676). Added after the clears are recorded:
-	// recording it would revert the whole resources value.
+	// A resources edit that drops a stored sub-field is recorded above
+	// as a resources.<sub-field> clear (ptone/scion#5676); it counts as a
+	// clear of config.resources, which a broker with
+	// clearedResourceSubfields applies at the next start.
+	resDropped := droppedResourceSubPaths(old.InlineConfig, cfg, p.present)
 	cleared = withDroppedResourcesSubField(cleared, old.InlineConfig, cfg, p.present)
 	// A broker with clearedFields applies the clears recorded above at
 	// the next start (ptone/scion#4890), so only the rest are held.
 	// What is reported applied follows what was recorded above.
 	sup := s.agentBrokerStartSupport(ctx, agent)
 	provision = sup.heldProvisionEdits(provision, old.InlineConfig, cfg, merged.ClearedFields)
-	cleared = sup.heldClearEdits(cleared, p.raw, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, cfg, p.present))
+	cleared = sup.heldClearEdits(cleared, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, cfg, p.present), resDropped)
 	removed = sup.heldRemovals(removed, merged.ClearedFields)
 	res.warnings = append(res.warnings, sup.reincarnateOnlyEditWarnings(provision, cleared)...)
 	res.warnings = append(res.warnings, removedEntriesWarnings(removed)...)
 	res.applied, res.heldForReincarnate = configEditDisposition(p.raw, cfg, old.InlineConfig, provision, cleared, removed)
 	return res
+}
+
+// unlimitedCheckBase is the base validateUnlimitedCounts compares a request
+// with when held edits are on: the agent's next-run inline config
+// (effectiveNextRunInline), but with each count limit pending as 0 taken
+// from applied instead. A pending 0 may be waiting for a broker that can
+// apply it (foldKeep), so it is not known to be the next run's value, and a
+// request that sends 0 again must still be checked against the broker:
+// otherwise a PATCH of an agent with no container would write the 0 to the
+// applied config and report it applied on a broker that keeps the inherited
+// limit. On a capable broker the extra check refuses nothing.
+func unlimitedCheckBase(agent *store.Agent, applied *api.ScionConfig) *api.ScionConfig {
+	base := effectiveNextRunInline(agent)
+	if agent.PendingConfig.IsEmpty() {
+		return base
+	}
+	p := pendingConfigPatch(agent.PendingConfig)
+	if base == nil {
+		base = &api.ScionConfig{}
+	}
+	var appliedTurns, appliedCalls *int
+	if applied != nil {
+		appliedTurns, appliedCalls = applied.MaxTurns, applied.MaxModelCalls
+	}
+	if p.present["max_turns"] && api.IsUnlimitedCount(p.cfg.MaxTurns) {
+		base.MaxTurns = api.CloneIntPtr(appliedTurns)
+	}
+	if p.present["max_model_calls"] && api.IsUnlimitedCount(p.cfg.MaxModelCalls) {
+		base.MaxModelCalls = api.CloneIntPtr(appliedCalls)
+	}
+	return base
 }

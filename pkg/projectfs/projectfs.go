@@ -113,6 +113,9 @@ type Kind string
 const (
 	KindWorkspace Kind = "workspace"
 	KindSharedDir Kind = "shared-dir"
+	// KindVolume is a `volumes:` entry: an Owner=user, Scope=agent Mount
+	// (design OQ-R2), outside the project tree.
+	KindVolume Kind = "volume"
 )
 
 // Mode is a workspace sharing mode. The values equal
@@ -202,6 +205,25 @@ func SharedDirMount(sd api.SharedDir, containerWorkspace string) Mount {
 		Provision: ProvisionEmpty,
 		Target:    SharedDirTarget(sd.Name, sd.InWorkspace, containerWorkspace),
 		ReadOnly:  sd.ReadOnly,
+	}
+}
+
+// UserVolumeMount returns the Mount of a `volumes:` entry: always
+// Scope=agent and Owner=user (design OQ-R2), so Scion never creates,
+// deletes, migrates or browses it. source is the host path the user
+// supplies (for a gcs volume, the bucket) and target the container path,
+// both as the runtime expanded them; the Mount is named by its target,
+// since a `volumes:` entry has no name of its own.
+func UserVolumeMount(source, target string, readOnly bool) Mount {
+	return Mount{
+		Kind:       KindVolume,
+		Name:       target,
+		Scope:      ScopeAgent,
+		Owner:      OwnerUser,
+		Provision:  ProvisionNone,
+		Target:     target,
+		ReadOnly:   readOnly,
+		UserSource: source,
 	}
 }
 
@@ -303,6 +325,18 @@ type Resolved struct {
 	// ClaimName is the PersistentVolumeClaim of the share this directory
 	// is on (the Layout's Share.PVName), for pod mounts; empty on local.
 	ClaimName string
+	// OwnerUID and OwnerGID are the Layout's UID and GID on a workspace or
+	// shared-dir Mount resolved on a shared backend (the leaves agents use):
+	// a root creator gives the leaf Open(true) creates that owner (Owner).
+	// They are zero on every other Resolved, including ProjectRoot,
+	// ProjectConfig and AgentRoot, whose directories never get the owner.
+	OwnerUID, OwnerGID int
+}
+
+// Owner is the shareddirs.Owner a root creator gives the directories it
+// creates for r: the Layout's UID and GID.
+func (r Resolved) Owner() shareddirs.Owner {
+	return shareddirs.Owner{UID: r.OwnerUID, GID: r.OwnerGID}
 }
 
 const (
@@ -439,6 +473,8 @@ func (l Layout) shared(rel string, m Mount) Resolved {
 // the agent's own directory, or pass the agent).
 func (l Layout) Resolve(p Project, agent string, m Mount) (Resolved, error) {
 	switch m.Kind {
+	case KindVolume:
+		return resolveUserVolume(m)
 	case KindWorkspace, KindSharedDir:
 	default:
 		return Resolved{}, fmt.Errorf("projectfs: unsupported mount kind %q", m.Kind)
@@ -472,6 +508,24 @@ func (l Layout) Resolve(p Project, agent string, m Mount) (Resolved, error) {
 	}
 }
 
+// resolveUserVolume resolves a `volumes:` entry: it lives where the user
+// put it (UserSource), on no backend of the Layout. Its fields are checked
+// where the entry is loaded (api.VolumeMount.Validate) and its source by the
+// runtime (checkVolumeSource), not here: resolving never refuses an entry a
+// runtime accepted before the entries went through Realize (#5837).
+func resolveUserVolume(m Mount) (Resolved, error) {
+	if m.Owner != OwnerUser || m.Scope != ScopeAgent {
+		return Resolved{}, fmt.Errorf("projectfs: a volume is an agent-scoped, user-owned mount, not %s/%s", m.Scope, m.Owner)
+	}
+	return Resolved{
+		HostPath: m.UserSource,
+		Target:   m.Target,
+		Kind:     KindVolume,
+		Name:     m.Name,
+		ReadOnly: m.ReadOnly,
+	}, nil
+}
+
 func (l Layout) resolveShared(p Project, agent string, m Mount) (Resolved, error) {
 	if p.ID == "" {
 		return Resolved{}, fmt.Errorf("projectfs: project ID is required on the %s backend", l.Backend)
@@ -484,7 +538,7 @@ func (l Layout) resolveShared(p Project, agent string, m Mount) (Resolved, error
 
 	switch m.Kind {
 	case KindSharedDir:
-		r := l.shared(filepath.Join(pr.RelPath, sharedDirsDir, m.Name), m)
+		r := l.mountLeaf(filepath.Join(pr.RelPath, sharedDirsDir, m.Name), m)
 		// Defense in depth alongside the validation above: the leaf must sit
 		// directly under this project's shared-dirs/.
 		if err := shareddirs.ConfineLeaf(r.HostPath, l.HostBase, root, p.ID, m.Name); err != nil {
@@ -494,17 +548,26 @@ func (l Layout) resolveShared(p Project, agent string, m Mount) (Resolved, error
 	default: // KindWorkspace
 		ws := filepath.Join(pr.RelPath, workspaceDir)
 		if agent == "" || m.Scope != ScopeAgent {
-			return l.shared(ws, m), nil
+			return l.mountLeaf(ws, m), nil
 		}
 		switch m.Mode {
 		case ModeWorktreePerAgent:
-			return l.shared(filepath.Join(ws, worktreesDir, agent), m), nil
+			return l.mountLeaf(filepath.Join(ws, worktreesDir, agent), m), nil
 		case ModeClonePerAgent, ModeEmptyPerAgent:
-			return l.shared(filepath.Join(pr.RelPath, agentsDir, agent, workspaceDir), m), nil
+			return l.mountLeaf(filepath.Join(pr.RelPath, agentsDir, agent, workspaceDir), m), nil
 		default:
 			return Resolved{}, fmt.Errorf("projectfs: mode %q has no agent-scoped workspace", m.Mode)
 		}
 	}
+}
+
+// mountLeaf is shared for a workspace or shared-dir Mount, the leaves
+// agents use: it also stamps the Layout's UID and GID as the owner a root
+// creator gives the leaf (Resolved.Owner).
+func (l Layout) mountLeaf(rel string, m Mount) Resolved {
+	r := l.shared(rel, m)
+	r.OwnerUID, r.OwnerGID = l.UID, l.GID
+	return r
 }
 
 func (l Layout) resolveLocal(p Project, agent string, m Mount) (Resolved, error) {

@@ -40,6 +40,10 @@ type AuthConfig struct {
 	DevAuthToken string
 	// DevUserCfg holds identity overrides for the development user
 	DevUserCfg DevUserConfig
+	// DevUser, when set, is the live development identity (see
+	// devUserSource); it takes precedence over DevUserCfg so an identity
+	// change is picked up by the next request. Nil uses DevUserCfg as is.
+	DevUser *devUserSource
 	// AgentTokenSvc handles agent JWT validation
 	AgentTokenSvc *AgentTokenService
 	// UserTokenSvc handles user JWT validation
@@ -272,7 +276,14 @@ func normalizeConstraintAuditAuthFailures(w http.ResponseWriter, r *http.Request
 
 // serveAfterAuth unwraps the response normalizer before entering downstream
 // middleware or a handler, so only authentication failures are rewritten.
+// It also carries the request's note of authorization checks stopped by
+// the request context ending, and writes its one summary line (if any)
+// when the handler returns, including on panic.
 func serveAfterAuth(w http.ResponseWriter, next http.Handler, r *http.Request) {
+	if ctx, note := withAuthzStoppedNote(r.Context()); note != nil {
+		r = r.WithContext(ctx)
+		defer note.emit(r)
+	}
 	if normalizer, ok := w.(*constraintAuditAuthFailureWriter); ok {
 		next.ServeHTTP(normalizer.ResponseWriter, r)
 		return
@@ -298,7 +309,10 @@ func handlerAfterAuth(next http.Handler) http.Handler {
 func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 	// Parse trusted proxy CIDRs
 	trustedNets := parseTrustedProxies(cfg.TrustedProxies)
-	devUser := NewDevUser(cfg.DevUserCfg)
+	devUsers := cfg.DevUser
+	if devUsers == nil {
+		devUsers = newDevUserSource(cfg.DevUserCfg)
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
@@ -571,6 +585,18 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					return
 				}
 
+				// Step 3f: Port page view (hub.port_view). A credential-less
+				// request of any method under /api/v1/portview/ in the
+				// route's one shape (isPortViewRequest) is passed through
+				// WITHOUT an identity: the route serves on the capability
+				// in its path alone, checked on every request, and never
+				// authorizes by an identity. It must stay above 3g.
+				if isPortViewRequest(r) {
+					ctx = contextWithAuthType(ctx, AuthTypeSignedURL)
+					serveAfterAuth(w, next, r.WithContext(ctx))
+					return
+				}
+
 				// Step 3g: no credential of any kind reached a port proxy
 				// route on a request that is not a page navigation
 				// (a navigation without a web session is sent to login by
@@ -579,9 +605,9 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				//
 				// ORDER: this step must stay the last one before the final
 				// 401. Any new step that lets a request without a
-				// credential through (as 3c to 3e do) goes ABOVE this
+				// credential through (as 3c to 3f do) goes ABOVE this
 				// one; placed below it, its port proxy requests would get
-				// this 401 instead. (3f is left free for such a step.)
+				// this 401 instead.
 				if isProxyRoute(r.URL.Path) && !isBrowserRequest(r) {
 					hinted := writePortProxyNoCredentials(w, r)
 					if cfg.RecordPortProxyNoCredentials != nil {
@@ -619,6 +645,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if !admitDevUserAccount(ctx, cfg, log, w) {
 					return
 				}
+				devUser := devUsers.Load()
 				ctx = context.WithValue(ctx, userContextKey{}, devUser)
 				ctx = contextWithIdentity(ctx, devUser)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(devUser))
@@ -714,6 +741,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						if !admitDevUserAccount(ctx, cfg, log, w) {
 							return
 						}
+						devUser := devUsers.Load()
 						ctx = context.WithValue(ctx, userContextKey{}, devUser)
 						ctx = contextWithIdentity(ctx, devUser)
 						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(devUser))

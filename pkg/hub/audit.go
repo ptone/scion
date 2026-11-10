@@ -240,6 +240,7 @@ const (
 	GCSLinkReasonSANotAdmissible    GCSLinkFetchReason = "sa_not_admissible"
 	GCSLinkReasonSALookupFailed     GCSLinkFetchReason = "sa_lookup_failed"
 	GCSLinkReasonSAUseNotAuthorized GCSLinkFetchReason = "sa_use_not_authorized"
+	GCSLinkReasonNativeIdentity     GCSLinkFetchReason = "native_identity"
 	GCSLinkReasonMintFailed         GCSLinkFetchReason = "mint_failed"
 	GCSLinkReasonGCSNotFound        GCSLinkFetchReason = "gcs_not_found"
 	GCSLinkReasonGCSDenied          GCSLinkFetchReason = "gcs_denied"
@@ -749,7 +750,7 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 					_ = logger.LogBrokerAuthEvent(r.Context(), event)
 				}
 
-				writeBrokerAuthError(w, err.Error())
+				writeBrokerAuthFailure(w, err)
 				return
 			}
 
@@ -772,6 +773,15 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 				}
 				event.Details["on_behalf_of_email"] = userIdent.Email()
 				event.Details["on_behalf_of_user_id"] = userIdent.ID()
+			}
+
+			// A conduit dial whose nonce Admit records is a success with the
+			// nonce deferred, not a replay check that ran.
+			if svc.defersNonce(r) {
+				if event.Details == nil {
+					event.Details = make(map[string]string)
+				}
+				event.Details["nonce_reason"] = "broker_nonce_deferred_to_admit"
 			}
 
 			if logger != nil {

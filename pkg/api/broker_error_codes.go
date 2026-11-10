@@ -30,10 +30,25 @@ const (
 	// it from (ptone/scion#3422).
 	BrokerErrCodeWorkspaceStorageUnconfigured = "workspace_storage_unconfigured"
 
+	// BrokerErrCodeWorkspaceDownloadModeUnsupported marks a create whose
+	// workspaceDownloadMode this broker does not know (422). The broker
+	// never falls back to another download for it.
+	BrokerErrCodeWorkspaceDownloadModeUnsupported = "workspace_download_mode_unsupported"
+
 	// BrokerErrCodeHarnessConfigUnusable marks a dispatch whose
 	// harness-config provisioner cannot run (422). It is a configuration
 	// error the caller must fix (ptone/scion#3132).
 	BrokerErrCodeHarnessConfigUnusable = "harness_config_unusable"
+	// BrokerErrCodeProjectPathNotInitialized marks a create, start or
+	// restart of a plain project whose explicit project path (a provider's
+	// LocalPath) holds no .scion directory or marker (409). The operator must
+	// initialize the path as a project (ptone/scion#6647).
+	BrokerErrCodeProjectPathNotInitialized = "project_path_not_initialized"
+	// BrokerErrCodeGitConfigRefused marks an agent create, start or restart
+	// the broker refuses (422) because the repository's git config sets keys
+	// agents may not be given. The message names every refused key and how
+	// to remove it, never a value or a host path (ptone/scion#6835).
+	BrokerErrCodeGitConfigRefused = LaunchCodeGitConfigRefused
 
 	// BrokerErrCodeStorageMigrationRequired marks an agent start the broker
 	// refuses (422) because its storage would be placed differently than
@@ -42,6 +57,12 @@ const (
 	// record pins nfs while the layout is not shared. The message names
 	// the keys and the migration (ptone/scion#6371).
 	BrokerErrCodeStorageMigrationRequired = "storage_migration_required"
+
+	// BrokerErrCodeProjectStorageUnavailable marks an agent create, start
+	// or restart the broker refuses (503) because it does not see the
+	// project storage share. The message names configuration fields, never
+	// the path, and gives the remedy (ptone/scion#5823).
+	BrokerErrCodeProjectStorageUnavailable = "project_storage_unavailable"
 
 	// BrokerErrCodeIdentityNotMapped marks a dispatch in GCP identity mode
 	// "assign" on the Kubernetes runtime whose GCP service account has no
@@ -80,6 +101,13 @@ const (
 	// shortly, against the restarted broker, is expected to succeed
 	// (ptone/scion#4668).
 	BrokerErrCodeBrokerDraining = "broker_draining"
+
+	// BrokerErrCodeStorageInvalid marks an agent create, start or restart
+	// refused because the broker's project storage settings are invalid
+	// (422). The broker started without storage; the operator must fix
+	// server.project_storage on the broker host and restart it. Stop and
+	// delete keep working.
+	BrokerErrCodeStorageInvalid = "storage_invalid"
 
 	// BrokerErrCodeLocalWorktreeRefused marks a worktree-per-agent dispatch
 	// for a linked checkout that the co-located broker refused because the
@@ -207,6 +235,12 @@ const (
 	BrokerKSASourceDiscovered = "discovered"
 )
 
+// BrokerSASourceCloudRunAllowlist is the Source of a service account report
+// entry for a Cloud Run profile: the account is listed in the selected
+// runtime entry's cloudrun.assignable_service_accounts in the broker's
+// global settings. Such an entry carries only the GSA.
+const BrokerSASourceCloudRunAllowlist = "cloudrun_allowlist"
+
 // Values of BrokerErrDetailDiscovery.
 const (
 	// BrokerKSADiscoveryNoMatch: no ServiceAccount in the namespace carries
@@ -232,6 +266,14 @@ const (
 // account report (hubclient.ProfileSAMappingsState.ReportVersion). Version
 // 2 means the broker reports a profile incomplete whenever dispatch would
 // not use the profile's entries (BrokerSAReportForceRuntime). The Hub
-// refuses a dispatch from a report only at this version or later; a report
-// without it (an older broker) is unknown.
-const BrokerSAReportVersion = 2
+// refuses a Kubernetes dispatch from a report only at version 2 or later;
+// a report without a version is unknown.
+//
+// Version 3 adds a report for each Cloud Run profile: its
+// cloudrun.assignable_service_accounts as entries with Source
+// BrokerSASourceCloudRunAllowlist, whether the profile can run an instance
+// as a per-dispatch identity, and whether a block account is configured
+// (as a boolean only). With the hub.cloudrun_native_identity experiment
+// on, the Hub refuses a Cloud Run dispatch from a profile whose report is
+// missing or below version 3.
+const BrokerSAReportVersion = 3

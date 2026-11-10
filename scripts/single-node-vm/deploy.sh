@@ -423,13 +423,67 @@ readonly EMPTY_SHA256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7
 # nothing in it is expanded either locally or on the VM. ARGS must be
 # shell-safe words (deploy.sh only passes validated values).
 install_layout_command() {
+  layout_script_write
+  layout_script_run "$@"
+  layout_script_remove
+}
+
+# layout_script_write / layout_script_run ARGS... / layout_script_remove --
+# the three parts of install_layout_command, for a VM command that runs
+# scion-layout.sh more than once: write it once, run it as often as needed,
+# remove it. A command must carry the script only once: an ssh --command
+# is a single argv word, which Linux caps at 128 KiB (MAX_ARG_STRLEN), and
+# scion-layout.sh alone is over a quarter of that.
+layout_script_write() {
   printf '%s\n' \
     "    SCION_LAYOUT_SH=\"\$(mktemp)\"" \
     "    cat > \"\$SCION_LAYOUT_SH\" << 'SCIONLAYOUTEOF'" \
     "$(cat "${SCRIPT_DIR}/scion-layout.sh")" \
-    "SCIONLAYOUTEOF" \
-    "    sudo bash \"\$SCION_LAYOUT_SH\" $* || { rm -f \"\$SCION_LAYOUT_SH\"; exit 1; }" \
+    "SCIONLAYOUTEOF"
+}
+layout_script_run() {
+  printf '%s\n' \
+    "    sudo bash \"\$SCION_LAYOUT_SH\" $* || { rm -f \"\$SCION_LAYOUT_SH\"; exit 1; }"
+}
+layout_script_remove() {
+  printf '%s\n' \
     "    rm -f \"\$SCION_LAYOUT_SH\""
+}
+
+# install_guard_command -- prints remote shell text (to follow
+# layout_script_write in the same command) that installs the start-attempts
+# counter (scion-hub-start-attempt.sh, run by the hub unit's ExecStartPre=-,
+# next to the guard) and the
+# boot-failure guard: scion-hub-rollback.sh (this directory) root-owned
+# 0755 at /usr/local/libexec/scion/scion-hub-rollback.sh (design D1 as
+# amended: outside the hub-owned ${INSTALL_ROOT}, so the hub user can
+# neither edit nor replace a script root runs), through scion-layout.sh
+# install-guard, which creates /usr/local/libexec/scion root-owned 0755 and
+# checks its directory chain; and the root oneshot scion-hub-rollback.service that
+# scion-hub.service's OnFailure= starts. Idempotent. Shared by the deploy
+# and migrate-layout paths so both install the same guard; the caller
+# writes scion-hub.service afterwards and runs daemon-reload. The guard
+# and layout temp files are removed on any exit (an EXIT trap, cleared
+# once the guard file is gone), including when install-guard fails.
+install_guard_command() {
+  printf '%s\n' \
+    "    SCION_ROLLBACK_SH=\"\$(mktemp)\"" \
+    "    SCION_START_ATTEMPT_SH=\"\$(mktemp)\"" \
+    "    trap 'rm -f \"\$SCION_ROLLBACK_SH\" \"\$SCION_START_ATTEMPT_SH\" \"\${SCION_LAYOUT_SH:-}\"' EXIT" \
+    "    cat > \"\$SCION_ROLLBACK_SH\" << 'SCIONROLLBACKEOF'" \
+    "$(cat "${SCRIPT_DIR}/scion-hub-rollback.sh")" \
+    "SCIONROLLBACKEOF" \
+    "    cat > \"\$SCION_START_ATTEMPT_SH\" << 'SCIONSTARTATTEMPTEOF'" \
+    "$(cat "${SCRIPT_DIR}/scion-hub-start-attempt.sh")" \
+    "SCIONSTARTATTEMPTEOF"
+  # shellcheck disable=SC2016 # expanded on the VM, not here
+  layout_script_run install-guard '"$SCION_ROLLBACK_SH"' '"$SCION_START_ATTEMPT_SH"'
+  printf '%s\n' \
+    "    rm -f \"\$SCION_ROLLBACK_SH\" \"\$SCION_START_ATTEMPT_SH\"" \
+    "    trap - EXIT" \
+    "    sudo tee /etc/systemd/system/scion-hub-rollback.service > /dev/null << 'SERVICEEOF'" \
+    "$(cat "${SCRIPT_DIR}/config-templates/scion-hub-rollback.service")" \
+    "SERVICEEOF"
 }
 
 # read_current_release ZONE -- prints the release tag ${INSTALL_ROOT}/current
@@ -495,6 +549,116 @@ proxy_sa_name() {
   printf '%s' "$name"
 }
 
+# Project roles granted to the hub VM's service account (Phase 2). The
+# create path grants HUB_SA_BASE_ROLES, plus HUB_SA_MINTING_ROLE when
+# hub_sa_minting is true. Teardown removes all of them, whatever
+# hub_sa_minting says now, since an earlier deploy may have granted the
+# minting role. Both paths read these lists, so they cannot drift apart.
+# The proxy SA and the deployer get no project roles here that teardown
+# owns (see Phase 2 and the IAP tunnel note in the teardown flow).
+HUB_SA_BASE_ROLES=(roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user)
+HUB_SA_MINTING_ROLE="roles/iam.serviceAccountAdmin"
+
+# _project_binding_absent TEXT -- true when TEXT (gcloud's stderr from
+# projects remove-iam-policy-binding) says the member/role binding is not
+# in the policy. Real gcloud exits 1 in that case rather than no-op, with
+# one of the IamPolicyBindingNotFound messages: "Policy binding with the
+# specified principal, role, and condition not found!" (what
+# --condition=None gets), "... principal and role not found!", or the
+# plural "Policy bindings with the specified principal and role not
+# found!". Older SDKs say "member" where newer ones say "principal".
+_project_binding_absent() {
+  if printf '%s\n' "$1" | grep -qiE 'permission|forbidden'; then
+    return 1
+  fi
+  printf '%s\n' "$1" | grep -qiE 'Policy bindings? with the specified (principal|member).* not found'
+}
+
+# remove_hub_sa_project_bindings PROJECT_ID SA_EMAIL ROLE...
+#
+# Removes the project IAM bindings of SA_EMAIL for exactly the given
+# roles, one remove-iam-policy-binding call per role and member, always
+# with --condition=None, never set-iam-policy. Members removed are the
+# live "serviceAccount:SA_EMAIL" and any "deleted:serviceAccount:SA_EMAIL
+# ?uid=..." tombstones GCP left from an earlier SA delete. No other
+# member and no other role is touched. Conditional bindings are skipped:
+# deploy.sh never creates one, and --condition=None cannot remove one.
+# Each role and member gets at most one call.
+#
+# The policy is read once to find what is bound. If that read fails, it
+# falls back to one blind removal of the live member per role, where an
+# absent binding is not an error; tombstones then stay and are reported.
+#
+# Sets HUB_SA_BINDINGS_REMOVED (count) and HUB_SA_BINDINGS_FAILED (count).
+# Never exits: a binding that could not be removed is warned about, and
+# a later --delete removes its tombstone.
+remove_hub_sa_project_bindings() {
+  local project="$1" sa_email="$2"
+  shift 2
+  local live_member="serviceAccount:${sa_email}"
+  local tombstone_prefix="deleted:serviceAccount:${sa_email}?uid="
+  local -a targets=()
+  local role member cond_title cond_expr policy_rows policy_err_file err_text wanted r t
+  HUB_SA_BINDINGS_REMOVED=0
+  HUB_SA_BINDINGS_FAILED=0
+
+  policy_err_file="$(mktemp)"
+  if policy_rows="$(gcloud projects get-iam-policy "${project}" \
+      --flatten="bindings[].members" \
+      --format="value(bindings.role,bindings.members,bindings.condition.title,bindings.condition.expression)" 2>"${policy_err_file}")"; then
+    # Tab is IFS whitespace, so empty condition fields collapse: an
+    # unconditional row leaves cond_title and cond_expr both empty, and any
+    # condition at all leaves at least one of them set. --flatten makes
+    # each row a single member, so member is compared whole.
+    while IFS=$'\t' read -r role member cond_title cond_expr; do
+      [[ -z "$role" || -z "$member" ]] && continue
+      [[ -n "$cond_title" || -n "$cond_expr" ]] && continue
+      wanted=false
+      for r in "$@"; do
+        [[ "$r" == "$role" ]] && wanted=true
+      done
+      [[ "$wanted" == "true" ]] || continue
+      if [[ "$member" == "$live_member" || "$member" == "$tombstone_prefix"* ]]; then
+        wanted=true
+        for t in ${targets[@]+"${targets[@]}"}; do
+          [[ "$t" == "${role}"$'\t'"${member}" ]] && wanted=false
+        done
+        [[ "$wanted" == "true" ]] && targets+=("${role}"$'\t'"${member}")
+      fi
+    done <<< "$policy_rows"
+    if [[ ${#targets[@]} -eq 0 ]]; then
+      echo "  No project role bindings left for ${sa_email}."
+    fi
+  else
+    warn "Could not read the IAM policy of project ${project}; removing ${sa_email}'s role bindings without it. Tombstones (deleted:serviceAccount:...) of an earlier SA delete are not checked:"
+    print_gcloud_error "$(cat "${policy_err_file}")"
+    for role in "$@"; do
+      targets+=("${role}"$'\t'"${live_member}")
+    done
+  fi
+  rm -f "${policy_err_file}"
+
+  local target
+  for target in ${targets[@]+"${targets[@]}"}; do
+    role="${target%%$'\t'*}"
+    member="${target#*$'\t'}"
+    if err_text="$(gcloud projects remove-iam-policy-binding "${project}" \
+        --member="${member}" \
+        --role="${role}" \
+        --condition=None \
+        --quiet 2>&1 >/dev/null)"; then
+      echo "  Removed: ${role} from ${member}"
+      HUB_SA_BINDINGS_REMOVED=$((HUB_SA_BINDINGS_REMOVED + 1))
+    elif _project_binding_absent "$err_text"; then
+      echo "  Not bound: ${role} for ${member}"
+    else
+      warn "Could not remove ${role} from ${member}:"
+      print_gcloud_error "$err_text"
+      HUB_SA_BINDINGS_FAILED=$((HUB_SA_BINDINGS_FAILED + 1))
+    fi
+  done
+}
+
 # Validate config file exists if specified
 if [[ -n "$CONFIG_FILE" ]]; then
   if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -525,19 +689,50 @@ source "${SCRIPT_DIR}/hybrid-tier.sh"
 # shellcheck source=scripts/single-node-vm/release-order.sh
 source "${SCRIPT_DIR}/release-order.sh"
 
-# One EXIT trap, registered once, removes these three temp files on every
-# exit path, including SIGINT and SIGTERM: SSH_STDERR_FILE,
-# HYBRID_KUBECONFIG and ALLUSERS_STDERR_FILE. Other temp files are not
-# covered by this trap. The three start empty, and
-# `rm -f ""` is a harmless no-op, so setting the trap here before any
-# file exists is safe. `trap`
-# replaces rather than stacks, so a second, later `trap ... EXIT` call
-# would silently drop this one -- there must only ever be this single
-# registration.
+# Local temp files (ptone/scion#6612). Every temp file this script and
+# hybrid-tier.sh create on the operator's machine -- the 0600 hub.env copy
+# holding the session secret (HUB_ENV_TMPFILE), the per-phase *_ERR
+# files, the kubeconfig -- is a plain `mktemp`, so all of them land in
+# TMPDIR. TMPDIR is pointed at DEPLOY_TMPDIR, a private (0700) directory
+# made once here, and deploy_cleanup removes that whole directory. So
+# each file is covered from the moment it exists, with no per-file
+# registration and no window between a mktemp and its trap entry (the
+# only window left is this one mktemp -d, which can at worst leave an
+# empty directory). Child processes (gcloud, kubectl, python3) inherit
+# TMPDIR, so their temp files go the same way.
+#
+# deploy_cleanup runs on EXIT and on INT, TERM and HUP. A signal handler
+# cleans up, then re-raises the signal with the default action, so an
+# interrupted run still ends with the signal's status (130 for INT, 143
+# for TERM). `trap` replaces rather than stacks: these must stay the only
+# EXIT/INT/TERM/HUP registrations in this script. SSH_STDERR_FILE,
+# HYBRID_KUBECONFIG and ALLUSERS_STDERR_FILE are also removed by name;
+# they start empty, and `rm -f ""` is a no-op.
 SSH_STDERR_FILE=""
 HYBRID_KUBECONFIG=""
 ALLUSERS_STDERR_FILE=""
-trap 'rm -f "$SSH_STDERR_FILE" "$HYBRID_KUBECONFIG" "$ALLUSERS_STDERR_FILE"' EXIT
+DEPLOY_TMPDIR=""
+deploy_cleanup() {
+  rm -f "$SSH_STDERR_FILE" "$HYBRID_KUBECONFIG" "$ALLUSERS_STDERR_FILE"
+  case "$DEPLOY_TMPDIR" in
+    */scion-deploy.*) rm -rf "$DEPLOY_TMPDIR" ;;
+  esac
+}
+# deploy_on_signal SIGNAL STATUS -- clean up, then die of SIGNAL; should the
+# re-raised signal somehow not end the script, exit with STATUS
+# (128 + signal number) instead of carrying on.
+deploy_on_signal() {
+  deploy_cleanup
+  trap - EXIT INT TERM HUP
+  kill -s "$1" "$$"
+  exit "$2"
+}
+trap deploy_cleanup EXIT
+trap 'deploy_on_signal INT 130' INT
+trap 'deploy_on_signal TERM 143' TERM
+trap 'deploy_on_signal HUP 129' HUP
+DEPLOY_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/scion-deploy.XXXXXX")"
+export TMPDIR="$DEPLOY_TMPDIR"
 
 # ---------------------------------------------------------------------------
 # Teardown flow (--delete)
@@ -605,6 +800,9 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   # this can never drift from what create actually named the SA.
   PROXY_SA_NAME="$(proxy_sa_name "$HUB_NAME")"
   PROXY_SA_EMAIL="${PROXY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+  # Every role the create path may have granted SA_EMAIL, minting role
+  # included whatever hub_sa_minting says now.
+  HUB_SA_TEARDOWN_ROLES=("${HUB_SA_BASE_ROLES[@]}" "${HUB_SA_MINTING_ROLE}")
 
   echo ""
   echo "Checking hybrid-tier firewall rule ownership:"
@@ -700,6 +898,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Cloud NAT:         ${NAT_NAME} (router: ${ROUTER_NAME})"
   echo "  Cloud Router:      ${ROUTER_NAME} (region: ${REGION})"
   echo "  Service account:   ${SA_EMAIL}"
+  echo "  Project roles:     ${HUB_SA_TEARDOWN_ROLES[*]} (bindings for ${SA_EMAIL}, and its deleted:serviceAccount tombstones, only)"
   echo "  Proxy SA:          ${PROXY_SA_EMAIL}"
   echo "  Service account:   $(hybrid_transport_sa_name "${HUB_NAME}")@${PROJECT_ID}.iam.gserviceaccount.com (hybrid tier agent transport; if present and marked)"
   echo "  Firewall rule:     ${FW_RULE_NAME}"
@@ -733,6 +932,9 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   ROUTER_NOT_FOUND=false
   SA_DELETED=false
   SA_NOT_FOUND=false
+  HUB_SA_BINDINGS_ATTEMPTED=false
+  HUB_SA_BINDINGS_REMOVED=0
+  HUB_SA_BINDINGS_FAILED=0
   PROXY_SA_DELETED=false
   PROXY_SA_NOT_FOUND=false
   FW_RULE_DELETED=false
@@ -868,6 +1070,13 @@ if [[ "$DELETE_MODE" == "true" ]]; then
       warn "Cloud Router ${ROUTER_NAME} could not be deleted: $(cat "${ROUTER_DELETE_ERR}")"
     fi
     rm -f "${ROUTER_DELETE_ERR}"
+
+    # Before the SA delete: once the SA is gone, GCP keeps its bindings as
+    # deleted:serviceAccount:...?uid= tombstones. Those of an earlier
+    # delete are removed here too.
+    info "Removing the service account's project role bindings..."
+    HUB_SA_BINDINGS_ATTEMPTED=true
+    remove_hub_sa_project_bindings "${PROJECT_ID}" "${SA_EMAIL}" "${HUB_SA_TEARDOWN_ROLES[@]}"
 
     info "Deleting service account..."
     SA_DELETE_ERR="$(mktemp)"
@@ -1029,6 +1238,12 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   else
     echo "  Kept service account:       ${SA_EMAIL}"
   fi
+  if [[ "$HUB_SA_BINDINGS_ATTEMPTED" == "true" ]]; then
+    echo "  Removed project bindings:   ${HUB_SA_BINDINGS_REMOVED} for ${SA_EMAIL}"
+    if [[ "$HUB_SA_BINDINGS_FAILED" -gt 0 ]]; then
+      echo "  Kept project bindings:      ${HUB_SA_BINDINGS_FAILED} for ${SA_EMAIL} (removal failed; re-run teardown)"
+    fi
+  fi
   if [[ "$PROXY_SA_DELETED" == "true" ]]; then
     echo "  Deleted proxy SA:           ${PROXY_SA_EMAIL}"
   elif [[ "${PROXY_SA_NOT_FOUND:-false}" == "true" ]]; then
@@ -1169,8 +1384,11 @@ if [[ "$MIGRATE_LAYOUT_MODE" == "true" ]]; then
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --command="
     set -euo pipefail
-$(install_layout_command adopt)
-$(install_layout_command set-maintenance /home/scion/.scion/settings.yaml "${MIGRATE_UPDATE_POLICY}")
+$(layout_script_write)
+$(layout_script_run adopt)
+$(layout_script_run set-maintenance /home/scion/.scion/settings.yaml "${MIGRATE_UPDATE_POLICY}")
+$(install_guard_command)
+$(layout_script_remove)
     sudo tee /etc/systemd/system/scion-hub.service > /dev/null << 'SERVICEEOF'
 $(cat "${SCRIPT_DIR}/config-templates/scion-hub.service")
 SERVICEEOF
@@ -1596,6 +1814,69 @@ echo "  Scion version: ${VERSION}"
 if [[ ! "$VERSION" =~ ^v?[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
   err "Invalid version: '${VERSION}' (expected characters: letters, digits, '.', '_', '-', optionally prefixed with 'v'; must not start with '-')."
   exit 1
+fi
+
+# release_image_version_ok VERSION -- true when VERSION is a release tag the
+# release image driver can build: vX.Y.Z, vX.Y.Z-preview.N or vX.Y.Z-rc.N
+# (the tag pattern of scripts/release/update-homebrew-formula.sh), or
+# nightly-YYYYMMDD (scripts/release/select-weekly-preview.sh). Phase 3b
+# checks it before VERSION reaches build-release-images.sh, and through it
+# git and docker; the looser check above is for the other uses of VERSION.
+release_image_version_ok() {
+  [[ "$1" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(preview|rc)\.(0|[1-9][0-9]*))?$ ]] \
+    || [[ "$1" =~ ^nightly-[0-9]{8}$ ]]
+}
+
+# release_image_version_floor_ok VERSION -- false when VERSION is a release
+# older than RELEASE_IMAGE_FLOOR: Phase 3b builds the single-image target
+# scion-antigravity, which the driver supports from v0.3.0-preview.4 on.
+# Uses release_order (release-order.sh). A nightly cannot be ordered
+# against a semver tag ("unknown") and passes: nightly tags are deleted
+# after 14 days, so any that still exists is newer than the floor.
+RELEASE_IMAGE_FLOOR="v0.3.0-preview.4"
+release_image_version_floor_ok() {
+  [[ "$(release_order "$1" "$RELEASE_IMAGE_FLOOR")" != "older" ]]
+}
+
+# The release image driver Phase 3b copies to the VM (source: build).
+IMAGE_DRIVER_LOCAL="${SCRIPT_DIR}/../../image-build/scripts/build-release-images.sh"
+
+# release_image_floor_check VERSION / release_image_driver_check -- the two
+# preconditions of an image build on the VM, each printing its own error
+# and returning 1 when it fails. release_image_build_preflight VERSION runs
+# both. They are shared by the early check below and Phase 3b, so the
+# messages cannot drift apart.
+release_image_floor_check() {
+  if ! release_image_version_floor_ok "$1"; then
+    err "Cannot build images for ${1} on the VM: container_images.source: build needs ${RELEASE_IMAGE_FLOOR} or later."
+    echo "  Pass --version with a newer release, use container_images.source: registry, or, if the VM already runs this release, re-run without --version." >&2
+    return 1
+  fi
+}
+release_image_driver_check() {
+  if [[ ! -f "$IMAGE_DRIVER_LOCAL" ]]; then
+    err "Release image driver not found: ${IMAGE_DRIVER_LOCAL}"
+    echo "  Run deploy.sh from a scion checkout (it builds images with image-build/scripts/build-release-images.sh), or use container_images.source: registry." >&2
+    return 1
+  fi
+}
+release_image_build_preflight() {
+  release_image_floor_check "$1" && release_image_driver_check
+}
+
+# Fail fast, before Phase 2 creates anything, on what would stop an image
+# build later: no driver next to this deploy.sh, or (for an explicit
+# --version or a new install) a release below the floor. When deploy.sh
+# keeps the release a VM already runs (KEEP_CURRENT_RELEASE), its images
+# may already be built, so the floor is left to Phase 3b, which applies it
+# only when a build will actually run. Phase 3b also adds the strict
+# release-tag check before VERSION reaches the driver.
+if [[ "$IMAGE_SOURCE" == "build" ]]; then
+  if [[ "$KEEP_CURRENT_RELEASE" == "true" ]]; then
+    release_image_driver_check || exit 1
+  else
+    release_image_build_preflight "$VERSION" || exit 1
+  fi
 fi
 
 # --- Release channel ---
@@ -2087,9 +2368,9 @@ fi
 # read and set IAM policy on it, and delete it if a follow-up grant fails.
 # serviceAccountCreator alone is not enough for that flow. Skipped when
 # hub_sa_minting is false.
-HUB_SA_ROLES=(roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user)
+HUB_SA_ROLES=("${HUB_SA_BASE_ROLES[@]}")
 if [[ "$HUB_SA_MINTING" == "true" ]]; then
-  HUB_SA_ROLES+=(roles/iam.serviceAccountAdmin)
+  HUB_SA_ROLES+=("${HUB_SA_MINTING_ROLE}")
 fi
 info "Binding IAM roles..."
 for ROLE in "${HUB_SA_ROLES[@]}"; do
@@ -2909,6 +3190,10 @@ info "Installing systemd service..."
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
+    set -euo pipefail
+$(layout_script_write)
+$(install_guard_command)
+$(layout_script_remove)
     sudo tee /etc/systemd/system/scion-hub.service > /dev/null << 'SERVICEEOF'
 $(cat "${SCRIPT_DIR}/config-templates/scion-hub.service")
 SERVICEEOF
@@ -3022,22 +3307,50 @@ fi
 if [[ "$IMAGE_SOURCE" == "build" ]]; then
   section "Phase 3b: Build Container Images on VM"
 
-  # NOTE: the checkout lives under /opt (root-owned, world-traversable),
-  # not /home/scion — the deployer identity running this over `gcloud
-  # compute ssh` is never a member of the `scion` group, and /home/scion
-  # is mode 0750 once cloud-init's `useradd -m` runs. Every privileged
-  # step uses `sudo`; the deployer only needs to traverse /opt and write
-  # its own ~/.scion-image-build status directory (see
-  # IMAGE_BUILD_STATUS_DIR), not anything under /tmp.
+  # The images are built by the release image driver,
+  # image-build/scripts/build-release-images.sh, from the checkout this
+  # deploy.sh runs from (the driver lives outside the release tree, so a
+  # driver from main can build an older release; see "Build images for a
+  # release" in image-build/README.md). It is copied to the VM, sha-checked,
+  # and run there as root. The driver clones the release tag itself into
+  # IMAGE_SRC_DIR (one directory per version, reused when the clone is
+  # clean) and runs that tree's build-images.sh with --tag VERSION.
+  #
+  # Each step passes --registry localhost/scion without --push, so images
+  # are only tagged in the VM's local Docker store
+  # (localhost/scion/<image>:VERSION and :<short-sha>), and --also-tag latest
+  # adds localhost/scion/<image>:latest with a local `docker tag`, which is
+  # what the hub runs. --force-latest is required by the driver whenever a
+  # registry is named; nothing is pushed anywhere.
+  #
+  # NOTE: everything lives under /opt (root-owned, world-traversable), not
+  # /home/scion — the deployer identity running this over `gcloud compute
+  # ssh` is never a member of the `scion` group, and /home/scion is mode
+  # 0750 once cloud-init's `useradd -m` runs. Every privileged step uses
+  # `sudo`; the deployer only needs to traverse /opt and write its own
+  # ~/.scion-image-build status directory (see IMAGE_BUILD_STATUS_DIR), not
+  # anything under /tmp.
   #
   # Idempotency: a successful build writes a version marker
-  # (/opt/scion-source/.images-built.version) containing $VERSION. A re-run
-  # skips the 10-15 min build iff the marker matches $VERSION AND all 3
-  # expected images are still present — a stale `:latest` tag alone is not
-  # enough, since re-running with --version vNEXT must not silently keep old
-  # images just because something answers to `:latest`. The marker file is
-  # what makes the skip version-aware.
-  IMAGES_BUILT_MARKER="/opt/scion-source/.images-built.version"
+  # (IMAGES_BUILT_MARKER) containing $VERSION. A re-run skips the 10-15 min
+  # build iff the marker matches $VERSION AND all 3 expected images are
+  # still present — a stale `:latest` tag alone is not enough, since
+  # re-running with --version vNEXT must not silently keep old images just
+  # because something answers to `:latest`. The marker file is what makes
+  # the skip version-aware. LEGACY_IMAGES_BUILT_MARKER is where deploy.sh
+  # kept the marker before it used the driver (inside its own clone,
+  # /opt/scion-source); it is still honoured, so images an older deploy.sh
+  # built are reused, and a new build removes it.
+  IMAGE_DRIVER_DIR="/opt/scion-image-build"
+  IMAGE_DRIVER_REMOTE="${IMAGE_DRIVER_DIR}/build-release-images.sh"
+  IMAGE_SRC_DIR="/opt/scion-image-src/${VERSION}"
+  IMAGES_BUILT_MARKER="${IMAGE_DRIVER_DIR}/images-built.version"
+  LEGACY_IMAGES_BUILT_MARKER="/opt/scion-source/.images-built.version"
+  if ! release_image_version_ok "$VERSION"; then
+    err "Cannot build images for version '${VERSION}': it is not a release tag (expected vX.Y.Z, vX.Y.Z-preview.N, vX.Y.Z-rc.N or nightly-YYYYMMDD)."
+    echo "  Pass --version <release tag>, or use container_images.source: registry." >&2
+    exit 1
+  fi
   SKIP_BUILD=false
   if [[ "$CFG_FORCE_REBUILD" == "true" ]]; then
     info "Forcing a rebuild (container_images.force_rebuild or --rebuild-images is set)."
@@ -3047,9 +3360,13 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
       --zone="${ZONE}" --project="${PROJECT_ID}" \
       --command="
         set -euo pipefail
-        MARKER='${IMAGES_BUILT_MARKER}'
-        if [ -f \"\$MARKER\" ] \
-          && [ \"\$(sudo cat \"\$MARKER\" 2>/dev/null)\" = '${VERSION}' ] \
+        MARKER_OK=false
+        for MARKER in '${IMAGES_BUILT_MARKER}' '${LEGACY_IMAGES_BUILT_MARKER}'; do
+          if [ -f \"\$MARKER\" ] && [ \"\$(sudo cat \"\$MARKER\" 2>/dev/null)\" = '${VERSION}' ]; then
+            MARKER_OK=true
+          fi
+        done
+        if [ \"\$MARKER_OK\" = true ] \
           && sudo docker image inspect localhost/scion/core-base:latest >/dev/null 2>&1 \
           && sudo docker image inspect localhost/scion/scion-base:latest >/dev/null 2>&1 \
           && sudo docker image inspect localhost/scion/scion-antigravity:latest >/dev/null 2>&1; then
@@ -3067,30 +3384,71 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
     info "Images already built for version ${VERSION} (marker + all 3 images present); skipping build."
     echo "  Set container_images.force_rebuild: true in the config, or pass --rebuild-images, to override."
   else
-    info "Cloning scion repository on VM..."
+    # A build will run: the floor (single-image target) and the driver are
+    # needed now. Skipped above when the images are already built, so a VM
+    # that keeps an older release with its images is not refused.
+    release_image_build_preflight "$VERSION" || exit 1
+    info "Copying the release image driver to the VM..."
+    if command -v sha256sum >/dev/null 2>&1; then
+      IMAGE_DRIVER_SHA="$(sha256sum < "$IMAGE_DRIVER_LOCAL")"
+    else
+      IMAGE_DRIVER_SHA="$(shasum -a 256 < "$IMAGE_DRIVER_LOCAL")"
+    fi
+    IMAGE_DRIVER_SHA="${IMAGE_DRIVER_SHA%% *}"
+    if [[ ! "$IMAGE_DRIVER_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+      err "Could not compute the SHA-256 of ${IMAGE_DRIVER_LOCAL}."
+      exit 1
+    fi
+    IMAGE_DRIVER_STAGE="$(gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="mktemp -d /tmp/scion-imgdriver.XXXXXX" 2>/dev/null)" || true
+    IMAGE_DRIVER_STAGE="${IMAGE_DRIVER_STAGE%%$'\n'*}"
+    IMAGE_DRIVER_STAGE="${IMAGE_DRIVER_STAGE//$'\r'/}"
+    if [[ ! "$IMAGE_DRIVER_STAGE" =~ ^/tmp/scion-imgdriver\.[A-Za-z0-9]+$ ]]; then
+      err "Could not create a private staging directory on ${INSTANCE_NAME} for the image driver (got '${IMAGE_DRIVER_STAGE}')."
+      exit 1
+    fi
+    if ! gcloud compute scp "${IMAGE_DRIVER_LOCAL}" \
+      "${INSTANCE_NAME}:${IMAGE_DRIVER_STAGE}/build-release-images.sh" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" --quiet; then
+      # Best effort: remove the staging dir (its name was checked above;
+      # checked again here, since it goes into an rm -rf).
+      if [[ "$IMAGE_DRIVER_STAGE" =~ ^/tmp/scion-imgdriver\.[A-Za-z0-9]+$ ]]; then
+        gcloud compute ssh "${INSTANCE_NAME}" \
+          --zone="${ZONE}" --project="${PROJECT_ID}" \
+          --command="rm -rf -- '${IMAGE_DRIVER_STAGE}'" >/dev/null 2>&1 || true
+      fi
+      err "Could not copy the image driver to ${INSTANCE_NAME}."
+      exit 1
+    fi
+    # Installed root-owned, then checked against the local copy's hash: a
+    # mismatch removes the installed copy and stops the deploy.
     gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
       --command="
         set -euo pipefail
-        if [ ! -d /opt/scion-source ]; then
-          sudo git clone --depth 1 --branch '${VERSION}' \
-            https://github.com/GoogleCloudPlatform/scion.git /opt/scion-source
-        else
-          cd /opt/scion-source
-          sudo git fetch --depth 1 origin tag '${VERSION}'
-          sudo git checkout '${VERSION}'
+        trap 'rm -rf ${IMAGE_DRIVER_STAGE}' EXIT
+        sudo install -d -m 0755 -o root -g root ${IMAGE_DRIVER_DIR} /opt/scion-image-src
+        sudo install -m 0755 -o root -g root ${IMAGE_DRIVER_STAGE}/build-release-images.sh ${IMAGE_DRIVER_REMOTE}
+        if ! echo '${IMAGE_DRIVER_SHA}  ${IMAGE_DRIVER_REMOTE}' | sha256sum -c - >/dev/null 2>&1; then
+          sudo rm -f ${IMAGE_DRIVER_REMOTE}
+          echo 'ERROR: the image driver on the VM does not match the local copy (SHA-256 mismatch).' >&2
+          exit 1
         fi
       "
+    echo "  Driver installed: ${IMAGE_DRIVER_REMOTE} (sha256 ${IMAGE_DRIVER_SHA})"
 
     # Build only the minimal set of images needed for deployment:
     # core-base (foundation) -> scion-base (adds scion binary) -> scion-antigravity (default harness)
-    # Using --target all would build ALL ~12 images including harnesses with known build issues.
-    info "Building container images (this may take 10-15 minutes)..."
+    # The driver's default --target all would build ALL ~12 images including
+    # harnesses with known build issues. The single-image target
+    # scion-antigravity needs v0.3.0-preview.4 or later
+    # (RELEASE_IMAGE_FLOOR, checked by release_image_build_preflight above).
+    info "Building container images for ${VERSION} (this may take 10-15 minutes)..."
     gcloud compute ssh "${INSTANCE_NAME}" \
       --zone="${ZONE}" --project="${PROJECT_ID}" \
       --command="
         set -euo pipefail
-        cd /opt/scion-source
         # Status dir: a real directory owned by this user (checked without
         # following a symlink), created 0700 if missing; anything else is
         # refused.
@@ -3106,50 +3464,42 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
         chmod 0700 \"\$B\"
         # Exported: the background build below runs in a child bash.
         export B
+        export IMAGE_DRIVER='${IMAGE_DRIVER_REMOTE}'
+        export IMAGE_SRC_DIR='${IMAGE_SRC_DIR}'
+        export IMAGE_VERSION='${VERSION}'
+        export IMAGES_BUILT_MARKER='${IMAGES_BUILT_MARKER}'
         rm -f \"\$B/exit\"
-        # Clear the marker before starting: if this build is interrupted or
+        # Clear the markers before starting: if this build is interrupted or
         # fails partway, no marker should be left claiming a stale version
-        # is built (Step 5 below only writes it back on full success).
-        sudo rm -f '${IMAGES_BUILT_MARKER}'
+        # is built (the last step below only writes it back on full success).
+        sudo rm -f '${IMAGES_BUILT_MARKER}' '${LEGACY_IMAGES_BUILT_MARKER}'
+        # The build runs in a subshell, so a failed step (set -e) ends only
+        # the subshell and its status still reaches \$B/exit; in a { }
+        # group, set -e would end the whole background shell before the
+        # exit file is written, and the poll below would wait until it
+        # timed out instead of reporting the failure.
         nohup bash -c '
-          {
+          (
             set -euo pipefail
-            # Step 1: Build core-base
-            echo \"=== Building core-base ===\"
-            sudo bash image-build/scripts/build-images.sh \
-              --builder local-docker \
-              --target core-base \
-              --tag latest
+            build_step() {
+              echo \"=== Building \$1 (release \$IMAGE_VERSION) ===\"
+              sudo bash \"\$IMAGE_DRIVER\" \"\$IMAGE_VERSION\" \
+                --src-dir \"\$IMAGE_SRC_DIR\" \
+                --also-tag latest --force-latest \
+                -- --builder local-docker --registry localhost/scion --target \"\$1\"
+            }
+            build_step core-base
+            build_step scion-base
+            build_step scion-antigravity
 
-            # Step 2: Build scion-base
-            echo \"=== Building scion-base ===\"
-            sudo bash image-build/scripts/build-images.sh \
-              --builder local-docker \
-              --target scion-base \
-              --tag latest
-
-            # Step 3: Build antigravity harness directly
-            echo \"=== Building scion-antigravity ===\"
-            sudo docker build \
-              -t scion-antigravity:latest \
-              --build-arg BASE_IMAGE=scion-base:latest \
-              -f harnesses/antigravity/Dockerfile \
-              harnesses/antigravity/
-
-            # Step 4: Tag images under localhost/scion for the runtime
-            echo \"=== Tagging images for localhost/scion registry ===\"
-            sudo docker tag core-base:latest localhost/scion/core-base:latest
-            sudo docker tag scion-base:latest localhost/scion/scion-base:latest
-            sudo docker tag scion-antigravity:latest localhost/scion/scion-antigravity:latest
-
-            # Step 5: Record the version marker so re-runs can skip the build.
+            # Record the version marker so re-runs can skip the build.
             # Written last, only on full success (set -e above aborts before
             # this line if any prior step failed).
-            echo \"=== Recording image build marker (version ${VERSION}) ===\"
-            echo '${VERSION}' | sudo tee '${IMAGES_BUILT_MARKER}' > /dev/null
+            echo \"=== Recording image build marker (version \$IMAGE_VERSION) ===\"
+            echo \"\$IMAGE_VERSION\" | sudo tee \"\$IMAGES_BUILT_MARKER\" > /dev/null
 
             echo \"=== All images built and tagged successfully ===\"
-          } > \"\$B/log\" 2>&1
+          ) > \"\$B/log\" 2>&1
           echo \$? > \"\$B/exit\"
         ' >/dev/null 2>&1 </dev/null &
         echo \$! > \"\$B/pid\"
@@ -3225,9 +3575,8 @@ fi
 # `gcloud run deploy --source`, because --source triggers Cloud Build, which
 # uploads source to GCS. Enterprise projects with the org policy
 # constraints/gcp.restrictServiceUsage denying storage.googleapis.com reject
-# that upload with HTTP 403. Docker is already available on the VM and the
-# repo is already cloned at /opt/scion-source, so we build and push there
-# instead.
+# that upload with HTTP 403. Docker is already available on the VM, so we
+# build from a checkout at /opt/scion-source and push there instead.
 PROXY_SERVICE="${INSTANCE_NAME}-iap-proxy"
 AR_REPO="cloud-run-source-deploy"
 PROXY_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPO}/${PROXY_SERVICE}:latest"
@@ -3244,18 +3593,38 @@ gcloud artifacts repositories create "${AR_REPO}" \
 echo "  Artifact Registry repo ready: ${AR_REPO}"
 
 # --- Build proxy image on the VM ---
-# When IMAGE_SOURCE=registry, Phase 3b is skipped and /opt/scion-source may
-# not exist on the VM. Ensure the repo is cloned (shallow) before building.
+# With IMAGE_SOURCE=build, the proxy is built from the release being
+# deployed: /opt/scion-source is cloned at VERSION, or moved to it. (Phase
+# 3b used to do this for its own image build; the release image driver now
+# clones the tag itself, so the checkout is kept here for the proxy.) With
+# IMAGE_SOURCE=registry, the repo is cloned (shallow) only if it is missing.
+if [[ "$IMAGE_SOURCE" == "build" ]]; then
+  PROXY_SOURCE_PREP="
+    if [ ! -d /opt/scion-source ]; then
+      sudo git clone --depth 1 --branch '${VERSION}' \
+        https://github.com/GoogleCloudPlatform/scion.git /opt/scion-source
+    else
+      cd /opt/scion-source
+      # Fetch only when the tag is not already local (a re-run of the same
+      # VERSION, or a checkout cloned at it).
+      sudo git rev-parse -q --verify 'refs/tags/${VERSION}^{commit}' >/dev/null \
+        || sudo git fetch --depth 1 origin tag '${VERSION}'
+      sudo git checkout '${VERSION}'
+    fi"
+else
+  PROXY_SOURCE_PREP="
+    if [ ! -d /opt/scion-source ]; then
+      sudo git clone --depth 1 \
+        https://github.com/GoogleCloudPlatform/scion.git /opt/scion-source
+    fi"
+fi
 info "Building proxy image on VM..."
 echo "  Image: ${PROXY_IMAGE}"
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
     set -euo pipefail
-    if [ ! -d /opt/scion-source ]; then
-      sudo git clone --depth 1 \
-        https://github.com/GoogleCloudPlatform/scion.git /opt/scion-source
-    fi
+    ${PROXY_SOURCE_PREP}
     sudo docker build -t ${PROXY_IMAGE} /opt/scion-source/extras/cloudrun-iap-proxy
   "
 echo "  Proxy image built on VM."

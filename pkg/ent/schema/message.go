@@ -146,6 +146,57 @@ func (Message) Indexes() []ent.Index {
 		// (created, id) keyset cursor. Without this index every page reads
 		// and sorts all of the project's messages.
 		index.Fields("project_id", "created", "id"),
+		// Participant reads (the agent DM inter-agent view, a user's message
+		// listing) filter on recipient_id = X OR sender_id = X across all
+		// projects. ListMessages reads each branch as its own query, and the
+		// trailing created, id serves its ORDER BY ... LIMIT in index order,
+		// so a page reads at most limit+1 rows per branch however busy the
+		// participant is. The COUNT of the OR uses both indexes (a
+		// multi-index OR on SQLite) instead of scanning the whole table.
+		index.Fields("sender_id", "created", "id"),
+		index.Fields("recipient_id", "created", "id"),
+		// The inter-agent view's legacy lookup filters on project_id and
+		// the sender text ("agent:<slug>") and orders by created, id.
+		index.Fields("project_id", "sender", "created", "id"),
+		// The stuck-pending sweep filters on dispatch_state = 'pending' AND
+		// created < cutoff and orders by created, id. Pending rows are a
+		// tiny fraction of the table, so a partial index keeps the sweep
+		// proportional to the pending rows instead of every row older than
+		// the cutoff. The WHERE must match the query's literal for the
+		// planner to pick the index (store.MessageDispatchPending).
+		index.Fields("created", "id").
+			Annotations(entsql.IndexWhere("dispatch_state = 'pending'")),
+		// The failed-message retention purge walks dispatch_state = 'failed'
+		// AND created < cutoff in (created, id) keyset chunks. A separate
+		// partial index rather than widening the pending one: SQLite only
+		// uses a partial index whose WHERE terms appear in the query, so an
+		// IN ('pending', 'failed') index would not serve the pending sweep,
+		// and failed rows (kept for the retention window) would bloat the
+		// pending sweep's range. The WHERE must match the purge's literal
+		// (store.MessageDispatchFailed). The explicit name avoids colliding
+		// with the pending index's default name (ptone/scion#6954).
+		index.Fields("created", "id").
+			StorageKey("message_failed_created_id").
+			Annotations(entsql.IndexWhere("dispatch_state = 'failed'")),
+		// The conversation consistency check reads the latest messages of a
+		// DM pair, one query per direction, filtering on sender_id and
+		// recipient_id and ordering by created, id. The single-column
+		// participant indexes above match only one side of the pair, so
+		// every row of that participant was read and sorted; with both
+		// columns the lookup reads at most limit+1 rows in index order.
+		// The index is partial on recipient_id IS NOT NULL so that only
+		// queries with a recipient_id term can use it: a sender_id-only
+		// read (the participant view's sender branch) cannot, and keeps
+		// (sender_id, created, id), which serves its ORDER BY with no sort.
+		// recipient_id = ? implies the WHERE, so the pair lookup still
+		// uses it.
+		index.Fields("sender_id", "recipient_id", "created", "id").
+			Annotations(entsql.IndexWhere("recipient_id IS NOT NULL")),
+		// The same check's thread lookup filters on thread_id alone. The
+		// (thread_id, channel, created, id) index has channel between the
+		// filter and the order, so it cannot serve that ORDER BY without
+		// sorting the whole thread.
+		index.Fields("thread_id", "created", "id"),
 	}
 }
 

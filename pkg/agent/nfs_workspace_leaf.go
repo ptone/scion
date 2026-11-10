@@ -15,14 +15,15 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"os"
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
@@ -34,6 +35,18 @@ const nfsWorkspaceExportHint = "workspace_storage nfs needs the broker to be abl
 	"under the project's directory on the export (its writes must not be mapped to an anonymous user " +
 	"that cannot write there); see the NFS export requirements in the Kubernetes HA guide"
 
+// nfsInlineLeafRefusal is the error that refuses a Kubernetes start whose
+// nfs share has no claim when the broker cannot create directory leaf (a
+// path relative to the export mounted at hostBase) itself. Each inline pod
+// volume names its directory's server path, so the directory must exist
+// before the pod: unlike a claim's subPath, the node does not create it.
+func nfsInlineLeafRefusal(hostBase, leaf string, cause error) error {
+	return fmt.Errorf("workspace_storage nfs: cannot create directory %q on the export before the pod starts: %w. "+
+		"Without nfs.shares[0].pv_name, Kubernetes pods mount each directory inline by its server path, so the broker must create it first: "+
+		"mount the share's export at %q (the project_storage nfs mount_root/<share id>), writable by the broker; "+
+		"see the NFS export requirements in the Kubernetes guide", leaf, cause, hostBase)
+}
+
 // nfsLeafGroupAccessBits are the mode bits a directory must carry for agents
 // to reach it through its group: setgid (new entries inherit the group) and
 // group write. A directory the broker creates always has them (2775); an
@@ -43,6 +56,54 @@ const nfsLeafGroupAccessBits = 0o2000 | 0o020 // S_ISGID | group write
 // ErrProjectShareNotMounted refuses a start whose project storage share is
 // not mounted on this broker.
 var ErrProjectShareNotMounted = errors.New("project storage share is not mounted on this broker")
+
+// projectShareError is a refusal for a share the broker does not see: its
+// text is the operator remedy (runtime.ProjectShareUnavailableText, or
+// runtime.ProjectShareInlineUnavailableText for a share without a claim)
+// and it matches ErrProjectShareNotMounted for errors.Is.
+type projectShareError struct {
+	msg    string
+	inline bool
+	// local marks a refusal for a local container runtime, which can
+	// mount the share itself (nfs.auto_mount), unlike Kubernetes.
+	local bool
+}
+
+func (e *projectShareError) Error() string { return e.msg }
+func (e *projectShareError) Unwrap() error { return ErrProjectShareNotMounted }
+
+// inlineShareNotVisible refuses a Kubernetes start whose NFS share has no
+// claim when the broker does not see the share at hostBase: as for a
+// claim, a projectShareError, with the inline remedy.
+func inlineShareNotVisible(hostBase string) error {
+	return &projectShareError{msg: runtime.ProjectShareInlineUnavailableText(hostBase), inline: true}
+}
+
+// ProjectShareClientText is the path-free client text for a start refused
+// with ErrProjectShareNotMounted: the refusal's remedy with the mount point
+// named as runtime.ProjectShareMountPathField. The refusal comes from the
+// workspace leaves: on Kubernetes, a runtime that never mounts the share on
+// the broker, or on a local container runtime, which can mount it itself.
+func ProjectShareClientText(err error) string {
+	var pse *projectShareError
+	if errors.As(err, &pse) && pse.inline {
+		return runtime.ProjectShareInlineUnavailableText(runtime.ProjectShareMountPathField)
+	}
+	if errors.As(err, &pse) && pse.local {
+		return runtime.ProjectShareUnavailableText(runtime.ProjectShareMountPathField, false)
+	}
+	return runtime.ProjectShareUnavailableText(runtime.ProjectShareMountPathField, true)
+}
+
+// resolvedLeafOwner is the share's configured nfs uid and gid as the nfs
+// backend resolved them from settings (ResolvedWorkspace OwnerUID and
+// OwnerGID), never read from a directory. The leaf helpers pass it to
+// shareddirs.EnsureLeafExpecting, which only checks existing upper
+// directories against it and chowns nothing. A workspace another backend
+// resolved gives the zero Owner.
+func resolvedLeafOwner(resolved runtime.ResolvedWorkspace) shareddirs.Owner {
+	return shareddirs.Owner{UID: resolved.OwnerUID, GID: resolved.OwnerGID}
+}
 
 // ensureNFSWorkspaceLeaf makes sure the project's NFS workspace directory
 // (<subpath_root>/<projectID>/workspace), its provisioning state directory
@@ -69,13 +130,16 @@ var ErrProjectShareNotMounted = errors.New("project storage share is not mounted
 // and each one's resolved path (resolved.SharedDirs) must match the leaf
 // computed here, the same layout the Kubernetes runtime mounts.
 //
-// It is a no-op unless the runtime is Kubernetes and the workspace is
-// mounted from an NFS PV claim. When the broker has no local mount of the
-// export (the host base does not exist), the start is refused with
-// ErrProjectShareNotMounted: the broker reads and creates project storage
-// through its own mount (ptone/scion#5823). A directory the
+// It is a no-op unless the runtime is Kubernetes and the pod mounts the
+// workspace from the NFS share (share.Mountable). When the broker has no
+// local mount of the export (the host base does not exist), the start is
+// refused with ErrProjectShareNotMounted: the broker reads and creates
+// project storage through its own mount (ptone/scion#5823). A directory the
 // broker is not allowed to create (EACCES, EPERM or EROFS): it is logged as
-// a warning and left to the node. Any other failure (a symlink, a regular
+// a warning and left to the node. That fallback applies to a share with a
+// claim only: with an inline share (no claim) it refuses the start
+// (nfsInlineLeafRefusal), since an inline volume needs its directory to
+// exist before the pod. Any other failure (a symlink, a regular
 // file in the path, an unexpected path) returns an error so the create
 // fails immediately instead of after the pod times out.
 //
@@ -85,8 +149,8 @@ var ErrProjectShareNotMounted = errors.New("project storage share is not mounted
 // directory lacks those bits (for
 // example one the kubelet created root-owned, or one made by hand), so the
 // provisioning chown stays strict for it.
-func ensureNFSWorkspaceLeaf(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, pvClaimName string, sharedDirNames []string) (prepared bool, err error) {
-	return ensureNFSWorkspaceLeaves(runtimeName, projectID, resolved, pvClaimName, sharedDirNames, "")
+func ensureNFSWorkspaceLeaf(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, share runtime.NFSPodShare, sharedDirNames []string) (prepared bool, err error) {
+	return ensureNFSWorkspaceLeaves(runtimeName, projectID, resolved, share, sharedDirNames, "")
 }
 
 // ensureNFSAgentWorkspaceLeaf is ensureNFSWorkspaceLeaf for a
@@ -98,8 +162,8 @@ func ensureNFSWorkspaceLeaf(runtimeName, projectID string, resolved runtime.Reso
 // and prepared requires both. The project's workspace directory is not
 // created. An existing directory is left exactly as it is, contents
 // included.
-func ensureNFSAgentWorkspaceLeaf(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, pvClaimName string, sharedDirNames []string, agentName string) (prepared bool, err error) {
-	prepared, _, err = ensureNFSAgentWorkspaceLeafClaim(runtimeName, projectID, resolved, pvClaimName, sharedDirNames, agentName)
+func ensureNFSAgentWorkspaceLeaf(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, share runtime.NFSPodShare, sharedDirNames []string, agentName string) (prepared bool, err error) {
+	prepared, _, err = ensureNFSAgentWorkspaceLeafClaim(runtimeName, projectID, resolved, share, sharedDirNames, agentName)
 	return prepared, err
 }
 
@@ -107,27 +171,50 @@ func ensureNFSAgentWorkspaceLeaf(runtimeName, projectID string, resolved runtime
 // reports whether this call created the agent's directory itself (an
 // atomic claim, not a check before the create): a forced move's start
 // marks only a directory it created (markMoveExportAgentDir).
-func ensureNFSAgentWorkspaceLeafClaim(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, pvClaimName string, sharedDirNames []string, agentName string) (prepared, agentDirCreated bool, err error) {
+func ensureNFSAgentWorkspaceLeafClaim(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, share runtime.NFSPodShare, sharedDirNames []string, agentName string) (prepared, agentDirCreated bool, err error) {
 	if !isNFSWorktreeName(agentName) {
 		return false, false, fmt.Errorf("workspace_storage nfs: invalid agent name %q", agentName)
 	}
-	return ensureNFSWorkspaceLeavesClaim(runtimeName, projectID, resolved, pvClaimName, sharedDirNames, agentName)
+	return ensureNFSWorkspaceLeavesClaim(runtimeName, projectID, resolved, share, sharedDirNames, agentName)
 }
 
 // ensureNFSWorkspaceLeaves implements ensureNFSWorkspaceLeaf and, with
 // agentName set, ensureNFSAgentWorkspaceLeaf.
-func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, pvClaimName string, sharedDirNames []string, agentName string) (prepared bool, err error) {
-	prepared, _, err = ensureNFSWorkspaceLeavesClaim(runtimeName, projectID, resolved, pvClaimName, sharedDirNames, agentName)
+func ensureNFSWorkspaceLeaves(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, share runtime.NFSPodShare, sharedDirNames []string, agentName string) (prepared bool, err error) {
+	prepared, _, err = ensureNFSWorkspaceLeavesClaim(runtimeName, projectID, resolved, share, sharedDirNames, agentName)
 	return prepared, err
+}
+
+// nfsLeavesApply reports whether the NFS leaf helpers create directories
+// for a start on runtimeName: on Kubernetes when the pod mounts the share
+// (share.Mountable()); on a local container runtime only the agent's own
+// directory (agentName set), which the runtime bind-mounts from the
+// broker's mount of the share, so no pod share is involved. The caller
+// selects the agent's directory only where agentDirOnShare holds
+// (nfsOwnAgentDirSelection). The project's own workspace leaf is never
+// created for a local container runtime here.
+func nfsLeavesApply(runtimeName, agentName string, share runtime.NFSPodShare) bool {
+	if isKubernetesRuntime(runtimeName) {
+		return share.Mountable()
+	}
+	return agentName != "" && isLocalContainerRuntime(runtimeName)
 }
 
 // ensureNFSWorkspaceLeavesClaim is ensureNFSWorkspaceLeaves that also
 // reports, with agentName set, whether this call created the agent's
 // directory.
-func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, pvClaimName string, sharedDirNames []string, agentName string) (prepared, agentDirCreated bool, err error) {
-	if !isKubernetesRuntime(runtimeName) || resolved.Backend != "nfs" || pvClaimName == "" {
+//
+// On a local container runtime (nfsLeavesApply) the same directories get the
+// same modes, claim and no-follow walk as on Kubernetes. Two Kubernetes
+// fallbacks do not apply there, because no node creates anything: a
+// directory the broker may not create refuses the start instead of being
+// left to the node, and a share that is not mounted is refused with the
+// local remedy (mount it, or nfs.auto_mount).
+func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runtime.ResolvedWorkspace, share runtime.NFSPodShare, sharedDirNames []string, agentName string) (prepared, agentDirCreated bool, err error) {
+	if resolved.Backend != "nfs" || !nfsLeavesApply(runtimeName, agentName, share) {
 		return false, false, nil
 	}
+	k8s := isKubernetesRuntime(runtimeName)
 
 	if !shareddirs.ValidProjectID(projectID) {
 		return false, false, fmt.Errorf("workspace_storage nfs: invalid project ID %q", projectID)
@@ -186,18 +273,33 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 		}
 	}
 
-	info, err := os.Stat(resolved.HostBase)
-	if err != nil {
+	// The share-visibility predicate shared with the broker's own checks
+	// (projectfs.ShareDirVisible, bounded): the share's mount point must be
+	// a directory on this broker. No mount-table source match is required
+	// here: Kubernetes never mounts the share on the broker, and a local
+	// container runtime's broker checks its own mount before Start.
+	if err := projectfs.ShareDirVisible(context.Background(), resolved.HostBase); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// A broker reads and creates project storage through its own
 			// mount of the share; without it the start is refused rather
 			// than left to the node (ptone/scion#5823).
-			return false, false, fmt.Errorf("%w (%s; mount it or set nfs.auto_mount)", ErrProjectShareNotMounted, resolved.HostBase)
+			// On the Kubernetes runtime, which never mounts the share on
+			// the broker, the remedy is the broker's own container, not
+			// nfs.auto_mount. The text names the path:
+			// a start failure reaches the client only as fixed text
+			// (runtimeOpError, ProjectShareClientText), and the broker logs
+			// this error. With an inline share the text also says why the
+			// broker must create the directories itself. A local container
+			// runtime can mount the share itself, so its remedy names that.
+			if !k8s {
+				return false, false, &projectShareError{msg: runtime.ProjectShareUnavailableText(resolved.HostBase, false), local: true}
+			}
+			if share.Inline() {
+				return false, false, inlineShareNotVisible(resolved.HostBase)
+			}
+			return false, false, &projectShareError{msg: runtime.ProjectShareUnavailableText(resolved.HostBase, true)}
 		}
 		return false, false, fmt.Errorf("workspace_storage nfs: check export mount %q: %w; %s", resolved.HostBase, err, nfsWorkspaceExportHint)
-	}
-	if !info.IsDir() {
-		return false, false, fmt.Errorf("workspace_storage nfs: check export mount %q: not a directory; %s", resolved.HostBase, nfsWorkspaceExportHint)
 	}
 
 	resolvedHostBase, err := filepath.EvalSymlinks(resolved.HostBase)
@@ -207,11 +309,14 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 
 	prepared = true
 	for _, leaf := range leaves {
-		ok, created, err := ensureNFSLeafClaim(resolvedHostBase, leaf)
+		ok, created, err := ensureNFSLeafClaim(resolvedHostBase, leaf, resolvedLeafOwner(resolved))
 		if created && agentName != "" && leaf == agentDirLeaf {
 			agentDirCreated = true
 		}
-		if err != nil && isNFSLeafPermissionError(err) {
+		if err != nil && k8s && isNFSLeafPermissionError(err) && share.Inline() {
+			return false, agentDirCreated, nfsInlineLeafRefusal(resolved.HostBase, leaf, err)
+		}
+		if err != nil && k8s && isNFSLeafPermissionError(err) {
 			// The broker may not be allowed to create the directory even
 			// though the node is, for example a broker that does not run
 			// as root on an export whose project directories are owned by

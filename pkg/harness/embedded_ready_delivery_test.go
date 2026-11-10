@@ -25,8 +25,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// loadEmbeddedEntry reads harnesses/<name>/config.yaml from the embed FS and
-// returns its raw bytes and parsed entry.
 // bundleOwnReady lists the bundles added after the legacy name-keyed
 // readiness table, with the ready block they chose. Every other bundle
 // reproduces the legacy table.
@@ -34,6 +32,8 @@ var bundleOwnReady = map[string]api.ReadySpec{
 	"antigravity-ui": {Strategy: "delay", Settle: 15 * time.Second},
 }
 
+// loadEmbeddedEntry reads harnesses/<name>/config.yaml from the embed FS and
+// returns its raw bytes and parsed entry.
 func loadEmbeddedEntry(t *testing.T, name string) ([]byte, config.HarnessConfigEntry) {
 	t.Helper()
 	data, err := fs.ReadFile(harnessesEmbed.FS, name+"/config.yaml")
@@ -171,6 +171,7 @@ func TestEmbeddedHarnessConfigs_AgentPluginsCapability(t *testing.T) {
 		"antigravity-ui": api.SupportNo,
 		"hermes":         api.SupportNo,
 		"opencode":       api.SupportNo,
+		"pi":             api.SupportNo,
 	}
 	for name, level := range want {
 		_, entry := loadEmbeddedEntry(t, name)

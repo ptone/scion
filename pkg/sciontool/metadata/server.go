@@ -233,14 +233,21 @@ type Server struct {
 	fetchDone     chan struct{}
 	fetchErr      error
 
-	// Singleflight for identity token fetches
-	idFetchMu       sync.Mutex
-	idFetchInFlight bool
-	idFetchDone     chan struct{}
-	idFetchErr      error
-	idFetchAudience string
+	// Singleflight for identity token fetches: the done channel of the
+	// in-flight fetch for each audience, guarded by idFetchMu.
+	idFetchMu sync.Mutex
+	idFetches map[string]chan struct{}
 
-	cancel             context.CancelFunc
+	cancel context.CancelFunc
+	// lnMu guards srv, ln and stopped. srv and ln are the HTTP server and
+	// listener currently serving (installed by Start or a health-check
+	// restart, always under lnMu); Stop shuts srv down and closes ln.
+	// stopped is set by Stop so that neither Start nor a restart installs a
+	// server afterwards. Read srv through currentSrv.
+	lnMu               sync.Mutex
+	ln                 net.Listener
+	stopped            bool
+	stopOnce           sync.Once
 	iptablesConfigured bool        // whether iptables redirect was successfully set up
 	metadataBlocked    blockMethod // which blocking method was applied (block mode only)
 
@@ -250,6 +257,19 @@ type Server struct {
 
 	shutdownToken     string
 	shutdownTokenPath string
+
+	// Hub refusals of the access token and of identity tokens (refusal.go).
+	accessRefusal *refusalState
+	idRefusal     *refusalState
+	// now, if set, replaces time.Now for the refusal windows (tests).
+	now func() time.Time
+	// afterRefusalCheck, if set, runs in the token handlers between the
+	// first refusal check and the singleflight lock (tests).
+	afterRefusalCheck func()
+	// afterFollowerJoin, if set, runs in handleIdentityToken when a request
+	// has joined another request's in-flight fetch for its audience, just
+	// before it waits (tests).
+	afterFollowerJoin func(audience string)
 }
 
 // authToken returns the current auth token, preferring the dynamic TokenFunc
@@ -393,6 +413,9 @@ func New(cfg Config) *Server {
 		config:         cfg,
 		client:         &http.Client{Timeout: 10 * time.Second},
 		cachedIDTokens: make(map[string]*cachedIDToken),
+		idFetches:      make(map[string]chan struct{}),
+		accessRefusal:  newRefusalState(),
+		idRefusal:      newRefusalState(),
 	}
 }
 
@@ -408,6 +431,12 @@ func (s *Server) buildMux() http.Handler {
 // If the port is already in use (e.g. a stale metadata server from a previous
 // init cycle), Start attempts to gracefully shut it down and retry.
 func (s *Server) Start(ctx context.Context) error {
+	// A stopped server never starts again: refuse before binding or
+	// installing any interception, so there is nothing to undo.
+	if s.isStopped() {
+		return errStartAfterStop
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 
@@ -429,9 +458,13 @@ func (s *Server) Start(ctx context.Context) error {
 		activeServerMu.Lock()
 		prev := activeServer
 		activeServerMu.Unlock()
-		if prev != nil && prev.srv != nil {
+		var prevSrv *http.Server
+		if prev != nil {
+			prevSrv = prev.currentSrv()
+		}
+		if prevSrv != nil {
 			log.Info("Forcefully closing previous metadata server instance")
-			_ = prev.srv.Close()
+			_ = prevSrv.Close()
 		} else {
 			// Fallback: try the HTTP shutdown endpoint (cross-process or
 			// the package-level reference was lost).
@@ -487,9 +520,22 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
-	s.srv = &http.Server{
+	srv := &http.Server{
 		Addr:    addr,
 		Handler: s.buildMux(),
+	}
+	if startBeforeServeHook != nil {
+		startBeforeServeHook(s)
+	}
+	// Backstop for a Stop that lands between the entry check and here:
+	// setServing then refuses and closes ln, and Start unwinds.
+	if !s.setServing(ln, srv) {
+		s.cleanupInterception()
+		cancel()
+		if rmErr := os.Remove(s.shutdownTokenPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			log.Debug("Failed to remove metadata shutdown token file %s: %v", s.shutdownTokenPath, rmErr)
+		}
+		return errStartAfterStop
 	}
 
 	// Track this server so a future Start() can forcefully close it.
@@ -499,7 +545,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		log.Info("Metadata server started on %s (mode=%s)", addr, s.config.Mode)
-		if err := s.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Error("Metadata server error: %v", err)
 		}
 	}()
@@ -516,7 +562,9 @@ func (s *Server) Start(ctx context.Context) error {
 		s.cleanupInterception()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
-		_ = s.srv.Shutdown(shutdownCtx)
+		if cur := s.currentSrv(); cur != nil {
+			_ = cur.Shutdown(shutdownCtx)
+		}
 	}()
 
 	return nil
@@ -605,10 +653,71 @@ func (s *Server) configureMetadataInterception(uid int) error {
 	return nil
 }
 
+// InterceptionInstalled reports whether Start installed any network-level
+// interception rule (the nat REDIRECT or the filter block). Valid after
+// Start returns; false when interception was skipped (non-root, host
+// networking) or Start failed.
+func (s *Server) InterceptionInstalled() bool {
+	return s.iptablesConfigured || s.metadataBlocked != blockNone
+}
+
 // Stop gracefully shuts down the server. It closes the listener synchronously
 // so the port is released before Stop returns. The background goroutine handles
 // iptables cleanup separately.
+//
+// Stop is idempotent: only the first call does anything, so sciontool init
+// can stop the server from a deferred call on every return path and again
+// on normal shutdown.
 func (s *Server) Stop() {
+	s.stopOnce.Do(s.stop)
+}
+
+// errStartAfterStop and errRestartAfterStop are returned by Start and by a
+// health-check restart on a server that has been stopped.
+var (
+	errStartAfterStop   = errors.New("metadata server: Start after Stop")
+	errRestartAfterStop = errors.New("metadata server stopped; not restarting")
+)
+
+// startBeforeServeHook, when non-nil, runs in Start after the listener and
+// interception are in place and just before setServing. Tests only: it
+// lets a test land a Stop exactly between Start's entry check and its
+// setServing backstop.
+var startBeforeServeHook func(*Server)
+
+// setServing installs srv and ln as what Stop must shut down. If Stop has
+// already run, it closes ln instead and returns false.
+func (s *Server) setServing(ln net.Listener, srv *http.Server) bool {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
+	if s.stopped {
+		_ = ln.Close()
+		return false
+	}
+	s.ln, s.srv = ln, srv
+	return true
+}
+
+// currentSrv returns the HTTP server currently installed, or nil.
+func (s *Server) currentSrv() *http.Server {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
+	return s.srv
+}
+
+// isStopped reports whether Stop has run.
+func (s *Server) isStopped() bool {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
+	return s.stopped
+}
+
+func (s *Server) stop() {
+	s.lnMu.Lock()
+	s.stopped = true
+	ln, srv := s.ln, s.srv
+	s.lnMu.Unlock()
+
 	activeServerMu.Lock()
 	if activeServer == s {
 		activeServer = nil
@@ -619,10 +728,22 @@ func (s *Server) Stop() {
 	// released before the caller proceeds. The context-cancellation goroutine
 	// still runs for iptables cleanup; http.Server.Shutdown is safe to call
 	// more than once.
-	if s.srv != nil {
+	if srv != nil {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = s.srv.Shutdown(shutdownCtx)
+		_ = srv.Shutdown(shutdownCtx)
 		shutdownCancel()
+	}
+	// http.Server.Shutdown closes only the listeners Serve has already
+	// registered. Start runs Serve in a goroutine, so a Stop that follows
+	// Start closely can run before Serve registers the listener; close it
+	// here so the port is always released before Stop returns. Shutdown
+	// runs first, so a Serve that starts late sees the server shutting down
+	// and returns ErrServerClosed. net.ErrClosed only means Serve already
+	// closed it.
+	if ln != nil {
+		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			log.Warn("Metadata server: closing listener: %v", err)
+		}
 	}
 	if s.shutdownTokenPath != "" {
 		if err := os.Remove(s.shutdownTokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -785,29 +906,41 @@ func (s *Server) restartHTTP(ctx context.Context) error {
 		return fmt.Errorf("restart limit reached")
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	_ = s.srv.Shutdown(shutdownCtx)
-	shutdownCancel()
+	if old := s.currentSrv(); old != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = old.Shutdown(shutdownCtx)
+		shutdownCancel()
+	}
 
 	bindIP := s.resolvedBindIP
 	if bindIP == "" {
 		bindIP = "127.0.0.1"
 	}
 	addr := fmt.Sprintf("%s:%d", bindIP, s.config.Port)
+	// Check stopped, bind and install under one hold of lnMu, so a Stop
+	// either runs first (and the restart binds nothing) or runs after the
+	// new listener is installed (and closes it).
+	s.lnMu.Lock()
+	if s.stopped {
+		s.lnMu.Unlock()
+		return errRestartAfterStop
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
+		s.lnMu.Unlock()
 		return fmt.Errorf("restart listen: %w", err)
 	}
-
-	s.srv = &http.Server{
+	srv := &http.Server{
 		Addr:    addr,
 		Handler: s.buildMux(),
 	}
+	s.ln, s.srv = ln, srv
+	s.lnMu.Unlock()
 
 	go func() {
 		log.Info("Metadata server restarted on %s (attempt %d/%d)",
 			addr, s.restartCount, maxRestarts)
-		if err := s.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Error("Metadata server error after restart: %v", err)
 		}
 	}()
@@ -985,30 +1118,49 @@ func (s *Server) handleServiceAccount(w http.ResponseWriter, r *http.Request, pa
 }
 
 func (s *Server) serveCachedToken(w http.ResponseWriter) bool {
+	body, ok := s.peekCachedToken()
+	if ok {
+		writeCachedToken(w, body)
+	}
+	return ok
+}
+
+// peekCachedToken reads the cached access token without writing a response:
+// the response body, and whether the token has more than 60 s left.
+func (s *Server) peekCachedToken() (map[string]interface{}, bool) {
 	s.mu.RLock()
 	cached := s.cachedToken
 	s.mu.RUnlock()
 
 	if cached == nil {
-		return false
+		return nil, false
 	}
 	elapsed := time.Since(cached.FetchedAt)
 	remaining := time.Duration(cached.ExpiresIn)*time.Second - elapsed
 	if remaining <= 60*time.Second {
-		return false
+		return nil, false
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	return map[string]interface{}{
 		"access_token": cached.AccessToken,
 		"expires_in":   int(remaining.Seconds()),
 		"token_type":   cached.TokenType,
-	})
-	return true
+	}, true
+}
+
+func writeCachedToken(w http.ResponseWriter, body map[string]interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if s.serveCachedToken(w) {
 		return
+	}
+	if s.serveRefusal(w, s.accessRefusal) {
+		return
+	}
+	if s.afterRefusalCheck != nil {
+		s.afterRefusalCheck()
 	}
 
 	// Singleflight: collapse concurrent fetches into one Hub request
@@ -1020,7 +1172,25 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		if s.serveCachedToken(w) {
 			return
 		}
+		if s.serveRefusal(w, s.accessRefusal) {
+			return
+		}
 		http.Error(w, "token generation failed", http.StatusBadGateway)
+		return
+	}
+	// A request that passed the checks above before the previous leader
+	// finished must not become a new leader inside the window that leader
+	// opened (or after the token it cached): re-check both while holding
+	// fetchMu. Lock order: fetchMu, then refusalState.mu / mu; neither is
+	// held while fetchMu is taken.
+	if left, ok := s.refusalLeft(s.accessRefusal); ok {
+		s.fetchMu.Unlock()
+		writeRefusal(w, left)
+		return
+	}
+	if body, ok := s.peekCachedToken(); ok {
+		s.fetchMu.Unlock()
+		writeCachedToken(w, body)
 		return
 	}
 	s.fetchInFlight = true
@@ -1036,6 +1206,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	s.fetchMu.Unlock()
 
 	if err != nil {
+		if isHubRefusal(err) && s.serveRefusal(w, s.accessRefusal) {
+			return
+		}
 		log.Error("Failed to fetch GCP access token from Hub: %v", err)
 		http.Error(w, "token generation failed", http.StatusBadGateway)
 		return
@@ -1046,16 +1219,29 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveCachedIDToken(w http.ResponseWriter, audience string) bool {
+	tok, ok := s.peekCachedIDToken(audience)
+	if ok {
+		writeCachedIDToken(w, tok)
+	}
+	return ok
+}
+
+// peekCachedIDToken reads the cached identity token for audience without
+// writing a response, and whether it has more than 60 s left.
+func (s *Server) peekCachedIDToken(audience string) (string, bool) {
 	s.idTokenMu.RLock()
 	cached := s.cachedIDTokens[audience]
 	s.idTokenMu.RUnlock()
 
 	if cached == nil || !time.Now().Before(cached.ExpiresAt.Add(-60*time.Second)) {
-		return false
+		return "", false
 	}
+	return cached.Token, true
+}
+
+func writeCachedIDToken(w http.ResponseWriter, tok string) {
 	w.Header().Set("Content-Type", "text/plain")
-	_, _ = fmt.Fprint(w, cached.Token)
-	return true
+	_, _ = fmt.Fprint(w, tok)
 }
 
 func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
@@ -1068,33 +1254,70 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 	if s.serveCachedIDToken(w, audience) {
 		return
 	}
+	if s.serveRefusal(w, s.idRefusal) {
+		return
+	}
+	if s.afterRefusalCheck != nil {
+		s.afterRefusalCheck()
+	}
 
-	// Singleflight: collapse concurrent fetches for the same audience
+	// Singleflight: collapse concurrent fetches for the same audience. Each
+	// audience has its own in-flight entry, so fetches for different
+	// audiences run independently.
 	s.idFetchMu.Lock()
-	if s.idFetchInFlight && s.idFetchAudience == audience {
-		done := s.idFetchDone
+	if done, ok := s.idFetches[audience]; ok {
 		s.idFetchMu.Unlock()
-		<-done
+		if s.afterFollowerJoin != nil {
+			s.afterFollowerJoin(audience)
+		}
+		select {
+		case <-done:
+		case <-r.Context().Done():
+			return // the client has gone; the leader still caches the token
+		}
 		if s.serveCachedIDToken(w, audience) {
+			return
+		}
+		if s.serveRefusal(w, s.idRefusal) {
 			return
 		}
 		http.Error(w, "identity token generation failed", http.StatusBadGateway)
 		return
 	}
-	s.idFetchInFlight = true
-	s.idFetchAudience = audience
-	s.idFetchDone = make(chan struct{})
+	// As in handleToken: re-check the window and the cache while holding
+	// idFetchMu before becoming the leader (lock order idFetchMu, then
+	// refusalState.mu / idTokenMu).
+	if left, ok := s.refusalLeft(s.idRefusal); ok {
+		s.idFetchMu.Unlock()
+		writeRefusal(w, left)
+		return
+	}
+	if tok, ok := s.peekCachedIDToken(audience); ok {
+		s.idFetchMu.Unlock()
+		writeCachedIDToken(w, tok)
+		return
+	}
+	done := make(chan struct{})
+	s.idFetches[audience] = done
 	s.idFetchMu.Unlock()
 
-	token, err := s.fetchIdentityToken(r.Context(), audience)
-
-	s.idFetchMu.Lock()
-	s.idFetchInFlight = false
-	s.idFetchErr = err
-	close(s.idFetchDone)
-	s.idFetchMu.Unlock()
+	token, err := func() (*cachedIDToken, error) {
+		// Close only this leader's own channel and remove only its own
+		// entry, also when the fetch panics, so the audience never keeps a
+		// dead leader that later requests would wait on.
+		defer func() {
+			s.idFetchMu.Lock()
+			delete(s.idFetches, audience)
+			close(done)
+			s.idFetchMu.Unlock()
+		}()
+		return s.fetchIdentityToken(r.Context(), audience)
+	}()
 
 	if err != nil {
+		if isHubRefusal(err) && s.serveRefusal(w, s.idRefusal) {
+			return
+		}
 		log.Error("Failed to fetch GCP identity token from Hub: %v", err)
 		http.Error(w, "identity token generation failed", http.StatusBadGateway)
 		return
@@ -1113,6 +1336,7 @@ func (s *Server) fetchAccessToken(ctx context.Context) (*GCPAccessTokenResponse,
 	} else {
 		token, err = s.fetchAccessTokenDirect(ctx)
 	}
+	s.noteFetchResult(s.accessRefusal, "access token", err)
 
 	if err != nil {
 		return nil, err
@@ -1150,7 +1374,7 @@ func (s *Server) fetchAccessTokenDirect(ctx context.Context) (*GCPAccessTokenRes
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, &hubStatusError{code: resp.StatusCode, body: string(respBody)}
 	}
 
 	var token GCPAccessTokenResponse
@@ -1174,6 +1398,7 @@ func (s *Server) fetchIdentityToken(ctx context.Context, audience string) (*cach
 	} else {
 		tokenStr, err = s.fetchIdentityTokenDirect(ctx, audience)
 	}
+	s.noteFetchResult(s.idRefusal, "identity token", err)
 
 	if err != nil {
 		return nil, err
@@ -1213,7 +1438,7 @@ func (s *Server) fetchIdentityTokenDirect(ctx context.Context, audience string) 
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+		return "", &hubStatusError{code: resp.StatusCode, body: string(respBody)}
 	}
 
 	var result hubIDTokenResponse
@@ -1234,24 +1459,35 @@ func (s *Server) proactiveRefreshLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.mu.RLock()
-			cached := s.cachedToken
-			s.mu.RUnlock()
-
-			if cached == nil {
-				continue
-			}
-
-			elapsed := time.Since(cached.FetchedAt)
-			remaining := time.Duration(cached.ExpiresIn)*time.Second - elapsed
-			if remaining < 300*time.Second {
-				log.Debug("Proactively refreshing GCP access token (remaining: %v)", remaining)
-				refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				if _, err := s.fetchAccessToken(refreshCtx); err != nil {
-					log.Error("Proactive token refresh failed: %v", err)
-				}
-				cancel()
-			}
+			s.refreshTick(ctx)
 		}
+	}
+}
+
+// refreshTick is one tick of proactiveRefreshLoop: refresh the cached access
+// token when it has less than 5 minutes left, unless no token is cached or a
+// hub refusal window is open. A hub refusal is logged once, by its back-off
+// step (noteFetchResult); its body is not logged again here.
+func (s *Server) refreshTick(ctx context.Context) {
+	s.mu.RLock()
+	cached := s.cachedToken
+	s.mu.RUnlock()
+
+	if cached == nil {
+		return
+	}
+	if _, refusing := s.refusalLeft(s.accessRefusal); refusing {
+		return
+	}
+
+	elapsed := time.Since(cached.FetchedAt)
+	remaining := time.Duration(cached.ExpiresIn)*time.Second - elapsed
+	if remaining < 300*time.Second {
+		log.Debug("Proactively refreshing GCP access token (remaining: %v)", remaining)
+		refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if _, err := s.fetchAccessToken(refreshCtx); err != nil && !isHubRefusal(err) {
+			log.Error("Proactive token refresh failed: %v", err)
+		}
+		cancel()
 	}
 }

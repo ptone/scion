@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -130,10 +131,16 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Build a map of brokerId -> localPath for quick lookup
+		// Build a map of brokerId -> localPath for quick lookup. The
+		// provider LocalPath is shown only to a caller that may read the
+		// project's provider records, decided once for the whole listing
+		// (the same gate as the project path refusal relay); anyone else
+		// gets the same list without it (ptone/scion#6844).
 		brokerLocalPaths := make(map[string]string)
-		for _, p := range providers {
-			brokerLocalPaths[p.BrokerID] = p.LocalPath
+		if s.callerMayReadProviders(ctx, projectID) {
+			for _, p := range providers {
+				brokerLocalPaths[p.BrokerID] = p.LocalPath
+			}
 		}
 
 		// The dispatch capability of a project-filtered listing follows the
@@ -147,10 +154,14 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 
 		// Build extended broker list with provider data
 		extendedBrokers := make([]RuntimeBrokerWithProvider, 0, len(result.Items))
+		// Storage layout values are shown to readers with hub.config.read
+		// only: decided once for the whole listing.
+		showStorage := s.storageValuesAllowed(ctx)
 		for i, broker := range result.Items {
 			if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 				continue
 			}
+			broker = redactBrokerStorage(broker, showStorage)
 			eb := RuntimeBrokerWithProvider{
 				RuntimeBroker: brokerForDisplay(broker),
 				LocalPath:     brokerLocalPaths[broker.ID],
@@ -190,10 +201,14 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	hubVersion := s.hubFleetVersion(ctx)
 
 	brokersWithCaps := make([]RuntimeBrokerWithCapabilities, 0, len(result.Items))
+	// Storage layout values are shown to readers with hub.config.read only:
+	// decided once for the whole listing.
+	showStorage := s.storageValuesAllowed(ctx)
 	for i, broker := range result.Items {
 		if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 			continue
 		}
+		broker = redactBrokerStorage(broker, showStorage)
 		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(broker), false)}
 		resp.HostedByThisServer = embedded.has(broker.ID)
 		resp.VersionStatus = runtimeBrokerVersionStatus(&result.Items[i], hubVersion)
@@ -273,6 +288,12 @@ func (s *Server) handleRuntimeBrokerRoutes(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// The legacy Runtime Broker's conversion plan (read-only).
+	if subPath == "conversion-plan" {
+		s.handleBrokerConversionPlan(w, r, brokerID)
+		return
+	}
+
 	// The broker->Hub launch report (design §3.2), POST
 	// .../agents/{agentId}/launch.
 	if agentPath, ok := strings.CutPrefix(subPath, "agents/"); ok {
@@ -290,6 +311,21 @@ func (s *Server) handleRuntimeBrokerRoutes(w http.ResponseWriter, r *http.Reques
 				return
 			}
 			s.handleAgentLaunchReport(w, r, brokerID, agentID)
+			return
+		}
+		// The broker-self signed workspace download, POST
+		// .../agents/{agentId}/workspace-download, with the same segment
+		// rules as the launch report.
+		if agentID, ok := strings.CutSuffix(agentPath, "/workspace-download"); ok {
+			if agentID == "" || strings.Contains(agentID, "/") {
+				NotFound(w, "Agent")
+				return
+			}
+			if r.Method != http.MethodPost {
+				MethodNotAllowed(w, http.MethodPost)
+				return
+			}
+			s.handleWorkspaceDownload(w, r, brokerID, agentID)
 			return
 		}
 	}
@@ -414,13 +450,17 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 		}
 	}
 
+	// Storage layout values are shown to readers with hub.config.read and
+	// to the broker itself only.
+	shown := s.brokerStorageForViewer(ctx, *broker, brokerSelf)
+
 	// Compute capabilities for the requesting user
-	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(*broker), false)}
+	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(shown), false)}
 	resp.HostedByThisServer = s.embeddedBrokerSnapshot().has(broker.ID)
 	resp.VersionStatus = runtimeBrokerVersionStatus(broker, s.hubFleetVersion(ctx))
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
-		resp.RuntimeBroker = brokerForDisplayWithCap(*broker, resp.Cap)
+		resp.RuntimeBroker = brokerForDisplayWithCap(shown, resp.Cap)
 		s.reportBrokerDispatchCapability(ctx, resp.Cap, broker, nil)
 	}
 
@@ -613,7 +653,7 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	// The caller holds broker.update (checked above).
-	writeJSON(w, http.StatusOK, withHostIdentity(brokerForDisplay(*after), true))
+	writeJSON(w, http.StatusOK, withHostIdentity(brokerForDisplay(s.brokerStorageForViewer(ctx, *after, false)), true))
 }
 
 func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
@@ -684,15 +724,10 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	// release requires that), audited as the sweep does (ptone/scion#3994).
 	s.releaseDeletedBrokerReservations(ctx, broker.ID)
 
-	// Clean up the broker's HMAC secret (best-effort, post-delete).
-	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
-		slog.WarnContext(ctx, "failed to delete broker secret during deregistration", "brokerId", id, "error", err)
-	}
+	// DeleteRuntimeBroker removed the broker's HMAC secret and any
+	// unconsumed join token in the same transaction as the row; announce
+	// the credential change now that it is committed.
 	s.conduitBrokerCredentialChanged(id)
-	// Clean up any unconsumed join token (best-effort, post-delete).
-	if err := s.store.DeleteJoinToken(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
-		slog.WarnContext(ctx, "failed to delete broker join token during deregistration", "brokerId", id, "error", err)
-	}
 
 	// Log the deregistration event
 	LogDeregisterEvent(ctx, s.auditLogger, id, brokerName, actorID, clientIP)
@@ -903,6 +938,13 @@ type brokerHeartbeatRequest struct {
 	PresentationTargetID      string                         `json:"presentationTargetId,omitempty"`
 	PresentationEpoch         int64                          `json:"presentationEpoch,omitempty"`
 	PresentationSeq           int64                          `json:"presentationSeq,omitempty"`
+	// ConversionPlanPresentation is a legacy broker's conversion plan
+	// snapshot (see hubclient.BrokerHeartbeat.ConversionPlanPresentation),
+	// kept as the bytes received so its size cap is checked before any
+	// decode. It is stored only when the request identity is the broker
+	// itself (ApplyConversionPlan). Omitted by an older broker or a flat
+	// one, in which case the stored value is left unchanged.
+	ConversionPlanPresentation json.RawMessage `json:"conversionPlanPresentation,omitempty"`
 }
 
 // brokerStartInFlight mirrors hubclient.StartInFlight.
@@ -955,6 +997,8 @@ type brokerProfileSAMappings struct {
 	IncompleteReason       string                         `json:"incompleteReason,omitempty"`
 	AmbiguousGSAs          []string                       `json:"ambiguousGSAs,omitempty"`
 	ReportVersion          int                            `json:"reportVersion,omitempty"`
+	CloudRunNativeIdentity bool                           `json:"cloudRunNativeIdentity,omitempty"`
+	CloudRunBlockAccount   bool                           `json:"cloudRunBlockAccount,omitempty"`
 }
 
 // brokerProfileSAMappingsHash is one profile's report hash in a heartbeat
@@ -990,7 +1034,8 @@ const profileSAReportConfirmInterval = 5 * time.Minute
 //     profileSAReportConfirmInterval. A hash that does not match (or no
 //     stored hash) leaves the stored report as is, to age, and asks for the
 //     full report.
-//   - The reports and hashes name every Kubernetes profile of the broker,
+//   - The reports and hashes name every Kubernetes and (from report
+//     version 3) Cloud Run profile of the broker,
 //     so a stored profile named in neither (for example one switched from
 //     Kubernetes to docker) has its report cleared.
 //
@@ -1042,6 +1087,8 @@ func applyProfileSAMappings(profiles []store.BrokerProfile, reported []brokerPro
 			}
 			p.MappingsHash = hash
 			p.MappingsReportVersion = r.ReportVersion
+			p.CloudRunNativeIdentity = r.CloudRunNativeIdentity
+			p.CloudRunBlockAccount = r.CloudRunBlockAccount
 			p.MappingsReportedAt = timePtr(now)
 			changed = true
 		case inHashes:
@@ -1071,6 +1118,8 @@ func profileSAReportEqual(p *store.BrokerProfile, r brokerProfileSAMappings, has
 		p.MappingsComplete == r.Complete &&
 		p.MappingsIncompleteReason == reason &&
 		p.MappingsReportVersion == r.ReportVersion &&
+		p.CloudRunNativeIdentity == r.CloudRunNativeIdentity &&
+		p.CloudRunBlockAccount == r.CloudRunBlockAccount &&
 		slices.Equal(p.ServiceAccountMappings, r.ServiceAccountMappings) &&
 		slices.Equal(p.AmbiguousGSAs, r.AmbiguousGSAs)
 }
@@ -1085,6 +1134,8 @@ func clearProfileSAReport(p *store.BrokerProfile) {
 	p.MappingsHash = ""
 	p.MappingsReportedAt = nil
 	p.MappingsReportVersion = 0
+	p.CloudRunNativeIdentity = false
+	p.CloudRunBlockAccount = false
 }
 
 // timePtr returns a pointer to a copy of t.
@@ -1412,6 +1463,19 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	} else if _, err := s.ApplyRuntimeTargetPresentation(ctx, id, heartbeat.PresentationTargetID,
 		heartbeat.RuntimeTargetPresentation, heartbeat.PresentationEpoch, heartbeat.PresentationSeq, time.Now()); err != nil {
 		s.agentLifecycleLog.Warn("heartbeat: failed to store runtime target presentation",
+			"broker_id", id, "error", err)
+	}
+
+	// A legacy broker's conversion plan is stored on the same rule: only
+	// from the broker's own credentials. Caps, the experiment, the schema
+	// version and the legacy-row check are ApplyConversionPlan's.
+	if !brokerSelf {
+		if len(heartbeat.ConversionPlanPresentation) > 0 {
+			s.agentLifecycleLog.Warn("heartbeat: ignoring conversionPlanPresentation sent with a request identity other than the broker itself",
+				"broker_id", id)
+		}
+	} else if _, err := s.ApplyConversionPlan(ctx, id, heartbeat.ConversionPlanPresentation, time.Now()); err != nil {
+		s.agentLifecycleLog.Warn("heartbeat: failed to store the conversion plan",
 			"broker_id", id, "error", err)
 	}
 
@@ -1894,6 +1958,16 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			if s.heartbeatPhaseGuarded(agent, statusUpdate.Phase) {
 				statusUpdate.Phase = ""
 			}
+			// Restart window: before a restart has recorded its new run, a
+			// report of the current run (or of none) comes from the run
+			// being replaced. The store drops its status fields on the
+			// locked row; this mirror drops them before the reservation
+			// reconcile below as well, as defence in depth. The reconcile
+			// does not depend on it: a heartbeat cannot move a stopped,
+			// error, halted or suspended row to a counted phase, and the
+			// releases it calls refuse a row that holds a restart claim
+			// (NoStartKindClaim).
+			guardRestartWindowReport(agent, &statusUpdate, statusUpdate)
 
 			// Reconcile the max_agents_per_broker reservation against the
 			// phase this heartbeat will actually persist — e.g. release on an
@@ -1903,6 +1977,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// reservation alone too.
 			if !reportOfOtherRun(agentHB.RunID, agent.RunID) {
 				s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, agent.Phase, statusUpdate.Phase)
+				s.reconcileProjectQuotaOnPhaseChange(ctx, agent, agent.Phase, statusUpdate.Phase)
 			}
 
 			// Update the agent's status

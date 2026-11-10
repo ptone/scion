@@ -20,9 +20,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,6 +49,7 @@ var runtimeBrokerInstanceKeyRe = regexp.MustCompile(RuntimeBrokerInstanceKeyPatt
 const (
 	RuntimeTargetTypeDocker     = "docker"
 	RuntimeTargetTypeKubernetes = "kubernetes"
+	RuntimeTargetTypeCloudRun   = "cloudrun"
 )
 
 // ErrRuntimeBrokerInstancesInServerYAML is returned by LoadGlobalConfig when a
@@ -54,8 +57,11 @@ const (
 var ErrRuntimeBrokerInstancesInServerYAML = errors.New(
 	"runtimeBroker.instances is only supported under server.broker.instances in settings.yaml")
 
-// RuntimeBrokerHostingError is the P1 fail-closed refusal of a flat instance
-// without the Hub in the same process.
+// RuntimeBrokerHostingError is the fail-closed refusal of a flat instance
+// whose Hub is not in the same process and whose remote activation the host
+// did not validate (runtimebroker.FlatInstanceConfig.RemoteCredentials). Its
+// message is the frozen text of contract section 2; validated remote hosting
+// never reaches it.
 type RuntimeBrokerHostingError struct {
 	InstanceKey string
 }
@@ -101,29 +107,11 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 		}
 		switch t.Type {
 		case RuntimeTargetTypeDocker:
-			for _, f := range []struct{ field, v string }{{"context", t.Context}, {"namespace", t.Namespace}, {"kubeconfig", t.Kubeconfig},
-				{"kubernetes_block_service_account", t.KubernetesBlockServiceAccount},
-				{"shared_dir_storage_class", t.SharedDirStorageClass}, {"shared_dir_size", t.SharedDirSize},
-				{"priority_class_name", t.PriorityClassName}} {
-				if field, v := f.field, f.v; v != "" {
-					errs = append(errs, ValidationError{Path: p + ".runtime_target." + field,
-						Message: "field not valid for runtime target type docker"})
-				}
-			}
-			// gke false and an absent safe_to_evict are unset; any other
-			// value of them is refused, as for the string fields above.
-			for _, f := range []struct {
-				field string
-				set   bool
-			}{{"kubernetes_service_account_mappings", len(t.KubernetesServiceAccountMappings) > 0},
-				{"gke", t.GKE}, {"safe_to_evict", t.SafeToEvict != nil}} {
-				if f.set {
-					errs = append(errs, ValidationError{Path: p + ".runtime_target." + f.field,
-						Message: "field not valid for runtime target type docker"})
-				}
-			}
+			errs = append(errs, fieldsNotValidFor(p, t.Type, kubernetesOnlyFieldsSet(t))...)
+			errs = append(errs, fieldsNotValidFor(p, t.Type, cloudRunOnlyFieldsSet(t))...)
 			errs = append(errs, validateInstanceRemovedStorageOverrides(p, t)...)
 		case RuntimeTargetTypeKubernetes:
+			errs = append(errs, fieldsNotValidFor(p, t.Type, cloudRunOnlyFieldsSet(t))...)
 			if t.Kubeconfig != "" && !validInstanceKubeconfigPath(t.Kubeconfig) {
 				errs = append(errs, ValidationError{Path: p + ".runtime_target.kubeconfig",
 					Message: fmt.Sprintf("kubeconfig must be one absolute local file path (no ~, environment variables or path list): %q", t.Kubeconfig)})
@@ -145,14 +133,154 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 						Message: fmt.Sprintf("%q is not a valid Kubernetes PriorityClass name: %s", t.PriorityClassName, strings.Join(verrs, "; "))})
 				}
 			}
+			errs = append(errs, ValidatePlacementFields(p+".runtime_target", t.NodeSelector, t.Tolerations, t.RuntimeClassName)...)
+			errs = append(errs, validateInstanceRemovedStorageOverrides(p, t)...)
+		case RuntimeTargetTypeCloudRun:
+			errs = append(errs, fieldsNotValidFor(p, t.Type, kubernetesOnlyFieldsSet(t))...)
+			errs = append(errs, validateCloudRunTarget(p+".runtime_target", t)...)
 			errs = append(errs, validateInstanceRemovedStorageOverrides(p, t)...)
 		default:
 			errs = append(errs, ValidationError{Path: p + ".runtime_target.type",
-				Message: fmt.Sprintf("unsupported runtime target type %q (supported: docker, kubernetes)", t.Type)})
+				Message: fmt.Sprintf("unsupported runtime target type %q (supported: docker, kubernetes, cloudrun)", t.Type)})
 		}
 	}
 	sort.SliceStable(errs, func(a, b int) bool { return errs[a].Path < errs[b].Path })
 	return errs
+}
+
+// kubernetesOnlyFieldsSet returns the settings names of the Kubernetes-only
+// runtime_target fields t sets, in a fixed order. gke false and an absent
+// safe_to_evict are unset; any other value of them is set.
+func kubernetesOnlyFieldsSet(t *V1RuntimeTargetConfig) []string {
+	var set []string
+	for _, f := range []struct {
+		field string
+		set   bool
+	}{{"context", t.Context != ""}, {"namespace", t.Namespace != ""}, {"kubeconfig", t.Kubeconfig != ""},
+		{"kubernetes_block_service_account", t.KubernetesBlockServiceAccount != ""},
+		{"shared_dir_storage_class", t.SharedDirStorageClass != ""}, {"shared_dir_size", t.SharedDirSize != ""},
+		{"priority_class_name", t.PriorityClassName != ""}, {"runtime_class_name", t.RuntimeClassName != ""},
+		{"kubernetes_service_account_mappings", len(t.KubernetesServiceAccountMappings) > 0},
+		{"gke", t.GKE}, {"safe_to_evict", t.SafeToEvict != nil},
+		{"node_selector", len(t.NodeSelector) > 0}, {"tolerations", len(t.Tolerations) > 0}} {
+		if f.set {
+			set = append(set, f.field)
+		}
+	}
+	return set
+}
+
+// cloudRunOnlyFieldsSet returns the settings names of the Cloud-Run-only
+// runtime_target fields t sets, in a fixed order.
+func cloudRunOnlyFieldsSet(t *V1RuntimeTargetConfig) []string {
+	var set []string
+	for _, f := range []struct{ field, v string }{{"project_id", t.ProjectID}, {"region", t.Region},
+		{"service_account", t.ServiceAccount}, {"network", t.Network}, {"subnetwork", t.Subnetwork},
+		{"credentials_file", t.CredentialsFile}} {
+		if f.v != "" {
+			set = append(set, f.field)
+		}
+	}
+	return set
+}
+
+// fieldsNotValidFor reports each named runtime_target field as not valid
+// for runtime target type typ.
+func fieldsNotValidFor(p, typ string, fields []string) []ValidationError {
+	var errs []ValidationError
+	for _, f := range fields {
+		errs = append(errs, ValidationError{Path: p + ".runtime_target." + f,
+			Message: "field not valid for runtime target type " + typ})
+	}
+	return errs
+}
+
+// Cloud Run runtime_target forms (contract amendment P5-CR, CR2). The JSON
+// schema mirrors each pattern, so scion config validate agrees with
+// ValidateRuntimeBrokerInstances.
+var (
+	cloudRunProjectIDRe = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]$`)
+	cloudRunRegionRe    = regexp.MustCompile(`^[a-z]+-[a-z]+[0-9]+$`)
+	// cloudRunServiceAccountRe is a user-managed service account:
+	// <name>@<project_id>.iam.gserviceaccount.com, both parts in GCP ID form.
+	cloudRunServiceAccountRe = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$`)
+	// cloudRunServiceAgentRe is a Google-managed service agent that the
+	// user-managed form would also match: service-<project number>@... or
+	// any account in a gcp-sa-* domain.
+	cloudRunServiceAgentRe = regexp.MustCompile(`^service-[0-9]+@|@gcp-sa-`)
+	// cloudRunComputeDefaultSARe is a project's default compute service
+	// account. It is matched against the lower-cased address.
+	cloudRunComputeDefaultSARe = regexp.MustCompile(`^[0-9]+-compute@developer\.gserviceaccount\.com$`)
+)
+
+// cloudRunAppEngineDefaultSADomain is the domain of a project's App Engine
+// default service account, <project_id>@appspot.gserviceaccount.com.
+const cloudRunAppEngineDefaultSADomain = "@appspot.gserviceaccount.com"
+
+// cloudRunDefaultServiceAccount reports whether sa is one of the two project
+// default service account forms of contract amendment P5-CR, CR2: the
+// compute default (<number>-compute@developer.gserviceaccount.com) or the
+// instance project's App Engine default (<projectID>@appspot.gserviceaccount.com).
+// The comparison ignores case. Every other address, other appspot addresses
+// included, is left to the user-managed form check, which refuses it.
+func cloudRunDefaultServiceAccount(sa, projectID string) bool {
+	lower := strings.ToLower(strings.TrimSpace(sa))
+	return cloudRunComputeDefaultSARe.MatchString(lower) ||
+		(projectID != "" && lower == strings.ToLower(projectID)+cloudRunAppEngineDefaultSADomain)
+}
+
+// validateCloudRunTarget checks the Cloud Run fields of a cloudrun
+// runtime_target at path (server.broker.instances[<i>].runtime_target).
+// Only the form is checked here; the credentials file itself (existence,
+// type, owner, mode, parse), project resolution and region validity are
+// checked on the host when the instance activates.
+func validateCloudRunTarget(path string, t *V1RuntimeTargetConfig) []ValidationError {
+	var errs []ValidationError
+	add := func(field, msg string) {
+		errs = append(errs, ValidationError{Path: path + "." + field, Message: msg})
+	}
+	switch {
+	case t.ProjectID == "":
+		add("project_id", "project_id is required for runtime target type cloudrun")
+	case strings.Contains(t.ProjectID, ":"):
+		add("project_id", fmt.Sprintf("domain-scoped project IDs are not supported: %q", t.ProjectID))
+	case !cloudRunProjectIDRe.MatchString(t.ProjectID):
+		add("project_id", fmt.Sprintf("project_id must be a GCP project ID (6 to 30 lower-case letters, digits or hyphens, starting with a letter): %q", t.ProjectID))
+	}
+	switch {
+	case t.Region == "":
+		add("region", "region is required for runtime target type cloudrun (e.g. us-central1)")
+	case !cloudRunRegionRe.MatchString(t.Region):
+		add("region", fmt.Sprintf("region must be a Cloud Run region (e.g. us-central1): %q", t.Region))
+	}
+	switch {
+	case t.ServiceAccount == "":
+		add("service_account", "service_account is required for runtime target type cloudrun; the platform default compute identity is never implied")
+	case cloudRunDefaultServiceAccount(t.ServiceAccount, t.ProjectID):
+		add("service_account", "the project default service accounts are not allowed")
+	case !cloudRunServiceAccountRe.MatchString(t.ServiceAccount) || cloudRunServiceAgentRe.MatchString(t.ServiceAccount):
+		add("service_account", "service_account must be a user-managed service account (name@project.iam.gserviceaccount.com)")
+	}
+	if t.Network == "" && t.Subnetwork == "" {
+		add("network", "a VPC network or subnetwork is required: Cloud Run agents mount the NFS share over the VPC")
+	}
+	switch {
+	case t.CredentialsFile == "":
+		add("credentials_file", "credentials_file is required for runtime target type cloudrun")
+	case !validInstanceCredentialsFilePath(t.CredentialsFile):
+		add("credentials_file", fmt.Sprintf("credentials_file must be one clean absolute local file path (no ~, environment variables, path list, \"//\", \".\" or \"..\" element or trailing \"/\"): %q", t.CredentialsFile))
+	}
+	return errs
+}
+
+// validInstanceCredentialsFilePath reports whether p is one absolute local
+// file path: it starts with "/", names more than the root, has no ~, $
+// (environment syntax) or path-list separator (":" or ";"), and is already
+// clean (no "//", "." or ".." element and no trailing "/"), so the path that
+// is checked and logged is the path that is opened. It is never expanded;
+// the file itself is checked when the instance activates.
+func validInstanceCredentialsFilePath(p string) bool {
+	return strings.HasPrefix(p, "/") && !strings.ContainsAny(p, "~$:;") && strings.Trim(p, "/") != "" && path.Clean(p) == p
 }
 
 // validateInstanceRemovedStorageOverrides reports the removed storage overrides
@@ -338,8 +466,9 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 			}
 			if err := checkStrings(p+".runtime_target", tm, "type", "display_name", "context", "namespace", "kubeconfig",
 				"kubernetes_block_service_account",
-				"shared_dir_storage_class", "shared_dir_size", "priority_class_name",
-				"shared_dir_storage_backend", "home_storage_backend", "home_storage_leaf"); err != nil {
+				"shared_dir_storage_class", "shared_dir_size", "priority_class_name", "runtime_class_name",
+				"shared_dir_storage_backend", "home_storage_backend", "home_storage_leaf",
+				"project_id", "region", "service_account", "network", "subnetwork", "credentials_file"); err != nil {
 				return err
 			}
 			// The YAML decoder would turn a string such as "yes" into a
@@ -378,6 +507,9 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 					}
 				}
 			}
+			if err := checkRawPlacement(p+".runtime_target", tm); err != nil {
+				return err
+			}
 		}
 		if d, present := m["agent_defaults"]; present && d != nil {
 			dm, ok := d.(map[string]interface{})
@@ -407,6 +539,50 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 				sort.Strings(envKeys)
 				if err := checkStrings(op+".env", env, envKeys...); err != nil {
 					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// rawTolerationKeys are the only keys of a raw toleration entry.
+var rawTolerationKeys = map[string]bool{"key": true, "operator": true, "value": true, "effect": true}
+
+// checkRawPlacement checks the raw placement fields of a runtime_target
+// mapping before the decoder can coerce or drop them: node_selector must be
+// a mapping of strings (an entry is named by its index in key order, so a
+// malformed key is never echoed), and tolerations a list of mappings with
+// only key, operator, value and effect, each a string. Malformed placement
+// is refused, never read as no placement.
+func checkRawPlacement(path string, tm map[string]interface{}) error {
+	if v, present := tm["node_selector"]; present {
+		m, isMap := v.(map[string]interface{})
+		if !isMap {
+			return fmt.Errorf("%s.node_selector must be a mapping", path)
+		}
+		for i, k := range rawMapKeys(m) {
+			if _, isString := m[k].(string); !isString {
+				return fmt.Errorf("%s.node_selector entry %d (in key order) must have a string value", path, i)
+			}
+		}
+	}
+	if v, present := tm["tolerations"]; present {
+		list, isList := v.([]interface{})
+		if !isList {
+			return fmt.Errorf("%s.tolerations must be a list", path)
+		}
+		for i, e := range list {
+			em, isMap := e.(map[string]interface{})
+			if !isMap {
+				return fmt.Errorf("%s.tolerations[%d] must be a mapping", path, i)
+			}
+			for _, k := range rawMapKeys(em) {
+				if !rawTolerationKeys[k] {
+					return fmt.Errorf("%s.tolerations[%d]: only key, operator, value and effect are supported", path, i)
+				}
+				if _, isString := em[k].(string); !isString {
+					return fmt.Errorf("%s.tolerations[%d].%s must be a string", path, i, k)
 				}
 			}
 		}
@@ -740,10 +916,19 @@ func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInst
 				GKE:                              i.RuntimeTarget.GKE,
 				PriorityClassName:                i.RuntimeTarget.PriorityClassName,
 				SafeToEvict:                      copyBoolPtr(i.RuntimeTarget.SafeToEvict),
+				NodeSelector:                     copyStringMap(i.RuntimeTarget.NodeSelector),
+				Tolerations:                      slices.Clone(i.RuntimeTarget.Tolerations),
+				RuntimeClassName:                 i.RuntimeTarget.RuntimeClassName,
 				SharedDirStorageBackend:          i.RuntimeTarget.SharedDirStorageBackend,
 				SharedDirStorageBackends:         copyStringMap(i.RuntimeTarget.SharedDirStorageBackends),
 				HomeStorageBackend:               i.RuntimeTarget.HomeStorageBackend,
 				HomeStorageLeaf:                  i.RuntimeTarget.HomeStorageLeaf,
+				ProjectID:                        i.RuntimeTarget.ProjectID,
+				Region:                           i.RuntimeTarget.Region,
+				ServiceAccount:                   i.RuntimeTarget.ServiceAccount,
+				Network:                          i.RuntimeTarget.Network,
+				Subnetwork:                       i.RuntimeTarget.Subnetwork,
+				CredentialsFile:                  i.RuntimeTarget.CredentialsFile,
 			}
 		}
 		if d := copyInstanceAgentDefaults(i.AgentDefaults); d != nil {
@@ -784,10 +969,19 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 				GKE:                              i.RuntimeTarget.GKE,
 				PriorityClassName:                i.RuntimeTarget.PriorityClassName,
 				SafeToEvict:                      copyBoolPtr(i.RuntimeTarget.SafeToEvict),
+				NodeSelector:                     copyStringMap(i.RuntimeTarget.NodeSelector),
+				Tolerations:                      slices.Clone(i.RuntimeTarget.Tolerations),
+				RuntimeClassName:                 i.RuntimeTarget.RuntimeClassName,
 				SharedDirStorageBackend:          i.RuntimeTarget.SharedDirStorageBackend,
 				SharedDirStorageBackends:         copyStringMap(i.RuntimeTarget.SharedDirStorageBackends),
 				HomeStorageBackend:               i.RuntimeTarget.HomeStorageBackend,
 				HomeStorageLeaf:                  i.RuntimeTarget.HomeStorageLeaf,
+				ProjectID:                        i.RuntimeTarget.ProjectID,
+				Region:                           i.RuntimeTarget.Region,
+				ServiceAccount:                   i.RuntimeTarget.ServiceAccount,
+				Network:                          i.RuntimeTarget.Network,
+				Subnetwork:                       i.RuntimeTarget.Subnetwork,
+				CredentialsFile:                  i.RuntimeTarget.CredentialsFile,
 			}
 		}
 		if i.AgentDefaults != nil {

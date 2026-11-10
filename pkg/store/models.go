@@ -111,6 +111,10 @@ type Agent struct {
 
 	// Applied configuration (stored as JSON)
 	AppliedConfig *AgentAppliedConfig `json:"appliedConfig,omitempty"`
+	// EffectiveConfig is the broker's verified effective configuration for
+	// one run (AgentEffectiveConfig), or nil. Written only by
+	// SetAgentEffectiveConfig; never by UpdateAgent.
+	EffectiveConfig *AgentEffectiveConfig `json:"-"`
 
 	// PendingConfig holds config edits the hub stored instead of applying
 	// (see AgentPendingConfig); nil when there are none. UpdateAgent writes
@@ -168,6 +172,7 @@ type Agent struct {
 	// (§3.3).
 	LaunchAsyncOptIn   bool      `json:"-"`
 	LaunchID           string    `json:"-"`
+	LaunchRunID        string    `json:"-"` // the run the launch dispatched (agents.launch_run_id); "" when unknown
 	LaunchState        string    `json:"-"` // "" | "active" | "ended"
 	LaunchEndReason    string    `json:"-"`
 	LaunchKind         string    `json:"-"` // "create" | "start" | "restart"
@@ -435,6 +440,14 @@ type AgentAppliedConfig struct {
 	// start was accepted cannot record the agent's previous target. Cleared
 	// together with RuntimeTarget.
 	RuntimeTargetCandidate string `json:"runtimeTargetCandidate,omitempty"`
+
+	// NativeCloudRun records the hub's own decision that a dispatch of this
+	// agent runs it on Cloud Run Instances as its own identity
+	// (hub.cloudrun_native_identity). The dispatcher sets it before the
+	// broker call, and only the hub's confirmed stop or delete of the agent
+	// removes it (Store.SetAgentNativeCloudRun). While it is set the hub
+	// issues the agent no GCP token. It is never taken from a client.
+	NativeCloudRun bool `json:"nativeCloudRun,omitempty"`
 
 	// Harness-config info for Runtime Broker hydration. When set, the broker
 	// fetches the harness-config from the Hub's storage backend instead of
@@ -1231,6 +1244,21 @@ type RuntimeBroker struct {
 	PresentationSeq      *int64     `json:"-"`
 	PresentationFencedAt *time.Time `json:"-"`
 
+	// ConversionPlanPresentation is the publishable conversion plan a
+	// legacy Runtime Broker last reported (api.ConversionPlanPresentation).
+	// Display data only. Nil means none was reported. It and the two
+	// fields below are written only by SetRuntimeBrokerConversionPlan and
+	// removed only by deleting the row. They are never serialized with the
+	// broker: GET /api/v1/runtime-brokers/{id}/conversion-plan is the one
+	// reader.
+	ConversionPlanPresentation *api.ConversionPlanPresentation `json:"-"`
+	// ConversionPlanObservedAt is the Hub time the stored plan was last
+	// written or confirmed, refreshed at most every
+	// PresentationObservedRefresh while unchanged.
+	ConversionPlanObservedAt *time.Time `json:"-"`
+	// ConversionPlanHash is the Hub-computed hash of the stored plan.
+	ConversionPlanHash string `json:"-"`
+
 	// Metadata
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
@@ -1428,6 +1456,20 @@ type BrokerCapabilities struct {
 	// applies (api.ClearableConfigPath, and env key removals) as applied
 	// at the next start rather than held for a reincarnation.
 	ClearedFields bool `json:"clearedFields,omitempty"`
+	// UnlimitedCountLimits indicates the broker honours an explicit
+	// max_turns or max_model_calls of 0 as "no limit" over an inherited one
+	// (ptone/scion#5605): its merge, default fill and launch keep it. Only
+	// for such a broker does the hub accept a change of a count limit to
+	// Unlimited; an older broker would keep the inherited limit.
+	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
+	// ClearedResourceSubfields indicates the broker applies the resources
+	// sub-field entries of cleared_fields (resources.requests.cpu and the
+	// like, api.ResourceSubPaths) at start, so a resources edit that drops
+	// one sub-field restores its inherited value while keeping the others
+	// (ptone/scion#5676). Only for such a broker does the hub report that
+	// drop as applied at the next start; an older broker ignores the
+	// entries and keeps the previous value until a reincarnation.
+	ClearedResourceSubfields bool `json:"clearedResourceSubfields,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -1500,9 +1542,20 @@ type BrokerProfile struct {
 	MappingsReportedAt *time.Time `json:"mappingsReportedAt,omitempty"`
 	// MappingsReportVersion is the broker's report version
 	// (api.BrokerSAReportVersion); zero from a broker that predates it.
-	// The Hub refuses a dispatch from the report only at that version or
-	// later (ptone/scion#3329 phase 4b).
+	// The Hub refuses a Kubernetes dispatch from the report from version 2
+	// (ptone/scion#3329 phase 4b), and uses a Cloud Run report from
+	// version 3.
 	MappingsReportVersion int `json:"mappingsReportVersion,omitempty"`
+	// CloudRunNativeIdentity is true when the broker reports, for a Cloud
+	// Run profile, that it can run an instance as the identity in its
+	// dispatch (report version 3 or later). ServiceAccountMappings then
+	// lists the accounts it may attach (Source
+	// api.BrokerSASourceCloudRunAllowlist, GSA only).
+	CloudRunNativeIdentity bool `json:"cloudRunNativeIdentity,omitempty"`
+	// CloudRunBlockAccount is true when the broker reports a block service
+	// account configured for this Cloud Run profile. Only presence is
+	// reported, never the account.
+	CloudRunBlockAccount bool `json:"cloudRunBlockAccount,omitempty"`
 }
 
 // BrokerProfileSAMapping is one GCP service account a broker profile can
@@ -1907,6 +1960,13 @@ const (
 	// UserStatusPending is used only on UserKindFederated rows: the
 	// account was recorded before the user's first verified request.
 	UserStatusPending = "pending"
+	// UserStatusDeleting is the status of a user whose forced deletion is
+	// in progress (ptone/scion#2143; see UserDeletion). Only
+	// UserStore.MarkUserDeleting writes it; UpdateUser refuses to write it
+	// and refuses to change a row that has it (ErrUserDeleting), so the
+	// status leaves deleting only when the deletion completes and the row
+	// is removed. Every status check that requires active denies it.
+	UserStatusDeleting = "deleting"
 )
 
 // User kind constants.
@@ -2476,13 +2536,63 @@ type NotificationSubscription struct {
 	CreatedBy         string    `json:"createdBy"`
 }
 
-// CreatorFallbackSubscriptionID is the SubscriptionID of a notification
-// sent to an agent's creator without a subscription: the HALTED
-// notification a halted agent's creator gets when none of the creator's
-// subscriptions matched (ptone/scion#4853). It is the nil UUID, which no
-// subscription has; the column carries no foreign key, and the retry sweep
-// rebuilds such a notification's subscriber from the notification itself.
+// CreatorFallbackSubscriptionID is the nil UUID, the SubscriptionID of a
+// notification that no subscription row produced; no subscription has it,
+// and the column carries no foreign key. What it means depends on the
+// subscriber:
+//   - on an agent-subscriber row it is the HALTED notification a halted
+//     agent's creator gets when none of the creator's subscriptions matched
+//     (ptone/scion#4853); the retry sweep rebuilds such a notification's
+//     subscriber from the notification itself;
+//   - on a user-subscriber row (a schedule-blocked notice, a notification
+//     with a Kind) it means only "no subscription". The dispatch sweep and
+//     the stale-notification expiry read agent-subscriber rows only, so
+//     they never act on these.
+//
+// A new kind of agent-subscriber row without a subscription goes through
+// the HALTED rebuild path in the sweep and must be designed and tested
+// against it.
 const CreatorFallbackSubscriptionID = "00000000-0000-0000-0000-000000000000"
+
+// Notification.Kind values. An empty Kind means not classified: every row
+// stored before kinds were recorded, and every row from a writer that does
+// not set one. An empty Kind does not mean the row is about an agent; code
+// that selects notifications to delete keys on AgentID or SubscriberType,
+// never on Kind.
+const (
+	// NotificationKindArtifactGrant: a user was given access to an
+	// artifact and the granter asked for the user to be told
+	// (ptone/scion#5145). ResourceType is NotificationResourceArtifact.
+	NotificationKindArtifactGrant = "artifact_grant"
+	// NotificationKindArtifactReviewSummary: a review of a user's artifact
+	// was finalized by a reviewer other than the owner whom the finalize
+	// request admitted to submit it (ptone/scion#6853). The artifact's owner is the only recipient.
+	// ResourceType is NotificationResourceArtifact, and Excerpt holds the
+	// cleaned start of the review's summary note, or is empty when the
+	// review has none.
+	NotificationKindArtifactReviewSummary = "artifact_review_summary"
+)
+
+// Notification.ResourceType values.
+const (
+	// NotificationResourceArtifact: ResourceID is an artifact id.
+	NotificationResourceArtifact = "artifact"
+)
+
+// Notification.Status values of NotificationKindArtifactGrant rows.
+const (
+	// NotificationStatusArtifactReviewRequested: the user was given review
+	// access and asked to review the artifact.
+	NotificationStatusArtifactReviewRequested = "ARTIFACT_REVIEW_REQUESTED"
+	// NotificationStatusArtifactShared: the user was given view, edit or
+	// manage access to the artifact.
+	NotificationStatusArtifactShared = "ARTIFACT_SHARED"
+)
+
+// NotificationStatusArtifactReviewSubmitted is the Status of a
+// NotificationKindArtifactReviewSummary row: a reviewer finalized a review
+// of the user's artifact.
+const NotificationStatusArtifactReviewSubmitted = "ARTIFACT_REVIEW_SUBMITTED"
 
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.
@@ -2535,6 +2645,21 @@ type Notification struct {
 	// NextAttemptAt is the earliest time the dispatch sweep may claim the
 	// notification again after a failed delivery; nil means at once.
 	NextAttemptAt *time.Time `json:"nextAttemptAt,omitempty"`
+	// Kind says what produced the notification (a NotificationKind* value),
+	// or is empty when it is not classified. See the NotificationKind*
+	// constants.
+	Kind string `json:"kind,omitempty"`
+	// ResourceType and ResourceID name the thing the notification is about
+	// (for example NotificationResourceArtifact and an artifact id). Both
+	// are empty when it is not about a resource.
+	ResourceType string `json:"resourceType,omitempty"`
+	ResourceID   string `json:"resourceId,omitempty"`
+	// Excerpt is text another principal wrote, kept apart from Message:
+	// for NotificationKindArtifactReviewSummary, the start of the review's
+	// summary note, cleaned when the row is built. Clients show it as
+	// plain text, attributed by Message, and never derive a link or a
+	// resource from it. Empty for every other kind.
+	Excerpt string `json:"excerpt,omitempty"`
 }
 
 // Notification.DispatchOutcome values.
@@ -3525,6 +3650,7 @@ const (
 type ScheduleFieldMask struct {
 	Name      bool
 	CronExpr  bool
+	TimeZone  bool
 	EventType bool
 	Payload   bool
 	Status    bool
@@ -3597,7 +3723,8 @@ type Schedule struct {
 	ID            string     `json:"id"`
 	ProjectID     string     `json:"projectId"`
 	Name          string     `json:"name"`
-	CronExpr      string     `json:"cronExpr"`               // Standard 5-field cron expression (UTC)
+	CronExpr      string     `json:"cronExpr"`               // Standard 5-field cron expression, evaluated in TimeZone
+	TimeZone      string     `json:"timeZone,omitempty"`     // IANA time zone for CronExpr; empty means UTC
 	EventType     string     `json:"eventType"`              // "message" (future: "dispatch_agent")
 	Payload       string     `json:"payload"`                // JSON: handler-specific configuration
 	Status        string     `json:"status"`                 // active, paused, deleted
@@ -3676,10 +3803,29 @@ type ScheduleFilter struct {
 	// the hub's agent row decision, so an agent's list pages fill with the
 	// rows it holds.
 	InitiatorAgentID string
+	// AuthorityPrincipal, when set, keeps only schedules whose recorded
+	// authority (the current initiator principal, with a recorded
+	// attribution as for InitiatorAgentID) is this principal. It matches the
+	// principal the schedule fires under, never CreatedBy. Kind and ID must
+	// both be set; one without the other is ErrInvalidInput.
+	AuthorityPrincipal ScheduleAuthorityPrincipal
 	// SystemPausedOnly, when true, keeps only paused schedules with a
 	// non-empty StatusReason: schedules the hub paused itself. A schedule a
 	// user paused (empty reason) is left out.
 	SystemPausedOnly bool
+}
+
+// ScheduleAuthorityPrincipal names the principal a schedule's recorded
+// authority resolves to: Kind is a DelegationPrincipal* value and ID the
+// principal's ID. The zero value means no principal filter.
+type ScheduleAuthorityPrincipal struct {
+	Kind string
+	ID   string
+}
+
+// IsZero reports whether p names no principal.
+func (p ScheduleAuthorityPrincipal) IsZero() bool {
+	return p.Kind == "" && p.ID == ""
 }
 
 // ToAPI converts a store.Agent to an api.AgentInfo for external consumption.
@@ -4201,6 +4347,10 @@ const (
 	ProjectRoleOwner  = "project-owner"
 	ProjectRoleAdmin  = "project-admin"
 	ProjectRoleMember = "project-member"
+	// ProjectRoleViewer is a built-in membership role (ptone/scion#5519):
+	// it reads the project, its agents and its chat, and cannot post
+	// messages, create agents or message them.
+	ProjectRoleViewer = "project-viewer"
 	// ProjectRoleVisitor is the seeded project role for a federated
 	// account granted visitor access to a project. It does not confer
 	// membership (RoleDefinition.ConfersMembership is false), and only
@@ -4230,12 +4380,22 @@ var BuiltInProjectMembershipRoles = map[string]bool{
 	ProjectRoleOwner:  true,
 	ProjectRoleAdmin:  true,
 	ProjectRoleMember: true,
+	ProjectRoleViewer: true,
 }
 
 // IsBuiltInProjectMembershipRole reports whether the given role name is
 // a built-in project membership role.
 func IsBuiltInProjectMembershipRole(roleName string) bool {
 	return BuiltInProjectMembershipRoles[roleName]
+}
+
+// IsBuiltInProjectMembershipRoleDef reports whether rd is a built-in project
+// membership role: a system role definition with one of the built-in names.
+// A custom (non-system) role that holds such a name is not one
+// (ptone/scion#5519). Prefer it to IsBuiltInProjectMembershipRole wherever
+// the definition is at hand.
+func IsBuiltInProjectMembershipRoleDef(rd *RoleDefinition) bool {
+	return rd != nil && rd.System && BuiltInProjectMembershipRoles[rd.Name]
 }
 
 // Agent role definition names (matching existing AgentRole constants)
@@ -4411,6 +4571,14 @@ const (
 	// operator scope re-issue (ptone/scion#3652). The row is kept as
 	// evidence of the authority the agent held before.
 	EdgeDeactivationScopeReissueReplaced EdgeDeactivationCause = "scope_reissue_replaced"
+	// EdgeDeactivationUserDeleteCascade is recorded by a forced user
+	// delete (ptone/scion#2143), under the deletion's operation ID, on the
+	// edges where the user is the delegator and on the edges and
+	// service-account assignments of every agent it stops. A restore
+	// reactivates only agent_soft_delete rows, so it reactivates none of
+	// these. ValidEdgeDeactivationCause and
+	// ValidAssignmentDeactivationCause accept it.
+	EdgeDeactivationUserDeleteCascade EdgeDeactivationCause = "user_delete_cascade"
 )
 
 // ValidEdgeDeactivationCause reports whether c is a cause that may be
@@ -4421,7 +4589,8 @@ func ValidEdgeDeactivationCause(c EdgeDeactivationCause) bool {
 		EdgeDeactivationAgentHardDelete,
 		EdgeDeactivationDelegatorDeleted,
 		EdgeDeactivationCreateCompensation,
-		EdgeDeactivationReincarnateReplaced:
+		EdgeDeactivationReincarnateReplaced,
+		EdgeDeactivationUserDeleteCascade:
 		return true
 	}
 	return false
@@ -4464,7 +4633,8 @@ func ValidAssignmentDeactivationCause(c EdgeDeactivationCause) bool {
 		EdgeDeactivationReincarnateReplaced,
 		EdgeDeactivationReincarnateFailed,
 		EdgeDeactivationReincarnatePendingSwept,
-		EdgeDeactivationReincarnateStaleSwept:
+		EdgeDeactivationReincarnateStaleSwept,
+		EdgeDeactivationUserDeleteCascade:
 		return true
 	}
 	return false
@@ -4940,6 +5110,45 @@ type DecisionAuditRecord struct {
 	ResourceAncestryLen    int
 	ResourceScopeKind      string
 	ResourceScopeUserIDSet bool
+
+	// RecordKind is empty for an ordinary decision record. A non-empty
+	// value names a record that summarizes more than one decision, for
+	// example DecisionAuditRecordKindListFilter. In-memory only, like the
+	// rest of the record: the decision-log adapter excludes every record
+	// with a RecordKind until the typed audit schema carries it.
+	RecordKind string
+	// ListFilter is the summary of a list request's item filter. Set only
+	// when RecordKind is DecisionAuditRecordKindListFilter.
+	ListFilter *DecisionAuditListFilter
+}
+
+// DecisionAuditRecordKindListFilter is the RecordKind of the one aggregated
+// item-filter record an agent delegated credential's list request writes.
+const DecisionAuditRecordKindListFilter = "agent_delegation_list_filter"
+
+// DecisionAuditListFilterMaxDeniedIDs bounds DecisionAuditListFilter.DeniedIDs.
+const DecisionAuditListFilterMaxDeniedIDs = 50
+
+// DecisionAuditListFilter summarizes the per-item decisions of one list
+// request. Each distinct item is counted once, however many passes of the
+// list examined it.
+type DecisionAuditListFilter struct {
+	// ItemPermission is the permission each item was decided for.
+	ItemPermission string
+	// Allowed, Denied and DroppedByAdmission count distinct items. An item
+	// is dropped by admission when its project is outside the list's
+	// project set, has no project, or does not admit the authorizing user.
+	Allowed            int
+	Denied             int
+	DroppedByAdmission int
+	// DeniedIDs holds up to DecisionAuditListFilterMaxDeniedIDs IDs of
+	// denied or dropped items; Truncated reports that there were more.
+	DeniedIDs []string
+	Truncated bool
+	// Incomplete reports that the request did not finish its list, for any
+	// reason, after the list arm started: a panic, a cancelled request, an
+	// invalid cursor or filter, or a server error.
+	Incomplete bool
 }
 
 // =============================================================================
@@ -5213,6 +5422,11 @@ type AgentDelegationGrant struct {
 	AgentProjectID    string
 	AgentGeneration   int
 	AgentStateVersion int64
+	// IssuedRunID is the agent's RunID at issuance, read under the agent row
+	// lock; "" for a grant issued before the column existed or to an agent
+	// not yet dispatched. A suspend that finds a newer run already started
+	// keeps the grants keyed to that run (ptone/scion#6403).
+	IssuedRunID string
 	// IssuerUserID is the user who created the grant.
 	IssuerUserID string
 	// BoundaryKind is "project" or "hub"; BoundaryProjectID is set iff

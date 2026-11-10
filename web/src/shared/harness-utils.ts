@@ -44,6 +44,7 @@ export const KNOWN_HARNESS_NAMES = [
   'hermes',
   'grok-build',
   'muse-code',
+  'pi',
   'antigravity-ui',
 ] as const;
 
@@ -73,6 +74,7 @@ const HARNESS_DISPLAY_NAMES: Record<KnownHarnessName, string> = {
   hermes: 'Hermes',
   'grok-build': 'Grok Build',
   'muse-code': 'Muse Code',
+  pi: 'Pi',
   'antigravity-ui': 'Antigravity UI (experimental)',
 };
 

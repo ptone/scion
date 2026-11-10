@@ -21,7 +21,9 @@
  * is on (client/broker-routes.ts); the existing detail page renders
  * otherwise. Tabs (?tab=):
  *
- * - overview: runtime target card, capacity, capabilities, legacy profiles;
+ * - overview: runtime target card, capacity, capabilities, legacy profiles,
+ *   the read-only conversion plan of a legacy broker, and the read-only
+ *   project storage card;
  * - agents: the projects this broker provides for, with their agents;
  * - health: shown only to a user holding hub.health.read, exactly the set
  *   the health summary endpoint authorizes; also hidden on a 401/403;
@@ -49,9 +51,11 @@ import type { BrokerAreaProject } from './broker-area-agents.js';
 import '../shared/status-badge.js';
 import '../shared/detail-header.js';
 import './broker-area-overview.js';
+import './broker-area-conversion-plan.js';
 import './broker-area-agents.js';
 import './broker-area-health.js';
 import './broker-area-configure.js';
+import '../shared/broker-storage-card.js';
 
 export type BrokerAreaTab = 'overview' | 'agents' | 'health' | 'configure';
 
@@ -186,6 +190,20 @@ export class ScionPageBrokerAreaDetail extends LitElement {
     } catch (err) {
       console.error('Failed to load broker health:', err);
     }
+  }
+
+  /**
+   * The hub's layout comparison for this broker. null when the comparison is
+   * not available: the health summary is not available to this user, has no
+   * row for this broker (for example a truncated summary), or the row has no
+   * workspace storage (the hub compares only a reported layout). [] when the
+   * hub lists no difference; that is not a confirmed match, because the
+   * summary also omits the list when the hub's own layout is not shared or
+   * could not be read.
+   */
+  private get storageMismatch(): string[] | null {
+    if (!this.healthAvailable || !this.healthRow?.workspace_storage) return null;
+    return this.healthRow.workspace_storage.layout_mismatch ?? [];
   }
 
   private get configureVisible(): boolean {
@@ -344,6 +362,11 @@ export class ScionPageBrokerAreaDetail extends LitElement {
             .broker=${broker}
             .settings=${this.settings}
           ></scion-broker-area-overview>
+          <scion-broker-area-conversion-plan .broker=${broker}></scion-broker-area-conversion-plan>
+          <scion-broker-storage-card
+            .storage=${broker.workspaceStorage}
+            .mismatch=${this.storageMismatch}
+          ></scion-broker-storage-card>
         </sl-tab-panel>
         <sl-tab-panel name="agents">
           <scion-broker-area-agents
