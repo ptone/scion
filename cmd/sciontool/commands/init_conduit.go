@@ -81,8 +81,10 @@ func (p portForwarding) run(ctx context.Context) {
 // newPortForwarding wires portForwarding to the hub client; getenv reads
 // the agent environment (os.Getenv outside tests). ptyUser is the agent
 // user that PTY streams' tmux clients run as; ssh is the conduit SSH
-// server (prepareConduitSSH), nil when there is none.
-func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, ssh *sshd.Config, getenv func(string) string) portForwarding {
+// server (prepareConduitSSH), nil when there is none. childArgs is init's
+// child command, which decides whether the deliver-message route is
+// offered (deliverRouteOptions).
+func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, ssh *sshd.Config, childArgs []string, getenv func(string) string) portForwarding {
 	return portForwarding{
 		getenv:         getenv,
 		disableConduit: disableConduit,
@@ -90,7 +92,10 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 			// The control handler is the session's only RPC target: a
 			// hub-originated RpcRequest reaches /v1/control/* and nothing
 			// else in sciontool.
-			ctl := control.New(control.Options{KickTokenRefresh: c.KickTokenRefresh})
+			ctl := control.New(control.Options{
+				KickTokenRefresh: c.KickTokenRefresh,
+				Deliver:          deliverRouteOptions(ptyUser, childArgs, getenv, deliverResolveTool),
+			})
 			a, err := conduit.New(conduit.Options{
 				HubURL:                c.HubURL(),
 				AgentID:               c.AgentID(),
