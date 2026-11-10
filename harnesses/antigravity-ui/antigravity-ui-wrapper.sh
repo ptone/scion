@@ -60,6 +60,12 @@ APP_IN="${STATE}/app.stdin"
 NO_AUTH_MARK="${STATE}/no-auth"
 PROMPT_RE='Enter the authorization code'
 NO_AUTH_MSG="the app is not signed in and is waiting for an interactive sign-in code. Assign a dedicated GCP service account to the agent, or stage a gcloud-adc file (Application Default Credentials); see the bundle README."
+# Under plain GCP identity passthrough (the host's own identity, no assigned
+# service account) the identity is only used on the operator's opt-in.
+if [ "${SCION_METADATA_MODE:-}" = "passthrough" ] && [ -z "${SCION_METADATA_SA_EMAIL:-}" ] \
+  && [ "${AGY_ADC_AUTH:-}" != "true" ]; then
+  NO_AUTH_MSG="the app is not signed in and is waiting for an interactive sign-in code. With GCP identity passthrough the host identity is not used by default. Assign a dedicated GCP service account to the agent, stage a gcloud-adc file, or set AGY_ADC_AUTH=true in the harness-config env (only on a throwaway VM whose service account is minimal); see the bundle README."
+fi
 APP_PID=""
 NGX_PID=""
 SINK_PID=""
@@ -270,6 +276,12 @@ while :; do
   [ "$attempt" -lt "$ATTEMPTS" ] \
     || fail "could not start the language server on a port of its own in ${ATTEMPTS} attempts"
 done
+# The UI has no login of its own: the language server must listen on
+# loopback only.
+addr="$(python3 -I "$HELPER" listen-addr --port "$JETSKI_LS_PORT" --pid "$APP_PID" 2>/dev/null || echo unknown)"
+if [ "$addr" != "loopback" ]; then
+  fail "the language server's listener on port ${JETSKI_LS_PORT} is not loopback-only (${addr})"
+fi
 log "language server is up on 127.0.0.1:${JETSKI_LS_PORT}"
 sign_in_watcher &
 WATCH_PID=$!
@@ -342,6 +354,10 @@ while :; do
   [ "$attempt" -lt "$ATTEMPTS" ] \
     || fail "could not start the proxy on a port of its own in ${ATTEMPTS} attempts"
 done
+addr="$(python3 -I "$HELPER" listen-addr --port "$AGUI_PROXY_PORT" --pid "$NGX_PID" 2>/dev/null || echo unknown)"
+if [ "$addr" != "loopback" ]; then
+  fail "the proxy's listener on port ${AGUI_PROXY_PORT} is not loopback-only (${addr})"
+fi
 log "proxy is up on 127.0.0.1:${AGUI_PROXY_PORT}"
 
 MODE=none

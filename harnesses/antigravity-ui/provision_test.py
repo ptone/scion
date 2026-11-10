@@ -95,7 +95,8 @@ NO_IDENTITY = dict(GOOGLE_APPLICATION_CREDENTIALS=None, SCION_METADATA_MODE=None
                    SCION_METADATA_SA_EMAIL=None)
 
 
-def _make_ctx(home: str, explicit_type: str = "", adc_file: bool = False) -> scion_harness.ProvisionContext:
+def _make_ctx(home: str, explicit_type: str = "", adc_file: bool = False,
+              mapped_adc: bool = False) -> scion_harness.ProvisionContext:
     bundle = os.path.join(home, ".scion", "harness")
     os.makedirs(os.path.join(bundle, "inputs"), exist_ok=True)
     os.makedirs(os.path.join(bundle, "outputs"), exist_ok=True)
@@ -107,6 +108,10 @@ def _make_ctx(home: str, explicit_type: str = "", adc_file: bool = False) -> sci
         with open(os.path.join(bundle, "secrets", "gcloud-adc"), "w", encoding="utf-8") as f:
             f.write("{}")
         cand["file_secret_files"] = {"gcloud-adc": "$HOME/.scion/harness/secrets/gcloud-adc"}
+    if mapped_adc:
+        # The file mapping Scion adds for GOOGLE_APPLICATION_CREDENTIALS.
+        cand["files"] = [{"source_path": "/host/adc.json",
+                          "container_path": "~/.config/gcloud/application_default_credentials.json"}]
     cand_path = os.path.join(bundle, "inputs", "auth-candidates.json")
     with open(cand_path, "w", encoding="utf-8") as f:
         json.dump(cand, f)
@@ -185,10 +190,11 @@ class ProvisionSeedTest(_SeedCases, unittest.TestCase):
 
 
 class ProvisionTest(unittest.TestCase):
-    def _run(self, home: str, explicit_type: str = "", adc_file: bool = False, **env: str | None):
+    def _run(self, home: str, explicit_type: str = "", adc_file: bool = False,
+             mapped_adc: bool = False, **env: str | None):
         with temporary_home(home), temporary_env(**{**NO_IDENTITY, **env}), \
                 contextlib.redirect_stderr(io.StringIO()):
-            ctx = _make_ctx(home, explicit_type, adc_file)
+            ctx = _make_ctx(home, explicit_type, adc_file, mapped_adc)
             provision.provision(ctx)
             auth_path, env_path = ctx.output_paths()
             with open(auth_path, encoding="utf-8") as f:
@@ -213,17 +219,53 @@ class ProvisionTest(unittest.TestCase):
             want = os.path.join(home, ".scion", "harness", "secrets", "gcloud-adc")
             self.assertEqual(overlay, {"AGY_ADC_AUTH": "true", "GOOGLE_APPLICATION_CREDENTIALS": want})
 
-    def test_staged_file_wins_over_env_and_assignment(self):
+    def test_staged_file_wins_over_mapped_file_and_assignment(self):
         with tempfile.TemporaryDirectory() as home:
-            _, overlay = self._run(home, adc_file=True, GOOGLE_APPLICATION_CREDENTIALS="/env/adc.json",
+            _, overlay = self._run(home, adc_file=True, mapped_adc=True,
                                    SCION_METADATA_MODE="assign", SCION_METADATA_SA_EMAIL="sa@p.iam.gserviceaccount.com")
             self.assertTrue(overlay["GOOGLE_APPLICATION_CREDENTIALS"].endswith("/secrets/gcloud-adc"))
 
-    def test_env_credentials_file(self):
+    def test_provisioner_env_credentials_are_not_used(self):
+        # The provisioner runs with a minimal environment; Scion delivers the
+        # ADC file as a staged secret or a file mapping instead.
         with tempfile.TemporaryDirectory() as home:
             auth, overlay = self._run(home, GOOGLE_APPLICATION_CREDENTIALS="/env/adc.json")
+            self.assertEqual(auth["method"], "none")
+            self.assertEqual(overlay, {})
+
+    def test_mapped_adc_file(self):
+        want = None
+        with tempfile.TemporaryDirectory() as home:
+            want = os.path.join(home, ".config", "gcloud", "application_default_credentials.json")
+            auth, overlay = self._run(home, mapped_adc=True)
             self.assertEqual(auth["method"], "vertex-ai")
-            self.assertEqual(overlay, {"AGY_ADC_AUTH": "true", "GOOGLE_APPLICATION_CREDENTIALS": "/env/adc.json"})
+            self.assertEqual(overlay, {"AGY_ADC_AUTH": "true", "GOOGLE_APPLICATION_CREDENTIALS": want})
+
+    def test_adc_file_present_at_the_mapped_path(self):
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, ".config", "gcloud", "application_default_credentials.json")
+            os.makedirs(os.path.dirname(path))
+            with open(path, "w") as f:
+                f.write("{}")
+            auth, overlay = self._run(home)
+            self.assertEqual(auth["method"], "vertex-ai")
+            self.assertEqual(overlay["GOOGLE_APPLICATION_CREDENTIALS"], path)
+
+    def test_explicit_vertex_ai_with_plain_passthrough_does_not_fail(self):
+        # Dispatch selects vertex-ai for passthrough; without an SA email it
+        # is the host identity, which is used only through the operator's
+        # AGY_ADC_AUTH (read by the app, not here).
+        with tempfile.TemporaryDirectory() as home:
+            auth, overlay = self._run(home, "vertex-ai", SCION_METADATA_MODE="passthrough")
+            self.assertEqual(auth["method"], "none")
+            self.assertEqual(overlay, {})
+
+    def test_explicit_vertex_ai_with_rewritten_assign(self):
+        with tempfile.TemporaryDirectory() as home:
+            auth, overlay = self._run(home, "vertex-ai", SCION_METADATA_MODE="passthrough",
+                                      SCION_METADATA_SA_EMAIL="sa@p.iam.gserviceaccount.com")
+            self.assertEqual(auth["method"], "vertex-ai")
+            self.assertEqual(overlay, {"AGY_ADC_AUTH": "true"})
 
     def test_assigned_service_account(self):
         with tempfile.TemporaryDirectory() as home:
@@ -307,8 +349,10 @@ class PortOwnerTest(unittest.TestCase):
         os.makedirs(os.path.join(self.proc, "net"))
         self.tcp = []
 
-    def _listen(self, port: int, inode: int, state: str = "0A", v6: bool = False):
-        local = ("00000000000000000000000001000000" if v6 else "0100007F") + ":%04X" % port
+    def _listen(self, port: int, inode: int, state: str = "0A", v6: bool = False, addr: str | None = None):
+        if addr is None:
+            addr = "00000000000000000000000001000000" if v6 else "0100007F"
+        local = addr + ":%04X" % port
         line = "  0: %s 00000000:0000 %s 00000000:00000000 00:00000000 00000000  1000  0 %d 1" % (local, state, inode)
         name = "tcp6" if v6 else "tcp"
         path = os.path.join(self.proc, "net", name)
@@ -366,6 +410,31 @@ class PortOwnerTest(unittest.TestCase):
         self._listen(9000, 560)
         self._pid(100, 1, [559, 560])
         self.assertEqual(helper.port_owner("8443", "100", self.proc), "none")
+
+    def test_listen_addr_loopback(self):
+        self._listen(8443, 570)                                   # 127.0.0.1
+        self._listen(8443, 571, v6=True)                          # ::1
+        self._listen(8443, 572, v6=True, addr="0000000000000000FFFF00000100007F")  # ::ffff:127.0.0.1
+        self._pid(100, 1, [570, 571, 572])
+        self.assertEqual(helper.listen_addr("8443", "100", self.proc), "loopback")
+
+    def test_listen_addr_wildcard_is_exposed(self):
+        self._listen(8443, 573, addr="00000000")                  # 0.0.0.0
+        self._listen(8443, 574)                                   # 127.0.0.1
+        self._pid(100, 1, [573, 574])
+        self.assertEqual(helper.listen_addr("8443", "100", self.proc), "exposed 0.0.0.0")
+
+    def test_listen_addr_v6_wildcard_and_lan_address(self):
+        self._listen(8443, 575, v6=True, addr="00000000000000000000000000000000")  # ::
+        self._listen(8443, 576, addr="0100000A")                  # 10.0.0.1
+        self._pid(100, 1, [575, 576])
+        self.assertEqual(helper.listen_addr("8443", "100", self.proc), "exposed 10.0.0.1,::")
+
+    def test_listen_addr_ignores_listeners_of_others(self):
+        self._listen(8443, 577, addr="00000000")
+        self._pid(100, 1)
+        self._pid(200, 1, [577])
+        self.assertEqual(helper.listen_addr("8443", "100", self.proc), "none")
 
     def test_bad_arguments(self):
         with self.assertRaises(helper.HelperError):
@@ -634,6 +703,15 @@ class WrapperStartupTest(unittest.TestCase):
         self.assertIn(f"port {taken} is not available", out)
         self.assertIn("the app exited during start-up", out)
 
+    def test_sign_in_prompt_under_passthrough_names_the_opt_in(self):
+        app = self._script("fakeapp", self.SIGNIN_APP)
+        proc = self._run(app, "40", SCION_METADATA_MODE="passthrough")
+        out = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, out)
+        self.assertIn("With GCP identity passthrough the host identity is not used by default", out)
+        self.assertIn("AGY_ADC_AUTH=true in the harness-config env", out)
+        self.assertNotIn("accounts.google.com", out)
+
     def test_app_exit_during_start_up(self):
         proc = self._run("/bin/false", "40")
         out = proc.stdout + proc.stderr
@@ -695,7 +773,7 @@ def serve_http(p):
 
 
 def serve_https(p):
-    srv = http.server.HTTPServer(("127.0.0.1", p), handler)
+    srv = http.server.HTTPServer((os.environ.get("FAKE_BIND") or "127.0.0.1", p), handler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(os.path.join(cert, "cert.pem"), os.path.join(cert, "key.pem"))
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
@@ -816,6 +894,11 @@ class WrapperRunningTest(unittest.TestCase):
         self.addCleanup(self._cleanup)
 
     def _cleanup(self):
+        if self.proc and self.proc.stdin:
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
         if self.proc and self.proc.poll() is None:
             self.proc.send_signal(signal.SIGTERM)
             try:
@@ -988,6 +1071,13 @@ class WrapperRunningTest(unittest.TestCase):
             ports = f.read().split()
         self.assertEqual(len(ports), 2, ports)
         self.assertIn("language server is up on 127.0.0.1:%s" % ports[1], out)
+
+    def test_language_server_on_a_non_loopback_address_fails(self):
+        self._start(FAKE_BIND="0.0.0.0")
+        self.assertEqual(self._wait_exit(), 1)
+        out = self._output()
+        self.assertIn("is not loopback-only (exposed 0.0.0.0)", out)
+        self.assertNotIn("Messages and tasks are not delivered", out)
 
     def test_foreign_listener_on_the_port_is_not_used(self):
         self._start(FAKE_MODE="foreign-first")

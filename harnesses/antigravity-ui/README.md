@@ -29,6 +29,9 @@ agent container (scion-antigravity-ui)
   shim changes nothing. The patches are specific to the pinned app version:
   at start the wrapper checks that they apply, and otherwise turns the shim
   off and offers only the tunnel.
+- Known limit: the port ownership and loopback checks run at start. If the
+  language server stops while the app keeps running, the wrapper does not
+  notice and the UI stops answering; restart the agent.
 - Known limit: the shim's HTML rule turns `="/` into `="` in every HTML page
   the app serves. The version check refuses an app page with a
   protocol-relative attribute (`="//`), but another HTML document the app
@@ -87,7 +90,9 @@ harness has one auth type, `vertex-ai`. The provisioner sets
 `AGY_ADC_AUTH=true` for the app when it finds, in this order:
 
 1. a staged `gcloud-adc` file secret;
-2. `GOOGLE_APPLICATION_CREDENTIALS` in the agent's environment;
+2. the ADC file Scion maps into the container from
+   `GOOGLE_APPLICATION_CREDENTIALS` (at
+   `~/.config/gcloud/application_default_credentials.json`);
 3. a dedicated GCP service account assigned to the agent (GCP identity mode
    `assign`; on Kubernetes the runtime may carry it as workload identity).
 
@@ -97,15 +102,15 @@ grant it editor or owner, data or IAM-admin roles. Prefer a project without
 production data, and prefer `assign` (short-lived tokens, no key file) over a
 staged file. Any process in the container can obtain its tokens.
 
-GCP identity `passthrough` with the host VM's own identity is not used by
-default. If the host VM's service account is minimal and you want to use
-it, set `AGY_ADC_AUTH=true` through settings or profile environment, or a
-harness-config `env` override. Template environment keys are not applied.
+Without any of these, Scion refuses to start the agent.
 
-Without a `gcloud-adc` file or an assigned service account, Scion refuses to
-start the agent. With plain `passthrough` Scion does start it (it counts the
-host identity as assigned), but the app is not given ADC: it asks for an
-interactive sign-in and the agent stops as described below.
+GCP identity `passthrough` uses the host VM's own identity. Scion starts such
+an agent, but the provisioner does not set `AGY_ADC_AUTH` for it, so by
+default the app asks for an interactive sign-in and the agent stops with a
+message listing the options. To use the host identity anyway, set
+`AGY_ADC_AUTH=true` in the harness-config `env` (the app reads it from the
+container environment). Do this only on a throwaway VM whose service account
+is minimal. Template environment keys are not applied.
 
 If the app asks for an interactive sign-in code at any time (for example
 when the assigned service account stops working), the agent stops with a

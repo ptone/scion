@@ -23,16 +23,25 @@ provisioner stages no instructions or MCP servers. Its jobs:
   1. Auth. The app signs in with Google Application Default Credentials
      when AGY_ADC_AUTH=true. vertex-ai is resolved, in this order, from:
        a. a staged gcloud-adc file secret;
-       b. GOOGLE_APPLICATION_CREDENTIALS in the container environment;
+       b. the ADC file Scion maps into the container from
+          GOOGLE_APPLICATION_CREDENTIALS, at
+          ~/.config/gcloud/application_default_credentials.json (a file
+          mapping in the auth candidates, or the file being present);
        c. a dedicated GCP service account assigned to the agent: the broker
           sets SCION_METADATA_SA_EMAIL for it, with SCION_METADATA_MODE
           "assign", or "passthrough" when the runtime turns an assign into
-          its own workload identity (Kubernetes). Plain passthrough, the
-          host's own identity, carries no SA email and does not count.
+          its own workload identity (Kubernetes).
      Each writes AGY_ADC_AUTH=true into the env overlay, plus
-     GOOGLE_APPLICATION_CREDENTIALS when a file is involved. With none of
-     them the method is "none" and AGY_ADC_AUTH is not set: the app then
-     waits for an interactive sign-in code, which the wrapper reports.
+     GOOGLE_APPLICATION_CREDENTIALS for a file. Otherwise the method is
+     "none" and this provisioner sets no AGY_ADC_AUTH; the app then waits
+     for an interactive sign-in code, which the wrapper reports.
+
+     Plain passthrough (the host's own identity, no SA email) resolves to
+     "none" even when vertex-ai was selected, and does not fail. An operator
+     who wants the host identity sets AGY_ADC_AUTH=true in the harness-config
+     env: the app reads it from the container environment. This provisioner
+     cannot see it, because it runs with a minimal environment (HOME, PATH,
+     LANG, TZ and SCION_* only).
   2. Turn the app's self-update check off: merge
      {"autoCheckForUpdates": false} into ~/.config/Antigravity/app_storage.json,
      keeping every other key. This runs before every start (pre-start).
@@ -71,6 +80,9 @@ AUTH = scion_harness.AuthSpec(
 )
 
 ADC_SECRET = "gcloud-adc"
+# Where Scion mounts the ADC file named by GOOGLE_APPLICATION_CREDENTIALS
+# (pkg/harness ContainerScriptHarness.ResolveAuth).
+ADC_MAPPED_PATH = "~/.config/gcloud/application_default_credentials.json"
 APP_STORAGE = "~/.config/Antigravity/app_storage.json"
 UPDATE_KEY = "autoCheckForUpdates"
 
@@ -132,15 +144,20 @@ def resolve_auth(ctx: scion_harness.ProvisionContext) -> tuple[scion_harness.Res
         return (scion_harness.ResolvedAuth("vertex-ai", spec_entry=method, auth_file=path),
                 {"AGY_ADC_AUTH": "true", "GOOGLE_APPLICATION_CREDENTIALS": path})
 
-    gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-    if not gac and "GOOGLE_APPLICATION_CREDENTIALS" in ctx.env_keys:
-        gac = (ctx.read_secret("GOOGLE_APPLICATION_CREDENTIALS", env_fallback=True) or "").strip()
-    if gac:
-        return (scion_harness.ResolvedAuth("vertex-ai", "GOOGLE_APPLICATION_CREDENTIALS", method),
-                {"AGY_ADC_AUTH": "true", "GOOGLE_APPLICATION_CREDENTIALS": gac})
+    mapped = scion_harness.expand_path(ADC_MAPPED_PATH)
+    if any(scion_harness.expand_path(p) == mapped for p in ctx.file_paths) or os.path.isfile(mapped):
+        return (scion_harness.ResolvedAuth("vertex-ai", spec_entry=method, auth_file=mapped),
+                {"AGY_ADC_AUTH": "true", "GOOGLE_APPLICATION_CREDENTIALS": mapped})
 
     if _assigned_service_account():
         return scion_harness.ResolvedAuth("vertex-ai", spec_entry=method), {"AGY_ADC_AUTH": "true"}
+
+    if os.environ.get("SCION_METADATA_MODE", "").strip() == "passthrough":
+        # The host's own identity. Not used unless the operator sets
+        # AGY_ADC_AUTH=true in the harness-config env, which the app reads.
+        ctx.info("GCP identity passthrough: the host identity is used only if "
+                 "AGY_ADC_AUTH=true is set in the harness-config env")
+        return scion_harness.ResolvedAuth("none"), {}
 
     if explicit:
         raise scion_harness.ProvisionError(

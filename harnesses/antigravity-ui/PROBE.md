@@ -53,7 +53,20 @@ be registered. Before the banner, the wrapper prints one of:
   the pinned version);
 - `path shim off: <reason>`: report the reason.
 
-## 3. Root check (tunnel case)
+## 3. Listeners
+
+From a second shell, after the banner:
+
+```sh
+docker exec agui-probe ss -ltn
+```
+
+- L1. How many listening TCP sockets are there, and are ALL of them on
+  `127.0.0.1` or `[::1]` (y/n)? Report the count and any non-loopback
+  address. (The wrapper refuses to start if the language server or the
+  proxy is not loopback-only; this also covers the app's other listeners.)
+
+## 3b. Root check (tunnel case)
 
 Open `http://127.0.0.1:8090/` in the host browser.
 
@@ -156,6 +169,7 @@ Send back this table. Values are yes/no, counts or paths; never tokens.
 |---|---|---|
 | Build | clean build (y/n) | |
 | Shim | `path_rewrite=shim` printed (y/n; reason if off) | |
+| L1 | listening sockets (count); all on loopback (y/n; list any other address) | |
 | R1 | root: UI loads; failed requests (count) | |
 | R2 | root: reload on a conversation URL works (y/n) | |
 | P1 | prefix: UI loads into the workspace (y/n) | |

@@ -21,6 +21,9 @@ Subcommands:
                     (see SHIM_PATCHES), else "none" and the reason.
   free-port         Print the preferred loopback port if it is free, else
                     a free ephemeral one.
+  listen-addr       Print "loopback", "exposed <addresses>" or "none" for the
+                    local addresses of this process tree's listeners on a
+                    TCP port.
   port-owner        Print "ours", "foreign" or "none": whether the listener
                     on a TCP port belongs to a given process or one of its
                     descendants.
@@ -31,6 +34,7 @@ Stdlib only.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 import re
 import socket
@@ -279,6 +283,46 @@ def any_free_port() -> int:
 _TCP_LISTEN = "0A"
 
 
+def _decode_addr(hex_addr: str) -> str:
+    """The local address of a /proc/net/tcp{,6} entry as text."""
+    raw = bytes.fromhex(hex_addr)
+    # Each 32-bit word is in host (little-endian) order.
+    words = b"".join(raw[i:i + 4][::-1] for i in range(0, len(raw), 4))
+    if len(words) == 4:
+        return str(ipaddress.IPv4Address(words))
+    return str(ipaddress.IPv6Address(words))
+
+
+def _is_loopback(addr: str) -> bool:
+    ip = ipaddress.ip_address(addr)
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback
+
+
+def listen_entries(port: int, proc_root: str = "/proc") -> dict[str, str]:
+    """Socket inode -> local address of TCP listeners on port."""
+    out: dict[str, str] = {}
+    for name in ("tcp", "tcp6"):
+        try:
+            with open(os.path.join(proc_root, "net", name), encoding="ascii") as f:
+                lines = f.readlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 10 or fields[3] != _TCP_LISTEN:
+                continue
+            try:
+                addr_hex, port_hex = fields[1].rsplit(":", 1)
+                if int(port_hex, 16) != port or fields[9] == "0":
+                    continue
+                out[fields[9]] = _decode_addr(addr_hex)
+            except (ValueError, IndexError):
+                continue
+    return out
+
+
 def listen_inodes(port: int, proc_root: str = "/proc") -> set[str]:
     """Socket inodes of TCP listeners on port (IPv4 and IPv6)."""
     inodes: set[str] = set()
@@ -333,25 +377,14 @@ def _in_tree(proc_root: str, pid: str, root: str) -> bool:
     return pid == root
 
 
-def port_owner(port: str, root_pid: str, proc_root: str = "/proc") -> str:
-    """Return "ours" if a listener on port is held by root_pid, one of its
-    descendants or a process in its session, "foreign" if the port has
-    listeners but none of ours, and "none" if nothing listens on it."""
-    p = int(_port(port, "port"))
-    if not root_pid.isdigit():
-        raise HelperError(f"pid must be a number, got {root_pid!r}")
-    inodes = listen_inodes(p, proc_root)
-    if not inodes:
-        return "none"
-    wanted = {f"socket:[{i}]" for i in inodes}
+def _tree_sockets(proc_root: str, root_pid: str) -> set[str]:
+    """Socket inodes held by root_pid, its descendants or its session."""
+    held: set[str] = set()
     try:
         pids = [d for d in os.listdir(proc_root) if d.isdigit()]
     except OSError as exc:
         raise HelperError(f"cannot list {proc_root}: {exc}") from exc
     for pid in pids:
-        # A descendant of root_pid, or a process in its session: the wrapper
-        # starts the app and nginx with setsid, so a server that double-forks
-        # out of the parent chain still has their session id.
         if not (_in_tree(proc_root, pid, root_pid) or _session(proc_root, pid) == root_pid):
             continue
         fd_dir = os.path.join(proc_root, pid, "fd")
@@ -361,11 +394,44 @@ def port_owner(port: str, root_pid: str, proc_root: str = "/proc") -> str:
             continue
         for fd in fds:
             try:
-                if os.readlink(os.path.join(fd_dir, fd)) in wanted:
-                    return "ours"
+                link = os.readlink(os.path.join(fd_dir, fd))
             except OSError:
                 continue
-    return "foreign"
+            if link.startswith("socket:[") and link.endswith("]"):
+                held.add(link[len("socket:["):-1])
+    return held
+
+
+def listen_addr(port: str, root_pid: str, proc_root: str = "/proc") -> str:
+    """Return "loopback" if every listener of root_pid's tree on port is on a
+    loopback address, "exposed <addr,...>" if any is not, or "none"."""
+    p = int(_port(port, "port"))
+    if not root_pid.isdigit():
+        raise HelperError(f"pid must be a number, got {root_pid!r}")
+    entries = listen_entries(p, proc_root)
+    if not entries:
+        return "none"
+    ours = _tree_sockets(proc_root, root_pid)
+    addrs = sorted({addr for inode, addr in entries.items() if inode in ours})
+    if not addrs:
+        return "none"
+    exposed = [a for a in addrs if not _is_loopback(a)]
+    return "exposed " + ",".join(exposed) if exposed else "loopback"
+
+
+def port_owner(port: str, root_pid: str, proc_root: str = "/proc") -> str:
+    """Return "ours" if a listener on port is held by root_pid, one of its
+    descendants or a process in its session (the wrapper starts the app and
+    nginx with setsid, so a server that double-forks out of the parent chain
+    still has their session id), "foreign" if the port has listeners but
+    none of ours, and "none" if nothing listens on it."""
+    p = int(_port(port, "port"))
+    if not root_pid.isdigit():
+        raise HelperError(f"pid must be a number, got {root_pid!r}")
+    inodes = listen_inodes(p, proc_root)
+    if not inodes:
+        return "none"
+    return "ours" if inodes & _tree_sockets(proc_root, root_pid) else "foreign"
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +460,11 @@ def main(argv: list[str] | None = None) -> int:
     free_group.add_argument("--preferred")
     free_group.add_argument("--any", action="store_true")
 
+    p_addr = sub.add_parser("listen-addr")
+    p_addr.add_argument("--port", required=True)
+    p_addr.add_argument("--pid", required=True)
+    p_addr.add_argument("--proc-root", default="/proc")
+
     p_owner = sub.add_parser("port-owner")
     p_owner.add_argument("--port", required=True)
     p_owner.add_argument("--pid", required=True)
@@ -405,6 +476,8 @@ def main(argv: list[str] | None = None) -> int:
             print(shim_check(args.ls_port, args.force_mismatch))
         elif args.cmd == "free-port":
             print(any_free_port() if args.any else free_port(args.preferred))
+        elif args.cmd == "listen-addr":
+            print(listen_addr(args.port, args.pid, args.proc_root))
         elif args.cmd == "port-owner":
             print(port_owner(args.port, args.pid, args.proc_root))
         else:
