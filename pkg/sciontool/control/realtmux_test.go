@@ -125,6 +125,19 @@ func waitFile(t *testing.T, path string, want int) string {
 	return string(got)
 }
 
+// waitExists waits until path exists.
+func waitExists(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("%s did not appear", filepath.Base(path))
+}
+
 // TestRealTmux_Deliver512KiBByteExact: a 512 KiB body arrives byte-exact
 // through the route, the local runner and a bracketed paste (design r3
 // §6.3, sciontool real tmux). Lines stay under the terminal's canonical
@@ -163,8 +176,13 @@ func TestRealTmux_PasteEndMarkerArrivesAsText(t *testing.T) {
 // session writes no readiness files (design r3 §3.1, R1b). The pane
 // ignores SIGINT, so the interrupt only discards the pending input line.
 func TestRealTmux_InterruptWithoutReadiness(t *testing.T) {
-	out := filepath.Join(t.TempDir(), "out")
-	h := realTmux(t, "trap '' INT; exec cat > "+out)
+	dir := t.TempDir()
+	out, ready := filepath.Join(dir, "out"), filepath.Join(dir, "ready")
+	// The pane marks itself ready only after it ignores SIGINT, so the
+	// interrupt cannot reach it before the trap is in place (a fresh pane
+	// may not have run its first command yet when the test posts).
+	h := realTmux(t, "trap '' INT; : > "+ready+"; exec cat > "+out)
+	waitExists(t, ready)
 	m := realBody("intr-1", "interrupt_paste", "after")
 	m["interrupt_keys"] = []string{"C-c"}
 	start := time.Now()
