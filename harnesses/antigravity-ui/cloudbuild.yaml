@@ -49,8 +49,11 @@ steps:
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
+# No default _REGISTRY: the image contains a vendor package and is not
+# published. A deliberate build must name a private registry, e.g.
+#   gcloud builds submit --config=cloudbuild.yaml \
+#     --substitutions=_REGISTRY=<private registry>,_SHORT_SHA=<sha> .
 substitutions:
-  _REGISTRY: 'us-central1-docker.pkg.dev/${PROJECT_ID}/public-docker'
   _TAG: 'latest'
 options:
   dynamicSubstitutions: true

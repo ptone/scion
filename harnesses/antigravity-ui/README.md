@@ -50,6 +50,14 @@ docker build \
 downloaded package does not match the pinned sha256, and on non-amd64
 targets.
 
+The image contains the vendor's app package, so it is built locally and not
+published. `image-build.conf` keeps the bundle out of the default catalog
+builds (`build-images.sh --target harnesses|common|all|thick` and the
+full-catalog Cloud Build configs) and limits it to `linux/amd64`. An
+explicit `build-images.sh --target scion-antigravity-ui` still builds it for
+amd64. The bundle's `cloudbuild.yaml` has no default registry: a deliberate
+Cloud Build run must name a private one.
+
 ## Start an agent and connect
 
 ```sh
@@ -113,7 +121,8 @@ UI has the same effect: start the agent again to recover.
 | `nginx.conf.tmpl` | forwarding proxy template |
 | `provision_test.py` | unit tests |
 | `PROBE.md` | runtime probe of the image and the path shim in a throwaway container |
-| `cloudbuild.yaml` | Cloud Build config (amd64) |
+| `cloudbuild.yaml` | Cloud Build config for deliberate builds (amd64; no default registry) |
+| `image-build.conf` | keeps the image out of catalog builds; amd64 only |
 
 ## Wrapper settings
 
