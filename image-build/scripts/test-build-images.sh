@@ -1418,6 +1418,55 @@ check_contains "pull-containers: pulls the catalog harnesses" "docker image pull
 check_contains "pull-containers: pulls the base" "docker image pull reg.example/x/scion-base:t1" "$(ctr)"
 check_not_contains "pull-containers: skips the catalog=no harness" "scion-onlyamd" "$(ctr)"
 
+# The single-harness Cloud Build config uses the harness's platforms.
+gen_platform() {
+  (cd "${TMP}" && env -i PATH="${TOOLBIN}" TMPDIR="${TMP}" bash -c '
+    REPO_ROOT="$1"; IMAGE_BUILD_DIR="$1/image-build"
+    source "$1/image-build/scripts/lib/targets.sh"
+    source "$1/image-build/scripts/builders/cloud-build.sh"
+    f="$(generate_single_harness_config "$2")"
+    grep -o "'"'"'--platform'"'"', '"'"'[^'"'"']*'"'"'" "${f}"
+  ' _ "${CAT}" "$1")
+}
+check_eq "cloud-build single config: harness with platforms" "'--platform', 'linux/amd64'" "$(gen_platform scion-onlyamd)"
+check_eq "cloud-build single config: harness without a conf" "'--platform', 'linux/amd64,linux/arm64'" "$(gen_platform scion-claude)"
+
+# check-harness-coverage.sh: a catalog=no bundle must not be in a
+# full-catalog config. It needs a python3 with PyYAML; without one the case
+# is reported as skipped, not passed.
+COVPY="$(command -v python3 || true)"
+if [ -n "${COVPY}" ] && "${COVPY}" -c 'import yaml' 2>/dev/null; then
+  COV="${TMP}/cov"
+  cp -R "${CAT}" "${COV}"
+  write_catalog_configs() {
+    local f name
+    for f in cloudbuild.yaml cloudbuild-common.yaml cloudbuild-harnesses.yaml cloudbuild-thick.yaml; do
+      printf 'steps:\n' > "${COV}/image-build/${f}"
+      for name in "$@"; do
+        printf "  - name: 'docker'\n    dir: 'harnesses/%s'\n    args: ['-t', '\$_REGISTRY/scion-%s:\$_TAG']\n" "${name}" "${name}" >> "${COV}/image-build/${f}"
+      done
+    done
+  }
+  run_cov() {
+    set +e
+    OUT="$(PYTHON="${COVPY}" bash "${COV}/image-build/scripts/check-harness-coverage.sh" 2>&1)"
+    RC=$?
+    set -e
+  }
+  write_catalog_configs claude codex
+  run_cov
+  check_rc "coverage: catalog=no bundle absent from the configs: exit 0" 0 "${RC}"
+  write_catalog_configs claude codex onlyamd
+  run_cov
+  check_rc "coverage: catalog=no bundle in a config: exit 1" 1 "${RC}"
+  check_contains "coverage: catalog=no bundle in a config: reported" "builds a harness outside the catalog" "${OUT}"
+  write_catalog_configs claude
+  run_cov
+  check_rc "coverage: catalog harness missing from a config: exit 1" 1 "${RC}"
+else
+  echo "SKIP - coverage: no python3 with PyYAML; check-harness-coverage.sh cases NOT run"
+fi
+
 echo ""
 echo "${PASSES} passed, ${FAILS} failed"
 [ "${FAILS}" -eq 0 ]

@@ -19,8 +19,11 @@
 # for which images exist, which target names expand to which ordered step
 # lists, and which dockerfile / context dir / build-args each step uses.
 #
-# Builders never read this file. The orchestrator translates step descriptors
-# into the uniform builder_build call.
+# Builders do not read the target DAG: the orchestrator translates step
+# descriptors into the uniform builder_build call. The one exception is the
+# per-harness image-build.conf (harness_build_conf), which the cloud-build
+# builder's single-harness config generator and the pull and coverage
+# scripts read through this file so there is one parser.
 
 discover_harness_names() {
   local harness_root="${REPO_ROOT}/harnesses"
