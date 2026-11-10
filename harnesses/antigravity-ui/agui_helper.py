@@ -167,6 +167,11 @@ def shim_rules(ls_port: str, share_dir: str) -> tuple[str, str]:
         "      sub_filter " + _nginx_str('="/', "rule") + " " + _nginx_str('="', "rule") + ";",
     ])
     lines = [
+        # Files the app serves under /static/ (artifacts, which may be HTML
+        # pages with their own relative links) pass through unmodified.
+        "    location /static/ {",
+        f"      proxy_pass https://127.0.0.1:{ls_port};",
+        "    }",
         "    location ~ /" + SHIM_URL_NAME.replace(".", "\\.") + "$ {",
         f"      root {share_dir};",
         "      types { }",

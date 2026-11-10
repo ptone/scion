@@ -118,8 +118,11 @@ fail() {
 # Whether the app has asked for an interactive sign-in code.
 sign_in_prompted() { grep -q -- "$PROMPT_RE" "$APP_LOG" 2>/dev/null; }
 
-ls_up() { curl -sk -o /dev/null --max-time 2 "https://127.0.0.1:${JETSKI_LS_PORT}/"; }
-proxy_up() { curl -s -o /dev/null --max-time 2 "http://127.0.0.1:${AGUI_PROXY_PORT}/"; }
+# fd 4 is the app's stdin FIFO (opened below); only the app needs it, so
+# every other child gets it closed.
+helper() { python3 -I "$HELPER" "$@" 4>&-; }
+ls_up() { curl -sk -o /dev/null --max-time 2 "https://127.0.0.1:${JETSKI_LS_PORT}/" 4>&-; }
+proxy_up() { curl -s -o /dev/null --max-time 2 "http://127.0.0.1:${AGUI_PROXY_PORT}/" 4>&-; }
 
 # Reads lines from this pane and answers each with a notice.
 input_sink() {
@@ -201,16 +204,16 @@ WANT_PROXY="$AGUI_PROXY_PORT"
 # if it is free, otherwise any free loopback port.
 pick_port() {
   if [ "$2" -eq 1 ]; then
-    python3 -I "$HELPER" free-port --preferred "$1"
+    helper free-port --preferred "$1"
   else
-    python3 -I "$HELPER" free-port --any
+    helper free-port --any
   fi
 }
 
 # port_owner <port> <pid>: "ours", "foreign" or "none" for the listener on
 # port, relative to pid's process tree (or session).
 port_owner() {
-  python3 -I "$HELPER" port-owner --port "$1" --pid "$2" 2>/dev/null || echo unknown
+  helper port-owner --port "$1" --pid "$2" 2>/dev/null || echo unknown
 }
 
 # owner_ok <port> <pid>: the listener on port is held by pid's tree.
@@ -278,7 +281,7 @@ while :; do
 done
 # The UI has no login of its own: the language server must listen on
 # loopback only.
-addr="$(python3 -I "$HELPER" listen-addr --port "$JETSKI_LS_PORT" --pid "$APP_PID" 2>/dev/null || echo unknown)"
+addr="$(helper listen-addr --port "$JETSKI_LS_PORT" --pid "$APP_PID" 2>/dev/null || echo unknown)"
 if [ "$addr" != "loopback" ]; then
   fail "the language server's listener on port ${JETSKI_LS_PORT} is not loopback-only (${addr})"
 fi
@@ -293,7 +296,7 @@ case "$AGUI_PATH_REWRITE" in
   auto)
     force=()
     if [ "$AGUI_SHIM_FORCE_MISMATCH" = "1" ]; then force=(--force-mismatch); fi
-    check="$(python3 -I "$HELPER" shim-check --ls-port "$JETSKI_LS_PORT" "${force[@]}")" || check="none: shim check failed"
+    check="$(helper shim-check --ls-port "$JETSKI_LS_PORT" "${force[@]}")" || check="none: shim check failed"
     if [ "$check" = shim ]; then
       SHIM=shim
     else
@@ -313,7 +316,7 @@ while :; do
     log "port ${WANT_PROXY} is not available; using ${AGUI_PROXY_PORT} for the proxy"
   fi
 
-  python3 -I "$HELPER" render-nginx \
+  helper render-nginx \
     --template "${AGUI_SHARE_DIR}/nginx.conf.tmpl" \
     --out "${STATE}/nginx.conf" \
     --state "$STATE" \
@@ -324,7 +327,7 @@ while :; do
 
   : >"${STATE}/nginx.err"
   setsid nginx -p "$STATE" -e "${STATE}/nginx.err" -c "${STATE}/nginx.conf" \
-    </dev/null >>"${STATE}/nginx.log" 2>&1 &
+    </dev/null >>"${STATE}/nginx.log" 2>&1 4>&- &
   NGX_PID=$!
 
   waited=0
@@ -354,7 +357,7 @@ while :; do
   [ "$attempt" -lt "$ATTEMPTS" ] \
     || fail "could not start the proxy on a port of its own in ${ATTEMPTS} attempts"
 done
-addr="$(python3 -I "$HELPER" listen-addr --port "$AGUI_PROXY_PORT" --pid "$NGX_PID" 2>/dev/null || echo unknown)"
+addr="$(helper listen-addr --port "$AGUI_PROXY_PORT" --pid "$NGX_PID" 2>/dev/null || echo unknown)"
 if [ "$addr" != "loopback" ]; then
   fail "the proxy's listener on port ${AGUI_PROXY_PORT} is not loopback-only (${addr})"
 fi
@@ -363,9 +366,9 @@ log "proxy is up on 127.0.0.1:${AGUI_PROXY_PORT}"
 MODE=none
 if command -v scion >/dev/null 2>&1; then
   if [ "$SHIM" = shim ] \
-    && scion expose "$AGUI_PROXY_PORT" --label "Antigravity" --app-mode >>"${STATE}/expose.log" 2>&1; then
+    && scion expose "$AGUI_PROXY_PORT" --label "Antigravity" --app-mode >>"${STATE}/expose.log" 2>&1 4>&-; then
     MODE=link
-  elif scion expose "$AGUI_PROXY_PORT" --label "Antigravity (use scion tunnel)" >>"${STATE}/expose.log" 2>&1; then
+  elif scion expose "$AGUI_PROXY_PORT" --label "Antigravity (use scion tunnel)" >>"${STATE}/expose.log" 2>&1 4>&-; then
     MODE=tunnel
   fi
 else

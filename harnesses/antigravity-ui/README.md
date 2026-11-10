@@ -32,14 +32,16 @@ agent container (scion-antigravity-ui)
 - Known limit: the port ownership and loopback checks run at start. If the
   language server stops while the app keeps running, the wrapper does not
   notice and the UI stops answering; restart the agent.
-- Known limit: the shim's HTML rule turns `="/` into `="` in every HTML page
-  the app serves. The version check refuses an app page with a
-  protocol-relative attribute (`="//`), but another HTML document the app
-  serves could still contain one, which would then point outside the proxy
-  path.
-- The wrapper registers port 8090 with `scion expose`. With the shim on it
-  asks for the experimental app mode first. If the Hub does not support app
-  mode, it registers the port normally, and you connect with `scion tunnel`.
+- Known limit: with the shim on, nginx adds the shim script to every HTML
+  page the app serves (except under `/static/`, which passes through
+  unmodified) and turns `="/` into `="` in it. The version check refuses an
+  app page with a protocol-relative attribute (`="//`), but another HTML
+  document the app serves could still contain one, and the shim's `<base>`
+  changes how that document's relative links resolve.
+- The wrapper registers the proxy port (8090 unless it is taken; the banner
+  shows the port in use) with `scion expose`. With the shim on it asks for
+  the experimental app mode first. If the Hub does not support app mode, it
+  registers the port normally, and you connect with `scion tunnel`.
 - Interrupts and pasted messages never reach the app. If the app or nginx
   exits, the wrapper stops the other and the agent ends.
 
@@ -80,14 +82,16 @@ scion tunnel my-agent --port 8090 --local-port 8090
 # then open http://127.0.0.1:8090/
 ```
 
-Websockets and long-lived streams need the `hub.conduit` experiment on the
-Hub.
+`scion tunnel` needs the `hub.conduit` experiment on the Hub. The port link
+also needs it for this app: without it a request through the link is limited
+to 60 seconds and 32 MiB, and a WebSocket gets `501`.
 
 ## Auth
 
-The app signs in with Google Application Default Credentials (ADC). The
-harness has one auth type, `vertex-ai`. The provisioner sets
-`AGY_ADC_AUTH=true` for the app when it finds, in this order:
+The app signs in with Google Application Default Credentials (ADC) when
+`AGY_ADC_AUTH=true`. The harness has one auth type, `vertex-ai`. The
+provisioner adds `AGY_ADC_AUTH=true` to the agent's environment when it
+finds, in this order:
 
 1. a staged `gcloud-adc` file secret;
 2. the ADC file Scion maps into the container from
@@ -96,21 +100,36 @@ harness has one auth type, `vertex-ai`. The provisioner sets
 3. a dedicated GCP service account assigned to the agent (GCP identity mode
    `assign`; on Kubernetes the runtime may carry it as workload identity).
 
+The provisioner only adds variables that are not already set, so a value
+you set yourself wins: `AGY_ADC_AUTH=false` keeps ADC off even with
+credentials.
+
 Use a dedicated service account, created for this harness, with only the
 roles the app needs. Never use a broad, shared or default one, and never
 grant it editor or owner, data or IAM-admin roles. Prefer a project without
 production data, and prefer `assign` (short-lived tokens, no key file) over a
 staged file. Any process in the container can obtain its tokens.
 
-Without any of these, Scion refuses to start the agent.
+Without a `gcloud-adc` file, a `GOOGLE_APPLICATION_CREDENTIALS` file or a GCP
+identity of `assign` or `passthrough`, Scion does not start the agent: it
+reports the `gcloud-adc` secret as missing.
 
-GCP identity `passthrough` uses the host VM's own identity. Scion starts such
-an agent, but the provisioner does not set `AGY_ADC_AUTH` for it, so by
-default the app asks for an interactive sign-in and the agent stops with a
-message listing the options. To use the host identity anyway, set
-`AGY_ADC_AUTH=true` in the harness-config `env` (the app reads it from the
-container environment). Do this only on a throwaway VM whose service account
-is minimal. Template environment keys are not applied.
+GCP identity `passthrough` lets the container reach the host's metadata
+server, so the host VM's identity is available to every process in the
+container, and to anyone with port access to the agent (the UI can run
+commands), whether or not the app uses it. `AGY_ADC_AUTH` only decides
+whether the app signs in with it. The provisioner does not set it under
+plain `passthrough`, so by default the app asks for an interactive sign-in
+and the agent stops with a message listing the options. Prefer GCP identity
+`block` with a staged `gcloud-adc` file, or `assign`. Use `passthrough` only
+where the VM's service account is minimal. Single-node GCE hubs default new
+agents to `passthrough` (`default_gcp_identity_mode`).
+
+To set `AGY_ADC_AUTH` (or a wrapper setting below) yourself, use the
+harness-config `env` (in settings `harness_configs.<name>.env`, a profile's
+`harness_overrides`, or the Hub's copy of the harness-config), an env-type
+secret, or a template's `env`. A template's `env` has the lowest priority:
+it applies only to keys no other source sets.
 
 If the app asks for an interactive sign-in code at any time (for example
 when the assigned service account stops working), the agent stops with a
@@ -127,7 +146,7 @@ the same effect: start the agent again to recover.
 | `agent-plugins.yaml` | Agent Plugins support (none) |
 | `Dockerfile` | pinned app package, nginx, wrapper |
 | `antigravity-ui-wrapper.sh` | process supervisor (installed into the image) |
-| `agui_helper.py` | renders the nginx config, checks the shim, picks free ports, checks port ownership (installed into the image) |
+| `agui_helper.py` | renders the nginx config, checks the shim, picks free ports, checks port ownership and listener addresses (installed into the image) |
 | `agui_shim.js` | path shim for the Hub port link (installed into the image) |
 | `agui_shim.test.mjs` | shim unit tests (`node --test`) |
 | `nginx.conf.tmpl` | forwarding proxy template |
@@ -138,7 +157,10 @@ the same effect: start the agent again to recover.
 
 ## Wrapper settings
 
-Set in the agent's environment (for example a template's `env`):
+Set them in the harness-config `env` (which works for every key). A
+template's `env` works only for keys no other source sets; the bundle's
+harness-config already sets `JETSKI_LS_PORT` and `AGUI_PROXY_PORT`, so a
+template value for those two is ignored.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -164,7 +186,9 @@ in use. Logs are in `~/.local/state/antigravity-ui/` (use the agent's
   the primary control against self-update. Its install directory is
   read-only for the agent user, which stops an unprivileged in-place update;
   it is not a hard barrier, because the agent user can use sudo in Scion
-  images. The app has no other switch to disable updates.
+  images. The app has no other switch to disable updates. Any apt source,
+  keyring or cron job the app's package adds at build time is removed, and
+  the build fails if a vendor apt source is still configured.
 
 ## Security notes
 
@@ -173,6 +197,9 @@ in use. Logs are in `~/.local/state/antigravity-ui/` (use the agent's
   governed by the Hub's port access permission on the agent.
 - The app's Google identity (the ADC service account) is available to
   everyone with port access to the agent.
+- Under GCP identity `passthrough` the host VM's identity is available to
+  every process in the container and to everyone with port access, whether
+  or not the app uses it (see Auth).
 - The app runs without the Chromium sandbox; the container is the boundary.
   Stage only credentials the app is meant to use.
 - On a workstation server whose Hub URL is a loopback address, agents use the

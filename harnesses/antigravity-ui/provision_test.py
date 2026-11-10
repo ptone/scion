@@ -513,6 +513,11 @@ class RenderNginxTest(unittest.TestCase):
         shim_block = shim_block[:shim_block.index("}")]
         self.assertNotIn("proxy_pass", shim_block)
         self.assertIn("location = /main.js {", conf)
+        # /static/ (artifacts) is proxied without the page rules.
+        static = conf[conf.index("location /static/ {"):]
+        static = static[:static.index("}")]
+        self.assertIn("proxy_pass https://127.0.0.1:8443;", static)
+        self.assertNotIn("sub_filter", static)
         for token, replacement in helper.SHIM_PATCHES:
             self.assertIn("sub_filter '%s' '%s';" % (token, replacement), conf)
         # Only loopback upstreams, also in the shim locations.
@@ -621,6 +626,24 @@ class SecurityPinsTest(unittest.TestCase):
         self.assertIn("chmod -R go-w /opt/Antigravity", df)
         self.assertIn("chown -R root:root /opt/Antigravity", df)
         self.assertNotIn("install.sh", df.replace("install script", ""))
+
+    def test_dockerfile_removes_package_added_sources(self):
+        df = _read("Dockerfile")
+        self.assertIn("/etc/apt/sources.list.d", df)
+        self.assertIn('comm -13 /tmp/agui-before /tmp/agui-after', df)
+        self.assertIn('xargs -r rm -f', df)
+        self.assertIn("a vendor apt source is still configured", df)
+        # The snapshot is taken around the install.
+        self.assertLess(df.index("snapshot > /tmp/agui-before"), df.index("apt-get install"))
+        self.assertLess(df.index("apt-get install"), df.index("snapshot > /tmp/agui-after"))
+
+    def test_dockerfile_checks_rendered_nginx_configs(self):
+        df = _read("Dockerfile")
+        check = df[df.rindex("for tier in none shim"):]
+        self.assertIn("render-nginx", check)
+        self.assertIn("nginx -t -p", check)
+        # After the files it renders are copied in.
+        self.assertGreater(df.rindex("for tier in none shim"), df.index("agui_shim.js /usr/local/share"))
 
     def test_dockerfile_creates_share_dir_traversable_before_copy(self):
         # A COPY --chmod=0644 into a missing directory creates it 0644, and

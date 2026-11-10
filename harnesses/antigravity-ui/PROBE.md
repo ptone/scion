@@ -173,37 +173,52 @@ Build checks (once):
 
 ```sh
 docker build --build-arg BASE_IMAGE=scion-base:latest -t scion-antigravity-ui:latest harnesses/antigravity-ui
+# B1: must fail at "sha256sum -c" (wrong pinned hash)
+docker build --build-arg BASE_IMAGE=scion-base:latest \
+  --build-arg AG_DEB_SHA256=0000000000000000000000000000000000000000000000000000000000000000 \
+  -t scion-antigravity-ui:badhash harnesses/antigravity-ui
+# B2: must fail with "antigravity-ui: amd64 only"
+docker buildx build --platform linux/arm64 --build-arg BASE_IMAGE=scion-base:latest \
+  -t scion-antigravity-ui:arm harnesses/antigravity-ui
+# B3: inside the image
 docker run --rm --entrypoint bash scion-antigravity-ui:latest -c \
   'for b in /opt/Antigravity/antigravity /opt/Antigravity/chrome_crashpad_handler /opt/Antigravity/resources/bin/language_server; do ldd "$b" | grep -c "not found"; done;
    touch /opt/Antigravity/x 2>/dev/null && echo writable || echo "not writable";
-   ls /etc/apt/sources.list.d/; sha256sum /opt/Antigravity/antigravity'
+   grep -rliE "antigravity|dl\.google\.com" /etc/apt/sources.list /etc/apt/sources.list.d || echo "no vendor source";
+   sha256sum /opt/Antigravity/antigravity'
 ```
 
-Plus the wrong-hash and arm64 builds from step 1 (both must fail).
+| Item | Expected |
+|---|---|
+| B1 | the build fails at `sha256sum -c` |
+| B2 | the build fails with `antigravity-ui: amd64 only` (if buildx cannot build arm64 here, `--build-arg TARGETARCH=arm64` with plain `docker build` shows the same message) |
+| B3 | `0` missing libraries for each binary; `not writable`; `no vendor source`; note the hash for E9 |
 
-Start an agent with a dedicated, minimal service account (or stage an ADC
-file instead: `scion secret set gcloud-adc @/path/to/adc.json`):
+Start an agent with a dedicated, minimal service account, or stage an ADC
+file instead (`scion hub secret set --type file --target
+~/.config/gcloud/application_default_credentials.json gcloud-adc
+@<path to adc.json>`):
 
 ```sh
 scion start agui-e2e --harness-config antigravity-ui --service-account <dedicated SA>
-scion attach agui-e2e                              # banner; then detach
-scion tunnel agui-e2e --port 8090 --local-port 8090   # then http://127.0.0.1:8090/
+scion attach agui-e2e                                  # banner; then detach
+scion tunnel agui-e2e --port 8090 --local-port 8090    # then http://127.0.0.1:8090/
 ```
 
 | Item | Check | Expected |
 |---|---|---|
 | E1 | time from start to the banner | about 10 s or less |
 | E2 | UI at root through the tunnel | signed in (no sign-in screen); a simple task runs |
-| E3 | `scion expose --list` from inside the agent (`scion attach`, shell window) | only 8090 |
-| L1 | inside the agent: `ss -ltn` | every listener of the app (all ports, not only 8090 and the language server) on `127.0.0.1` or `[::1]` |
-| E4 | `scion message agui-e2e "x"`, then a Scion interrupt | the pane shows "message not delivered"; the app keeps running |
+| E3 | `scion expose --list` from inside the agent (`scion attach`, shell window) | one port: the proxy port shown in the banner (8090 unless it was taken) |
+| L1 | inside the agent: `ss -ltn` | every listener of the app (all ports, not only the proxy and the language server) on `127.0.0.1` or `[::1]` |
+| E4 | `scion message agui-e2e "x"`, then `scion message --interrupt agui-e2e "y"` | the pane shows "message not delivered"; the app keeps running |
 | E5 | stop the app (`pkill -f /opt/Antigravity/antigravity` in the shell window) | the agent ends |
-| E6 | start a second agent with no service account and no ADC file | Scion refuses the start; with plain passthrough the agent exits 1 with the no-auth message |
-| E7 | set `AGUI_SHIM_FORCE_MISMATCH=1` in the harness-config env and start an agent | banner: "The port link cannot show the UI (forced version mismatch (test hook))"; only a plain expose in expose.log |
-| E8 | on a host-networked workstation hub, start two agents at once | both run, on different ports (the banner shows them) |
-| E9 | after 10 minutes: `grep -ciE "update\|download" ~/.local/state/antigravity-ui/app.log` and `sha256sum /opt/Antigravity/antigravity` | no update download; hash unchanged from the build check |
+| E6 | start a second agent with no service account, no ADC file and GCP identity `block` | Scion does not start it and reports the `gcloud-adc` secret as missing. With GCP identity `passthrough` instead: the agent starts, then exits 1 with the passthrough no-auth message |
+| E7 | set `AGUI_SHIM_FORCE_MISMATCH=1` in the harness-config env and start an agent | banner: "The port link cannot show the UI (forced version mismatch (test hook))"; `scion expose --list` shows the label `Antigravity (use scion tunnel)` |
+| E8 | on a host-networked workstation hub, start two agents at once | both run, on different ports (each banner shows its port) |
+| E9 | after 10 minutes: `grep -ciE "update\|download" ~/.local/state/antigravity-ui/app.log` and `sha256sum /opt/Antigravity/antigravity` | no update download; hash equal to B3 |
 
-Report E1 to E9, L1 and the build checks with yes/no, counts, seconds and
+Report B1 to B3, E1 to E9 and L1 with yes/no, counts, seconds and
 ports only; never tokens, sign-in URLs or command lines.
 
 ## Report template

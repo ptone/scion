@@ -290,6 +290,34 @@ test("rewrites URL-bearing DOM attributes and properties", () => {
   assert.equal(img.attrs.alt, "/not-a-url");
 });
 
+test("rewrites URLs in markup inserted as HTML strings", () => {
+  let observed;
+  class FakeObserver {
+    constructor(cb) { this.cb = cb; observed = this; }
+    observe(target, opts) { this.target = target; this.opts = opts; }
+  }
+  const { window } = load(`${PREFIX}/`, undefined, { MutationObserver: FakeObserver });
+  assert.ok(observed, "observer not created");
+  assert.equal(observed.opts.childList, true);
+  assert.equal(observed.opts.subtree, true);
+  const el = (attrs, kids = []) => {
+    const e = new window.Element();
+    e.nodeType = 1;
+    Object.assign(e.attrs, attrs);
+    e.querySelectorAll = () => kids;
+    return e;
+  };
+  const child = el({ href: "rel/page.html" });
+  const img = el({ src: "/static/artifacts/a.png", alt: "/kept" }, [child]);
+  const keep = el({ href: "#top", src: `${PREFIX}/already.png` });
+  observed.cb([{ addedNodes: [img, { nodeType: 3 }, keep] }]);
+  assert.equal(img.attrs.src, `${PREFIX}/static/artifacts/a.png`);
+  assert.equal(img.attrs.alt, "/kept");
+  assert.equal(child.attrs.href, `${PREFIX}/rel/page.html`);
+  assert.equal(keep.attrs.href, "#top");
+  assert.equal(keep.attrs.src, `${PREFIX}/already.png`);
+});
+
 test("namespaces storage per agent", () => {
   const { window, realLocal } = load(`${PREFIX}/`);
   realLocal.setItem("hubKey", "hub");
