@@ -26,6 +26,10 @@ _OPENCODE_AUTH = os.path.join(
     os.environ.get("HOME") or os.path.expanduser("~"),
     ".local", "share", "opencode", "auth.json",
 )
+# The secret target is the literal home-relative path: for a secret written
+# from an agent, the hub accepts a harness credential file only in this form,
+# not as an absolute path under $HOME.
+_OPENCODE_AUTH_TARGET = "~/.local/share/opencode/auth.json"
 
 
 def _capture_auth_json(quiet: bool = False, scope: str = "project") -> bool:
@@ -48,7 +52,7 @@ def _capture_auth_json(quiet: bool = False, scope: str = "project") -> bool:
         "sciontool", "secret", "set", "OPENCODE_AUTH",
         f"@{_OPENCODE_AUTH}",
         "--type", "file",
-        "--target", _OPENCODE_AUTH,
+        "--target", _OPENCODE_AUTH_TARGET,
         "--force",
         "--scope", scope,
     ]

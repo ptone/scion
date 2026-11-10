@@ -45,23 +45,23 @@ Token precedence: `COPILOT_GITHUB_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`.
 
 ### Interactive Login (No-Auth Fallback)
 
-If no token is provided, the agent starts a shell with sign-in instructions;
-it does not sign in automatically. Run `copilot login` to authenticate via
-browser-based OAuth device flow, then capture credentials:
-
-```bash
-python3 /home/scion/.scion/harness/capture_auth.py
-```
+If no token is provided, the agent starts a shell with instructions; it does
+not sign in automatically. Copilot sign-in cannot be captured from an agent:
+it lives in `~/.copilot/config.json`, which is also Copilot's settings file,
+and the Hub refuses that file as a target for a secret written from an agent.
+Set `COPILOT_GITHUB_TOKEN` or `GH_TOKEN` as a profile or project secret (for
+example with `scion hub secret set`) and restart the agent. The
+`capture_auth.py` script only prints this explanation; it does not call the
+Hub.
 
 In no-auth mode Copilot runs with no session bus (`no-auth-env.yaml` sets
-`DBUS_SESSION_BUS_ADDRESS` to a path that never exists), and the sign-in is
-kept in `~/.copilot/config.json`, the file the capture script reads. Starts
-with a token or a captured credential file do not set it.
+`DBUS_SESSION_BUS_ADDRESS` to a path that never exists). Starts with a token
+or a credential file do not set it.
 
 ### Credential File (`COPILOT_CONFIG`)
 
-A captured `~/.copilot/config.json`, staged as the `COPILOT_CONFIG` file
-secret, selects the `auth-file` method. That file is also copilot's settings
+A `~/.copilot/config.json` provided as the `COPILOT_CONFIG` file secret (set by
+a user, not captured from an agent) selects the `auth-file` method. That file is also copilot's settings
 file, and the provisioner writes `trustedFolders` into it on every start, so a
 `config.json` already in the container counts as sign-in only when it holds a
 top-level key other than `trustedFolders` (or cannot be parsed). A start with

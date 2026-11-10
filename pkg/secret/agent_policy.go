@@ -44,9 +44,11 @@ func IsAgentWritten(meta SecretMeta) bool {
 var agentEnvNameShape = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 
 // agentEnvDenyExact lists names an agent may never target: names the shell,
-// a language runtime, git, gcloud or
-// an HTTP client executes, loads code from, or uses to redirect traffic,
-// trust or credentials.
+// a language runtime, git, gcloud or an HTTP client executes, loads code
+// from, or uses to redirect traffic, trust or credentials.
+// Some entries are also covered by agentEnvDenySuffixes (HTTP_PROXY,
+// NODE_OPTIONS, SSL_CERT_FILE, ...). That redundancy is deliberate: each list
+// stays correct on its own if the other changes.
 var agentEnvDenyExact = []string{
 	"BASH_ENV", "ENV", "PATH", "PROMPT_COMMAND", "PS0", "PS1", "PS2", "PS3", "PS4",
 	"IFS", "CDPATH", "SHELLOPTS", "BASHOPTS", "GLOBIGNORE", "HISTFILE", "HOME", "SHELL",
@@ -157,6 +159,14 @@ var ErrAgentFileTarget = errors.New("file target not allowed for agent-written s
 // exactly one of the harness credential files. Everything else (absolute
 // paths, home rc and profile files, other home paths, nested names) is
 // refused.
+// AgentCredentialFileTargets returns a sorted copy of the harness credential
+// files an agent may write as file secrets (besides AgentSecretsDir).
+func AgentCredentialFileTargets() []string {
+	out := slices.Clone(agentCredentialFileTargets)
+	slices.Sort(out)
+	return out
+}
+
 func AgentFileTargetAllowed(target string) error {
 	if leaf, ok := strings.CutPrefix(target, AgentSecretsDir); ok {
 		if agentSecretLeaf.MatchString(leaf) {

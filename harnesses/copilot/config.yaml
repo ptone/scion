@@ -102,9 +102,9 @@ no_auth:
   # below. no-auth-env.yaml sets the env for this mode.
   message: |
     This agent started without credentials.
-    Run: copilot login
-    Complete the interactive login flow.
-    Then run: python3 /home/scion/.scion/harness/capture_auth.py
+    Copilot sign-in cannot be captured from an agent.
+    Set COPILOT_GITHUB_TOKEN or GH_TOKEN as a profile or project secret
+    (for example with 'scion hub secret set'), then restart the agent.
 
 auth:
   default_type: api-key

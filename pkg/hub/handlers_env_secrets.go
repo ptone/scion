@@ -1686,8 +1686,8 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 				if m.SecretType == store.SecretTypeInternal {
 					continue
 				}
-				// Only keys the agent could read: check 7's agent-route
-				// target policy (authorizeRuntimeProjectItem).
+				// Only keys the agent could read: the agent-route target
+				// policy that authorizeRuntimeProjectItem also applies.
 				if secret.AgentWrittenTargetRefused(m) {
 					continue
 				}

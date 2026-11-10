@@ -12,78 +12,28 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Capture-auth for Copilot — delegates to the standard capture flow,
-then captures ~/.copilot/config.json as a COPILOT_CONFIG file secret."""
+"""Capture-auth for Copilot: not supported from an agent.
 
-import os
-import subprocess
+Copilot keeps its sign-in in ~/.copilot/config.json, which is also its
+settings file. The hub refuses that file as a target for a secret written
+from an agent, so this script does not call the hub. It explains how to
+provide Copilot credentials instead and exits non-zero.
+"""
+
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import scion_harness
-
-_COPILOT_CONFIG = os.path.join(
-    os.environ.get("HOME") or os.path.expanduser("~"),
-    ".copilot", "config.json",
+UNSUPPORTED = (
+    "capture-auth: Copilot sign-in (~/.copilot/config.json) cannot be stored "
+    "from an agent: it is also Copilot's settings file, so the hub refuses it. "
+    "Set COPILOT_GITHUB_TOKEN or GH_TOKEN as a profile or project secret "
+    "instead (for example with 'scion hub secret set'), then restart the agent."
 )
 
 
-def _capture_config_json(force: bool = False, scope: str = "user") -> bool:
-    """Capture ~/.copilot/config.json as a COPILOT_CONFIG file secret."""
-    if not os.path.isfile(_COPILOT_CONFIG):
-        print(
-            f"capture-auth: {_COPILOT_CONFIG} not found — "
-            "run 'copilot login' first, then re-run this script",
-            file=sys.stderr,
-        )
-        return False
-
-    cmd = [
-        "sciontool", "secret", "set", "COPILOT_CONFIG",
-        f"@{_COPILOT_CONFIG}",
-        "--type", "file",
-        "--target", _COPILOT_CONFIG,
-        "--scope", scope,
-    ]
-    if scope == "user":
-        cmd.append("--allow-progeny")
-    if force:
-        cmd.append("--force")
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except FileNotFoundError:
-        print("capture-auth: sciontool not found in PATH", file=sys.stderr)
-        return False
-    except subprocess.TimeoutExpired:
-        print("capture-auth: sciontool timed out setting COPILOT_CONFIG", file=sys.stderr)
-        return False
-
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        if "already exists" in stderr.lower():
-            print(
-                'capture-auth: COPILOT_CONFIG already exists (use --force to overwrite)',
-            )
-            return False
-        print(f"capture-auth: failed to set COPILOT_CONFIG: {stderr}", file=sys.stderr)
-        return False
-
-    print(f"capture-auth: COPILOT_CONFIG: captured from {_COPILOT_CONFIG}")
-    return True
+def main() -> int:
+    print(UNSUPPORTED, file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--scope", choices=["project", "user"], default="user")
-    known, _ = parser.parse_known_args()
-
-    rc = scion_harness.capture_auth_main()
-
-    force = "--force" in sys.argv
-    config_ok = _capture_config_json(force, known.scope)
-
-    if rc != 0 and config_ok:
-        sys.exit(0)
-    sys.exit(rc)
+    sys.exit(main())

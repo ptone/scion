@@ -105,7 +105,7 @@ agents start pre-authenticated.
    is running in no-auth mode. See [No-Auth Fallback](#no-auth-fallback).
 2. **Authenticate** — Inside the agent (via `scion attach` or the terminal page), you run the
    harness's native login command (e.g. `claude setup-token`, `codex login --device-auth`,
-   `copilot login`, `agy`). Each bundle's no-auth message tells you exactly which command to run.
+   `agy`). Each bundle's no-auth message tells you exactly which command to run.
 3. **Capture** — You run the bundle's `capture_auth.py`, which locates the credential files the
    harness just wrote and stores them as project secrets. On the next start, the host stages those
    secrets back into the agent and provisioning selects them automatically. See
@@ -122,7 +122,7 @@ The per-harness login and capture details:
 | **Gemini** | native Gemini auth (e.g. OAuth login) | `GEMINI_OAUTH_CREDS` (file `~/.gemini/oauth_creds.json`) |
 | **Codex** | `codex login --device-auth` | `CODEX_AUTH` (file `~/.codex/auth.json`) |
 | **OpenCode** | `opencode auth login` | `OPENCODE_AUTH` (file `~/.local/share/opencode/auth.json`) |
-| **Copilot** | `copilot login` | `COPILOT_CONFIG` (file `~/.copilot/config.json`) |
+| **Copilot** | *(none)* | *(none — Copilot sign-in cannot be captured from an agent; provide `COPILOT_GITHUB_TOKEN` or `GH_TOKEN` as a profile or project secret)* |
 | **Hermes** | `hermes setup` | *(none — Hermes is API-key only; provide the key up front)* |
 | **Pi** | `pi`, then `/login` | `PI_AUTH` (file `~/.pi/agent/auth.json`) |
 | **Antigravity** | `agy` | `AGY_TOKEN` (file `~/.gemini/antigravity-cli/antigravity-oauth-token`, with a gnome-keyring fallback) |
@@ -325,14 +325,14 @@ that no auth candidates were found, that it is running in no-auth mode, and whic
 run next.
 
 This lets you launch an agent, log in to the harness interactively (e.g. `claude setup-token`,
-`copilot login`, `hermes setup`, `agy`), and then capture the resulting credentials for reuse
-(see below). Every bundle declares `no_auth.behavior: drop-to-shell` along with a message, and
-optionally a login command to run first. Copilot runs no command: it starts a shell with sign-in
-instructions. A harness-config can add environment variables for no-auth mode only, in a
+`hermes setup`, `agy`), and then capture the resulting credentials for reuse (see below). Every
+bundle declares `no_auth.behavior: drop-to-shell` along with a message, and optionally a login
+command to run first. Copilot runs no command: it starts a shell with instructions to provide
+`COPILOT_GITHUB_TOKEN` or `GH_TOKEN` as a profile or project secret, because its sign-in cannot be
+captured from an agent. A harness-config can add environment variables for no-auth mode only, in a
 `no-auth-env.yaml` file next to its `config.yaml` with one `env` map. Copilot's sets
 `DBUS_SESSION_BUS_ADDRESS: unix:path=/home/scion/.scion/harness/no-session-bus`, so in that mode
-it runs with no session bus and keeps its sign-in in `~/.copilot/config.json`. Starts with
-credentials never get these variables.
+it runs with no session bus. Starts with credentials never get these variables.
 
 The fallback applies only to **automatic** resolution. If you selected an auth type via the
 [Explicit Path](#the-explicit-path), the fallback is disabled — the required credentials must be
@@ -384,14 +384,32 @@ rejected capture with `--scope user` (or via the CLI/Script path above) still wo
 affect user-originated project writes made directly through the web UI or `scion hub secret set
 --project`.
 
-**What an agent may store.** An agent-written environment secret may not use a name the shell,
-a language runtime, git, gcloud or an HTTP client acts on (`PATH`, `BASH_ENV`, `LD_*`, `GIT_*`,
-`GITHUB_TOKEN*`, `CLOUDSDK_*`, `GOOGLE_APPLICATION_CREDENTIALS`, proxy and CA-bundle variables in
-either case, and similar); other names are accepted. An agent-written file secret must target `~/.scion/agent-secrets/<name>` or one of the
-harness credential files listed above. Copilot's `~/.copilot/config.json` is excluded because it
-is also Copilot's settings file, so Copilot auth capture from an agent is refused: provide Copilot
-credentials (`COPILOT_GITHUB_TOKEN` or `GH_TOKEN`) through your profile or project secrets instead.
-Secrets stored this way before the change are not delivered if they break these rules.
+**What an agent may store.** Secrets an agent writes (`sciontool secret set`, Capture Auth) are
+checked by name and target when they are written and again when they are delivered.
+
+- An environment secret name must be letters, digits and underscores, not starting with a digit.
+  Names that the shell, a language runtime, git, gcloud, a build tool or an HTTP client acts on are
+  refused:
+  - exact names such as `PATH`, `HOME`, `SHELL`, `IFS`, `BASH_ENV`, `ENV`, `PROMPT_COMMAND`,
+    `PYTHONPATH`, `NODE_OPTIONS`, `GOPROXY`, `CC`, `GLIBC_TUNABLES`, `SSLKEYLOGFILE` and
+    `GOOGLE_APPLICATION_CREDENTIALS`;
+  - the prefixes `LD_`, `DYLD_`, `GIT_`, `GITHUB_TOKEN`, `BASH_FUNC_`, `NPM_CONFIG_`, `CLOUDSDK_`,
+    `CGO_`, `PIP_`, `UV_` and `CLAUDE_CODE_` (except `CLAUDE_CODE_OAUTH_TOKEN`), and the reserved
+    `SCION_` and `GCE_METADATA_`;
+  - the suffixes `_PATH`, `_HOME`, `_OPTS`, `_OPTIONS`, `_COMMAND`, `_EDITOR`, `_PAGER`,
+    `_ASKPASS`, `_PROXY`, `_BASE_URL`, `_CA_BUNDLE`, `_CA_CERTS` and `_CERT_FILE`, so names such
+    as `JAVA_HOME` or `MY_KEY_PATH` are refused too.
+
+  All of these rules ignore case. Other names are accepted.
+- A file secret must target `~/.scion/agent-secrets/<name>` (a plain file name) or one of the
+  harness credential files listed above, written exactly as shown, starting with `~/`. Copilot's
+  `~/.copilot/config.json` is excluded because it is also Copilot's settings file: provide Copilot
+  credentials (`COPILOT_GITHUB_TOKEN` or `GH_TOKEN`) through your profile or project secrets.
+- An agent-written secret that breaks these rules is not delivered, not returned to agents and not
+  listed, including secrets stored before this change. To replace one, **delete it and set it again
+  yourself** (web UI or `scion hub secret set`). Overwriting it is not enough for a project-scope
+  secret: it still counts as agent-written. Deleting it also restores a lower-scope secret with the
+  same name, which the refused secret otherwise hides.
 
 ### How capture works
 

@@ -26,15 +26,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TestAgentEnvTargetAllowed_Table pins the agent-route env name policy.
-//
-// MUTANT M3a (the LD_ deny prefix removed) fails the LD_PRELOAD,
-// LD_AUDIT and LD_LIBRARY_PATH_TOKEN rows. MUTANT M3i (deny rules matched on
-// the name as written instead of upper-cased) fails the http_proxy,
-// https_proxy, no_proxy and ld_preload rows.
+// TestAgentEnvTargetAllowed_Table pins the agent-route env name policy. The
+// LD_PRELOAD, LD_AUDIT and LD_LIBRARY_PATH_TOKEN rows guard the LD_ prefix,
+// and the lower-case rows guard that the deny rules ignore case.
 func TestAgentEnvTargetAllowed_Table(t *testing.T) {
 	refused := []string{
-		// brief-named denies
+		// shell and loader names, git exec and config names, interpreter options
 		"BASH_ENV", "ENV", "LD_PRELOAD", "LD_LIBRARY_PATH", "PATH", "PROMPT_COMMAND",
 		"GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_CONFIG_GLOBAL", "GIT_EXEC_PATH",
 		"PYTHONSTARTUP", "PYTHONPATH", "NODE_OPTIONS", "PERL5OPT", "RUBYOPT",
@@ -46,13 +43,13 @@ func TestAgentEnvTargetAllowed_Table(t *testing.T) {
 		"LESSOPEN", "MANPAGER", "SYSTEMD_PAGER", "SSLKEYLOGFILE",
 		// deny wins over a credential-looking suffix
 		"GIT_TOKEN", "LD_AUDIT", "LD_LIBRARY_PATH_TOKEN", "CLOUDSDK_AUTH_ACCESS_TOKEN",
-		// A2: the scion-env coupling
+		// GITHUB_TOKEN*: sciontool init copies these into the scion-env file
 		"GITHUB_TOKEN", "GITHUB_TOKEN_X",
-		// A3: ADC redirection and gcloud overrides
+		// ADC redirection and gcloud overrides
 		"GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_CONFIG", "CLOUDSDK_CORE_ACCOUNT",
-		// A6: proxy, CA bundle and base-URL redirection
+		// proxy, CA bundle and base-URL redirection
 		"HTTPS_PROXY", "ALL_PROXY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "ANTHROPIC_BASE_URL",
-		// A7: executable ADC credential sources
+		// executable ADC credential sources
 		"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
 		// reserved control-plane prefixes
 		"SCION_HUB_TOKEN", "GCE_METADATA_HOST",
@@ -87,12 +84,10 @@ func TestAgentEnvTargetAllowed_Table(t *testing.T) {
 }
 
 // TestAgentFileTargetAllowed_Table pins the agent-route file target policy.
-//
-// MUTANT M4b (the single-leaf rule replaced by a non-empty leaf check)
-// fails the nested and "../" rows. MUTANT M4a (the ~/.copilot/config.json
-// exclusion check disabled) is equivalent: that path is still refused
-// because it is not on the credential-file allow-list; only the error
-// text differs.
+// The nested, "../" and hidden-name rows guard the single-file-name rule in
+// the agent secrets directory. The ~/.copilot/config.json row is refused by
+// the exclusion and, independently, because it is not on the credential-file
+// allow-list; only the error text tells the two apart.
 func TestAgentFileTargetAllowed_Table(t *testing.T) {
 	allowed := append([]string{
 		"~/.scion/agent-secrets/cert.pem",
@@ -105,7 +100,7 @@ func TestAgentFileTargetAllowed_Table(t *testing.T) {
 		"~/.scion/agent-secrets/.hidden", "~/.scion/agent-secrets/", "~/.scion/agent-secrets/..",
 		"~//.bashrc", "~/x/.codex/auth.json", "~/.codex/auth.json/", "~/.ssh/authorized_keys",
 		"relative/path", "", "~/.scion/agent-secrets/a\\b",
-		// A7: Copilot's settings file stays excluded
+		// Copilot's settings file stays excluded
 		"~/.copilot/config.json",
 	}
 	for _, target := range allowed {
@@ -135,7 +130,7 @@ func TestAgentWrittenTargetRefused(t *testing.T) {
 		{"agent-written env, empty type, name used", SecretMeta{Name: "BASH_ENV", CreatedBy: "agent:a1"}, true},
 		{"agent-written env allowed", SecretMeta{Name: "X_TOKEN", SecretType: TypeEnvironment, Target: "X_TOKEN", CreatedBy: "agent:a1"}, false},
 		{"agent-written file outside dir", SecretMeta{Name: "F", SecretType: TypeFile, Target: "~/.bashrc", CreatedBy: "agent:a1"}, true},
-		{"agent-written file with empty target (A4)", SecretMeta{Name: "F", SecretType: TypeFile, CreatedBy: "agent:a1"}, true},
+		{"agent-written file with empty target", SecretMeta{Name: "F", SecretType: TypeFile, CreatedBy: "agent:a1"}, true},
 		{"agent-written file in dir", SecretMeta{Name: "F", SecretType: TypeFile, Target: "~/.scion/agent-secrets/f", CreatedBy: "agent:a1"}, false},
 		{"agent-written variable", SecretMeta{Name: "V", SecretType: TypeVariable, Target: "anything", CreatedBy: "agent:a1"}, false},
 	}

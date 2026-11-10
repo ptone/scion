@@ -7,8 +7,11 @@ package commands
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -44,15 +47,19 @@ By default, the secret is scoped to the current agent's project. Subsequent
 agents in the same project will receive this secret automatically. Use
 --scope=user to store a personal credential visible only to your agents.
 
-Environment secret names that the shell or a runtime acts on (PATH, LD_*,
-BASH_ENV, GIT_*, proxy and CA-bundle names, ...) are refused.
+Environment secret names that the shell, a runtime or a build tool acts on
+are refused: exact names (PATH, HOME, BASH_ENV, NODE_OPTIONS, GOPROXY, ...),
+prefixes (LD_, GIT_, GITHUB_TOKEN, CLOUDSDK_, PIP_, ...) and suffixes (_PATH,
+_HOME, _OPTS, _OPTIONS, _COMMAND, _PROXY, _CERT_FILE, ...). The rules ignore
+case.
 
 If VALUE starts with @, the remainder is treated as a file path. The file
 contents are read and base64-encoded, and --type defaults to "file". A file
 secret's target must be ~/.scion/agent-secrets/<name> or a harness
 credential file (for example ~/.claude/.credentials.json). Without
---target, a file under your home keeps its home-relative path and any other
-file defaults to ~/.scion/agent-secrets/<KEY>.
+--target, a harness credential file under your home keeps its ~/ path, and
+any other file defaults to ~/.scion/agent-secrets/<KEY>; KEY must then start
+with a letter or digit.
 
 Examples:
   # Store a simple environment variable secret
@@ -127,15 +134,11 @@ Examples:
 					log.Error("Failed to resolve absolute path for %s: %v", filePath, err)
 					os.Exit(1)
 				}
-				home, err := os.UserHomeDir()
-				if err == nil && strings.HasPrefix(absPath, home+"/") {
-					localTarget = "~/" + absPath[len(home)+1:]
-				} else {
-					// The hub refuses agent-written file targets outside
-					// the agent secrets directory and the harness
-					// credential files, so an absolute path is never a
-					// usable default.
-					localTarget = agentSecretsDir + key
+				home, _ := os.UserHomeDir()
+				localTarget, err = defaultFileTarget(absPath, home, key)
+				if err != nil {
+					log.Error("%v", err)
+					os.Exit(1)
 				}
 			}
 		} else {
@@ -173,10 +176,42 @@ Examples:
 	},
 }
 
-// agentSecretsDir mirrors secret.AgentSecretsDir (pkg/secret/agent_policy.go),
-// the hub's directory for agent-written file secrets; sciontool does not
-// import pkg/secret.
+// agentSecretsDir, agentSecretLeaf and knownCredentialFileTargets mirror the
+// hub's agent file-target policy (pkg/secret/agent_policy.go); sciontool does
+// not import pkg/secret. secret_target_test.go keeps them in step.
 const agentSecretsDir = "~/.scion/agent-secrets/"
+
+var agentSecretLeaf = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+var knownCredentialFileTargets = []string{
+	"~/.claude/.credentials.json",
+	"~/.codex/auth.json",
+	"~/.config/gcloud/application_default_credentials.json",
+	"~/.gemini/antigravity-cli/antigravity-oauth-token",
+	"~/.gemini/oauth_creds.json",
+	"~/.grok/auth.json",
+	"~/.local/share/opencode/auth.json",
+	"~/.pi/agent/auth.json",
+}
+
+// defaultFileTarget is the file secret target used when --target is not
+// given: a harness credential file under home keeps its ~/ path, and any
+// other file goes to agentSecretsDir + key, the only other target the hub
+// accepts for a secret written from an agent. A key that is not a valid
+// file name there is refused.
+func defaultFileTarget(absPath, home, key string) (string, error) {
+	if home != "" {
+		if rel, ok := strings.CutPrefix(absPath, home+"/"); ok {
+			if t := "~/" + rel; slices.Contains(knownCredentialFileTargets, t) {
+				return t, nil
+			}
+		}
+	}
+	if !agentSecretLeaf.MatchString(key) {
+		return "", fmt.Errorf("cannot default the target for key %q: it must start with a letter or digit; pass --target %s<name>", key, agentSecretsDir)
+	}
+	return agentSecretsDir + key, nil
+}
 
 func init() {
 	rootCmd.AddCommand(secretCmd)

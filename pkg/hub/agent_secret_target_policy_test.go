@@ -93,11 +93,9 @@ func targetPolicyResolvedNames(t *testing.T, d *HTTPAgentDispatcher, agent *stor
 // TestResolveSecrets_AgentWrittenUnsafeTargetsDropped: rows written through
 // the agent route whose env name or file target the agent policy refuses are
 // never delivered (for example rows that predate the write-time check); the
-// same rows written by a user are delivered unchanged.
-//
-// MUTANT M3d (env delivery drop removed) fails the LD_PRELOAD and PATH rows.
-// MUTANT M4d (file delivery drop removed) fails the ~/.bashrc, /etc and
-// empty-target rows.
+// same rows written by a user are delivered unchanged. The LD_PRELOAD and PATH
+// rows guard the env drop in resolveSecrets and resolveAsNeededForKeys; the
+// ~/.bashrc, /etc and empty-target rows guard the file drop.
 func TestResolveSecrets_AgentWrittenUnsafeTargetsDropped(t *testing.T) {
 	st := createTestStore(t)
 	f := newTargetPolicyFixture(t, st)
@@ -137,12 +135,10 @@ func TestResolveSecrets_AgentWrittenUnsafeTargetsDropped(t *testing.T) {
 	}
 }
 
-// TestAgentGetSecret_AgentWrittenUnsafeTargetNotFound: the runtime read
-// (check 7) hides an agent-written project secret whose env name the agent
-// policy refuses, as start-time delivery does; a safe agent-written secret
-// stays readable.
-//
-// MUTANT M3e (check-7 target drop removed) fails it.
+// TestAgentGetSecret_AgentWrittenUnsafeTargetNotFound: the runtime read of a
+// project secret (authorizeRuntimeProjectItem) hides an agent-written secret
+// whose env name the agent policy refuses, as start-time delivery does; a
+// safe agent-written secret stays readable.
 func TestAgentGetSecret_AgentWrittenUnsafeTargetNotFound(t *testing.T) {
 	srv, s, agentID, projectID, agentToken := setupAgentSecretGetTest(t)
 	writer := "agent:" + agentID
@@ -169,8 +165,6 @@ func putTargetPolicySecret(t *testing.T, srv *Server, agentID, token, key string
 }
 
 // TestAgentSetSecret_DangerousEnvTarget_Rejected: write-time env policy.
-//
-// MUTANT M3c (write-time env check removed) fails it.
 func TestAgentSetSecret_DangerousEnvTarget_Rejected(t *testing.T) {
 	srv, _, agentID, _, agentToken := setupAgentSecretTest(t)
 	for _, target := range []string{"BASH_ENV", "LD_PRELOAD", "PATH", "GIT_SSH_COMMAND", "GITHUB_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS", "NODE_OPTIONS"} {
@@ -188,8 +182,6 @@ func TestAgentSetSecret_DangerousEnvTarget_Rejected(t *testing.T) {
 }
 
 // TestAgentSetSecret_FileTargetOutsideDir_Rejected: write-time file policy.
-//
-// MUTANT M4c (write-time file check removed) fails it.
 func TestAgentSetSecret_FileTargetOutsideDir_Rejected(t *testing.T) {
 	srv, _, agentID, _, agentToken := setupAgentSecretTest(t)
 	for _, target := range []string{"/etc/ld.so.preload", "~/.bashrc", "~/.profile", "~/.copilot/config.json", "~/.scion/agent-secrets/../.bashrc"} {
@@ -229,8 +221,7 @@ func setTargetPolicyRow(t *testing.T, b secret.SecretBackend, key, typ, target, 
 //   - user part on a recorded chain (agentListUserSecrets): a recorded
 //     principal-ceiling edge.
 //
-// MUTANT M3g (any one of the three list filters removed) fails the
-// matching subtest.
+// Each subtest guards one of the three list filters.
 func TestAgentListSecrets_AgentWrittenUnsafeTargetsHidden(t *testing.T) {
 	t.Run("project and unrecorded user chain", func(t *testing.T) {
 		f := &userScopeCeilingFixture{materialFixture: newMaterialFixture(t, "tp-list-unrecorded")}
@@ -279,11 +270,9 @@ func TestAgentListSecrets_AgentWrittenUnsafeTargetsHidden(t *testing.T) {
 }
 
 // TestAgentGetSecret_UserScopeAgentWrittenUnsafeTargetNotFound: the runtime
-// read of a user-scope secret (check 8) hides an agent-written row whose env
-// name or file target the agent policy refuses; a safe agent-written row in
-// the same scope stays readable (the control).
-//
-// MUTANT M4e (check-8 target drop removed) fails it.
+// read of a user-scope secret (authorizeRuntimeUserItem) hides an
+// agent-written row whose env name or file target the agent policy refuses;
+// a safe agent-written row in the same scope stays readable (the control).
 func TestAgentGetSecret_UserScopeAgentWrittenUnsafeTargetNotFound(t *testing.T) {
 	f := newUserScopeCeilingFixture(t, "tp-get-user", store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
 	writer := "agent:" + f.AgentID
@@ -306,8 +295,6 @@ func TestAgentGetSecret_UserScopeAgentWrittenUnsafeTargetNotFound(t *testing.T) 
 // start-time delivery (selectDeliverySecrets) drops agent-written rows whose
 // env name or file target the agent policy refuses, and delivers a safe
 // agent-written env and file row next to them (the controls).
-//
-// MUTANT M3h (selectDeliverySecrets target drop removed) fails it.
 func TestSelectDeliverySecrets_AgentWrittenUnsafeTargetsDropped(t *testing.T) {
 	m := newLDFixture(t, "tp-select", ldOptions{})
 	ctx := context.Background()
@@ -335,5 +322,49 @@ func TestSelectDeliverySecrets_AgentWrittenUnsafeTargetsDropped(t *testing.T) {
 		if !byName[kept] {
 			t.Errorf("%s: expected to be delivered (control)", kept)
 		}
+	}
+}
+
+// TestResolveSecrets_AgentCreatedProjectSecretNeedsDeleteToReplace pins how a
+// user replaces a project-scope secret that an agent created with a target
+// the agent policy refuses. Updating a secret keeps its CreatedBy, so a user
+// overwrite leaves the row agent-written and it stays withheld; deleting it
+// and setting it again as the user makes it the user's own, and it is
+// delivered. The docs tell users to delete and set it again for this reason.
+func TestResolveSecrets_AgentCreatedProjectSecretNeedsDeleteToReplace(t *testing.T) {
+	st := createTestStore(t)
+	f := newTargetPolicyFixture(t, st)
+	d := newTargetPolicyDispatcher(st)
+	b := secret.NewLocalBackend(st, "test-hub-id", "test-secret")
+	ctx := context.Background()
+	writer := "agent:" + f.writerID
+	recipient := &store.Agent{ID: tid("tp-replace-recipient"), ProjectID: f.projectID}
+	set := func(by string) {
+		t.Helper()
+		if _, _, err := b.Set(ctx, &secret.SetSecretInput{
+			Name: "TOOL_HOME_VALUE", Value: "v", SecretType: store.SecretTypeEnvironment, Target: "MY_TOOL_HOME",
+			Scope: store.ScopeProject, ScopeID: f.projectID, InjectionMode: store.InjectionModeAlways,
+			CreatedBy: by, UpdatedBy: by,
+		}); err != nil {
+			t.Fatalf("set by %s: %v", by, err)
+		}
+	}
+
+	set(writer)
+	if targetPolicyResolvedNames(t, d, recipient)["TOOL_HOME_VALUE"] {
+		t.Fatal("agent-created secret with a refused target was delivered")
+	}
+
+	set("user-admin")
+	if targetPolicyResolvedNames(t, d, recipient)["TOOL_HOME_VALUE"] {
+		t.Fatal("after a user overwrite the row is still agent-created and must stay withheld")
+	}
+
+	if err := b.Delete(ctx, "TOOL_HOME_VALUE", store.ScopeProject, f.projectID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	set("user-admin")
+	if !targetPolicyResolvedNames(t, d, recipient)["TOOL_HOME_VALUE"] {
+		t.Fatal("after delete and a user set the secret must be delivered")
 	}
 }
