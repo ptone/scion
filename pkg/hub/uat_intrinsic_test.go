@@ -580,7 +580,7 @@ func TestUATIntrinsic_LaunchMaterialStrictWalk(t *testing.T) {
 	}
 
 	for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart, PurposeProvisionCredential, PurposeAvailabilityProbe} {
-		env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(m.authz, m.agent, purpose), m.agent)
+		env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(m.authz, m.agent, purpose), m.agent, nil)
 		require.NoError(t, err)
 		for _, scope := range []string{store.ScopeProject, store.ScopeHub, store.ScopeRuntimeBroker} {
 			k := "LG_ENV_" + strings.ToUpper(scope)
@@ -681,7 +681,7 @@ func TestUATIntrinsic_PreExistingDescendantWithheld(t *testing.T) {
 
 	buf := lgLogger(m)
 	for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart, PurposeProvisionCredential, PurposeAvailabilityProbe} {
-		env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(m.authz, m.agent, purpose), m.agent)
+		env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(m.authz, m.agent, purpose), m.agent, nil)
 		require.NoError(t, err, purpose)
 		assert.Empty(t, env["UI_PRE_ENV"], "%s withholds the launch item", purpose)
 	}

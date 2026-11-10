@@ -258,26 +258,16 @@ func envVarDeliveryKind(v store.EnvVar) MaterialKind {
 // like a store read error. The owner's user-scope rows not shared with
 // progeny are held to the owner material chain rule, as there.
 //
-// For an agent without credentials (launchesWithoutCredentials), a setting
-// noAuthKeepsStoredEnv withholds is skipped before it is authorized or
-// decided; the credential names are read for the agent
-// (noAuthCredentialEnvNames), and a read error is returned.
-func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *deliverySelector, agent *store.Agent) (map[string]string, map[string]bool, error) {
-	var credNames credentialEnvNames
-	if launchesWithoutCredentials(agent) {
-		names, err := d.noAuthCredentialEnvNames(ctx, agent)
-		if err != nil {
-			return nil, nil, err
-		}
-		credNames = names
+// credNames are the credential env names for an agent without credentials
+// (launchesWithoutCredentials; read once by the caller with
+// noAuthCredentialEnvNames), and nil for an agent with credentials. For an
+// agent without credentials a setting noAuthKeepsStoredEnv withholds is
+// skipped before it is authorized or decided. Such an agent with nil
+// credNames is an error: the selection never runs without the rule.
+func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *deliverySelector, agent *store.Agent, credNames credentialEnvNames) (map[string]string, map[string]bool, error) {
+	if launchesWithoutCredentials(agent) && credNames == nil {
+		return nil, nil, errors.New("material delivery: credential names not read for an agent without credentials")
 	}
-	return d.selectDeliveryEnvFor(ctx, sel, agent, credNames)
-}
-
-// selectDeliveryEnvFor is selectDeliveryEnv with the credential names
-// already read: credNames is non-nil exactly for an agent without
-// credentials.
-func (d *HTTPAgentDispatcher) selectDeliveryEnvFor(ctx context.Context, sel *deliverySelector, agent *store.Agent, credNames credentialEnvNames) (map[string]string, map[string]bool, error) {
 	result := make(map[string]string)
 	plain := make(map[string]bool)
 	if agent == nil {
@@ -314,7 +304,7 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnvFor(ctx context.Context, sel *del
 			}
 			// Withheld for an agent without credentials before it is
 			// authorized or decided, so no decision is spent on it.
-			if credNames != nil && !noAuthKeepsStoredEnv(v.Key, v.Secret, credNames) {
+			if credNames != nil && !noAuthKeepsStoredEnv(v.Key, v.Secret, noAuthStoredScopeAllowed(filter.Scope), credNames) {
 				continue
 			}
 			if filter.Scope == store.ScopeUser {
@@ -345,7 +335,7 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnvFor(ctx context.Context, sel *del
 			if secret.IsReservedEnvTarget(v.Key) || v.Key == agentTZEnvKey {
 				continue
 			}
-			if credNames != nil && !noAuthKeepsStoredEnv(v.Key, v.Secret, credNames) {
+			if credNames != nil && !noAuthKeepsStoredEnv(v.Key, v.Secret, noAuthStoredScopeAllowed(envSourceProgeny), credNames) {
 				continue
 			}
 			if _, exists := result[v.Key]; exists {
