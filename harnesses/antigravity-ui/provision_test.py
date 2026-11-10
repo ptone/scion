@@ -396,6 +396,16 @@ class RenderNginxTest(unittest.TestCase):
         self.assertTrue(helper.shim_check_text(page, js.split(" ")[0]).startswith("none:"))
         self.assertTrue(helper.shim_check_text(page, js + " " + js).startswith("none:"))
 
+    def test_shim_check_forced_mismatch(self):
+        # The test hook never contacts the app.
+        self.assertEqual(helper.shim_check("1", force_mismatch=True),
+                         "none: forced version mismatch (test hook)")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = helper.main(["shim-check", "--ls-port", "1", "--force-mismatch"])
+        self.assertEqual(rc, 0)
+        self.assertIn("forced version mismatch", out.getvalue())
+
     def test_shim_check_unreachable(self):
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))

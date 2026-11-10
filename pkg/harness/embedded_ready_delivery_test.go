@@ -29,7 +29,7 @@ import (
 // readiness table, with the ready block they chose. Every other bundle
 // reproduces the legacy table.
 var bundleOwnReady = map[string]api.ReadySpec{
-	"antigravity-ui": {Strategy: "delay", Settle: 15 * time.Second},
+	"antigravity-ui": {Strategy: "delay", Settle: 5 * time.Second},
 }
 
 // loadEmbeddedEntry reads harnesses/<name>/config.yaml from the embed FS and

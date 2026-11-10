@@ -78,9 +78,11 @@ harness has one auth type, `vertex-ai`. The provisioner sets
 3. a GCP service account assigned to the agent (GCP identity mode
    `assign`).
 
-Use a dedicated service account with only the roles the app needs. Never
-use a broad or default one: any process in the container can obtain its
-tokens.
+Use a dedicated service account, created for this harness, with only the
+roles the app needs. Never use a broad, shared or default one, and never
+grant it editor or owner, data or IAM-admin roles. Prefer a project without
+production data, and prefer `assign` (short-lived tokens, no key file) over a
+staged file. Any process in the container can obtain its tokens.
 
 GCP identity `passthrough` (the host VM's own identity) is not used by
 default. If the host VM's service account is minimal and you want to use
@@ -90,7 +92,8 @@ harness-config `env` override. Template environment keys are not applied.
 Without a `gcloud-adc` file or an assigned service account, Scion refuses to
 start the agent. If the app still asks for an interactive sign-in code (for
 example when the assigned service account stops working), the agent stops
-with a message saying how to provide credentials.
+with a message saying how to provide credentials. Signing out in the app's
+UI has the same effect: start the agent again to recover.
 
 ## Files
 
@@ -119,6 +122,7 @@ Set in the agent's environment (for example a template's `env`):
 | `JETSKI_LS_PORT` | `8443` | preferred language server HTTPS port (loopback) |
 | `AGUI_PROXY_PORT` | `8090` | preferred nginx port, the exposed port |
 | `AGUI_PATH_REWRITE` | `auto` | `none`: never use the path shim (tunnel only) |
+| `AGUI_SHIM_FORCE_MISMATCH` | `0` | `1`: test hook, make the shim's version check fail |
 | `AGUI_LS_TIMEOUT` | `90` | seconds to wait for the language server |
 | `AGUI_PROXY_TIMEOUT` | `30` | seconds to wait for nginx |
 
@@ -145,6 +149,12 @@ window).
   everyone with port access to the agent.
 - The app runs without the Chromium sandbox; the container is the boundary.
   Stage only credentials the app is meant to use.
+- On a workstation server whose Hub URL is a loopback address, agents use the
+  host network. The app's UI and its other loopback listeners are then on
+  the host's 127.0.0.1, where any local user can reach them without Scion
+  authorization. Use the harness there only on a single-user machine, or give
+  the server a Hub URL that agents reach over the bridge network (which also
+  lets GCP identity `assign` work).
 
 ## Version bump
 

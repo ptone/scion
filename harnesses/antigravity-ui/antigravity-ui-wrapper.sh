@@ -37,6 +37,7 @@
 #   AGUI_PATH_REWRITE    auto|none: path shim that lets the UI run under the
 #                        Hub port proxy path (auto: on when the running app
 #                        matches the shim's patch points)
+#   AGUI_SHIM_FORCE_MISMATCH  1: test hook, make the shim version check fail
 #   AGUI_LS_TIMEOUT      seconds to wait for the language server (90)
 #   AGUI_PROXY_TIMEOUT   seconds to wait for nginx (30)
 
@@ -45,6 +46,7 @@ set -euo pipefail
 : "${JETSKI_LS_PORT:=8443}"
 : "${AGUI_PROXY_PORT:=8090}"
 : "${AGUI_PATH_REWRITE:=auto}"
+: "${AGUI_SHIM_FORCE_MISMATCH:=0}"
 : "${AGUI_LS_TIMEOUT:=90}"
 : "${AGUI_PROXY_TIMEOUT:=30}"
 : "${AGUI_APP_BIN:=/opt/Antigravity/antigravity}"
@@ -223,7 +225,9 @@ SHIM=none
 SHIM_REASON="path shim turned off"
 case "$AGUI_PATH_REWRITE" in
   auto)
-    check="$(python3 -I "$HELPER" shim-check --ls-port "$JETSKI_LS_PORT")" || check="none: shim check failed"
+    force=()
+    if [ "$AGUI_SHIM_FORCE_MISMATCH" = "1" ]; then force=(--force-mismatch); fi
+    check="$(python3 -I "$HELPER" shim-check --ls-port "$JETSKI_LS_PORT" "${force[@]}")" || check="none: shim check failed"
     if [ "$check" = shim ]; then
       SHIM=shim
     else

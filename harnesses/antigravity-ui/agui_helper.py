@@ -264,7 +264,10 @@ def shim_check_text(index_html: str, main_js: str) -> str:
     return "shim"
 
 
-def shim_check(ls_port: str) -> str:
+def shim_check(ls_port: str, force_mismatch: bool = False) -> str:
+    if force_mismatch:
+        # Test hook: exercises the fallback without a different app version.
+        return "none: forced version mismatch (test hook)"
     try:
         index_html = _fetch_loopback(ls_port, "/")
         main_js = _fetch_loopback(ls_port, "/main.js")
@@ -323,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_check = sub.add_parser("shim-check")
     p_check.add_argument("--ls-port", required=True)
+    p_check.add_argument("--force-mismatch", action="store_true")
 
     p_free = sub.add_parser("free-port")
     p_free.add_argument("--preferred", required=True)
@@ -332,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "seed-update-off":
             print("antigravity-ui: app_storage.json " + seed_update_off(args.home))
         elif args.cmd == "shim-check":
-            print(shim_check(args.ls_port))
+            print(shim_check(args.ls_port, args.force_mismatch))
         elif args.cmd == "free-port":
             print(free_port(args.preferred))
         else:

@@ -38,7 +38,7 @@ config_dir: .config/Antigravity
 interrupt_key: Escape
 ready:
   strategy: delay
-  settle: 15s
+  settle: 5s
 # Pasted messages reach the wrapper's input sink, which answers with a
 # "not delivered" notice; they never reach the app.
 delivery:
