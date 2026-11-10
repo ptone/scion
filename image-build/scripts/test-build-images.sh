@@ -1394,6 +1394,11 @@ check_eq "platforms: explicit target, no overlap: nothing built" "" "$(line_for 
 
 run_bi "${CAT}" --target scion-onlyamd --platform all --registry reg.example/x --dry-run
 check_contains "platforms: all is intersected to amd64" "--platform linux/amd64 -t reg.example/x/scion-onlyamd:" "$(line_for reg.example/x/scion-onlyamd)"
+check_not_contains "platforms: a one-platform step is not pushed by promotion" "--push" "$(line_for reg.example/x/scion-onlyamd)"
+check_not_contains "platforms: no push promotion for a one-platform step" "Adding --push automatically" "${OUT}"
+
+run_bi "${CAT}" --target harnesses --platform all --registry reg.example/x --dry-run
+check_contains "platforms: multi-platform steps still promote --push" "Adding --push automatically" "${OUT}"
 
 run_bi "${CAT}" --target scion-claude --platform all --registry reg.example/x --dry-run
 # The dry-run printer quotes the comma.

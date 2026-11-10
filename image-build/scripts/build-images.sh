@@ -219,10 +219,24 @@ fi
 
 # Multi-arch builds require --push (buildx can't load multi-arch images
 # into the local docker daemon). Auto-promote and warn, matching the prior
-# build-images.sh behavior.
+# build-images.sh behavior -- but only when some step really builds for more
+# than one platform: a harness limited to one platform
+# (harnesses/<name>/image-build.conf) builds and loads locally.
 if [[ "${PLATFORMS}" == *","* && "${PUSH}" != "true" ]]; then
-  echo "Warning: multi-platform builds require --push. Adding --push automatically."
-  PUSH="true"
+  _multi_step="false"
+  while IFS= read -r _step; do
+    [[ -n "${_step}" ]] || continue
+    _step_p="$(step_platforms "${_step}" "${PLATFORMS}")" || continue
+    if [[ "${_step_p}" == *","* ]]; then
+      _multi_step="true"
+      break
+    fi
+  done < <(resolve_targets "${TARGET}")
+  if [[ "${_multi_step}" == "true" ]]; then
+    echo "Warning: multi-platform builds require --push. Adding --push automatically."
+    PUSH="true"
+  fi
+  unset _multi_step _step _step_p
 fi
 
 # --registry is required for any path that publishes images. Without it,
