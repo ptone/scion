@@ -26,7 +26,8 @@
  *   under the prefix at any route depth (and under "/" without a prefix).
  * - Without a prefix it does nothing else.
  * - With one: sets window.__AGUI_PREFIX__ (read by the patched main.js),
- *   prefixes root-relative and same-host URLs passed to fetch, XHR,
+ *   puts root-relative, relative and same-host URLs (normalised, so dot
+ *   segments cannot leave the prefix) under the prefix for fetch, XHR,
  *   WebSocket, EventSource, Worker, SharedWorker, history and URL-bearing
  *   DOM attributes, and namespaces localStorage and sessionStorage per agent
  *   so keys of the app do not mix with those of the Hub web app.
@@ -91,7 +92,33 @@
     }
     var s = (typeof u === "string") ? u : String(u);
     if (s.charAt(0) === "/" && s.charAt(1) !== "/") {
-      return under(s.split("?")[0].split("#")[0]) ? u : prefix + s;
+      // Decide on the normalised path, and build the result from it, so dot
+      // segments ("/x/../../y") cannot lead outside the prefix.
+      var r;
+      try {
+        r = new w.URL(s, loc.href);
+      } catch (e) {
+        return u;
+      }
+      var norm = r.pathname + r.search + r.hash;
+      if (under(r.pathname)) {
+        return norm === s ? u : norm;
+      }
+      return prefix + norm;
+    }
+    // A relative reference ("x", "../x"): the page's <base> is PREFIX/, which
+    // stands for the app's root, so resolve it as the app would at its root
+    // and put the result under the prefix. Without this, dot segments could
+    // climb out of the prefix.
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s) && s.charAt(0) !== "/" &&
+        s.charAt(0) !== "#" && s.charAt(0) !== "?" && s !== "") {
+      var rel;
+      try {
+        rel = new w.URL(s, "http://app.invalid/");
+      } catch (e2) {
+        return u;
+      }
+      return prefix + rel.pathname + rel.search + rel.hash;
     }
     if (s.indexOf("//") < 0) {
       return u;

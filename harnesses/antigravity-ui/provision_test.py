@@ -398,6 +398,14 @@ class PortOwnerTest(unittest.TestCase):
         self._pid(200, 1, [557])
         self.assertEqual(helper.port_owner("8443", "100", self.proc), "foreign")
 
+    def test_shared_port_with_a_foreign_listener_is_foreign(self):
+        # Two listeners on one port (SO_REUSEPORT): ours and someone else's.
+        self._listen(8443, 562)
+        self._listen(8443, 563)
+        self._pid(100, 1, [562])
+        self._pid(200, 1, [563])
+        self.assertEqual(helper.port_owner("8443", "100", self.proc), "foreign")
+
     def test_listener_invisible_to_us_is_foreign(self):
         # Another container's process: its socket is in the shared net
         # table, but no visible process holds it.

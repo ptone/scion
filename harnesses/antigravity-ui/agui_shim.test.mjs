@@ -192,7 +192,17 @@ test("rewrites root-relative and same-host URLs only", () => {
   assert.equal(r("/a?b=/c#/d"), `${PREFIX}/a?b=/c#/d`);
   assert.equal(r(`${PREFIX}/main.js`), `${PREFIX}/main.js`);
   assert.equal(r(PREFIX), PREFIX);
-  assert.equal(r("relative.js"), "relative.js");
+  // Relative references resolve as at the app's root, under the prefix.
+  assert.equal(r("relative.js"), `${PREFIX}/relative.js`);
+  assert.equal(r("a/b.js?v=1#x"), `${PREFIX}/a/b.js?v=1#x`);
+  assert.equal(r("../../../../../../../v1/projects"), `${PREFIX}/v1/projects`);
+  assert.equal(r("./x/../y"), `${PREFIX}/y`);
+  // Fragments, queries and other schemes are left alone.
+  assert.equal(r("#top"), "#top");
+  assert.equal(r("?q=1"), "?q=1");
+  assert.equal(r("blob:https://hub.example/123"), "blob:https://hub.example/123");
+  assert.equal(r("javascript:void(0)"), "javascript:void(0)");
+  assert.equal(r("mailto:a@example.com"), "mailto:a@example.com");
   assert.equal(r("//cdn.example/x.js"), "//cdn.example/x.js");
   assert.equal(r("https://other.example/x"), "https://other.example/x");
   assert.equal(r("data:text/plain,/x"), "data:text/plain,/x");
@@ -200,6 +210,19 @@ test("rewrites root-relative and same-host URLs only", () => {
   assert.equal(r(`wss://${HOST}/connect-websocket`), `wss://${HOST}${PREFIX}/connect-websocket`);
   assert.equal(r(`https://${HOST}${PREFIX}/x`), `https://${HOST}${PREFIX}/x`);
   assert.equal(r(null), null);
+  // Dot segments are resolved before the prefix check and in the result.
+  // Six levels up from inside the prefix is the Hub's /api/v1/projects;
+  // it stays under the prefix.
+  assert.equal(r(`${PREFIX}/../../../../../../v1/projects`), `${PREFIX}/api/v1/projects`);
+  assert.equal(r("/../../../v1/projects"), `${PREFIX}/v1/projects`);
+  assert.equal(r("/a/./b/../c?x=1#h"), `${PREFIX}/a/c?x=1#h`);
+  assert.equal(r(`${PREFIX}/a/../b`), `${PREFIX}/b`);
+  // Percent-encoded dot segments are dot segments to the URL parser too.
+  assert.equal(r(`${PREFIX}/%2e%2e/%2E%2E/%2e%2e/%2e%2e/%2e%2e/%2e%2e/v1/x`), `${PREFIX}/api/v1/x`);
+  // A backslash after the leading slash reads as another host to the
+  // parser; only the path is kept, under the prefix, on this origin.
+  assert.equal(r("/\\evil.example/x"), `${PREFIX}/x`);
+  assert.equal(r(`https://${HOST}${PREFIX}/../../x`), `https://${HOST}${PREFIX}/api/v1/agents/abc-123/ports/x`);
 });
 
 test("wraps fetch, XHR, WebSocket, Worker and history", () => {

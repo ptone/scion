@@ -63,8 +63,9 @@ docker exec agui-probe ss -ltn
 
 - L1. How many listening TCP sockets are there, and are ALL of them on
   `127.0.0.1` or `[::1]` (y/n)? Report the count and any non-loopback
-  address. (The wrapper refuses to start if the language server or the
-  proxy is not loopback-only; this also covers the app's other listeners.)
+  address. (The wrapper itself refuses to start only if the language server
+  or the proxy is not loopback-only; L1 is what covers the app's other
+  listeners.)
 
 ## 3b. Root check (tunnel case)
 
@@ -156,10 +157,54 @@ sort /tmp/agui-prefix/escaped.log | uniq -c | sort -rn | head -20    # their pat
 ## 5. Shim off (control)
 
 Stop the container with `docker stop agui-probe` (the wrapper ignores
-Ctrl-C by design), start it again with `-e AGUI_PATH_REWRITE=none`, repeat the start of step 4
-(re-create the 8091 config), and open the prefixed URL once.
+Ctrl-C by design), start it again with `-e AGUI_PATH_REWRITE=none`, repeat
+the start of step 4 (re-create the 8091 config), and open the prefixed URL
+once.
 
 - C1. Does it show "Not Found" or a broken page, as in the first probe?
+
+## 6. Phase 1 end-to-end check (agent on a Scion server)
+
+Run on an amd64 docker host with a Scion server built from this branch. Use
+a Hub URL that agents reach over the bridge network if you can (GCP identity
+`assign` then works and agents stay off the host loopback).
+
+Build checks (once):
+
+```sh
+docker build --build-arg BASE_IMAGE=scion-base:latest -t scion-antigravity-ui:latest harnesses/antigravity-ui
+docker run --rm --entrypoint bash scion-antigravity-ui:latest -c \
+  'for b in /opt/Antigravity/antigravity /opt/Antigravity/chrome_crashpad_handler /opt/Antigravity/resources/bin/language_server; do ldd "$b" | grep -c "not found"; done;
+   touch /opt/Antigravity/x 2>/dev/null && echo writable || echo "not writable";
+   ls /etc/apt/sources.list.d/; sha256sum /opt/Antigravity/antigravity'
+```
+
+Plus the wrong-hash and arm64 builds from step 1 (both must fail).
+
+Start an agent with a dedicated, minimal service account (or stage an ADC
+file instead: `scion secret set gcloud-adc @/path/to/adc.json`):
+
+```sh
+scion start agui-e2e --harness-config antigravity-ui --service-account <dedicated SA>
+scion attach agui-e2e                              # banner; then detach
+scion tunnel agui-e2e --port 8090 --local-port 8090   # then http://127.0.0.1:8090/
+```
+
+| Item | Check | Expected |
+|---|---|---|
+| E1 | time from start to the banner | about 10 s or less |
+| E2 | UI at root through the tunnel | signed in (no sign-in screen); a simple task runs |
+| E3 | `scion expose --list` from inside the agent (`scion attach`, shell window) | only 8090 |
+| L1 | inside the agent: `ss -ltn` | every listener of the app (all ports, not only 8090 and the language server) on `127.0.0.1` or `[::1]` |
+| E4 | `scion message agui-e2e "x"`, then a Scion interrupt | the pane shows "message not delivered"; the app keeps running |
+| E5 | stop the app (`pkill -f /opt/Antigravity/antigravity` in the shell window) | the agent ends |
+| E6 | start a second agent with no service account and no ADC file | Scion refuses the start; with plain passthrough the agent exits 1 with the no-auth message |
+| E7 | set `AGUI_SHIM_FORCE_MISMATCH=1` in the harness-config env and start an agent | banner: "The port link cannot show the UI (forced version mismatch (test hook))"; only a plain expose in expose.log |
+| E8 | on a host-networked workstation hub, start two agents at once | both run, on different ports (the banner shows them) |
+| E9 | after 10 minutes: `grep -ciE "update\|download" ~/.local/state/antigravity-ui/app.log` and `sha256sum /opt/Antigravity/antigravity` | no update download; hash unchanged from the build check |
+
+Report E1 to E9, L1 and the build checks with yes/no, counts, seconds and
+ports only; never tokens, sign-in URLs or command lines.
 
 ## Report template
 

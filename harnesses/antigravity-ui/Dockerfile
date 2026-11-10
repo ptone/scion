@@ -32,7 +32,10 @@ ARG AG_DEB_SHA256=d28326ada1ea2f45ec3ee1fdf46caee9e34676e25750337ab69c0a3dd257da
 
 # The vendor install script is never run. The .deb's maintainer scripts run
 # here, at build time only. /opt/Antigravity ends up root-owned and not
-# writable by the agent user, so the app cannot replace itself at runtime.
+# writable by the agent user, which stops an unprivileged in-place update.
+# It is not a hard barrier (the agent user can use sudo in Scion images):
+# the app's update check, turned off at every start by provision.py, is the
+# primary control against self-update.
 #
 # nginx: Debian's core package. nginx-light is only a metapackage on trixie.
 # The build fails unless the modules the proxy config needs are compiled in.

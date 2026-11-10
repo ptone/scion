@@ -151,8 +151,8 @@ Set in the agent's environment (for example a template's `env`):
 
 A preferred port that is already taken (agents with host networking share
 the host's loopback) is replaced by a free one; the banner shows the port
-in use. Logs are in `~/.local/state/antigravity-ui/` (use the agent's `shell` tmux
-window).
+in use. Logs are in `~/.local/state/antigravity-ui/` (use the agent's
+`shell` tmux window).
 
 ## Limitations
 
@@ -160,8 +160,11 @@ window).
 - Signing in from the app's own "Continue with Google" button does not
   complete in headless mode; use ADC (see Auth).
 - amd64 only.
-- The app is pinned. It cannot update itself: its update check is turned off,
-  and its install directory is read-only for the agent user.
+- The app is pinned. Its update check is turned off at every start, which is
+  the primary control against self-update. Its install directory is
+  read-only for the agent user, which stops an unprivileged in-place update;
+  it is not a hard barrier, because the agent user can use sudo in Scion
+  images. The app has no other switch to disable updates.
 
 ## Security notes
 

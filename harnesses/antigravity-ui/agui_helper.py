@@ -325,24 +325,7 @@ def listen_entries(port: int, proc_root: str = "/proc") -> dict[str, str]:
 
 def listen_inodes(port: int, proc_root: str = "/proc") -> set[str]:
     """Socket inodes of TCP listeners on port (IPv4 and IPv6)."""
-    inodes: set[str] = set()
-    for name in ("tcp", "tcp6"):
-        try:
-            with open(os.path.join(proc_root, "net", name), encoding="ascii") as f:
-                lines = f.readlines()[1:]
-        except OSError:
-            continue
-        for line in lines:
-            fields = line.split()
-            if len(fields) < 10 or fields[3] != _TCP_LISTEN:
-                continue
-            try:
-                local_port = int(fields[1].rsplit(":", 1)[1], 16)
-            except (IndexError, ValueError):
-                continue
-            if local_port == port and fields[9] != "0":
-                inodes.add(fields[9])
-    return inodes
+    return set(listen_entries(port, proc_root))
 
 
 def _stat(proc_root: str, pid: str) -> list[str]:
@@ -420,18 +403,19 @@ def listen_addr(port: str, root_pid: str, proc_root: str = "/proc") -> str:
 
 
 def port_owner(port: str, root_pid: str, proc_root: str = "/proc") -> str:
-    """Return "ours" if a listener on port is held by root_pid, one of its
-    descendants or a process in its session (the wrapper starts the app and
-    nginx with setsid, so a server that double-forks out of the parent chain
-    still has their session id), "foreign" if the port has listeners but
-    none of ours, and "none" if nothing listens on it."""
+    """Return "ours" if every listener on port is held by root_pid, one of
+    its descendants or a process in its session (the wrapper starts the app
+    and nginx with setsid, so a server that double-forks out of the parent
+    chain still has their session id), "foreign" if any listener on the port
+    is not ours (another process can share a port with SO_REUSEPORT), and
+    "none" if nothing listens on it."""
     p = int(_port(port, "port"))
     if not root_pid.isdigit():
         raise HelperError(f"pid must be a number, got {root_pid!r}")
     inodes = listen_inodes(p, proc_root)
     if not inodes:
         return "none"
-    return "ours" if inodes & _tree_sockets(proc_root, root_pid) else "foreign"
+    return "ours" if inodes <= _tree_sockets(proc_root, root_pid) else "foreign"
 
 
 # ---------------------------------------------------------------------------
