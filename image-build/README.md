@@ -76,7 +76,7 @@ All image-related scripts live under `scripts/`. GitHub Actions workflows remain
 | `scripts/trigger-cloudbuild.sh` | Deprecation shim. Forwards to `build-images.sh --builder cloud-build`. |
 | `scripts/pull-containers.sh` | Pull pre-built images (auto-detects runtime). |
 | `scripts/setup-cloud-build.sh` | One-time GCP setup (APIs, Artifact Registry, permissions). |
-| `scripts/check-harness-coverage.sh` | Fails if a `harnesses/<name>/Dockerfile` is missing from an aggregate `cloudbuild-*.yaml`. |
+| `scripts/check-harness-coverage.sh` | Fails if a `harnesses/<name>/Dockerfile` is missing from an aggregate `cloudbuild-*.yaml`, or if a bundle with `catalog=no` (see below) is in one. |
 | `scripts/check-image-size.sh` | Reports the size growth of a candidate image over a baseline; fails above a MiB budget. See [Image size budget](#image-size-budget). |
 | `.github/workflows/build-images.yml` | GitHub Actions workflow for building and pushing images. |
 
@@ -145,6 +145,16 @@ The orchestrator owns target sequencing, tag computation, and BASE_IMAGE threadi
 | `all` | Full DAG | Rebuilds everything from `core-base`. |
 | `thick-prep` | `thick-prep` | Prep layer for thick base. amd64 only. |
 | `thick` | `thick-prep` + `scion-base` + catalog harnesses + hub | Full thick rebuild using Cloud Workstations base instead of `core-base`. amd64 only. |
+
+A bundle can adjust how its image is built with an optional
+`harnesses/<name>/image-build.conf` of `key=value` lines:
+
+- `catalog=no`: the image is left out of the group targets (`harnesses`,
+  `common`, `all`, `thick`) and must not appear in the full-catalog Cloud Build
+  configs. It still builds with an explicit `--target scion-<name>`.
+- `platforms=linux/amd64` (comma list): requested platforms (or the native one)
+  are intersected with it; a step with no overlap is skipped with a notice.
+  The single-harness Cloud Build config uses it too.
 
 ### Tagging
 

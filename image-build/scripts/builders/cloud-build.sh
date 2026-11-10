@@ -76,6 +76,11 @@ builder_prepare() {
 generate_single_harness_config() {
   local step_id="$1"
   local harness_name="${step_id#scion-}"
+  # Platforms the harness supports (harnesses/<name>/image-build.conf), else
+  # the catalog default.
+  local platforms
+  platforms="$(harness_build_conf "${harness_name}" platforms)"
+  [[ -n "${platforms}" ]] || platforms="linux/amd64,linux/arm64"
   # Written into the private CLOUD_BUILD_TMPDIR (see the source-time trap
   # above); a second call for the same step_id in this process just
   # overwrites identical content.
@@ -102,7 +107,7 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-${step_id}'
     dir: 'harnesses/${harness_name}'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=\$_REGISTRY/scion-base:\$_TAG', '-t', '\$_REGISTRY/${step_id}:\$_SHORT_SHA', '-t', '\$_REGISTRY/${step_id}:\$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    args: ['buildx', 'build', '--platform', '${platforms}', '--build-arg', 'BASE_IMAGE=\$_REGISTRY/scion-base:\$_TAG', '-t', '\$_REGISTRY/${step_id}:\$_SHORT_SHA', '-t', '\$_REGISTRY/${step_id}:\$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 

@@ -914,6 +914,14 @@ if [[ "${BUILDER_MODE}" == "target" ]]; then
   builder_run_target "${TARGET}" "${REGISTRY}" "${TAG}" "${PUSH}"
 else
   for step in "${STEPS[@]}"; do
+    # A harness may support fewer platforms than requested
+    # (harnesses/<name>/image-build.conf). Build what overlaps; skip it
+    # with a notice when nothing does.
+    if ! step_platforms_out="$(step_platforms "${step}" "${PLATFORMS}")"; then
+      echo ""
+      echo "Skipping ${step}: it supports $(harness_build_conf "${step#scion-}" platforms) only (requested: ${PLATFORMS:-$(native_platform) (native)})."
+      continue
+    fi
     image_name="$(step_image_name "${step}")"
     dockerfile="$(step_dockerfile "${step}")"
     context_dir="$(step_context_dir "${step}")"
@@ -939,7 +947,7 @@ else
       --context-dir "${context_dir}" \
       --dockerfile "${dockerfile}" \
       --tags "${tags}" \
-      --platforms "${PLATFORMS}" \
+      --platforms "${step_platforms_out}" \
       ${build_arg_flags[@]+"${build_arg_flags[@]}"} \
       --push "${PUSH}" \
       --load "${LOAD}"

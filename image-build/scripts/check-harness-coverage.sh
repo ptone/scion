@@ -88,9 +88,18 @@ if [[ ! -d "${HARNESS_ROOT}" ]]; then
 fi
 
 # Expected harness set: every directory directly under harnesses/ that has
-# its own Dockerfile. Same rule as lib/targets.sh's discover_harness_names().
+# its own Dockerfile (lib/targets.sh's discover_harness_names()), minus the
+# bundles whose image-build.conf says catalog=no (lib/targets.sh's
+# emit_catalog_harness_steps()). Those must NOT appear in the full-catalog
+# configs: they are reported as extra below.
+catalog_excluded() {
+  local conf="${HARNESS_ROOT}/$1/image-build.conf"
+  [[ -f "${conf}" ]] && sed -n 's/^[[:space:]]*catalog[[:space:]]*=[[:space:]]*//p' "${conf}" \
+    | tail -n 1 | tr -d '[:space:]' | grep -qx 'no'
+}
 expected="$(find "${HARNESS_ROOT}" -mindepth 2 -maxdepth 2 -name Dockerfile -print \
   | while IFS= read -r dockerfile; do basename "$(dirname "${dockerfile}")"; done \
+  | while IFS= read -r name; do catalog_excluded "${name}" || echo "${name}"; done \
   | sort -u)"
 
 if [[ -z "${expected}" ]]; then
@@ -152,7 +161,7 @@ for name in sorted(mismatched):
     fail=1
   fi
   if [[ -n "${extra}" ]]; then
-    echo "FAIL: ${config_name} builds a harness with no harnesses/<name>/Dockerfile:" >&2
+    echo "FAIL: ${config_name} builds a harness outside the catalog (no harnesses/<name>/Dockerfile, or catalog=no in its image-build.conf):" >&2
     while IFS= read -r name; do echo "  - ${name}" >&2; done <<<"${extra}"
     fail=1
   fi
@@ -165,7 +174,9 @@ done
 
 if [[ "${fail}" -ne 0 ]]; then
   echo "" >&2
-  echo "Every harnesses/<name>/Dockerfile must have a build step in each of:" >&2
+  echo "Every harnesses/<name>/Dockerfile must have a build step in each of" >&2
+  echo "the configs below, unless its image-build.conf says catalog=no (then it" >&2
+  echo "must have none):" >&2
   printf '  %s\n' "${CHECKED_CONFIGS[@]}" >&2
   echo "(cloudbuild-omni.yaml is exempt -- see this script's header.)" >&2
   exit 1

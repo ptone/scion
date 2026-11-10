@@ -1367,6 +1367,38 @@ check_contains "explicit SOURCE_DATE_EPOCH with the git shim: wins" "--build-arg
 RUN_ENV=()
 RUN_PATH=""
 
+# ---------------------------------------------------------------------------
+# Per-harness image-build.conf: catalog=no and platforms
+# ---------------------------------------------------------------------------
+
+CAT="${TMP}/cat"
+cp -R "${OFF}" "${CAT}"
+mkdir -p "${CAT}/harnesses/onlyamd"
+cp "${CAT}/harnesses/claude/Dockerfile" "${CAT}/harnesses/onlyamd/Dockerfile"
+printf '# test fixture\ncatalog=no\nplatforms=linux/amd64\n' > "${CAT}/harnesses/onlyamd/image-build.conf"
+git -C "${CAT}" add -A
+GIT_AUTHOR_DATE="2023-06-01T00:00:00Z" GIT_COMMITTER_DATE="${COMMIT_DATE}" git -C "${CAT}" commit -q -m "catalog fixture"
+
+run_bi "${CAT}" --target harnesses --dry-run
+check_rc "catalog=no: harnesses group: exit 0" 0 "${RC}"
+check_contains "catalog=no: harnesses group: other harnesses still build" "-t scion-claude:" "$(line_for scion-claude)"
+check_not_contains "catalog=no: harnesses group: excluded harness left out" "scion-onlyamd" "${OUT}"
+
+run_bi "${CAT}" --target all --dry-run
+check_not_contains "catalog=no: all group: excluded harness left out" "scion-onlyamd" "${OUT}"
+
+run_bi "${CAT}" --target scion-onlyamd --platform linux/arm64 --dry-run
+check_rc "platforms: explicit target, no overlap: exit 0" 0 "${RC}"
+check_contains "platforms: explicit target, no overlap: skip notice" "Skipping scion-onlyamd: it supports linux/amd64 only (requested: linux/arm64)." "${OUT}"
+check_eq "platforms: explicit target, no overlap: nothing built" "" "$(line_for scion-onlyamd)"
+
+run_bi "${CAT}" --target scion-onlyamd --platform all --registry reg.example/x --dry-run
+check_contains "platforms: all is intersected to amd64" "--platform linux/amd64 -t reg.example/x/scion-onlyamd:" "$(line_for reg.example/x/scion-onlyamd)"
+
+run_bi "${CAT}" --target scion-claude --platform all --registry reg.example/x --dry-run
+# The dry-run printer quotes the comma.
+check_contains "platforms: harness without a conf keeps all platforms" '--platform linux/amd64\,linux/arm64 ' "$(line_for reg.example/x/scion-claude)"
+
 echo ""
 echo "${PASSES} passed, ${FAILS} failed"
 [ "${FAILS}" -eq 0 ]

@@ -40,11 +40,95 @@ is_harness_step() {
   [[ "${step}" == scion-* && -f "${REPO_ROOT}/harnesses/${name}/Dockerfile" ]]
 }
 
+# harness_build_conf <harness-name> <key>
+#
+# Echoes the value of <key> from harnesses/<name>/image-build.conf, an
+# optional per-bundle file of key=value lines (# comments allowed). Keys:
+#   catalog=no            leave the bundle out of the group targets
+#                         (harnesses, common, all, thick) and out of the
+#                         full-catalog Cloud Build configs; it still builds
+#                         with an explicit --target scion-<name>.
+#   platforms=linux/amd64 the platforms the image supports (comma list);
+#                         requested platforms are intersected with it.
+harness_build_conf() {
+  local conf="${REPO_ROOT}/harnesses/$1/image-build.conf"
+  [[ -f "${conf}" ]] || return 0
+  # Pure bash (no external tools): the last "<key>=" line wins.
+  local line key value result=""
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%%#*}"
+    [[ "${line}" == *=* ]] || continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="${key//[[:space:]]/}"
+    if [[ "${key}" == "$2" ]]; then
+      result="${value//[[:space:]]/}"
+    fi
+  done <"${conf}"
+  echo "${result}"
+}
+
+# Every harness image, including ones left out of the catalog.
 emit_harness_steps() {
   local name
   discover_harness_names | while IFS= read -r name; do
     [[ -n "${name}" ]] && echo "scion-${name}"
   done
+}
+
+# Harness images built by the group targets.
+emit_catalog_harness_steps() {
+  local name
+  discover_harness_names | while IFS= read -r name; do
+    [[ -n "${name}" ]] || continue
+    [[ "$(harness_build_conf "${name}" catalog)" == "no" ]] && continue
+    echo "scion-${name}"
+  done
+}
+
+# native_platform: the docker platform of this host (linux/amd64 or
+# linux/arm64).
+native_platform() {
+  case "${HOSTTYPE:-}" in
+    x86_64|amd64) echo "linux/amd64" ;;
+    aarch64|arm64) echo "linux/arm64" ;;
+    *) echo "linux/${HOSTTYPE:-unknown}" ;;
+  esac
+}
+
+# step_platforms <step_id> <requested>
+#
+# Echoes the platforms to build the step for: <requested> ("" = native)
+# intersected with the harness's declared platforms, if it declares any.
+# Echoes <requested> unchanged for steps without a declaration. Returns 1
+# (echoing nothing) when the intersection is empty.
+step_platforms() {
+  local step="$1" requested="$2"
+  if ! is_harness_step "${step}"; then
+    echo "${requested}"
+    return 0
+  fi
+  local allowed
+  allowed="$(harness_build_conf "${step#scion-}" platforms)"
+  if [[ -z "${allowed}" ]]; then
+    echo "${requested}"
+    return 0
+  fi
+  local want="${requested}" p out=""
+  [[ -n "${want}" ]] || want="$(native_platform)"
+  IFS=',' read -r -a _wanted <<<"${want}"
+  for p in "${_wanted[@]}"; do
+    if [[ ",${allowed}," == *",${p},"* ]]; then
+      out="${out:+${out},}${p}"
+    fi
+  done
+  [[ -n "${out}" ]] || return 1
+  # Keep "native" as "" when the native platform is what was asked for.
+  if [[ -z "${requested}" ]]; then
+    echo ""
+  else
+    echo "${out}"
+  fi
 }
 
 # All known step IDs. The step ID is also the published image name
@@ -106,7 +190,7 @@ resolve_targets() {
       echo scion-base
       ;;
     harnesses)
-      emit_harness_steps
+      emit_catalog_harness_steps
       ;;
     hub)
       echo scion-hub
@@ -116,12 +200,12 @@ resolve_targets() {
       ;;
     common)
       printf '%s\n' scion-base
-      emit_harness_steps
+      emit_catalog_harness_steps
       printf '%s\n' scion-hub
       ;;
     all)
       printf '%s\n' core-base scion-base
-      emit_harness_steps
+      emit_catalog_harness_steps
       printf '%s\n' scion-hub
       ;;
     thick-prep)
@@ -129,7 +213,7 @@ resolve_targets() {
       ;;
     thick)
       printf '%s\n' thick-prep scion-base
-      emit_harness_steps
+      emit_catalog_harness_steps
       printf '%s\n' scion-hub
       ;;
     *)
