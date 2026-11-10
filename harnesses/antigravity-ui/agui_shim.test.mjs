@@ -36,6 +36,35 @@ function fakeStorage() {
   };
 }
 
+// A document whose head records inserted elements. document.write throws,
+// as it does on a page that enforces Trusted Types.
+function fakeDocument(calls) {
+  const head = {
+    children: [],
+    get firstChild() { return this.children[0] ?? null; },
+    insertBefore(el, ref) {
+      const i = ref ? this.children.indexOf(ref) : this.children.length;
+      this.children.splice(i < 0 ? this.children.length : i, 0, el);
+    },
+  };
+  calls.head = head;
+  return {
+    head,
+    documentElement: null,
+    createElement(tag) {
+      return { tag, attrs: {}, setAttribute(n, v) { this.attrs[n] = v; } };
+    },
+    write(s) {
+      calls.writes.push(s);
+      throw new TypeError("This document requires 'TrustedHTML' assignment.");
+    },
+  };
+}
+
+function baseHrefs(calls) {
+  return calls.head.children.filter((e) => e.tag === "base").map((e) => e.attrs.href);
+}
+
 function load(pathname, before, extra) {
   const calls = { fetch: [], xhr: [], ctor: [], history: [], writes: [] };
   class XMLHttpRequest {}
@@ -63,7 +92,7 @@ function load(pathname, before, extra) {
   }
   const window = {
     location: { pathname, host: HOST, href: `https://${HOST}${pathname}` },
-    document: { write: (s) => calls.writes.push(s), documentElement: null },
+    document: fakeDocument(calls),
     URL,
     Proxy,
     Request,
@@ -104,7 +133,8 @@ test("without a proxy prefix it only writes a root base", () => {
   const { window, calls, realLocal } = load("/conversations/1", before);
   // The root <base> together with nginx turning ="/ into =" reproduces the
   // original root-relative asset URLs; nothing else changes.
-  assert.deepEqual(calls.writes, ['<base href="/">']);
+  assert.deepEqual(baseHrefs(calls), ["/"]);
+  assert.deepEqual(calls.writes, []);
   assert.equal(window.__AGUI_PREFIX__, undefined);
   for (const [name, value] of Object.entries(before)) {
     assert.equal(window[name], value, `${name} was replaced at root`);
@@ -122,10 +152,13 @@ test("without a proxy prefix it only writes a root base", () => {
   assert.deepEqual(calls.fetch, ["/static/x"]);
 });
 
-test("finds the proxy prefix and writes its base", () => {
+test("finds the proxy prefix and inserts its base", () => {
   const { window, calls } = load(`${PREFIX}/conversations/1`);
   assert.equal(window.__AGUI_PREFIX__, PREFIX);
-  assert.deepEqual(calls.writes, [`<base href="${PREFIX}/">`]);
+  assert.deepEqual(baseHrefs(calls), [`${PREFIX}/`]);
+  // The base goes first in <head>, before anything already there.
+  assert.equal(calls.head.children[0].tag, "base");
+  assert.deepEqual(calls.writes, []);
 });
 
 test("proxyPrefix rejects other paths", () => {
@@ -137,6 +170,19 @@ test("proxyPrefix rejects other paths", () => {
   assert.equal(p("/api/v1/agents/abc/ports/8090/files/"), "");
   assert.equal(p("/api/v1/agents//ports/8090/proxy/"), "");
   assert.equal(p("/web/abc"), "");
+});
+
+test("sets the prefix and keeps working when the base cannot be inserted", () => {
+  const { window } = load(`${PREFIX}/c/1`, undefined, {
+    document: {
+      head: null,
+      documentElement: null,
+      createElement() { throw new TypeError("blocked"); },
+      write() { throw new TypeError("This document requires 'TrustedHTML' assignment."); },
+    },
+  });
+  assert.equal(window.__AGUI_PREFIX__, PREFIX);
+  assert.equal(window.__AGUI_SHIM__.rewrite("/main.js"), `${PREFIX}/main.js`);
 });
 
 test("rewrites root-relative and same-host URLs only", () => {

@@ -301,15 +301,26 @@ def listen_inodes(port: int, proc_root: str = "/proc") -> set[str]:
     return inodes
 
 
-def _ppid(proc_root: str, pid: str) -> str | None:
+def _stat(proc_root: str, pid: str) -> list[str]:
+    """Fields of /proc/<pid>/stat after the command name: state, ppid,
+    pgrp, session, ..."""
     try:
         with open(os.path.join(proc_root, pid, "stat"), encoding="utf-8", errors="replace") as f:
             stat = f.read()
     except OSError:
-        return None
+        return []
     # The command name is in parentheses and may contain spaces.
-    rest = stat[stat.rfind(")") + 2:].split()
+    return stat[stat.rfind(")") + 2:].split()
+
+
+def _ppid(proc_root: str, pid: str) -> str | None:
+    rest = _stat(proc_root, pid)
     return rest[1] if len(rest) > 1 else None
+
+
+def _session(proc_root: str, pid: str) -> str | None:
+    rest = _stat(proc_root, pid)
+    return rest[3] if len(rest) > 3 else None
 
 
 def _in_tree(proc_root: str, pid: str, root: str) -> bool:
@@ -323,9 +334,9 @@ def _in_tree(proc_root: str, pid: str, root: str) -> bool:
 
 
 def port_owner(port: str, root_pid: str, proc_root: str = "/proc") -> str:
-    """Return "ours" if a listener on port is held by root_pid or one of its
-    descendants, "foreign" if the port has listeners but none of ours, and
-    "none" if nothing listens on it."""
+    """Return "ours" if a listener on port is held by root_pid, one of its
+    descendants or a process in its session, "foreign" if the port has
+    listeners but none of ours, and "none" if nothing listens on it."""
     p = int(_port(port, "port"))
     if not root_pid.isdigit():
         raise HelperError(f"pid must be a number, got {root_pid!r}")
@@ -338,7 +349,10 @@ def port_owner(port: str, root_pid: str, proc_root: str = "/proc") -> str:
     except OSError as exc:
         raise HelperError(f"cannot list {proc_root}: {exc}") from exc
     for pid in pids:
-        if not _in_tree(proc_root, pid, root_pid):
+        # A descendant of root_pid, or a process in its session: the wrapper
+        # starts the app and nginx with setsid, so a server that double-forks
+        # out of the parent chain still has their session id.
+        if not (_in_tree(proc_root, pid, root_pid) or _session(proc_root, pid) == root_pid):
             continue
         fd_dir = os.path.join(proc_root, pid, "fd")
         try:

@@ -125,13 +125,23 @@ input_sink() {
 
 # After start-up: if the app asks for a sign-in code (for example when an
 # assigned service account stops working), stop it; the main loop then
-# exits 1 with the no-auth message.
+# exits 1 with the no-auth message. Each pass reads only what the log gained
+# since the last one (plus a small overlap, so a prompt split across two
+# reads is still seen), so the cost does not grow with the agent's uptime.
 sign_in_watcher() {
+  local offset=0 size from n
   while :; do
-    if sign_in_prompted; then
-      : >"$NO_AUTH_MARK"
-      kill_group "$APP_PID"
-      return
+    size="$(stat -c %s "$APP_LOG" 2>/dev/null || echo 0)"
+    if [ "$size" -lt "$offset" ]; then offset=0; fi
+    if [ "$size" -gt "$offset" ]; then
+      from=$(( offset > 256 ? offset - 256 : 0 ))
+      n="$(tail -c +"$((from + 1))" "$APP_LOG" | head -c "$((size - from))" | grep -c -- "$PROMPT_RE" || true)"
+      if [ "${n:-0}" -gt 0 ]; then
+        : >"$NO_AUTH_MARK"
+        kill_group "$APP_PID"
+        return
+      fi
+      offset="$size"
     fi
     sleep 2
   done
@@ -148,8 +158,8 @@ banner() {
       ;;
     tunnel)
       if [ "$SHIM" = shim ]; then
-        echo " The port link is sandboxed on this hub, so the UI does not work"
-        echo " through it. Connect with a tunnel instead:"
+        echo " App mode is not available here (see ${STATE}/expose.log), so the"
+        echo " port link cannot show the UI. Connect with a tunnel instead:"
       else
         echo " The port link cannot show the UI (${SHIM_REASON})."
         echo " Connect with a tunnel instead:"
@@ -191,10 +201,14 @@ pick_port() {
   fi
 }
 
-# owner_ok <port> <pid>: the listener on port is held by pid or a child.
-owner_ok() {
-  [ "$(python3 -I "$HELPER" port-owner --port "$1" --pid "$2" 2>/dev/null)" = ours ]
+# port_owner <port> <pid>: "ours", "foreign" or "none" for the listener on
+# port, relative to pid's process tree (or session).
+port_owner() {
+  python3 -I "$HELPER" port-owner --port "$1" --pid "$2" 2>/dev/null || echo unknown
 }
+
+# owner_ok <port> <pid>: the listener on port is held by pid's tree.
+owner_ok() { [ "$(port_owner "$1" "$2")" = ours ]; }
 
 stop_and_reap() {
   kill_group "$1"
@@ -231,15 +245,23 @@ while :; do
   # Wait for the language server. A sign-in prompt ends the start (no log
   # tail: the log holds the sign-in URL).
   waited=0
+  lost_port=""
   until ls_up; do
     sign_in_prompted && fail "$NO_AUTH_MSG"
-    kill -0 "$APP_PID" 2>/dev/null || fail "the app exited during start-up" "$APP_LOG"
+    if ! kill -0 "$APP_PID" 2>/dev/null; then
+      # The app may have exited because another process took its port.
+      if [ "$attempt" -lt "$ATTEMPTS" ] && [ "$(port_owner "$JETSKI_LS_PORT" "$APP_PID")" = foreign ]; then
+        lost_port=1
+        break
+      fi
+      fail "the app exited during start-up" "$APP_LOG"
+    fi
     waited=$((waited + 1))
     [ "$waited" -lt "$AGUI_LS_TIMEOUT" ] \
       || fail "the language server did not answer on 127.0.0.1:${JETSKI_LS_PORT} within ${AGUI_LS_TIMEOUT}s" "$APP_LOG"
     sleep 1
   done
-  if kill -0 "$APP_PID" 2>/dev/null && owner_ok "$JETSKI_LS_PORT" "$APP_PID"; then
+  if [ -z "$lost_port" ] && kill -0 "$APP_PID" 2>/dev/null && owner_ok "$JETSKI_LS_PORT" "$APP_PID"; then
     break
   fi
   log "port ${JETSKI_LS_PORT} is answered by a process outside this agent; trying another port"
@@ -288,19 +310,30 @@ while :; do
     --path-rewrite "$SHIM" \
     || fail "could not render the nginx config"
 
+  : >"${STATE}/nginx.err"
   setsid nginx -p "$STATE" -e "${STATE}/nginx.err" -c "${STATE}/nginx.conf" \
     </dev/null >>"${STATE}/nginx.log" 2>&1 &
   NGX_PID=$!
 
   waited=0
+  lost_port=""
   until proxy_up; do
-    kill -0 "$NGX_PID" 2>/dev/null || fail "nginx exited during start-up" "${STATE}/nginx.err" "${STATE}/nginx.log"
+    if ! kill -0 "$NGX_PID" 2>/dev/null; then
+      # nginx may have exited because another process took its port.
+      if [ "$attempt" -lt "$ATTEMPTS" ] \
+        && { grep -q "Address already in use" "${STATE}/nginx.err" 2>/dev/null \
+             || [ "$(port_owner "$AGUI_PROXY_PORT" "$NGX_PID")" = foreign ]; }; then
+        lost_port=1
+        break
+      fi
+      fail "nginx exited during start-up" "${STATE}/nginx.err" "${STATE}/nginx.log"
+    fi
     waited=$((waited + 1))
     [ "$waited" -lt "$AGUI_PROXY_TIMEOUT" ] \
       || fail "nginx did not answer on 127.0.0.1:${AGUI_PROXY_PORT} within ${AGUI_PROXY_TIMEOUT}s" "${STATE}/nginx.err"
     sleep 1
   done
-  if kill -0 "$NGX_PID" 2>/dev/null && owner_ok "$AGUI_PROXY_PORT" "$NGX_PID"; then
+  if [ -z "$lost_port" ] && kill -0 "$NGX_PID" 2>/dev/null && owner_ok "$AGUI_PROXY_PORT" "$NGX_PID"; then
     break
   fi
   log "port ${AGUI_PROXY_PORT} is answered by a process outside this agent; trying another port"

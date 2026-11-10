@@ -319,11 +319,11 @@ class PortOwnerTest(unittest.TestCase):
                 f.write(header)
             f.write(line + "\n")
 
-    def _pid(self, pid: int, ppid: int, sockets=(), comm="proc (x)"):
+    def _pid(self, pid: int, ppid: int, sockets=(), comm="proc (x)", sid=None):
         d = os.path.join(self.proc, str(pid))
         os.makedirs(os.path.join(d, "fd"))
         with open(os.path.join(d, "stat"), "w") as f:
-            f.write("%d (%s) S %d %d 0 0" % (pid, comm, ppid, pid))
+            f.write("%d (%s) S %d %d %d 0" % (pid, comm, ppid, pid, sid if sid is not None else pid))
         for i, inode in enumerate(sockets):
             os.symlink("socket:[%d]" % inode, os.path.join(d, "fd", str(10 + i)))
 
@@ -338,6 +338,14 @@ class PortOwnerTest(unittest.TestCase):
         self._pid(100, 1)
         self._pid(101, 100)
         self._pid(102, 101, [556], comm="language server")
+        self.assertEqual(helper.port_owner("8443", "100", self.proc), "ours")
+
+    def test_listener_held_in_the_same_session(self):
+        # Double-forked out of the parent chain (reparented to 1), but still
+        # in the app's session.
+        self._listen(8443, 561)
+        self._pid(100, 1)
+        self._pid(103, 1, [561], sid=100)
         self.assertEqual(helper.port_owner("8443", "100", self.proc), "ours")
 
     def test_listener_held_by_someone_else(self):
@@ -668,8 +676,9 @@ class WrapperStartupTest(unittest.TestCase):
 
 FAKE_APP = r"""#!/usr/bin/env python3
 # Fake app for the wrapper tests: serves HTTPS on JETSKI_LS_PORT.
-# FAKE_MODE: serve | late-prompt | foreign-first.
-import http.server, os, ssl, sys, threading, time
+# FAKE_MODE: serve | late-prompt | foreign-first | foreign-then-exit.
+# FAKE_WEB_DIR: directory to serve (default: the current directory).
+import functools, http.server, os, ssl, sys, threading, time
 
 home = os.environ["HOME"]
 port = int(os.environ["JETSKI_LS_PORT"])
@@ -677,8 +686,16 @@ cert = os.environ["FAKE_CERT_DIR"]
 mode = os.environ.get("FAKE_MODE", "serve")
 
 
+handler = functools.partial(http.server.SimpleHTTPRequestHandler,
+                            directory=os.environ.get("FAKE_WEB_DIR") or os.getcwd())
+
+
+def serve_http(p):
+    http.server.HTTPServer(("127.0.0.1", p), handler).serve_forever()
+
+
 def serve_https(p):
-    srv = http.server.HTTPServer(("127.0.0.1", p), http.server.SimpleHTTPRequestHandler)
+    srv = http.server.HTTPServer(("127.0.0.1", p), handler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(os.path.join(cert, "cert.pem"), os.path.join(cert, "key.pem"))
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
@@ -690,6 +707,7 @@ attempt = int(open(attempt_file).read()) + 1 if os.path.exists(attempt_file) els
 open(attempt_file, "w").write(str(attempt))
 with open(os.path.join(home, "fake-ports"), "a") as f:
     f.write("%d\n" % port)
+open(os.path.join(home, "app.pid"), "w").write(str(os.getpid()))
 
 if mode == "foreign-first" and attempt == 1:
     # A listener that is not part of this process tree takes the port.
@@ -701,6 +719,18 @@ if mode == "foreign-first" and attempt == 1:
         os._exit(0)
     time.sleep(120)
     sys.exit(0)
+
+if mode == "foreign-then-exit" and attempt == 1:
+    # Another process (plain HTTP, so the HTTPS probe fails) takes the port
+    # and this app exits, as an app that lost the bind race would.
+    if os.fork() == 0:
+        os.setsid()
+        if os.fork() == 0:
+            open(os.path.join(home, "foreign.pid"), "w").write(str(os.getpid()))
+            serve_http(port)
+        os._exit(0)
+    time.sleep(1)
+    sys.exit(1)
 
 if mode == "late-prompt":
     def later():
@@ -714,10 +744,37 @@ serve_https(port)
 
 FAKE_NGINX = r"""#!/usr/bin/env python3
 # Fake nginx: serves plain HTTP on the port in the rendered config.
-import http.server, os, re, sys
+# FAKE_NGINX_MODE=lose-first: on the first run another process takes the
+# port (a raw listener that closes every connection, so the HTTP probe
+# fails) and this one fails to bind and exits, as nginx would.
+import http.server, os, re, socket, sys, time
+home = os.environ["HOME"]
 conf = open(sys.argv[sys.argv.index("-c") + 1]).read()
+err = sys.argv[sys.argv.index("-e") + 1]
 port = int(re.search(r"listen 127\.0\.0\.1:(\d+);", conf).group(1))
-open(os.path.join(os.environ["HOME"], "nginx.pid"), "w").write(str(os.getpid()))
+with open(os.path.join(home, "nginx-ports"), "a") as f:
+    f.write("%d\n" % port)
+runs = os.path.join(home, "nginx-runs")
+run = int(open(runs).read()) + 1 if os.path.exists(runs) else 1
+open(runs, "w").write(str(run))
+if os.environ.get("FAKE_NGINX_MODE") == "lose-first" and run == 1:
+    if os.fork() == 0:
+        os.setsid()
+        if os.fork() == 0:
+            open(os.path.join(home, "foreign-nginx.pid"), "w").write(str(os.getpid()))
+            s = socket.socket()
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", port))
+            s.listen(8)
+            while True:
+                c, _ = s.accept()
+                c.close()
+        os._exit(0)
+    time.sleep(1)
+    with open(err, "a") as f:
+        f.write("nginx: [emerg] bind() to 127.0.0.1:%d failed (98: Address already in use)\n" % port)
+    sys.exit(1)
+open(os.path.join(home, "nginx.pid"), "w").write(str(os.getpid()))
 http.server.HTTPServer(("127.0.0.1", port), http.server.SimpleHTTPRequestHandler).serve_forever()
 """
 
@@ -765,7 +822,7 @@ class WrapperRunningTest(unittest.TestCase):
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
-        for name in ("foreign.pid", "nginx.pid"):
+        for name in ("foreign.pid", "foreign-nginx.pid", "nginx.pid", "app.pid"):
             pid = self._read_pid(name)
             if pid:
                 try:
@@ -879,6 +936,58 @@ class WrapperRunningTest(unittest.TestCase):
         self.assertIn("not signed in", out)
         self.assertNotIn("accounts.google.com", out)
         self.assertNotIn("hidden-state", out)
+
+    def test_shim_on_path(self):
+        # The fake app serves a page and a main.js with the patch points, as
+        # the pinned app does.
+        web = os.path.join(self.tmp, "web")
+        os.makedirs(web)
+        with open(os.path.join(web, "index.html"), "w") as f:
+            f.write('<html><head><script src="/main.js"></script></head><body></body></html>')
+        with open(os.path.join(web, "main.js"), "w") as f:
+            f.write(" ".join(t for t, _ in helper.SHIM_PATCHES))
+        self._start(FAKE_WEB_DIR=web)
+        out = self._wait_for("Messages and tasks are not delivered")
+        self.assertIn("nginx config rendered (path_rewrite=shim)", out)
+        self.assertIn("App mode is not available here", out)
+        with open(os.path.join(self.home, ".local", "state", "antigravity-ui", "nginx.conf")) as f:
+            self.assertIn("location = /main.js {", f.read())
+        with open(os.path.join(self.home, "scion-calls")) as f:
+            calls = f.read().splitlines()
+        self.assertEqual(len(calls), 2, calls)
+        self.assertIn("--app-mode", calls[0])
+        self.assertNotIn("--app-mode", calls[1])
+
+    def test_sigterm_stops_everything(self):
+        self._start()
+        self._wait_for("Messages and tasks are not delivered")
+        app_pid, nginx_pid = self._read_pid("app.pid"), self._read_pid("nginx.pid")
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self._wait_exit(), 143)
+        time.sleep(0.5)
+        for pid in (app_pid, nginx_pid):
+            with self.assertRaises(OSError):
+                os.kill(pid, 0)
+
+    def test_proxy_port_lost_to_another_process_is_retried(self):
+        self._start(FAKE_NGINX_MODE="lose-first")
+        out = self._wait_for("Messages and tasks are not delivered")
+        self.assertIn("trying another port", out)
+        self.assertNotIn("nginx exited during start-up", out)
+        with open(os.path.join(self.home, "nginx-ports")) as f:
+            ports = f.read().split()
+        self.assertEqual(len(ports), 2, ports)
+        self.assertNotEqual(ports[0], ports[1])
+        self.assertIn("proxy is up on 127.0.0.1:%s" % ports[1], out)
+
+    def test_app_that_exits_after_losing_its_port_is_retried(self):
+        self._start(FAKE_MODE="foreign-then-exit")
+        out = self._wait_for("Messages and tasks are not delivered")
+        self.assertIn("trying another port", out)
+        with open(os.path.join(self.home, "fake-ports")) as f:
+            ports = f.read().split()
+        self.assertEqual(len(ports), 2, ports)
+        self.assertIn("language server is up on 127.0.0.1:%s" % ports[1], out)
 
     def test_foreign_listener_on_the_port_is_not_used(self):
         self._start(FAKE_MODE="foreign-first")

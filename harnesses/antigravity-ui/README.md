@@ -29,6 +29,11 @@ agent container (scion-antigravity-ui)
   shim changes nothing. The patches are specific to the pinned app version:
   at start the wrapper checks that they apply, and otherwise turns the shim
   off and offers only the tunnel.
+- Known limit: the shim's HTML rule turns `="/` into `="` in every HTML page
+  the app serves. The version check refuses an app page with a
+  protocol-relative attribute (`="//`), but another HTML document the app
+  serves could still contain one, which would then point outside the proxy
+  path.
 - The wrapper registers port 8090 with `scion expose`. With the shim on it
   asks for the experimental app mode first. If the Hub does not support app
   mode, it registers the port normally, and you connect with `scion tunnel`.
@@ -100,10 +105,12 @@ harness-config `env` override. Template environment keys are not applied.
 Without a `gcloud-adc` file or an assigned service account, Scion refuses to
 start the agent. With plain `passthrough` Scion does start it (it counts the
 host identity as assigned), but the app is not given ADC: it asks for an
-interactive sign-in and the agent stops as described below. If the app still asks for an interactive sign-in code (for
-example when the assigned service account stops working), the agent stops
-with a message saying how to provide credentials. Signing out in the app's
-UI has the same effect: start the agent again to recover.
+interactive sign-in and the agent stops as described below.
+
+If the app asks for an interactive sign-in code at any time (for example
+when the assigned service account stops working), the agent stops with a
+message saying how to provide credentials. Signing out in the app's UI has
+the same effect: start the agent again to recover.
 
 ## Files
 

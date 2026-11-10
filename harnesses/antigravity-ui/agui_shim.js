@@ -54,15 +54,29 @@
 
   var loc = w.location;
   var prefix = proxyPrefix(loc.pathname);
+  // Set first, so the patched main.js finds the prefix even if anything
+  // below throws.
   w.__AGUI_SHIM__ = { prefix: prefix, proxyPrefix: proxyPrefix };
+  if (prefix) {
+    w.__AGUI_PREFIX__ = prefix;
+  }
 
-  if (w.document && typeof w.document.write === "function") {
-    w.document.write("<base href=" + JSON.stringify(prefix + "/") + ">");
+  // <base href="PREFIX/">, as an element (not document.write, which is a
+  // Trusted Types sink). This script is the first element of <head>.
+  try {
+    var d = w.document;
+    var head = d && (d.head || (d.getElementsByTagName && d.getElementsByTagName("head")[0]));
+    if (head && typeof d.createElement === "function") {
+      var base = d.createElement("base");
+      base.setAttribute("href", prefix + "/");
+      head.insertBefore(base, head.firstChild);
+    }
+  } catch (e) {
+    // No base: relative assets then resolve against the page URL.
   }
   if (!prefix) {
     return;
   }
-  w.__AGUI_PREFIX__ = prefix;
 
   function under(path) {
     return path === prefix || path.indexOf(prefix + "/") === 0;
