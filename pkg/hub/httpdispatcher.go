@@ -3162,6 +3162,10 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 				if secret.IsReservedEnvTarget(target) {
 					continue
 				}
+				// Agent-route target policy, matching resolveSecrets.
+				if secret.AgentWrittenTargetRefused(sv.SecretMeta) {
+					continue
+				}
 				if _, needed := keySet[target]; needed {
 					// Store under the canonical key if this was an alternative match
 					resultKey := target
@@ -5171,6 +5175,15 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			if d.debug {
 				d.log.Debug("resolveSecrets: dropping reserved-target secret", "name", sv.Name, "target", sv.Target, "scope", sv.Scope)
 			}
+			continue
+		}
+		// Agent-route target policy at delivery (pkg/secret/agent_policy.go):
+		// an agent-written secret whose env name or file target the policy
+		// refuses is never attached, including rows written before the
+		// write-time check existed. Logged by name, never by value.
+		if secret.AgentWrittenTargetRefused(sv.SecretMeta) {
+			d.log.WarnContext(ctx, "start-time secret withheld: agent-written target not allowed",
+				"agent_id", agent.ID, "secret", sv.Name, "type", sv.SecretType, "scope", sv.Scope)
 			continue
 		}
 		// Only skip as_needed environment-type secrets (handled by the

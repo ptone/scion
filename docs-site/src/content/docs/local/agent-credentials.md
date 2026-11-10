@@ -384,6 +384,15 @@ rejected capture with `--scope user` (or via the CLI/Script path above) still wo
 affect user-originated project writes made directly through the web UI or `scion hub secret set
 --project`.
 
+**What an agent may store.** An agent-written environment secret may not use a name the shell,
+a language runtime, git, gcloud or an HTTP client acts on (`PATH`, `BASH_ENV`, `LD_*`, `GIT_*`,
+`GITHUB_TOKEN*`, `CLOUDSDK_*`, `GOOGLE_APPLICATION_CREDENTIALS`, proxy and CA-bundle variables in
+either case, and similar); other names are accepted. An agent-written file secret must target `~/.scion/agent-secrets/<name>` or one of the
+harness credential files listed above. Copilot's `~/.copilot/config.json` is excluded because it
+is also Copilot's settings file, so Copilot auth capture from an agent is refused: provide Copilot
+credentials (`COPILOT_GITHUB_TOKEN` or `GH_TOKEN`) through your profile or project secrets instead.
+Secrets stored this way before the change are not delivered if they break these rules.
+
 ### How capture works
 
 The host generates a capture manifest (`inputs/capture-auth-config.json`) from the harness's

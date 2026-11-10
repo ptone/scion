@@ -1377,14 +1377,29 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 
-	// Validate file-specific constraints.
-	if secretType == store.SecretTypeFile {
-		if strings.Contains(target, "..") {
-			BadRequest(w, "target path must not contain '..'")
+	// Agent-route target policy (pkg/secret/agent_policy.go): an agent may
+	// not choose an env name or file path that the shell, a runtime or a
+	// harness acts on. resolveSecrets applies the same policy at delivery.
+	if secretType == store.SecretTypeEnvironment {
+		if err := secret.AgentEnvTargetAllowed(target); err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{
+				"field": "target",
+				"value": target,
+			})
 			return
 		}
-		if !strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "~/") {
-			ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{
+	}
+
+	// Validate file-specific constraints.
+	if secretType == store.SecretTypeFile {
+		if req.Target == "" {
+			ValidationError(w, "file secret target is required ("+secret.AgentSecretsDir+"<name>)", map[string]interface{}{
+				"field": "target",
+			})
+			return
+		}
+		if err := secret.AgentFileTargetAllowed(target); err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{
 				"field": "target",
 				"value": target,
 			})
@@ -1669,6 +1684,11 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 			}
 			for _, m := range metas {
 				if m.SecretType == store.SecretTypeInternal {
+					continue
+				}
+				// Only keys the agent could read: check 7's agent-route
+				// target policy (authorizeRuntimeProjectItem).
+				if secret.AgentWrittenTargetRefused(m) {
 					continue
 				}
 				secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target})

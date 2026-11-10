@@ -15,6 +15,10 @@ Scion now requires TLS off loopback between the Hub and Runtime Brokers (`server
 
 [Read the full release notes for this week ->](/scion/release-notes/2026-10-26/)
 
+## Agent-written secrets: reserved env names and file targets are refused
+
+Secrets an agent writes (`sciontool secret set`, Capture Auth) are now checked by name and target. Agent-written environment secrets may not use a name the shell, runtimes, git, gcloud or HTTP clients act on (for example `PATH`, `LD_*`, `GIT_*` or a proxy variable). Agent-written file secrets must target `~/.scion/agent-secrets/<name>` or a harness credential file. Existing agent-written secrets that break these rules are no longer delivered; re-create them, or set them yourself from the web UI or `scion hub secret set`. Copilot auth capture from an agent is refused; provide `COPILOT_GITHUB_TOKEN` or `GH_TOKEN` as a profile or project secret instead. Secret scopes and defaults are unchanged. See [Agent credentials](/scion/local/agent-credentials/).
+
 ## Kubernetes agent pods no longer mount a Kubernetes API token
 
 Kubernetes agent pods no longer mount a Kubernetes API token. Restart running agents to apply this to them. To list agent pods that still have a token across all namespaces, see [Agent pod identity](/scion/hosted/ha/kubernetes/#agent-pod-identity).

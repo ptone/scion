@@ -411,12 +411,15 @@ func TestAgentSecrets_SizeLimit_ReturnsJSONError(t *testing.T) {
 		Value:    strings.Repeat("a", 64*1024+1),
 		Encoding: "raw",
 		Type:     "file",
-		Target:   "/tmp/bigfile.dat",
+		Target:   "~/.scion/agent-secrets/bigfile.dat",
 	}
 	rec := doRequestWithAgentToken(t, srv, http.MethodPut,
 		"/api/v1/agents/"+agentID+"/secrets/BIG_AGENT_KEY", body, agentToken)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("size limit: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "64KB") {
+		t.Errorf("size limit: expected the 64KB error, got %s", rec.Body.String())
 	}
 	checkJSONError(t, rec.Body.String())
 }

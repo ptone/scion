@@ -284,6 +284,11 @@ From inside an agent container, read secrets with `scion secret`. The calls are 
     telling you to retry with `--scope user`. This does not affect writes you make yourself through
     the web UI or `scion hub secret set --project`.*
 
+    *Agent-written environment secrets may not use a name the shell or a runtime acts on (for
+    example `PATH`, `LD_*` or a proxy variable), and agent-written file secrets must target
+    `~/.scion/agent-secrets/<name>` or a harness credential file (see [Agent credentials](/scion/local/agent-credentials/)). This does
+    not affect secrets you set yourself through the web UI or `scion hub secret set`.*
+
 #### Using the Hub API Directly
 Under the hood, `scion secret` and `sciontool` interact with the Hub's agent-specific secrets API:
 

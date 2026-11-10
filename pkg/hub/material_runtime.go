@@ -248,6 +248,10 @@ func (s *Server) authorizeRuntimeProjectItem(ctx context.Context, key string, fa
 	if meta.SecretType == store.SecretTypeInternal {
 		return ItemResult{Candidate: cand, Reason: ReasonNotFound}, ""
 	}
+	// Agent-route target policy, as start-time delivery applies it.
+	if secret.AgentWrittenTargetRefused(*meta) {
+		return ItemResult{Candidate: cand, Reason: ReasonNotFound}, ""
+	}
 	cand.Meta = *meta
 	return ItemResult{Candidate: cand, Allowed: true, Reason: ReasonAllowed}, ""
 }
@@ -296,6 +300,10 @@ func (s *Server) authorizeRuntimeUserItem(ctx context.Context, ident AgentIdenti
 		return ItemResult{Candidate: cand, Reason: ReasonBackendError}
 	}
 	if meta.SecretType == store.SecretTypeInternal {
+		return ItemResult{Candidate: cand, Reason: ReasonNotFound}
+	}
+	// Agent-route target policy, as start-time delivery applies it.
+	if secret.AgentWrittenTargetRefused(*meta) {
 		return ItemResult{Candidate: cand, Reason: ReasonNotFound}
 	}
 	cand.Meta = *meta

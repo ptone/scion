@@ -497,6 +497,10 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		if (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") && secret.IsReservedEnvTarget(sv.Target) {
 			continue
 		}
+		// Agent-route target policy at delivery, as resolveSecrets.
+		if secret.AgentWrittenTargetRefused(sv.SecretMeta) {
+			continue
+		}
 		if sv.InjectionMode == store.InjectionModeAsNeeded && (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") {
 			continue
 		}

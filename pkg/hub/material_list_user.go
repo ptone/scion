@@ -89,7 +89,7 @@ func (s *Server) agentListUserSecrets(
 		return secrets, items, false
 	}
 	for _, m := range metas {
-		if m.SecretType == store.SecretTypeInternal {
+		if m.SecretType == store.SecretTypeInternal || secret.AgentWrittenTargetRefused(m) {
 			continue
 		}
 		if !m.AllowProgeny || !eligible[m.ID] {
@@ -183,7 +183,7 @@ func (s *Server) agentListUserSecretsProgeny(
 		return secrets, items, false
 	}
 	for _, m := range metas {
-		if m.SecretType == store.SecretTypeInternal {
+		if m.SecretType == store.SecretTypeInternal || secret.AgentWrittenTargetRefused(m) {
 			continue
 		}
 		if !m.AllowProgeny || !eligible[m.ID] {

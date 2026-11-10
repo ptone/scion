@@ -44,8 +44,15 @@ By default, the secret is scoped to the current agent's project. Subsequent
 agents in the same project will receive this secret automatically. Use
 --scope=user to store a personal credential visible only to your agents.
 
+Environment secret names that the shell or a runtime acts on (PATH, LD_*,
+BASH_ENV, GIT_*, proxy and CA-bundle names, ...) are refused.
+
 If VALUE starts with @, the remainder is treated as a file path. The file
-contents are read and base64-encoded, and --type defaults to "file".
+contents are read and base64-encoded, and --type defaults to "file". A file
+secret's target must be ~/.scion/agent-secrets/<name> or a harness
+credential file (for example ~/.claude/.credentials.json). Without
+--target, a file under your home keeps its home-relative path and any other
+file defaults to ~/.scion/agent-secrets/<KEY>.
 
 Examples:
   # Store a simple environment variable secret
@@ -55,7 +62,7 @@ Examples:
   sciontool secret set CLAUDE_AUTH @~/.claude/.credentials.json
 
   # Store a file secret with explicit target path
-  sciontool secret set MY_CERT @/tmp/cert.pem --type file --target ~/certs/cert.pem
+  sciontool secret set MY_CERT @/tmp/cert.pem --type file --target ~/.scion/agent-secrets/cert.pem
 
   # Overwrite an existing secret
   sciontool secret set MY_KEY "new-value" --force
@@ -124,7 +131,11 @@ Examples:
 				if err == nil && strings.HasPrefix(absPath, home+"/") {
 					localTarget = "~/" + absPath[len(home)+1:]
 				} else {
-					localTarget = absPath
+					// The hub refuses agent-written file targets outside
+					// the agent secrets directory and the harness
+					// credential files, so an absolute path is never a
+					// usable default.
+					localTarget = agentSecretsDir + key
 				}
 			}
 		} else {
@@ -161,6 +172,11 @@ Examples:
 		log.Info("Secret %q stored (scope: %s)", resp.Key, resp.Scope)
 	},
 }
+
+// agentSecretsDir mirrors secret.AgentSecretsDir (pkg/secret/agent_policy.go),
+// the hub's directory for agent-written file secrets; sciontool does not
+// import pkg/secret.
+const agentSecretsDir = "~/.scion/agent-secrets/"
 
 func init() {
 	rootCmd.AddCommand(secretCmd)
