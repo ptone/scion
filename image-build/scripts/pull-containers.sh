@@ -57,14 +57,18 @@ if [[ -z "${REGISTRY}" ]]; then
 fi
 REGISTRY="${REGISTRY%/}"
 
+# The harness catalog comes from lib/targets.sh, so bundles left out of it
+# (catalog=no in harnesses/<name>/image-build.conf: images that are built
+# locally and never published) are not pulled.
+# shellcheck source=lib/targets.sh
+source "${SCRIPT_DIR}/lib/targets.sh"
 IMAGES=(
   "${REGISTRY}/scion-base:${TAG}"
   "${REGISTRY}/scion-hub:${TAG}"
 )
-while IFS= read -r dockerfile; do
-  harness="$(basename "$(dirname "${dockerfile}")")"
-  IMAGES+=("${REGISTRY}/scion-${harness}:${TAG}")
-done < <(find "${REPO_ROOT}/harnesses" -mindepth 2 -maxdepth 2 -name Dockerfile -print | sort)
+while IFS= read -r harness_step; do
+  [[ -n "${harness_step}" ]] && IMAGES+=("${REGISTRY}/${harness_step}:${TAG}")
+done < <(emit_catalog_harness_steps)
 
 detect_runtime() {
   if command -v container &>/dev/null && [[ "$(uname)" == "Darwin" ]]; then

@@ -115,6 +115,7 @@ step_platforms() {
     return 0
   fi
   local want="${requested}" p out=""
+  local -a _wanted
   [[ -n "${want}" ]] || want="$(native_platform)"
   IFS=',' read -r -a _wanted <<<"${want}"
   for p in "${_wanted[@]}"; do

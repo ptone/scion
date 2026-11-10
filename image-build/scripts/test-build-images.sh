@@ -1399,6 +1399,20 @@ run_bi "${CAT}" --target scion-claude --platform all --registry reg.example/x --
 # The dry-run printer quotes the comma.
 check_contains "platforms: harness without a conf keeps all platforms" '--platform linux/amd64\,linux/arm64 ' "$(line_for reg.example/x/scion-claude)"
 
+# pull-containers.sh pulls the catalog only: a catalog=no image is never
+# published, so pulling it would fail before the rest.
+: > "${TMP}/ctr.log"
+set +e
+OUT="$(cd "${TMP}" && env -i PATH="${STUBBIN}:${TOOLBIN}" HOME="${TMP}/home" TMPDIR="${TMP}" \
+  STUB_CTR_LOG="${TMP}/ctr.log" STUB_PRESENT="${TMP}/present" STUB_ENV_LOG="${TMP}/env.log" \
+  bash "${CAT}/image-build/scripts/pull-containers.sh" --registry reg.example/x --tag t1 docker 2>&1)"
+RC=$?
+set -e
+check_rc "pull-containers: catalog pull: exit 0" 0 "${RC}"
+check_contains "pull-containers: pulls the catalog harnesses" "docker image pull reg.example/x/scion-claude:t1" "$(ctr)"
+check_contains "pull-containers: pulls the base" "docker image pull reg.example/x/scion-base:t1" "$(ctr)"
+check_not_contains "pull-containers: skips the catalog=no harness" "scion-onlyamd" "$(ctr)"
+
 echo ""
 echo "${PASSES} passed, ${FAILS} failed"
 [ "${FAILS}" -eq 0 ]

@@ -92,10 +92,11 @@ fi
 # bundles whose image-build.conf says catalog=no (lib/targets.sh's
 # emit_catalog_harness_steps()). Those must NOT appear in the full-catalog
 # configs: they are reported as extra below.
+# One parser for image-build.conf: lib/targets.sh's harness_build_conf.
+# shellcheck source=lib/targets.sh
+source "${SCRIPT_DIR}/lib/targets.sh"
 catalog_excluded() {
-  local conf="${HARNESS_ROOT}/$1/image-build.conf"
-  [[ -f "${conf}" ]] && sed -n 's/^[[:space:]]*catalog[[:space:]]*=[[:space:]]*//p' "${conf}" \
-    | tail -n 1 | tr -d '[:space:]' | grep -qx 'no'
+  [[ "$(harness_build_conf "$1" catalog)" == "no" ]]
 }
 expected="$(find "${HARNESS_ROOT}" -mindepth 2 -maxdepth 2 -name Dockerfile -print \
   | while IFS= read -r dockerfile; do basename "$(dirname "${dockerfile}")"; done \
