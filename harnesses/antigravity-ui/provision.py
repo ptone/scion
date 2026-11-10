@@ -24,17 +24,18 @@ provisioner stages no instructions or MCP servers. Its jobs:
      when AGY_ADC_AUTH=true. vertex-ai is resolved, in this order, from:
        a. a staged gcloud-adc file secret;
        b. GOOGLE_APPLICATION_CREDENTIALS in the container environment;
-       c. a GCP service account the broker assigned to the agent
-          (SCION_METADATA_MODE=assign with SCION_METADATA_SA_EMAIL set; the
-          broker sets SCION_METADATA_MODE only for assign and block, never
-          for passthrough).
+       c. a dedicated GCP service account assigned to the agent: the broker
+          sets SCION_METADATA_SA_EMAIL for it, with SCION_METADATA_MODE
+          "assign", or "passthrough" when the runtime turns an assign into
+          its own workload identity (Kubernetes). Plain passthrough, the
+          host's own identity, carries no SA email and does not count.
      Each writes AGY_ADC_AUTH=true into the env overlay, plus
      GOOGLE_APPLICATION_CREDENTIALS when a file is involved. With none of
      them the method is "none" and AGY_ADC_AUTH is not set: the app then
      waits for an interactive sign-in code, which the wrapper reports.
   2. Turn the app's self-update check off: merge
      {"autoCheckForUpdates": false} into ~/.config/Antigravity/app_storage.json,
-     keeping every other key. The wrapper does the same at start.
+     keeping every other key. This runs before every start (pre-start).
   3. Write outputs/resolved-auth.json and outputs/env.json.
 
 The script is stdlib-only.
@@ -107,8 +108,12 @@ def seed_update_off(ctx: scion_harness.ProvisionContext) -> str:
 
 
 def _assigned_service_account() -> bool:
-    return (os.environ.get("SCION_METADATA_MODE", "").strip() == "assign"
-            and bool(os.environ.get("SCION_METADATA_SA_EMAIL", "").strip()))
+    """A dedicated SA is assigned: assign mode, or an assign the runtime
+    rewrote to passthrough. Both carry the SA email; the host identity
+    (plain passthrough) does not."""
+    mode = os.environ.get("SCION_METADATA_MODE", "").strip()
+    email = os.environ.get("SCION_METADATA_SA_EMAIL", "").strip()
+    return mode in ("assign", "passthrough") and bool(email)
 
 
 def resolve_auth(ctx: scion_harness.ProvisionContext) -> tuple[scion_harness.ResolvedAuth, dict[str, str]]:

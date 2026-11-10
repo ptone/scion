@@ -75,8 +75,8 @@ harness has one auth type, `vertex-ai`. The provisioner sets
 
 1. a staged `gcloud-adc` file secret;
 2. `GOOGLE_APPLICATION_CREDENTIALS` in the agent's environment;
-3. a GCP service account assigned to the agent (GCP identity mode
-   `assign`).
+3. a dedicated GCP service account assigned to the agent (GCP identity mode
+   `assign`; on Kubernetes the runtime may carry it as workload identity).
 
 Use a dedicated service account, created for this harness, with only the
 roles the app needs. Never use a broad, shared or default one, and never
@@ -84,13 +84,15 @@ grant it editor or owner, data or IAM-admin roles. Prefer a project without
 production data, and prefer `assign` (short-lived tokens, no key file) over a
 staged file. Any process in the container can obtain its tokens.
 
-GCP identity `passthrough` (the host VM's own identity) is not used by
+GCP identity `passthrough` with the host VM's own identity is not used by
 default. If the host VM's service account is minimal and you want to use
 it, set `AGY_ADC_AUTH=true` through settings or profile environment, or a
 harness-config `env` override. Template environment keys are not applied.
 
 Without a `gcloud-adc` file or an assigned service account, Scion refuses to
-start the agent. If the app still asks for an interactive sign-in code (for
+start the agent. With plain `passthrough` Scion does start it (it counts the
+host identity as assigned), but the app is not given ADC: it asks for an
+interactive sign-in and the agent stops as described below. If the app still asks for an interactive sign-in code (for
 example when the assigned service account stops working), the agent stops
 with a message saying how to provide credentials. Signing out in the app's
 UI has the same effect: start the agent again to recover.
@@ -100,12 +102,12 @@ UI has the same effect: start the agent again to recover.
 | File | Purpose |
 |---|---|
 | `config.yaml` | harness-config |
-| `provision.py` | pre-start provisioner: turns the app's update check off |
+| `provision.py` | pre-start provisioner: resolves the app's auth (ADC, see Auth) and turns the app's update check off |
 | `scion_harness.py` | vendored provisioner library (generated) |
 | `agent-plugins.yaml` | Agent Plugins support (none) |
 | `Dockerfile` | pinned app package, nginx, wrapper |
 | `antigravity-ui-wrapper.sh` | process supervisor (installed into the image) |
-| `agui_helper.py` | renders the nginx config, checks the shim, picks free ports, turns updates off (installed into the image) |
+| `agui_helper.py` | renders the nginx config, checks the shim, picks free ports, checks port ownership (installed into the image) |
 | `agui_shim.js` | path shim for the Hub port link (installed into the image) |
 | `agui_shim.test.mjs` | shim unit tests (`node --test`) |
 | `nginx.conf.tmpl` | forwarding proxy template |
@@ -168,3 +170,6 @@ window).
    `agui_helper.py` exactly once), and update the tokens if the bundle
    changed. Until then the wrapper turns the shim off and offers only the
    tunnel.
+5. Re-run the path-shim probe in `PROBE.md` against the new image and attach
+   its report to the change. The shim patches are specific to one app
+   version, so a bump is not done until the probe passes.

@@ -68,8 +68,9 @@
     return path === prefix || path.indexOf(prefix + "/") === 0;
   }
 
-  // Returns the rewritten URL as a string, or the original value unchanged
-  // (which keeps non-string values such as TrustedScriptURL intact).
+  // Returns the original value when no prefix is needed (a non-string value
+  // such as a TrustedScriptURL then stays intact), else the rewritten URL as
+  // a string. Script URL sinks re-wrap that string with scriptURL() below.
   function rewrite(u) {
     if (u === null || u === undefined) {
       return u;
@@ -120,14 +121,41 @@
     };
   }
 
-  // Constructors that take a URL first.
-  function wrapCtor(name) {
+  // If a non-string script URL (a TrustedScriptURL) needed a prefix, wrap
+  // the rewritten string through a Trusted Types policy again, so a page that
+  // enforces Trusted Types still accepts it. Without Trusted Types, or if the
+  // page refuses the policy, the plain string is used.
+  var ttPolicy;
+  function scriptURL(original, rewritten) {
+    if (typeof original === "string" || rewritten === original) {
+      return rewritten;
+    }
+    var tt = w.trustedTypes;
+    if (!tt || typeof tt.createPolicy !== "function") {
+      return rewritten;
+    }
+    if (ttPolicy === undefined) {
+      try {
+        ttPolicy = tt.createPolicy("agui-shim", { createScriptURL: function (s) { return s; } });
+      } catch (e) {
+        ttPolicy = null;
+      }
+    }
+    return ttPolicy ? ttPolicy.createScriptURL(rewritten) : rewritten;
+  }
+
+  // Constructors that take a URL first. Worker URLs are script URLs.
+  function wrapCtor(name, isScript) {
     var Orig = w[name];
     if (typeof Orig !== "function") {
       return;
     }
     var Wrapped = function (url, opts) {
-      return arguments.length > 1 ? new Orig(rewrite(url), opts) : new Orig(rewrite(url));
+      var r = rewrite(url);
+      if (isScript) {
+        r = scriptURL(url, r);
+      }
+      return arguments.length > 1 ? new Orig(r, opts) : new Orig(r);
     };
     Wrapped.prototype = Orig.prototype;
     var statics = ["CONNECTING", "OPEN", "CLOSING", "CLOSED"];
@@ -138,10 +166,10 @@
     }
     w[name] = Wrapped;
   }
-  wrapCtor("WebSocket");
-  wrapCtor("EventSource");
-  wrapCtor("Worker");
-  wrapCtor("SharedWorker");
+  wrapCtor("WebSocket", false);
+  wrapCtor("EventSource", false);
+  wrapCtor("Worker", true);
+  wrapCtor("SharedWorker", true);
 
   // History: keep pushed URLs under the prefix.
   if (w.history) {

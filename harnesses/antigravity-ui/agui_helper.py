@@ -16,13 +16,14 @@
 
 Subcommands:
 
-  seed-update-off   Merge {"autoCheckForUpdates": false} into the app's
-                    app_storage.json, keeping every other key.
   render-nginx      Render nginx.conf.tmpl into a private nginx.conf.
   shim-check        Print "shim" if the running app matches the path shim
                     (see SHIM_PATCHES), else "none" and the reason.
   free-port         Print the preferred loopback port if it is free, else
                     a free ephemeral one.
+  port-owner        Print "ours", "foreign" or "none": whether the listener
+                    on a TCP port belongs to a given process or one of its
+                    descendants.
 
 Stdlib only.
 """
@@ -30,7 +31,6 @@ Stdlib only.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import socket
@@ -38,9 +38,6 @@ import ssl
 import sys
 import tempfile
 import urllib.request
-
-APP_STORAGE_REL = os.path.join(".config", "Antigravity", "app_storage.json")
-UPDATE_KEY = "autoCheckForUpdates"
 
 # Placeholders the template may contain. Anything else written as ${...}
 # is an error, so a typo cannot leave a literal placeholder in the config.
@@ -77,6 +74,7 @@ SHIM_PATCHES = (
      "baseUrl:window.location.origin+(window.__AGUI_PREFIX__||\"\"),onWebSocketFallback"),
 )
 SHIM_PAGE_TOKEN = "<head>"
+SHIM_PROTOCOL_RELATIVE = '="//'
 _NGINX_UNSAFE = ("'", "$", "\\")
 
 
@@ -85,7 +83,7 @@ class HelperError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# seed-update-off
+# render-nginx
 # ---------------------------------------------------------------------------
 
 
@@ -103,44 +101,6 @@ def _atomic_write(path: str, data: str, mode: int) -> None:
         except OSError:
             pass
         raise
-
-
-def seed_update_off(home: str) -> str:
-    """Set autoCheckForUpdates=false in app_storage.json under home.
-
-    Other keys are preserved. A file that is not a JSON object is kept as
-    app_storage.json.invalid and replaced. Returns a short status string.
-    """
-    path = os.path.join(home, APP_STORAGE_REL)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    data: dict = {}
-    status = "created"
-    try:
-        with open(path, encoding="utf-8") as f:
-            raw = f.read()
-    except FileNotFoundError:
-        raw = None
-    if raw is not None:
-        try:
-            parsed = json.loads(raw) if raw.strip() else {}
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict):
-            data = parsed
-            status = "merged"
-        else:
-            os.replace(path, path + ".invalid")
-            status = "replaced-invalid"
-    if data.get(UPDATE_KEY) is False and status == "merged":
-        return "unchanged"
-    data[UPDATE_KEY] = False
-    _atomic_write(path, json.dumps(data, indent=2) + "\n", 0o600)
-    return status
-
-
-# ---------------------------------------------------------------------------
-# render-nginx
-# ---------------------------------------------------------------------------
 
 
 def _port(value: str, what: str) -> str:
@@ -257,6 +217,10 @@ def shim_check_text(index_html: str, main_js: str) -> str:
     """Return "shim" if the app matches the shim, else "none: <reason>"."""
     if index_html.count(SHIM_PAGE_TOKEN) != 1:
         return "none: the app page has no single <head> tag"
+    # The HTML rule turns ="/ into ="; on a protocol-relative ="//host/x
+    # that would give a root-relative URL outside the prefix.
+    if SHIM_PROTOCOL_RELATIVE in index_html:
+        return "none: the app page has a protocol-relative URL attribute"
     for token, _ in SHIM_PATCHES:
         n = main_js.count(token)
         if n != 1:
@@ -299,9 +263,95 @@ def free_port(preferred: str) -> int:
     port = int(_port(preferred, "preferred port"))
     if _bindable(port):
         return port
+    return any_free_port()
+
+
+def any_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+# ---------------------------------------------------------------------------
+# port-owner
+# ---------------------------------------------------------------------------
+
+_TCP_LISTEN = "0A"
+
+
+def listen_inodes(port: int, proc_root: str = "/proc") -> set[str]:
+    """Socket inodes of TCP listeners on port (IPv4 and IPv6)."""
+    inodes: set[str] = set()
+    for name in ("tcp", "tcp6"):
+        try:
+            with open(os.path.join(proc_root, "net", name), encoding="ascii") as f:
+                lines = f.readlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 10 or fields[3] != _TCP_LISTEN:
+                continue
+            try:
+                local_port = int(fields[1].rsplit(":", 1)[1], 16)
+            except (IndexError, ValueError):
+                continue
+            if local_port == port and fields[9] != "0":
+                inodes.add(fields[9])
+    return inodes
+
+
+def _ppid(proc_root: str, pid: str) -> str | None:
+    try:
+        with open(os.path.join(proc_root, pid, "stat"), encoding="utf-8", errors="replace") as f:
+            stat = f.read()
+    except OSError:
+        return None
+    # The command name is in parentheses and may contain spaces.
+    rest = stat[stat.rfind(")") + 2:].split()
+    return rest[1] if len(rest) > 1 else None
+
+
+def _in_tree(proc_root: str, pid: str, root: str) -> bool:
+    seen = set()
+    while pid and pid not in seen and pid not in ("0", "1"):
+        if pid == root:
+            return True
+        seen.add(pid)
+        pid = _ppid(proc_root, pid) or ""
+    return pid == root
+
+
+def port_owner(port: str, root_pid: str, proc_root: str = "/proc") -> str:
+    """Return "ours" if a listener on port is held by root_pid or one of its
+    descendants, "foreign" if the port has listeners but none of ours, and
+    "none" if nothing listens on it."""
+    p = int(_port(port, "port"))
+    if not root_pid.isdigit():
+        raise HelperError(f"pid must be a number, got {root_pid!r}")
+    inodes = listen_inodes(p, proc_root)
+    if not inodes:
+        return "none"
+    wanted = {f"socket:[{i}]" for i in inodes}
+    try:
+        pids = [d for d in os.listdir(proc_root) if d.isdigit()]
+    except OSError as exc:
+        raise HelperError(f"cannot list {proc_root}: {exc}") from exc
+    for pid in pids:
+        if not _in_tree(proc_root, pid, root_pid):
+            continue
+        fd_dir = os.path.join(proc_root, pid, "fd")
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink(os.path.join(fd_dir, fd)) in wanted:
+                    return "ours"
+            except OSError:
+                continue
+    return "foreign"
 
 
 # ---------------------------------------------------------------------------
@@ -312,9 +362,6 @@ def free_port(preferred: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agui_helper")
     sub = parser.add_subparsers(dest="cmd", required=True)
-
-    p_seed = sub.add_parser("seed-update-off")
-    p_seed.add_argument("--home", default=os.environ.get("HOME") or os.path.expanduser("~"))
 
     p_render = sub.add_parser("render-nginx")
     p_render.add_argument("--template", required=True)
@@ -329,16 +376,23 @@ def main(argv: list[str] | None = None) -> int:
     p_check.add_argument("--force-mismatch", action="store_true")
 
     p_free = sub.add_parser("free-port")
-    p_free.add_argument("--preferred", required=True)
+    free_group = p_free.add_mutually_exclusive_group(required=True)
+    free_group.add_argument("--preferred")
+    free_group.add_argument("--any", action="store_true")
+
+    p_owner = sub.add_parser("port-owner")
+    p_owner.add_argument("--port", required=True)
+    p_owner.add_argument("--pid", required=True)
+    p_owner.add_argument("--proc-root", default="/proc")
 
     args = parser.parse_args(argv)
     try:
-        if args.cmd == "seed-update-off":
-            print("antigravity-ui: app_storage.json " + seed_update_off(args.home))
-        elif args.cmd == "shim-check":
+        if args.cmd == "shim-check":
             print(shim_check(args.ls_port, args.force_mismatch))
         elif args.cmd == "free-port":
-            print(free_port(args.preferred))
+            print(any_free_port() if args.any else free_port(args.preferred))
+        elif args.cmd == "port-owner":
+            print(port_owner(args.port, args.pid, args.proc_root))
         else:
             print("antigravity-ui: nginx config rendered (" + render_nginx(args) + ")")
     except (HelperError, OSError) as exc:

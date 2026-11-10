@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -124,7 +125,7 @@ def _make_ctx(home: str, explicit_type: str = "", adc_file: bool = False) -> sci
 
 
 class _SeedCases:
-    """Shared cases for the two updater-off implementations."""
+    """Cases for the updater-off seeding (provision.py)."""
 
     def seed(self, home: str) -> str:
         raise NotImplementedError
@@ -183,11 +184,6 @@ class ProvisionSeedTest(_SeedCases, unittest.TestCase):
             return provision.seed_update_off(_make_ctx(home))
 
 
-class HelperSeedTest(_SeedCases, unittest.TestCase):
-    def seed(self, home: str) -> str:
-        return helper.seed_update_off(home)
-
-
 class ProvisionTest(unittest.TestCase):
     def _run(self, home: str, explicit_type: str = "", adc_file: bool = False, **env: str | None):
         with temporary_home(home), temporary_env(**{**NO_IDENTITY, **env}), \
@@ -236,10 +232,20 @@ class ProvisionTest(unittest.TestCase):
             self.assertEqual(auth["method"], "vertex-ai")
             self.assertEqual(overlay, {"AGY_ADC_AUTH": "true"})
 
+    def test_assign_rewritten_to_passthrough_counts(self):
+        # A Kubernetes assign is carried as passthrough with the SA email.
+        with tempfile.TemporaryDirectory() as home:
+            auth, overlay = self._run(home, SCION_METADATA_MODE="passthrough",
+                                      SCION_METADATA_SA_EMAIL="sa@p.iam.gserviceaccount.com")
+            self.assertEqual(auth["method"], "vertex-ai")
+            self.assertEqual(overlay, {"AGY_ADC_AUTH": "true"})
+
     def test_other_identity_modes_do_not_count(self):
         cases = [
+            dict(SCION_METADATA_MODE="passthrough", SCION_METADATA_SA_EMAIL=None),
+            dict(SCION_METADATA_MODE="passthrough", SCION_METADATA_SA_EMAIL=""),
+            dict(SCION_METADATA_MODE="block", SCION_METADATA_SA_EMAIL="sa@p.iam.gserviceaccount.com"),
             dict(SCION_METADATA_MODE="block", SCION_METADATA_SA_EMAIL=None),
-            dict(SCION_METADATA_MODE="passthrough", SCION_METADATA_SA_EMAIL="sa@p.iam.gserviceaccount.com"),
             dict(SCION_METADATA_MODE="assign", SCION_METADATA_SA_EMAIL=""),
         ]
         for env in cases:
@@ -290,6 +296,74 @@ class FreePortTest(unittest.TestCase):
         for bad in ("abc", "0", "70000"):
             with self.subTest(bad=bad), self.assertRaises(helper.HelperError):
                 helper.free_port(bad)
+
+
+class PortOwnerTest(unittest.TestCase):
+    """port-owner against a fake /proc."""
+
+    def setUp(self):
+        self.proc = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.proc)
+        os.makedirs(os.path.join(self.proc, "net"))
+        self.tcp = []
+
+    def _listen(self, port: int, inode: int, state: str = "0A", v6: bool = False):
+        local = ("00000000000000000000000001000000" if v6 else "0100007F") + ":%04X" % port
+        line = "  0: %s 00000000:0000 %s 00000000:00000000 00:00000000 00000000  1000  0 %d 1" % (local, state, inode)
+        name = "tcp6" if v6 else "tcp"
+        path = os.path.join(self.proc, "net", name)
+        header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+        mode = "a" if os.path.exists(path) else "w"
+        with open(path, mode) as f:
+            if mode == "w":
+                f.write(header)
+            f.write(line + "\n")
+
+    def _pid(self, pid: int, ppid: int, sockets=(), comm="proc (x)"):
+        d = os.path.join(self.proc, str(pid))
+        os.makedirs(os.path.join(d, "fd"))
+        with open(os.path.join(d, "stat"), "w") as f:
+            f.write("%d (%s) S %d %d 0 0" % (pid, comm, ppid, pid))
+        for i, inode in enumerate(sockets):
+            os.symlink("socket:[%d]" % inode, os.path.join(d, "fd", str(10 + i)))
+
+    def test_listener_held_by_root(self):
+        self._listen(8443, 555)
+        self._pid(100, 1, [555])
+        self.assertEqual(helper.port_owner("8443", "100", self.proc), "ours")
+
+    def test_listener_held_by_a_descendant(self):
+        # The language server is a child (or grandchild) of the app.
+        self._listen(8443, 556, v6=True)
+        self._pid(100, 1)
+        self._pid(101, 100)
+        self._pid(102, 101, [556], comm="language server")
+        self.assertEqual(helper.port_owner("8443", "100", self.proc), "ours")
+
+    def test_listener_held_by_someone_else(self):
+        self._listen(8443, 557)
+        self._pid(100, 1)
+        self._pid(200, 1, [557])
+        self.assertEqual(helper.port_owner("8443", "100", self.proc), "foreign")
+
+    def test_listener_invisible_to_us_is_foreign(self):
+        # Another container's process: its socket is in the shared net
+        # table, but no visible process holds it.
+        self._listen(8443, 558)
+        self._pid(100, 1, [999])
+        self.assertEqual(helper.port_owner("8443", "100", self.proc), "foreign")
+
+    def test_no_listener(self):
+        self._listen(8443, 559, state="01")  # established, not listening
+        self._listen(9000, 560)
+        self._pid(100, 1, [559, 560])
+        self.assertEqual(helper.port_owner("8443", "100", self.proc), "none")
+
+    def test_bad_arguments(self):
+        with self.assertRaises(helper.HelperError):
+            helper.port_owner("0", "100", self.proc)
+        with self.assertRaises(helper.HelperError):
+            helper.port_owner("8443", "x", self.proc)
 
 
 class RenderNginxTest(unittest.TestCase):
@@ -395,6 +469,10 @@ class RenderNginxTest(unittest.TestCase):
         self.assertTrue(helper.shim_check_text("<html></html>", js).startswith("none:"))
         self.assertTrue(helper.shim_check_text(page, js.split(" ")[0]).startswith("none:"))
         self.assertTrue(helper.shim_check_text(page, js + " " + js).startswith("none:"))
+        # A protocol-relative attribute would be broken by the ="/ rule.
+        page_pr = '<html><head><script src="//cdn.example/x.js"></script></head></html>'
+        self.assertEqual(helper.shim_check_text(page_pr, js),
+                         "none: the app page has a protocol-relative URL attribute")
 
     def test_shim_check_forced_mismatch(self):
         # The test hook never contacts the app.
@@ -545,7 +623,7 @@ class WrapperStartupTest(unittest.TestCase):
             taken = str(s.getsockname()[1])
             proc = self._run("/bin/false", "5", JETSKI_LS_PORT=taken)
         out = proc.stdout + proc.stderr
-        self.assertIn(f"port {taken} is in use", out)
+        self.assertIn(f"port {taken} is not available", out)
         self.assertIn("the app exited during start-up", out)
 
     def test_app_exit_during_start_up(self):
@@ -586,6 +664,231 @@ class WrapperStartupTest(unittest.TestCase):
         proc = subprocess.run([bash, "-n", os.path.join(HERE, "antigravity-ui-wrapper.sh")],
                               capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+FAKE_APP = r"""#!/usr/bin/env python3
+# Fake app for the wrapper tests: serves HTTPS on JETSKI_LS_PORT.
+# FAKE_MODE: serve | late-prompt | foreign-first.
+import http.server, os, ssl, sys, threading, time
+
+home = os.environ["HOME"]
+port = int(os.environ["JETSKI_LS_PORT"])
+cert = os.environ["FAKE_CERT_DIR"]
+mode = os.environ.get("FAKE_MODE", "serve")
+
+
+def serve_https(p):
+    srv = http.server.HTTPServer(("127.0.0.1", p), http.server.SimpleHTTPRequestHandler)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(os.path.join(cert, "cert.pem"), os.path.join(cert, "key.pem"))
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    srv.serve_forever()
+
+
+attempt_file = os.path.join(home, "fake-attempts")
+attempt = int(open(attempt_file).read()) + 1 if os.path.exists(attempt_file) else 1
+open(attempt_file, "w").write(str(attempt))
+with open(os.path.join(home, "fake-ports"), "a") as f:
+    f.write("%d\n" % port)
+
+if mode == "foreign-first" and attempt == 1:
+    # A listener that is not part of this process tree takes the port.
+    if os.fork() == 0:
+        os.setsid()
+        if os.fork() == 0:
+            open(os.path.join(home, "foreign.pid"), "w").write(str(os.getpid()))
+            serve_https(port)
+        os._exit(0)
+    time.sleep(120)
+    sys.exit(0)
+
+if mode == "late-prompt":
+    def later():
+        time.sleep(3)
+        print("Go to https://accounts.google.com/o/oauth2/auth?state=hidden-state", flush=True)
+        print("Enter the authorization code:", flush=True)
+    threading.Thread(target=later, daemon=True).start()
+
+serve_https(port)
+"""
+
+FAKE_NGINX = r"""#!/usr/bin/env python3
+# Fake nginx: serves plain HTTP on the port in the rendered config.
+import http.server, os, re, sys
+conf = open(sys.argv[sys.argv.index("-c") + 1]).read()
+port = int(re.search(r"listen 127\.0\.0\.1:(\d+);", conf).group(1))
+open(os.path.join(os.environ["HOME"], "nginx.pid"), "w").write(str(os.getpid()))
+http.server.HTTPServer(("127.0.0.1", port), http.server.SimpleHTTPRequestHandler).serve_forever()
+"""
+
+FAKE_SCION = """#!/bin/sh
+# Fake scion: records expose calls; refuses --app-mode (no app mode on this hub).
+echo "$*" >> "$HOME/scion-calls"
+for a in "$@"; do [ "$a" = "--app-mode" ] && exit 1; done
+exit 0
+"""
+
+
+class WrapperRunningTest(unittest.TestCase):
+    """Wrapper behaviour after start-up, with a fake HTTPS app and fake nginx."""
+
+    def setUp(self):
+        for tool in ("bash", "setsid", "curl", "openssl"):
+            if not shutil.which(tool):
+                self.skipTest(f"{tool} not found")
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = os.path.join(self.tmp, "home")
+        self.bin = os.path.join(self.tmp, "bin")
+        self.certs = os.path.join(self.tmp, "certs")
+        for d in (self.home, self.bin, self.certs):
+            os.makedirs(d)
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+             "-subj", "/CN=127.0.0.1", "-keyout", os.path.join(self.certs, "key.pem"),
+             "-out", os.path.join(self.certs, "cert.pem")],
+            check=True, capture_output=True,
+        )
+        for name, body in (("fakeapp", FAKE_APP), ("nginx", FAKE_NGINX), ("scion", FAKE_SCION)):
+            path = os.path.join(self.bin, name)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+            os.chmod(path, 0o755)
+        self.out_path = os.path.join(self.tmp, "out.txt")
+        self.proc = None
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        if self.proc and self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGTERM)
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        for name in ("foreign.pid", "nginx.pid"):
+            pid = self._read_pid(name)
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+
+    def _read_pid(self, name: str) -> int | None:
+        try:
+            with open(os.path.join(self.home, name)) as f:
+                return int(f.read().strip())
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _unused_port() -> str:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return str(s.getsockname()[1])
+
+    def _start(self, **extra: str):
+        env = {
+            "HOME": self.home,
+            "PATH": self.bin + os.pathsep + "/usr/local/bin:/usr/bin:/bin",
+            "AGUI_APP_BIN": os.path.join(self.bin, "fakeapp"),
+            "AGUI_SHARE_DIR": HERE,
+            "AGUI_LS_TIMEOUT": "20",
+            "JETSKI_LS_PORT": self._unused_port(),
+            "AGUI_PROXY_PORT": self._unused_port(),
+            "FAKE_CERT_DIR": self.certs,
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        env.update(extra)
+        self.out = open(self.out_path, "w")
+        self.addCleanup(self.out.close)
+        self.proc = subprocess.Popen(
+            ["bash", os.path.join(HERE, "antigravity-ui-wrapper.sh")],
+            env=env, stdin=subprocess.PIPE, stdout=self.out, stderr=subprocess.STDOUT, text=True,
+        )
+
+    def _output(self) -> str:
+        with open(self.out_path) as f:
+            return f.read()
+
+    def _wait_for(self, text: str, timeout: float = 40) -> str:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            out = self._output()
+            if text in out:
+                return out
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.2)
+        self.fail(f"{text!r} not seen; output:\n{self._output()}")
+
+    def _wait_exit(self, timeout: float = 30) -> int:
+        try:
+            return self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.fail(f"wrapper did not exit; output:\n{self._output()}")
+
+    def test_runs_and_ends_with_the_app(self):
+        self._start()
+        self._wait_for("Messages and tasks are not delivered")
+        out = self._output()
+        self.assertIn("path shim off", out)  # the fake app is not the pinned version
+        with open(os.path.join(self.home, "scion-calls")) as f:
+            calls = f.read()
+        self.assertNotIn("--app-mode", calls)  # no app mode without the shim
+        self.assertIn("--label Antigravity (use scion tunnel)", calls)
+        # A pasted message gets a notice; SIGINT changes nothing.
+        self.proc.stdin.write("hello\n")
+        self.proc.stdin.flush()
+        self._wait_for("message not delivered")
+        os.kill(self.proc.pid, signal.SIGINT)
+        time.sleep(1)
+        self.assertIsNone(self.proc.poll())
+        # The app exiting ends the wrapper with its code, and stops nginx.
+        app_pid = int(subprocess.run(["pgrep", "-P", str(self.proc.pid), "-f", "fakeapp"],
+                                     capture_output=True, text=True).stdout.split()[0])
+        os.kill(app_pid, signal.SIGTERM)
+        self.assertEqual(self._wait_exit(), 128 + signal.SIGTERM)
+        self.assertIn("the app exited", self._output())
+        nginx_pid = self._read_pid("nginx.pid")
+        time.sleep(0.5)
+        with self.assertRaises(OSError):
+            os.kill(nginx_pid, 0)
+
+    def test_forced_mismatch_banner_and_plain_expose(self):
+        self._start(AGUI_SHIM_FORCE_MISMATCH="1")
+        out = self._wait_for("Messages and tasks are not delivered")
+        self.assertIn("path shim off: forced version mismatch (test hook)", out)
+        self.assertIn("cannot show the UI (forced version mismatch (test hook))", out)
+        with open(os.path.join(self.home, "scion-calls")) as f:
+            calls = f.read().splitlines()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertNotIn("--app-mode", calls[0])
+
+    def test_nginx_death_ends_the_wrapper(self):
+        self._start()
+        self._wait_for("Messages and tasks are not delivered")
+        os.kill(self._read_pid("nginx.pid"), signal.SIGKILL)
+        self.assertEqual(self._wait_exit(), 1)
+        self.assertIn("nginx exited", self._output())
+
+    def test_sign_in_prompt_after_start_stops_the_agent(self):
+        self._start(FAKE_MODE="late-prompt")
+        self._wait_for("Messages and tasks are not delivered")
+        self.assertEqual(self._wait_exit(), 1)
+        out = self._output()
+        self.assertIn("not signed in", out)
+        self.assertNotIn("accounts.google.com", out)
+        self.assertNotIn("hidden-state", out)
+
+    def test_foreign_listener_on_the_port_is_not_used(self):
+        self._start(FAKE_MODE="foreign-first")
+        out = self._wait_for("Messages and tasks are not delivered")
+        self.assertIn("is answered by a process outside this agent; trying another port", out)
+        with open(os.path.join(self.home, "fake-ports")) as f:
+            ports = f.read().split()
+        self.assertEqual(len(ports), 2, ports)
+        self.assertNotEqual(ports[0], ports[1])
+        self.assertIn("language server is up on 127.0.0.1:%s" % ports[1], out)
 
 
 if __name__ == "__main__":

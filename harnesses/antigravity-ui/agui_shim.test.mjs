@@ -36,7 +36,7 @@ function fakeStorage() {
   };
 }
 
-function load(pathname, before) {
+function load(pathname, before, extra) {
   const calls = { fetch: [], xhr: [], ctor: [], history: [], writes: [] };
   class XMLHttpRequest {}
   XMLHttpRequest.prototype.open = function (method, url) { calls.xhr.push(url); };
@@ -81,6 +81,7 @@ function load(pathname, before) {
     localStorage: fakeStorage(),
     sessionStorage: fakeStorage(),
   };
+  Object.assign(window, extra || {});
   const realLocal = window.localStorage;
   if (before) {
     for (const name of ["fetch", "WebSocket", "EventSource", "Worker", "localStorage", "sessionStorage"]) {
@@ -177,6 +178,36 @@ test("wraps fetch, XHR, WebSocket, Worker and history", () => {
   window.history.pushState(null, "", "/c/2");
   window.history.replaceState(null, "", `${PREFIX}/c/3`);
   assert.deepEqual(calls.history, [["push", `${PREFIX}/c/2`], ["replace", `${PREFIX}/c/3`]]);
+});
+
+test("re-wraps a rewritten TrustedScriptURL through a policy", () => {
+  const { window, calls } = load(`${PREFIX}/`, undefined, {
+    trustedTypes: {
+      createPolicy(name, rules) {
+        calls.policies = (calls.policies || 0) + 1;
+        return { createScriptURL: (s) => ({ trusted: rules.createScriptURL(s), policy: name }) };
+      },
+    },
+  });
+  const tsu = { toString: () => "/diff_worker.js?v=1" };
+  const w1 = new window.Worker(tsu);
+  assert.deepEqual(w1.url, { trusted: `${PREFIX}/diff_worker.js?v=1`, policy: "agui-shim" });
+  // Already under the prefix: the original object is passed through as is.
+  const inside = { toString: () => `${PREFIX}/diff_worker.js` };
+  assert.equal(new window.Worker(inside).url, inside);
+  // A plain string stays a string.
+  assert.equal(new window.Worker("/w.js").url, `${PREFIX}/w.js`);
+  // One policy for the page.
+  new window.Worker({ toString: () => "/other.js" });
+  assert.equal(calls.policies, 1);
+});
+
+test("falls back to a string when the page refuses the policy", () => {
+  const { window } = load(`${PREFIX}/`, undefined, {
+    trustedTypes: { createPolicy() { throw new Error("refused"); } },
+  });
+  const w1 = new window.Worker({ toString: () => "/diff_worker.js" });
+  assert.equal(w1.url, `${PREFIX}/diff_worker.js`);
 });
 
 test("rewrites URL-bearing DOM attributes and properties", () => {

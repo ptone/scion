@@ -173,20 +173,33 @@ banner() {
 mkdir -p "$STATE"
 chmod 700 "$STATE"
 
-python3 -I "$HELPER" seed-update-off || log "warning: could not disable the app's update check"
+# Ports. Agents on host networking share the loopback, so a port that is
+# free now can be taken before our process binds it. Each start attempt
+# therefore checks, after the probe answers, that the listener belongs to
+# our own process tree, and otherwise retries on another port.
+ATTEMPTS=3
+WANT_LS="$JETSKI_LS_PORT"
+WANT_PROXY="$AGUI_PROXY_PORT"
 
-for var in JETSKI_LS_PORT AGUI_PROXY_PORT; do
-  want="${!var}"
-  got="$(python3 -I "$HELPER" free-port --preferred "$want")" || fail "invalid ${var}: ${want}"
-  if [ "$got" != "$want" ]; then
-    log "port ${want} is in use; using ${got} for ${var}"
+# pick_port <preferred> <attempt>: the preferred port on the first attempt
+# if it is free, otherwise any free loopback port.
+pick_port() {
+  if [ "$2" -eq 1 ]; then
+    python3 -I "$HELPER" free-port --preferred "$1"
+  else
+    python3 -I "$HELPER" free-port --any
   fi
-  printf -v "$var" '%s' "$got"
-done
-if [ "$JETSKI_LS_PORT" = "$AGUI_PROXY_PORT" ]; then
-  fail "JETSKI_LS_PORT and AGUI_PROXY_PORT must differ"
-fi
-export JETSKI_LS_PORT
+}
+
+# owner_ok <port> <pid>: the listener on port is held by pid or a child.
+owner_ok() {
+  [ "$(python3 -I "$HELPER" port-owner --port "$1" --pid "$2" 2>/dev/null)" = ours ]
+}
+
+stop_and_reap() {
+  kill_group "$1"
+  wait "$1" 2>/dev/null || true
+}
 
 # The app's stdin: a FIFO held open read-write on fd 4, so the app never
 # sees EOF on stdin, whatever it does with it.
@@ -196,25 +209,44 @@ exec 4<>"$APP_IN"
 rm -f "$NO_AUTH_MARK"
 : >"$APP_LOG"
 
-log "starting the Antigravity app (headless)"
-setsid "$AGUI_APP_BIN" --ozone-platform=headless --headless --disable-gpu --no-sandbox \
-  <"$APP_IN" >>"$APP_LOG" 2>&1 &
-APP_PID=$!
-
 exec 3<&0
 input_sink <&3 &
 SINK_PID=$!
 exec 3<&-
-# Wait for the language server. A sign-in prompt ends the start (no log
-# tail: the log holds the sign-in URL).
-waited=0
-until ls_up; do
-  sign_in_prompted && fail "$NO_AUTH_MSG"
-  kill -0 "$APP_PID" 2>/dev/null || fail "the app exited during start-up" "$APP_LOG"
-  waited=$((waited + 1))
-  [ "$waited" -lt "$AGUI_LS_TIMEOUT" ] \
-    || fail "the language server did not answer on 127.0.0.1:${JETSKI_LS_PORT} within ${AGUI_LS_TIMEOUT}s" "$APP_LOG"
-  sleep 1
+
+attempt=0
+while :; do
+  attempt=$((attempt + 1))
+  JETSKI_LS_PORT="$(pick_port "$WANT_LS" "$attempt")" || fail "invalid JETSKI_LS_PORT: ${WANT_LS}"
+  if [ "$JETSKI_LS_PORT" != "$WANT_LS" ]; then
+    log "port ${WANT_LS} is not available; using ${JETSKI_LS_PORT} for the language server"
+  fi
+  export JETSKI_LS_PORT
+
+  log "starting the Antigravity app (headless)"
+  setsid "$AGUI_APP_BIN" --ozone-platform=headless --headless --disable-gpu --no-sandbox \
+    <"$APP_IN" >>"$APP_LOG" 2>&1 &
+  APP_PID=$!
+
+  # Wait for the language server. A sign-in prompt ends the start (no log
+  # tail: the log holds the sign-in URL).
+  waited=0
+  until ls_up; do
+    sign_in_prompted && fail "$NO_AUTH_MSG"
+    kill -0 "$APP_PID" 2>/dev/null || fail "the app exited during start-up" "$APP_LOG"
+    waited=$((waited + 1))
+    [ "$waited" -lt "$AGUI_LS_TIMEOUT" ] \
+      || fail "the language server did not answer on 127.0.0.1:${JETSKI_LS_PORT} within ${AGUI_LS_TIMEOUT}s" "$APP_LOG"
+    sleep 1
+  done
+  if kill -0 "$APP_PID" 2>/dev/null && owner_ok "$JETSKI_LS_PORT" "$APP_PID"; then
+    break
+  fi
+  log "port ${JETSKI_LS_PORT} is answered by a process outside this agent; trying another port"
+  stop_and_reap "$APP_PID"
+  APP_PID=""
+  [ "$attempt" -lt "$ATTEMPTS" ] \
+    || fail "could not start the language server on a port of its own in ${ATTEMPTS} attempts"
 done
 log "language server is up on 127.0.0.1:${JETSKI_LS_PORT}"
 sign_in_watcher &
@@ -239,26 +271,43 @@ case "$AGUI_PATH_REWRITE" in
   *) fail "AGUI_PATH_REWRITE must be auto or none, got ${AGUI_PATH_REWRITE}" ;;
 esac
 
-python3 -I "$HELPER" render-nginx \
-  --template "${AGUI_SHARE_DIR}/nginx.conf.tmpl" \
-  --out "${STATE}/nginx.conf" \
-  --state "$STATE" \
-  --proxy-port "$AGUI_PROXY_PORT" \
-  --ls-port "$JETSKI_LS_PORT" \
-  --path-rewrite "$SHIM" \
-  || fail "could not render the nginx config"
+attempt=0
+while :; do
+  attempt=$((attempt + 1))
+  AGUI_PROXY_PORT="$(pick_port "$WANT_PROXY" "$attempt")" || fail "invalid AGUI_PROXY_PORT: ${WANT_PROXY}"
+  if [ "$AGUI_PROXY_PORT" != "$WANT_PROXY" ]; then
+    log "port ${WANT_PROXY} is not available; using ${AGUI_PROXY_PORT} for the proxy"
+  fi
 
-setsid nginx -p "$STATE" -e "${STATE}/nginx.err" -c "${STATE}/nginx.conf" \
-  </dev/null >>"${STATE}/nginx.log" 2>&1 &
-NGX_PID=$!
+  python3 -I "$HELPER" render-nginx \
+    --template "${AGUI_SHARE_DIR}/nginx.conf.tmpl" \
+    --out "${STATE}/nginx.conf" \
+    --state "$STATE" \
+    --proxy-port "$AGUI_PROXY_PORT" \
+    --ls-port "$JETSKI_LS_PORT" \
+    --path-rewrite "$SHIM" \
+    || fail "could not render the nginx config"
 
-waited=0
-until proxy_up; do
-  kill -0 "$NGX_PID" 2>/dev/null || fail "nginx exited during start-up" "${STATE}/nginx.err" "${STATE}/nginx.log"
-  waited=$((waited + 1))
-  [ "$waited" -lt "$AGUI_PROXY_TIMEOUT" ] \
-    || fail "nginx did not answer on 127.0.0.1:${AGUI_PROXY_PORT} within ${AGUI_PROXY_TIMEOUT}s" "${STATE}/nginx.err"
-  sleep 1
+  setsid nginx -p "$STATE" -e "${STATE}/nginx.err" -c "${STATE}/nginx.conf" \
+    </dev/null >>"${STATE}/nginx.log" 2>&1 &
+  NGX_PID=$!
+
+  waited=0
+  until proxy_up; do
+    kill -0 "$NGX_PID" 2>/dev/null || fail "nginx exited during start-up" "${STATE}/nginx.err" "${STATE}/nginx.log"
+    waited=$((waited + 1))
+    [ "$waited" -lt "$AGUI_PROXY_TIMEOUT" ] \
+      || fail "nginx did not answer on 127.0.0.1:${AGUI_PROXY_PORT} within ${AGUI_PROXY_TIMEOUT}s" "${STATE}/nginx.err"
+    sleep 1
+  done
+  if kill -0 "$NGX_PID" 2>/dev/null && owner_ok "$AGUI_PROXY_PORT" "$NGX_PID"; then
+    break
+  fi
+  log "port ${AGUI_PROXY_PORT} is answered by a process outside this agent; trying another port"
+  stop_and_reap "$NGX_PID"
+  NGX_PID=""
+  [ "$attempt" -lt "$ATTEMPTS" ] \
+    || fail "could not start the proxy on a port of its own in ${ATTEMPTS} attempts"
 done
 log "proxy is up on 127.0.0.1:${AGUI_PROXY_PORT}"
 

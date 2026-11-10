@@ -130,6 +130,8 @@ browser (a fresh tab) and use the UI for a few minutes:
 - P6. Devtools, Application, Local Storage for `127.0.0.1:8091`: do all of
   the app's keys start with `agui:x:` (y/n, count of keys without it)?
 - P7. Console: any errors mentioning `agui` or a path without the prefix?
+- P8. Open a diff view (it runs in a web worker). Does it render? Console:
+  any Trusted Types errors (for example "requires 'TrustedScriptURL'")?
 
 Then, in the container shell:
 
@@ -163,5 +165,6 @@ Send back this table. Values are yes/no, counts or paths; never tokens.
 | P5 | prefix: reload on a conversation URL works (y/n) | |
 | P6 | prefix: app storage keys all start with `agui:x:` (y/n, count without) | |
 | P7 | prefix: console errors about paths (count, short text) | |
+| P8 | prefix: diff view renders (y/n); Trusted Types errors (count) | |
 | Escapes | `escaped.log` lines (count, top paths) | |
 | C1 | shim off: prefixed page broken as before (y/n) | |
