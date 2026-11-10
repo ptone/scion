@@ -257,7 +257,27 @@ func envVarDeliveryKind(v store.EnvVar) MaterialKind {
 // discards, are skipped. A credential that cannot be minted is an error,
 // like a store read error. The owner's user-scope rows not shared with
 // progeny are held to the owner material chain rule, as there.
+//
+// For an agent without credentials (launchesWithoutCredentials), a setting
+// noAuthKeepsStoredEnv withholds is skipped before it is authorized or
+// decided; the credential names are read for the agent
+// (noAuthCredentialEnvNames), and a read error is returned.
 func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *deliverySelector, agent *store.Agent) (map[string]string, map[string]bool, error) {
+	var credNames credentialEnvNames
+	if launchesWithoutCredentials(agent) {
+		names, err := d.noAuthCredentialEnvNames(ctx, agent)
+		if err != nil {
+			return nil, nil, err
+		}
+		credNames = names
+	}
+	return d.selectDeliveryEnvFor(ctx, sel, agent, credNames)
+}
+
+// selectDeliveryEnvFor is selectDeliveryEnv with the credential names
+// already read: credNames is non-nil exactly for an agent without
+// credentials.
+func (d *HTTPAgentDispatcher) selectDeliveryEnvFor(ctx context.Context, sel *deliverySelector, agent *store.Agent, credNames credentialEnvNames) (map[string]string, map[string]bool, error) {
 	result := make(map[string]string)
 	plain := make(map[string]bool)
 	if agent == nil {
@@ -292,6 +312,11 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *delive
 			if v.Key == agentTZEnvKey {
 				continue
 			}
+			// Withheld for an agent without credentials before it is
+			// authorized or decided, so no decision is spent on it.
+			if credNames != nil && !noAuthKeepsStoredEnv(v.Key, v.Secret, credNames) {
+				continue
+			}
 			if filter.Scope == store.ScopeUser {
 				if !gate.allowEnvRow(gctx, filter, v) {
 					continue
@@ -318,6 +343,9 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *delive
 		}
 		for _, v := range progenyVars {
 			if secret.IsReservedEnvTarget(v.Key) || v.Key == agentTZEnvKey {
+				continue
+			}
+			if credNames != nil && !noAuthKeepsStoredEnv(v.Key, v.Secret, credNames) {
 				continue
 			}
 			if _, exists := result[v.Key]; exists {
@@ -373,6 +401,16 @@ type secretDeliveryCandidate struct {
 //
 // A list error, a credential that cannot be minted or a fetch failure other
 // than the ones skipped above is an error; skipped is then nil.
+//
+// For an agent without credentials (launchesWithoutCredentials) only the git
+// token candidates are selected (noAuthKeepsSecretCandidate: GITHUB_TOKEN in
+// the project scope and the owner's user scope), before any authorization,
+// and no progeny secret; each candidate still passes the same authorization,
+// owner-path check, test-admin restriction and fetch, and is skipped and
+// reported the same way. The result is then the delivered candidates, each
+// with its scope as Source, with no precedence applied between them: the
+// caller picks one (pickNoAuthGitTokenFrom) and sends none of them as
+// resolved secrets.
 func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *deliverySelector, agent *store.Agent) ([]ResolvedSecret, []skippedSecret, error) {
 	if d.secretBackend == nil || agent == nil {
 		return nil, nil, nil
@@ -406,6 +444,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 	defer gcancel()
 	startOpts, gate := d.startSecretResolveOpts(gctx, agent, &ta)
 	defer gate.flush(ctx, ownerMaterialSiteLaunchSecrets)
+	noAuth := launchesWithoutCredentials(agent)
 
 	var kept []secretDeliveryCandidate
 	for _, sc := range scopes {
@@ -415,6 +454,11 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		}
 		for _, m := range metas {
 			if m.SecretType == store.SecretTypeInternal {
+				continue
+			}
+			// An agent without credentials: only the git token candidates
+			// are considered, in every scope including the owner's.
+			if noAuth && !noAuthKeepsSecretCandidate(sc.scope, m.Name) {
 				continue
 			}
 			if sc.scope != store.ScopeUser {
@@ -437,7 +481,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 	// Progeny secrets: the agent's own progeny decision, as resolveSecrets.
 	// startSecretResolveOpts sets AuthzCheck only for an agent with more
 	// than one ancestry entry.
-	if startOpts != nil && startOpts.AuthzCheck != nil {
+	if !noAuth && startOpts != nil && startOpts.AuthzCheck != nil {
 		progeny, err := d.store.ListProgenySecrets(ctx, agent.Ancestry)
 		if err != nil {
 			return nil, nil, err
@@ -492,6 +536,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 	merged := make(map[string]secret.SecretWithValue)
 	var skipped []skippedSecret
 	var decryptFailures []secret.ResolveFailure
+	var tokenCandidates []ResolvedSecret
 	for _, c := range kept {
 		// A progeny secret fills only names no scope set (kept lists every
 		// scope secret before any progeny secret). It is checked before its
@@ -522,6 +567,17 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 			// path brokers mount, never the stored "gcpsm:" form).
 			sv.SecretRef = r.Ref
 		}
+		if noAuth {
+			// A withheld (test-admin) candidate has no value and is not
+			// delivered; the next candidate stands in for it.
+			if sv.Value != "" {
+				tokenCandidates = append(tokenCandidates, ResolvedSecret{
+					Name: sv.Name, Type: sv.SecretType, Target: sv.Target,
+					Value: sv.Value, Source: sv.Scope, Ref: sv.SecretRef,
+				})
+			}
+			continue
+		}
 		if sv.SecretType == "" {
 			sv.SecretType = store.SecretTypeEnvironment
 		}
@@ -532,6 +588,9 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 	}
 	if len(decryptFailures) > 0 {
 		return nil, nil, &secret.ResolveDecryptError{Failures: decryptFailures}
+	}
+	if noAuth {
+		return tokenCandidates, skipped, nil
 	}
 	names := make([]string, 0, len(merged))
 	for n := range merged {
