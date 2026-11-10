@@ -161,7 +161,8 @@ Ctrl-C by design), start it again with `-e AGUI_PATH_REWRITE=none`, repeat
 the start of step 4 (re-create the 8091 config), and open the prefixed URL
 once.
 
-- C1. Does it show "Not Found" or a broken page, as in the first probe?
+- C1. Expected: the prefixed page is broken (the app shows "Not Found", or
+  its scripts and styles fail to load). Is it?
 
 ## 6. Phase 1 end-to-end check (agent on a Scion server)
 
@@ -216,9 +217,10 @@ scion tunnel agui-e2e --port 8090 --local-port 8090    # then http://127.0.0.1:8
 | E6 | start a second agent with no service account, no ADC file and GCP identity `block` | Scion does not start it and reports the `gcloud-adc` secret as missing. With GCP identity `passthrough` instead: the agent starts, then exits 1 with the passthrough no-auth message |
 | E7 | set `AGUI_SHIM_FORCE_MISMATCH=1` in the harness-config env and start an agent | banner: "The port link cannot show the UI (forced version mismatch (test hook))"; `scion expose --list` shows the label `Antigravity (use scion tunnel)` |
 | E8 | on a host-networked workstation hub, start two agents at once | both run, on different ports (each banner shows its port) |
+| E10 | sign out in the UI (settings), then watch the pane | the agent stops with the no-auth message; if it keeps running signed out instead, report that |
 | E9 | after 10 minutes: `grep -ciE "update\|download" ~/.local/state/antigravity-ui/app.log` and `sha256sum /opt/Antigravity/antigravity` | no update download; hash equal to B3 |
 
-Report B1 to B3, E1 to E9 and L1 with yes/no, counts, seconds and
+Report B1 to B3, E1 to E10 and L1 with yes/no, counts, seconds and
 ports only; never tokens, sign-in URLs or command lines.
 
 ## Report template

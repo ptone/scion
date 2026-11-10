@@ -888,9 +888,10 @@ http.server.HTTPServer(("127.0.0.1", port), http.server.SimpleHTTPRequestHandler
 """
 
 FAKE_SCION = """#!/bin/sh
-# Fake scion: records expose calls; refuses --app-mode (no app mode on this hub).
+# Fake scion: records expose calls; refuses --app-mode (no app mode on this
+# hub) unless FAKE_SCION_APP_MODE=1.
 echo "$*" >> "$HOME/scion-calls"
-for a in "$@"; do [ "$a" = "--app-mode" ] && exit 1; done
+for a in "$@"; do [ "$a" = "--app-mode" ] && [ "${FAKE_SCION_APP_MODE:-}" != "1" ] && exit 1; done
 exit 0
 """
 
@@ -1071,6 +1072,22 @@ class WrapperRunningTest(unittest.TestCase):
         self.assertEqual(len(calls), 2, calls)
         self.assertIn("--app-mode", calls[0])
         self.assertNotIn("--app-mode", calls[1])
+
+    def test_link_mode_banner_shows_the_port(self):
+        web = os.path.join(self.tmp, "web")
+        os.makedirs(web)
+        with open(os.path.join(web, "index.html"), "w") as f:
+            f.write('<html><head></head><body></body></html>')
+        with open(os.path.join(web, "main.js"), "w") as f:
+            f.write(" ".join(t for t, _ in helper.SHIM_PATCHES))
+        port = self._unused_port()
+        self._start(FAKE_WEB_DIR=web, FAKE_SCION_APP_MODE="1", AGUI_PROXY_PORT=port)
+        out = self._wait_for("Messages and tasks are not delivered")
+        self.assertIn('Open the "Antigravity" port (%s) from this agent\'s page' % port, out)
+        with open(os.path.join(self.home, "scion-calls")) as f:
+            calls = f.read().splitlines()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("--app-mode", calls[0])
 
     def test_sigterm_stops_everything(self):
         self._start()

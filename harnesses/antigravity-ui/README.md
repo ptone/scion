@@ -131,10 +131,11 @@ harness-config `env` (in settings `harness_configs.<name>.env`, a profile's
 secret, or a template's `env`. A template's `env` has the lowest priority:
 it applies only to keys no other source sets.
 
-If the app asks for an interactive sign-in code at any time (for example
-when the assigned service account stops working), the agent stops with a
-message saying how to provide credentials. Signing out in the app's UI has
-the same effect: start the agent again to recover.
+If the app prints its sign-in prompt at any time (for example when the
+assigned service account stops working), the wrapper stops the agent with a
+message saying how to provide credentials; start the agent again to
+recover. Whether signing out in the app's UI leads to that prompt is not
+established yet: E10 in `PROBE.md` checks it.
 
 ## Files
 

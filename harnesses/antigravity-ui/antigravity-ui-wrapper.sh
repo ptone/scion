@@ -163,7 +163,7 @@ banner() {
   echo " Antigravity UI (experimental) is running."
   case "$1" in
     link)
-      echo " Open the \"Antigravity\" port from this agent's page in Scion."
+      echo " Open the \"Antigravity\" port (${AGUI_PROXY_PORT}) from this agent's page in Scion."
       ;;
     tunnel)
       if [ "$SHIM" = shim ]; then
