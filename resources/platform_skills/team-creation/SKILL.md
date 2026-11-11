@@ -4,8 +4,10 @@ description: >-
   Create or extend scion agent team templates from a high-level description of roles and workflow.
   Use when the user describes a multi-agent team, panel, crew, pipeline, or any scenario
   requiring coordinated LLM agents with distinct roles. Also use when adding new roles to an
-  existing team, modifying workflows, or restructuring agent coordination. Produces ready-to-use
-  template directories in .scion/templates/ by default, or in a custom path if specified.
+  existing team, modifying workflows, or restructuring agent coordination. Also use when porting
+  or converting an agent pack from another host (a Cursor or Claude Code plugin, a skills repo with
+  subagent definitions) into a Scion team. Produces ready-to-use template directories in
+  .scion/templates/ by default, or in a custom path if specified.
 ---
 
 # Scion Team Creation & Extension Skill
@@ -22,7 +24,7 @@ Each template lives in `.scion/templates/<template-name>/` and contains:
 .scion/templates/<template-name>/
 ├── scion-agent.yaml       # REQUIRED: template metadata and config
 ├── agents.md              # REQUIRED: agent behavioral instructions
-├── system-prompt.md       # REQUIRED: role persona and expertise framing
+├── system-prompt.md       # OPTIONAL: replaces the harness's default system prompt (see below)
 └── skills/                # OPTIONAL: harness skills (agentskills.io standard)
     └── <skill-name>/
         └── SKILL.md
@@ -45,12 +47,14 @@ Every template MUST have this file. Minimal valid config:
 schema_version: "1"
 description: "Short description of this agent role"
 agent_instructions: agents.md
-system_prompt: system-prompt.md
 ```
 
 Optional fields you may include when the role requires them:
 
 ```yaml
+model: extra-large         # Default model: alias (small|medium|large|extra-large) or explicit ID.
+                           # Lowest priority; `scion start --model` overrides it.
+default_harness_config: claude   # A preference only; `scion start --harness-config` overrides it.
 max_turns: 50              # Maximum conversation turns
 max_duration: "30m"        # Maximum wall-clock time (e.g. "1h", "30m")
 
@@ -66,11 +70,19 @@ services:
       target: "localhost:9222"
       timeout: "10s"
 
+mcp_servers:
+  github:
+    transport: stdio
+    command: github-mcp-server
+    args: ["stdio"]
+
 skills:
   - uri: "skill://scion/global/idea-refine@latest"
   - uri: "skill://scion/core/scion@^1.0"
     optional: true
 ```
+
+An agent only has the MCP servers its template declares. Unlike an in-process subagent, it does not inherit its parent's servers.
 
 ### Fields to Never Use
 
@@ -93,7 +105,9 @@ The primary contents should focus on task and job work describing what the agent
 
 Do **not** include instructions on how to use the scion CLI (starting agents, messaging, `scion look`, etc.) — every agent automatically receives base CLI operating instructions from the platform.
 
-### system-prompt.md (Optional)
+### system-prompt.md (Optional; usually omit)
+
+**Warning:** on harnesses whose `system_prompt_mode` is `native` (Claude Code among them), this file is passed as `--system-prompt` and **replaces the harness's entire default system prompt**, including its built-in tool-use guidance. Prefer putting the persona at the top of `agents.md`. Use `system-prompt.md` only when you deliberately want to replace the harness prompt.
 
 Frames the agent's persona, expertise, and perspective — *who* the agent is, while `agents.md` shapes *what* it does. Example:
 
@@ -131,6 +145,10 @@ description: >-
 Skill instructions and reference material here.
 ```
 
+Template-local skills and GitHub URI skills both keep their executable bits. Older Scion builds dropped exec bits and subdirectories for URI skills, so prefer running scripts as `bash x.sh` or `bun x.ts` rather than `./x`. Skills that might reach an older hub will still work.
+
+Scion loads skills only from three sources: template `skills/`, platform skills, and URI references. It never loads skills from the agent's repo checkout.
+
 During agent provisioning, Scion automatically merges skills from the template into the correct harness-specific location (e.g. `.claude/skills/` for Claude, `.gemini/skills/` for Gemini). The agent's LLM harness discovers and loads these skills at runtime.
 
 Use skills to package domain knowledge, tool-usage patterns, or specialized workflows that a role needs. Skills are portable across harnesses and reusable across templates.
@@ -139,21 +157,15 @@ Use skills to package domain knowledge, tool-usage patterns, or specialized work
 
 In addition to local `skills/` directories, templates can declare skill dependencies from the skill bank registry using URI references in `scion-agent.yaml`. These skills are downloaded and installed at provision time.
 
-### URI Format
+### URI Formats
 
 ```
-skill://<registry>/<scope>/<name>@<version>
+skill://<registry>/<scope>/<name>@<version>                          # skill bank (Hub registry)
+gh://<owner>/<repo>/<name>[@<ref>]                                    # GitHub, <repo>/skills/<name> only
+https://github.com/<owner>/<repo>/tree/<ref>/<path>                   # GitHub, any path (monorepos, plugins)
 ```
 
-- **registry**: The registry host (typically `scion`)
-- **scope**: Where the skill lives — `core` (platform skills), `global` (hub-wide), `project/<id>` (project-scoped), or `user/<id>` (user-scoped)
-- **name**: The skill name
-- **version**: Version constraint — an exact version (`1.0.0`), a range (`^1.0`), or `latest`
-
-Examples:
-- `skill://scion/global/idea-refine@latest` — a global-scope skill from the Hub
-- `skill://scion/core/scion@^1.0` — a core platform skill
-- `skill://scion/project/my-custom-skill@1.0.0` — a project-scoped skill
+Pin GitHub refs to a commit SHA for skills you did not write. For scopes, version constraints, private-repo tokens, and resolution behavior, read `references/skill-uris.md`.
 
 ### Declaring Skills in scion-agent.yaml
 
@@ -178,7 +190,7 @@ Each entry supports three fields:
 - **URI references**: Use for published, shared skills from the skill bank — skills that exist independently of this template and may be updated separately. Good for widely-useful skills like `idea-refine`, domain-specific utilities, or skills maintained by other teams.
 - **Local `skills/` directory**: Use for skills specific to this template's workflow that aren't published to the registry. Also for skills you want to customize beyond what the registry version provides.
 
-If a skill is useful to multiple templates and is published to the registry, reference it by URI rather than copying the `SKILL.md` locally. Local skills take precedence over registry skills of the same name, so you can always override a URI-referenced skill with a local version if needed.
+If a skill is useful to multiple templates and is published to the registry or lives in a public repo, reference it by URI rather than copying the `SKILL.md` locally. **Never declare the same skill name both locally and by URI.** URI skills are installed after local ones and overwrite them. To customize an upstream skill, fork it into `skills/` under the same name and drop the URI entry.
 
 ## The Orchestrator Pattern
 
@@ -192,6 +204,16 @@ The orchestrator's `agents.md` should focus on:
 - **Completion criteria**: how the orchestrator knows the overall task is done
 
 Workers don't communicate directly with each other — the orchestrator reads output from one and relays relevant information to others.
+
+### Roles, not models
+
+Create one template per **role**, not one per model or vendor. The harness (vendor CLI) and model are chosen when each agent is started (`scion start <name> --type <role> --harness-config <h> --model <alias>`). A panel that needs model diversity is one reviewer template started several times on different harness-configs. A listed harness-config can still fail at start, so preflight the ones a workflow depends on (see **Verify a Team**).
+
+### Briefs and reports
+
+- Workers run in their own clone and container, so paths in the orchestrator's clone mean nothing to them. Hand work over through pushed branches, PR URLs, or files in a shared directory (`/scion-volumes/<name>/`). Templates cannot declare shared directories, so the orchestrator resolves one at runtime.
+- Keep the task argument of `scion start` short. Put a long brief in a file and pass its path. Very large inline tasks have crashed agents at start.
+- Have workers write their report to a file (for example `<shared-dir>/<program>/inbox/<agent>.md`) as well as messaging it. The orchestrator wakes on the message or the completion event, then reads the file. Messages can be lost.
 
 ### Orchestrator agents.md Structure
 
@@ -246,8 +268,26 @@ If a role needs specialized domain knowledge or tool-usage patterns that would b
 - [ ] Template directory names are kebab-case
 - [ ] The workflow matches the user's intent
 - [ ] No CLI usage instructions are duplicated in templates
-- [ ] For skills referenced by URI: verify the URI format is correct (`skill://registry/scope/name@version`)
+- [ ] For skills referenced by URI: verify the URI format is correct (`skill://registry/scope/name@version`, `gh://owner/repo/name@ref`, or a full `https://github.com/.../tree/<sha>/<path>` for monorepo paths)
+- [ ] No skill name is declared both locally and by URI
+- [ ] No `system-prompt.md` unless replacing the harness prompt is intended
+- [ ] Skill scripts are invoked through an interpreter (`bash`, `bun`, `python`), not `./script`
+- [ ] URI skills are proven by starting one real agent from the template and listing its skills directory. Provisioning is the only resolution test available inside an agent
 - [ ] Required skills (non-optional) will cause provisioning to fail if unresolvable — mark skills `optional: true` if the team can function without them
+
+### 6. Verify a Team
+
+The validation checklist catches format errors. Only a running agent proves the template works.
+
+1. **Provision smoke.** Start the cheapest role on a small model with a task like: "List `$HOME/.claude/skills/*/` (or your harness's skills dir), print the first 3 lines of <a few SKILL.md files>, message the output to @<you>, then signal completion." The expected count is local skills + URI skills + platform skills. A missing directory means a URI did not resolve. Delete the agent afterwards, and repeat whenever the URI set changes.
+2. **Harness preflight.** When a workflow relies on several vendors (review panels, cross-model judges), start one trivial agent on each harness-config it names. `scion harness-config list` shows configs that exist, not ones that start. Expired tokens, missing auth, missing images, and crashes at boot are all common. Record the runnable set where the orchestrator reads it, and tell the orchestrator what to do when a panel shrinks to one vendor.
+3. **Dry run.** Give the orchestrator a small real task, and read its briefs and its workers' reports before trusting the workflow.
+
+Syncing a template to test it (`scion templates sync <name>`, or `scion start --upload-template`) publishes it at project scope. Say so before the first sync.
+
+## Starting From an Existing Agent Pack
+
+When the team comes from a pack written for another host, read `references/porting.md` before designing roles. It covers triage (`scripts/triage.sh`), mapping host primitives (`references/host-primitive-map.md`), a runtime contract skill (`references/runtime-contract-skeleton.md`), minimal forks, and a dogfood trial. The templates it produces use the formats above and pass **Verify a Team**.
 
 ## Extending an Existing Team
 
@@ -282,5 +322,7 @@ Read the existing templates in `.scion/templates/` to understand:
 - **Template names = directory names**. The `description` in `scion-agent.yaml` is cosmetic; the `--type` value is the directory name.
 - **Skills are harness-portable**. Write `SKILL.md` content without assuming a specific harness — scion mounts skills into the correct location automatically.
 - **URI skills resolve at provision time**. Agents must be connected to a Hub with the skill in its registry. Use `optional: true` for skills that are nice-to-have but not essential.
-- **Local skills take precedence**. If a template's `skills/` directory contains a skill with the same name as a URI-referenced skill, the local version wins.
+- **URI skills overwrite local skills of the same name.** URI skills install after template-local ones. Never declare a name both ways.
+- **`system-prompt.md` replaces the harness prompt** on native-mode harnesses such as Claude Code. Omit it unless you mean that.
+- **Syncing publishes at project scope.** `scion templates sync <name>` (name only, from `.scion/templates/`) and `scion start --upload-template` make the template visible to every project member.
 - **Never set `harness`, `harness_config`, `explicit_workspace`, or `config_dir`** — these fields are deprecated or cause broken agent startup. Omit them entirely. Project defaults handle harness selection automatically.
