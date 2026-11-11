@@ -63,6 +63,11 @@ func TestRealTmux_PasteArrivesAsText(t *testing.T) {
 	defer cancel()
 	if _, err := r.Run(ctx, []string{"tmux", "new-session", "-d", "-s", "scion", "-x", "200", "-y", "20",
 		fmt.Sprintf("cat > %s", outFile)}, nil); err != nil {
+		// Under SCION_TEST_REQUIRE_TMUX=1 (CI) a session that cannot start
+		// fails too, so a green run always means the paste was checked.
+		if os.Getenv("SCION_TEST_REQUIRE_TMUX") == "1" {
+			t.Fatalf("cannot start tmux (SCION_TEST_REQUIRE_TMUX=1): %v", err)
+		}
 		t.Skipf("cannot start tmux: %v", err)
 	}
 	defer func() { _, _ = r.Run(context.Background(), []string{"tmux", "kill-server"}, nil) }()
