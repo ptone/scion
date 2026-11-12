@@ -7646,6 +7646,8 @@ export class ScionChatThread extends LitElement {
             .choiceIntro=${msg.choiceIntro}
             .answerMode=${msg.answerMode}
             .answerability=${this.answerabilityFor(msg)}
+            .choiceResponse=${msg.choiceResponse}
+            .choiceResponseSet=${msg.choiceResponseSet}
             @choice-answered=${this.handleChoiceAnswered}
             @choice-answer-denied=${this.handleChoiceAnswerDenied}
             dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
