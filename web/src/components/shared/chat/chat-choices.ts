@@ -23,6 +23,11 @@
  * the recommended choice. The card applies the 200's view at once and emits
  * `choice-answered` so the thread holds the same view; other tabs get it
  * over `chat.choice.updated`.
+ *
+ * Answerability (design §4.5): the thread passes `answerability` for the
+ * prompt's asker. A blocked card disables every choice (`aria-disabled`)
+ * and shows the reason inline; a 403 on click blocks it the same way and
+ * emits `choice-answer-denied`. A gone asker stays answerable with a note.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -32,8 +37,17 @@ import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import { showToast } from '../../../utils/toast.js';
-import { answerDecision, newerDecisionView } from '../../../client/chat-choices.js';
-import type { ChoiceAnsweredDetail } from '../../../client/chat-choices.js';
+import {
+  ANSWERABLE,
+  answerDecision,
+  answerabilityFromDenial,
+  newerDecisionView,
+} from '../../../client/chat-choices.js';
+import type {
+  AskerAnswerability,
+  ChoiceAnswerDeniedDetail,
+  ChoiceAnsweredDetail,
+} from '../../../client/chat-choices.js';
 import type { ChoiceOption, DecisionView } from '../../../shared/types.js';
 
 let hintSeq = 0;
@@ -54,6 +68,17 @@ export class ScionChatChoices extends LitElement {
   @property()
   currentUserId = '';
 
+  /** Whether the viewer can answer this prompt's asker (design §4.5). */
+  @property({ attribute: false })
+  answerability: AskerAnswerability = ANSWERABLE;
+
+  /**
+   * What this card's own 403 said, authoritative over `answerability`
+   * until the card is gone.
+   */
+  @state()
+  private denied: AskerAnswerability | null = null;
+
   /**
    * Views this card received from its own answer POST, newer than
    * `decisions` until the thread passes them back.
@@ -70,6 +95,7 @@ export class ScionChatChoices extends LitElement {
   private rendered = new Map<string, DocumentFragment>();
 
   private readonly hintId = `choice-hint-${++hintSeq}`;
+  private readonly reasonId = `choice-reason-${hintSeq}`;
 
   static override styles = css`
     :host {
@@ -270,6 +296,47 @@ export class ScionChatChoices extends LitElement {
       margin-top: 0.35rem;
     }
 
+    .reason {
+      margin-top: 0.5rem;
+      display: flex;
+      gap: 0.4rem;
+      align-items: flex-start;
+      font-size: var(--chat-fs-sm, 0.875rem);
+      color: var(--scion-text-secondary, #475569);
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-radius: var(--scion-radius, 0.5rem);
+      padding: 0.4rem 0.55rem;
+    }
+
+    .reason sl-icon {
+      flex-shrink: 0;
+      margin-top: 0.2rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .reason b {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .note {
+      display: flex;
+      gap: 0.35rem;
+      align-items: flex-start;
+      font-size: var(--chat-fs-sm, 0.875rem);
+      color: var(--scion-text-muted, #64748b);
+      padding: 0.5rem 0.75rem;
+      border-top: 1px dashed var(--scion-border, #e2e8f0);
+    }
+
+    .note sl-icon {
+      flex-shrink: 0;
+      margin-top: 0.2rem;
+    }
+
+    .note b {
+      color: var(--scion-text-secondary, #475569);
+    }
+
     .sr-only {
       position: absolute;
       width: 1px;
@@ -350,8 +417,21 @@ export class ScionChatChoices extends LitElement {
     return a.answeredByName || a.answeredByEmail || 'someone';
   }
 
+  /** The viewer's answerability: this card's own 403 wins over the thread's. */
+  get effectiveAnswerability(): AskerAnswerability {
+    return this.denied ?? this.answerability ?? ANSWERABLE;
+  }
+
+  /**
+   * Whether the viewer cannot answer at all: every choice, and a set's
+   * Submit, is disabled and `renderAnswerBlocked()` says why.
+   */
+  get answerBlocked(): boolean {
+    return this.effectiveAnswerability.state === 'blocked';
+  }
+
   private actionable(d: DecisionView): boolean {
-    return d.status === 'pending' && !this.submitting;
+    return d.status === 'pending' && !this.submitting && !this.answerBlocked;
   }
 
   /** Enter on the focused card (not on a control inside it) picks the recommended choice. */
@@ -385,10 +465,40 @@ export class ScionChatChoices extends LitElement {
         }
         return;
       }
+      if (res.status === 403) {
+        this.applyDenied(d, res.code, res.reason);
+        return;
+      }
       showToast(res.message, 'danger');
     } finally {
       this.submitting = null;
     }
+  }
+
+  /**
+   * A 403 from an answer endpoint (design §4.5 step 3): nothing was
+   * recorded. Blocks the card with the reason, toasts it, and tells the
+   * thread so the asker's other prompts (or the whole read-only thread)
+   * show it too.
+   */
+  private applyDenied(d: DecisionView, code: string, reason: string | undefined): void {
+    const answerability = answerabilityFromDenial(code, reason, d.askerAgentName);
+    this.denied = answerability;
+    showToast(blockedText(answerability), 'warning');
+    const detail: ChoiceAnswerDeniedDetail = {
+      messageId: this.messageId,
+      askerAgentId: d.askerAgentId,
+      code,
+      ...(reason ? { reason } : {}),
+      answerability,
+    };
+    this.dispatchEvent(
+      new CustomEvent<ChoiceAnswerDeniedDetail>('choice-answer-denied', {
+        detail,
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private applyOwn(view: DecisionView, responseMessageId?: string): void {
@@ -413,14 +523,16 @@ export class ScionChatChoices extends LitElement {
     // Single mode (design §4.1): the card holds one decision.
     const d = this.views[0];
     if (!d) return nothing;
-    const pendingWithDefault = d.status === 'pending' && !!d.defaultChoiceId;
+    const blocked = this.answerBlocked && d.status === 'pending';
+    const pendingWithDefault = d.status === 'pending' && !!d.defaultChoiceId && !blocked;
     return html`
       <div
         class="card"
         role="group"
         tabindex="0"
         aria-label=${plainText(d.question)}
-        aria-describedby=${pendingWithDefault ? this.hintId : nothing}
+        aria-disabled=${blocked ? 'true' : nothing}
+        aria-describedby=${pendingWithDefault ? this.hintId : blocked ? this.reasonId : nothing}
         @keydown=${(e: KeyboardEvent) => this.onCardKeydown(e, d)}
       >
         <div class="card-head">
@@ -428,7 +540,7 @@ export class ScionChatChoices extends LitElement {
           <span class="title">Decision</span>
           ${d.key ? html`<span class="key">${d.key}</span>` : nothing}
         </div>
-        ${this.renderRow(d, pendingWithDefault)}
+        ${this.renderRow(d, pendingWithDefault)} ${this.renderAskerGoneNote()}
       </div>
     `;
   }
@@ -475,6 +587,7 @@ export class ScionChatChoices extends LitElement {
       ?outline=${outlined && !s.chosen}
       ?loading=${s.loading}
       ?disabled=${s.disabled}
+      aria-disabled=${s.disabled ? 'true' : nothing}
       title=${s.recommended ? `${c.label} (recommended)` : c.label}
       @click=${() => {
         if (!s.chosen) void this.choose(d, c.id);
@@ -525,7 +638,45 @@ export class ScionChatChoices extends LitElement {
     </button>`;
   }
 
-  private renderFoot(d: DecisionView): TemplateResult {
+  /**
+   * Why the viewer cannot answer (design §4.3 "Pending, blocked"): visible
+   * text, not a tooltip, with `lock` (or `eye` for a read-only thread).
+   * Set mode renders it once under the rows.
+   */
+  renderAnswerBlocked(): TemplateResult | typeof nothing {
+    const a = this.effectiveAnswerability;
+    if (a.state !== 'blocked') return nothing;
+    return html`<div
+      class="reason"
+      id=${this.reasonId}
+      data-reason=${a.readOnly ? 'read-only' : 'denied'}
+    >
+      <sl-icon name=${a.readOnly ? 'eye' : 'lock'} aria-hidden="true"></sl-icon>
+      <span
+        >${a.askerName ? html`You can't answer <b>${a.askerName}</b>: ` : nothing}${a.reason ??
+        ''}</span
+      >
+    </div>`;
+  }
+
+  /**
+   * The asker no longer exists (design §4.3 "Asker gone"): still
+   * answerable, the hub records the answer without delivering it.
+   */
+  renderAskerGoneNote(): TemplateResult | typeof nothing {
+    if (this.effectiveAnswerability.state !== 'gone') return nothing;
+    const views = this.views;
+    if (!views.some((d) => d.status === 'pending')) return nothing;
+    const name = views[0]?.askerAgentName || 'The agent';
+    return html`<div class="note" role="note">
+      <sl-icon name="info-circle" aria-hidden="true"></sl-icon>
+      <span
+        ><b>${name}</b> is no longer running. Your answer will be recorded but not delivered.</span
+      >
+    </div>`;
+  }
+
+  private renderFoot(d: DecisionView): TemplateResult | typeof nothing {
     if (this.submitting?.rowId === d.rowId) {
       return html`<div class="row-foot" role="status">Sending…</div>`;
     }
@@ -546,10 +697,17 @@ export class ScionChatChoices extends LitElement {
       const v = d.replacedBy?.version;
       return html`<div class="row-foot">${v ? `Replaced by v${v}` : 'Replaced'}</div>`;
     }
+    if (this.answerBlocked) return this.renderAnswerBlocked();
     return html`<div class="row-foot">
       <sl-icon name="hourglass-split"></sl-icon>Awaiting your answer
     </div>`;
   }
+}
+
+/** The reason line of a blocked answerability, as plain text. */
+function blockedText(a: AskerAnswerability): string {
+  const reason = a.reason ?? '';
+  return a.askerName ? `You can't answer ${a.askerName}: ${reason}` : reason;
 }
 
 /** Markdown source reduced to text for an accessible name. */
