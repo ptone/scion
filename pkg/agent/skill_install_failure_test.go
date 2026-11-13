@@ -35,7 +35,7 @@ import (
 // the skill when required.
 
 const (
-	installFailGoodURI    = "skill://scion/core/good-skill@1.0"
+	installFailGoodURI    = "skill://scion/global/good-skill@1.0"
 	installFailMissingURI = "gh://owner/repo/missing-skill@main"
 	// installFail404Reason is the user-facing reason for a SKILL.md
 	// download that got a 404: download failures are shown verbatim.
@@ -159,7 +159,7 @@ func TestInstallResolvedSkills_FilesystemErrorDoesNotLeakPath(t *testing.T) {
 	// it also fails as root).
 	skills := []ResolvedSkill{{
 		Name:    "fs-skill",
-		URI:     "skill://scion/core/fs-skill@1.0",
+		URI:     "skill://scion/global/fs-skill@1.0",
 		Version: "1.0.0",
 		Files: []ResolvedFile{
 			{Path: "dir", Content: []byte("a file")},
@@ -396,7 +396,7 @@ func TestInstallResolvedSkills_OptionalCacheFallthroughLeavesNoPartialDir(t *tes
 
 	skills := []ResolvedSkill{{
 		Name:     "cached-skill",
-		URI:      "skill://scion/core/cached-skill@1.0",
+		URI:      "skill://scion/global/cached-skill@1.0",
 		Version:  "1.0.0",
 		Hash:     bundleHash,
 		Optional: true,
@@ -458,7 +458,7 @@ func TestInstallResolvedSkills_TransportErrorScrubsURL(t *testing.T) {
 	fileURL := "https://127.0.0.1:1/private/path/SKILL.md?sig=" + secret
 	newSkills := func(optional bool) []ResolvedSkill {
 		return []ResolvedSkill{{
-			Name: "scrub-skill", URI: "skill://scion/core/scrub-skill@1.0", Version: "1.0.0", Optional: optional,
+			Name: "scrub-skill", URI: "skill://scion/global/scrub-skill@1.0", Version: "1.0.0", Optional: optional,
 			Files: []ResolvedFile{{Path: "SKILL.md", URL: fileURL}},
 		}}
 	}
@@ -523,7 +523,7 @@ func TestInstallResolvedSkills_MalformedRedirectScrubsLocation(t *testing.T) {
 	skillsDest := filepath.Join(agentHome, ".claude", "skills")
 	records := captureSlog(t)
 	skills := []ResolvedSkill{{
-		Name: "redirect-skill", URI: "skill://scion/core/redirect-skill@1.0", Version: "1.0.0",
+		Name: "redirect-skill", URI: "skill://scion/global/redirect-skill@1.0", Version: "1.0.0",
 		Files: []ResolvedFile{{Path: "SKILL.md", URL: srv.URL + "/SKILL.md"}},
 	}}
 	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)

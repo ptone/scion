@@ -266,8 +266,13 @@ func TestNormalizeSkillURI(t *testing.T) {
 		// ── skill:// passthrough ─────────────────────────────────────────────
 		{
 			name:  "skill with registry and scope",
-			input: "skill://scion/core/my-skill",
-			want:  "skill://scion/core/my-skill",
+			input: "skill://scion/global/my-skill",
+			want:  "skill://scion/global/my-skill",
+		},
+		{
+			name:  "skill global alias form",
+			input: "skill://global/my-skill",
+			want:  "skill://global/my-skill",
 		},
 		{
 			name:  "skill alias form",
@@ -334,8 +339,8 @@ func TestNormalizeSkillURI(t *testing.T) {
 		},
 		{
 			name:  "canonical skill:// is idempotent",
-			input: "skill://scion/core/my-skill",
-			want:  "skill://scion/core/my-skill",
+			input: "skill://scion/global/my-skill",
+			want:  "skill://scion/global/my-skill",
 		},
 	}
 

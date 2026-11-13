@@ -181,7 +181,7 @@ func TestBuildSkillRouter_OtherSchemes(t *testing.T) {
 		wantGCP     int
 		resolvedURI string
 	}{
-		{name: "skill scheme goes to hub", uri: "skill://scion/core/s", wantHub: 1, resolvedURI: "skill://scion/core/s"},
+		{name: "skill scheme goes to hub", uri: "skill://scion/global/s", wantHub: 1, resolvedURI: "skill://scion/global/s"},
 		{name: "bare name goes to hub", uri: "code-review", wantHub: 1, resolvedURI: "code-review"},
 		{name: "gcp-skill bypasses hub", uri: "gcp-skill://alias/ID", wantGCP: 1, resolvedURI: "gcp-skill://alias/ID"},
 	}

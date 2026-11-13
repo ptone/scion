@@ -76,7 +76,7 @@ func TestVerifySkillBundleHashes_GoldenAgreesWithHub(t *testing.T) {
 	}
 	for name, skill := range map[string]ResolvedSkill{
 		"hub gh tree":      {URI: "gh://acme/hashv2-repo/tool@main", Hash: v2GoldenGHTreeV1, HashV2: v2GoldenGHTreeV2, Files: ghTree},
-		"legacy, no modes": {URI: "skill://scion/core/legacy@1.0.0", Hash: v2GoldenLegacyV1, HashV2: v2GoldenLegacyV2, Files: legacy},
+		"legacy, no modes": {URI: "skill://scion/global/legacy@1.0.0", Hash: v2GoldenLegacyV1, HashV2: v2GoldenLegacyV2, Files: legacy},
 		"gh exec bit":      {URI: "gh://o/r/s@main", Hash: v2GoldenGHExecV1, HashV2: v2GoldenGHExecV2, Files: gh},
 	} {
 		if err := verifySkillBundleHashes(skill, installedInfos(skill.Files)); err != nil {
@@ -94,7 +94,7 @@ func TestVerifySkillBundleHashes(t *testing.T) {
 		{Path: "SKILL.md", Hash: v2TestHashA, Mode: "0644"},
 		{Path: "scripts/run.sh", Hash: v2TestHashB, Mode: "0644"},
 	}
-	ok := ResolvedSkill{URI: "skill://scion/core/s@1.0.0", Hash: v2GoldenLegacyV1, HashV2: v2GoldenLegacyV2, Files: files}
+	ok := ResolvedSkill{URI: "skill://scion/global/s@1.0.0", Hash: v2GoldenLegacyV1, HashV2: v2GoldenLegacyV2, Files: files}
 
 	if err := verifySkillBundleHashes(ResolvedSkill{URI: ok.URI, Hash: ok.Hash, Files: files}, installedInfos(files)); err != nil {
 		t.Errorf("v1 only: %v", err)
@@ -157,14 +157,14 @@ func TestVerifySkillBundleHashV2_ModeFromMetadata(t *testing.T) {
 // HashV2 empty.
 func TestHubResolveResponseToResult_CarriesContentHashV2(t *testing.T) {
 	const body = `{"resolved":[` +
-		`{"uri":"skill://scion/core/a@1.0.0","name":"a","resolvedVersion":"1.0.0","contentHash":"sha256:v1a","contentHashV2":"sha256:v2a","files":[]},` +
-		`{"uri":"skill://scion/core/b@1.0.0","name":"b","resolvedVersion":"1.0.0","contentHash":"sha256:v1b","files":[]}]}`
+		`{"uri":"skill://scion/global/a@1.0.0","name":"a","resolvedVersion":"1.0.0","contentHash":"sha256:v1a","contentHashV2":"sha256:v2a","files":[]},` +
+		`{"uri":"skill://scion/global/b@1.0.0","name":"b","resolvedVersion":"1.0.0","contentHash":"sha256:v1b","files":[]}]}`
 	var resp hubclient.ResolveSkillsResponse
 	if err := json.Unmarshal([]byte(body), &resp); err != nil {
 		t.Fatal(err)
 	}
 	result := hubResolveResponseToResult([]api.SkillReference{
-		{URI: "skill://scion/core/a@1.0.0"}, {URI: "skill://scion/core/b@1.0.0"},
+		{URI: "skill://scion/global/a@1.0.0"}, {URI: "skill://scion/global/b@1.0.0"},
 	}, &resp)
 	if len(result.Resolved) != 2 {
 		t.Fatalf("resolved = %+v", result.Resolved)
@@ -231,7 +231,7 @@ func TestInstallSkill_ContentHashV2(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			skillsDest := t.TempDir()
 			skill := ResolvedSkill{
-				Name: "v2-skill", URI: "skill://scion/core/v2-skill@1.0.0", Version: "1.0.0",
+				Name: "v2-skill", URI: "skill://scion/global/v2-skill@1.0.0", Version: "1.0.0",
 				Hash: v1, HashV2: tt.hashV2, Files: files,
 			}
 			_, err := installSkillAt(context.Background(), skill, skillsDest)
@@ -303,7 +303,7 @@ func TestInstallSkill_ContentHashV2CacheHit(t *testing.T) {
 			ctx := ContextWithSkillCache(context.Background(), cache)
 			skillsDest := t.TempDir()
 			skill := ResolvedSkill{
-				Name: "cached-v2", URI: "skill://scion/core/cached-v2@1.0.0", Version: "1.0.0",
+				Name: "cached-v2", URI: "skill://scion/global/cached-v2@1.0.0", Version: "1.0.0",
 				Hash: v1, HashV2: tt.hashV2,
 				Files: []ResolvedFile{{Path: "SKILL.md", URL: srv.URL + "/SKILL.md", Hash: tt.listedHash, Mode: "0644"}},
 			}
