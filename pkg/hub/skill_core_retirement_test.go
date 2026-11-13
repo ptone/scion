@@ -105,6 +105,36 @@ func TestCreateSkill_CoreScopeRejected(t *testing.T) {
 	assert.True(t, sawGuidance, "resolver log should record the skill://global/<name> migration hint")
 }
 
+// TestListSkills_CoreScopeRejected verifies that GET /api/v1/skills?scope=core
+// returns 400 Bad Request with the retired-scope message naming "global".
+func TestListSkills_CoreScopeRejected(t *testing.T) {
+	srv, s, alice, _, _ := setupSkillAuthzTest(t)
+	ctx := context.Background()
+
+	superAdminID := tid("core-list-superadmin")
+	createTestUserWithRole(t, s, superAdminID, superAdminID+"@test.com", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+	superAdmin, err := s.GetUser(ctx, superAdminID)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name string
+		user *store.User
+	}{
+		{"super-admin", superAdmin},
+		{"hub-member", alice},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequestAsUser(t, srv, tc.user, http.MethodGet, "/api/v1/skills?scope=core", nil)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+			assert.Equal(t, "validation_error", errResp.Error.Code)
+			assert.Equal(t, retiredSkillScopeCoreMessage, errResp.Error.Message)
+			assert.Contains(t, errResp.Error.Message, `"global"`)
+		})
+	}
+}
+
 // TestDetermineScopeSearchOrder verifies the default search order is
 // user -> project -> global, with core completely retired.
 func TestDetermineScopeSearchOrder(t *testing.T) {

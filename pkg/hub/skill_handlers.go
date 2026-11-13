@@ -42,8 +42,9 @@ import (
 )
 
 const (
-	githubAPIBase = "https://api.github.com"
-	githubRawBase = "https://raw.githubusercontent.com"
+	githubAPIBase                = "https://api.github.com"
+	retiredSkillScopeCoreMessage = `invalid scope "core": the "core" skill scope is no longer supported; use "global" instead`
+	githubRawBase                = "https://raw.githubusercontent.com"
 )
 
 // CreateSkillRequest is the request body for creating a skill.
@@ -253,6 +254,10 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		OwnerID: query.Get("ownerId"),
 		Status:  query.Get("status"),
 		Search:  query.Get("search"),
+	}
+	if filter.Scope == "core" {
+		ValidationError(w, retiredSkillScopeCoreMessage, nil)
+		return
 	}
 	if tagsParam := query.Get("tags"); tagsParam != "" {
 		filter.Tags = strings.Split(tagsParam, ",")
@@ -638,7 +643,7 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 	switch scope {
 	case store.SkillScopeGlobal, store.SkillScopeProject, store.SkillScopeUser:
 	case "core":
-		ValidationError(w, `invalid scope "core": the "core" skill scope is no longer supported; use "global" instead`, nil)
+		ValidationError(w, retiredSkillScopeCoreMessage, nil)
 		return
 	default:
 		ValidationError(w, fmt.Sprintf("invalid scope %q: must be one of global, project, user", scope), nil)
