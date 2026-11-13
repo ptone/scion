@@ -37,13 +37,22 @@ const (
 	retiredCoreSkillAliasPrefix    = "skill://core/"
 	retiredCoreSkillScionPrefix    = "skill://scion/core/"
 	retiredCoreSkillDefaultPrefix  = "skill:///core/"
-	replacementGlobalSkillURIPrefx = "skill://global/"
+	replacementGlobalSkillURIPrefx = "skill://scion/global/"
 )
 
 type coreCollisionWarning struct {
 	skillID uuid.UUID
 	oldSlug string
 	newSlug string
+}
+
+type droppedInjectionWarning struct {
+	droppedID uuid.UUID
+	keptID    uuid.UUID
+	scope     string
+	scopeID   string
+	oldURI    string
+	targetURI string
 }
 
 // MigrateSkillCoreScope performs an idempotent data migration retiring the
@@ -54,12 +63,13 @@ type coreCollisionWarning struct {
 //  2. On slug collision with an existing scope="global" row (or an earlier
 //     migrated row in the same batch), the core skill's slug is renamed to
 //     <slug>-core (then <slug>-core-2, <slug>-core-3, ...) within the 64-char
-//     slug limit, its scope is set to "global", and a warning is logged with
-//     the old and new identity.
+//     slug limit without colliding with any other core or global row, its scope
+//     is set to "global", and a warning is logged with the old and new identity.
 //  3. Stored skill://core/<slug> (as well as skill://scion/core/<slug> and
 //     skill:///core/<slug>) references in hub_settings["injected_skills"].user_defined
-//     and in project/user SkillInjection rows are rewritten to
-//     skill://global/<new slug> (preserving any @version suffix).
+//     and in project/user SkillInjection rows are rewritten to the canonical
+//     skill://scion/global/<new slug> (preserving any @version suffix) and
+//     deduplicated.
 //  4. Template files are not rewritten.
 func MigrateSkillCoreScope(ctx context.Context, client *ent.Client) error {
 	tx, err := client.Tx(ctx)
@@ -75,6 +85,7 @@ func MigrateSkillCoreScope(ctx context.Context, client *ent.Client) error {
 
 	mutated := false
 	var warnings []coreCollisionWarning
+	var droppedInjections []droppedInjectionWarning
 
 	coreSkills, err := tx.Skill.Query().
 		Where(entskill.ScopeEQ(retiredSkillScopeCore)).
@@ -100,19 +111,28 @@ func MigrateSkillCoreScope(ctx context.Context, client *ent.Client) error {
 			return fmt.Errorf("querying existing global skill slugs: %w", err)
 		}
 
-		globalSlugs := make(map[string]bool, len(existingGlobalSlugs)+len(coreSkills))
+		claimedGlobalSlugs := make(map[string]bool, len(existingGlobalSlugs)+len(coreSkills))
+		occupiedSlugs := make(map[string]bool, len(existingGlobalSlugs)+len(coreSkills))
 		for _, slug := range existingGlobalSlugs {
-			globalSlugs[slug] = true
+			claimedGlobalSlugs[slug] = true
+			occupiedSlugs[slug] = true
+		}
+		// Seed occupiedSlugs with all core slugs before the loop so a collision
+		// rename never claims another core row's slug and non-colliding core
+		// rows always keep their original slug regardless of creation order.
+		for _, sk := range coreSkills {
+			occupiedSlugs[sk.Slug] = true
 		}
 
 		for _, sk := range coreSkills {
 			oldSlug := sk.Slug
 			newSlug := oldSlug
-			collided := globalSlugs[oldSlug]
+			collided := claimedGlobalSlugs[oldSlug]
 			if collided {
-				newSlug = nextCoreCollisionSlug(oldSlug, globalSlugs)
+				newSlug = nextCoreCollisionSlug(oldSlug, occupiedSlugs)
 			}
-			globalSlugs[newSlug] = true
+			claimedGlobalSlugs[newSlug] = true
+			occupiedSlugs[newSlug] = true
 			if _, recorded := slugRemap[oldSlug]; !recorded {
 				slugRemap[oldSlug] = newSlug
 			}
@@ -176,26 +196,34 @@ func MigrateSkillCoreScope(ctx context.Context, client *ent.Client) error {
 			scopeID string
 			uri     string
 		}
-		existingKeys := make(map[injectionKey]bool, len(existingInScopes))
+		existingKeyIDs := make(map[injectionKey]uuid.UUID, len(existingInScopes))
 		for _, si := range existingInScopes {
-			existingKeys[injectionKey{scope: si.Scope, scopeID: si.ScopeID, uri: si.SkillURI}] = true
+			existingKeyIDs[injectionKey{scope: si.Scope, scopeID: si.ScopeID, uri: si.SkillURI}] = si.ID
 		}
 
 		for _, p := range pendingInjections {
 			oldKey := injectionKey{scope: p.row.Scope, scopeID: p.row.ScopeID, uri: p.row.SkillURI}
-			delete(existingKeys, oldKey)
+			delete(existingKeyIDs, oldKey)
 
 			targetKey := injectionKey{scope: p.row.Scope, scopeID: p.row.ScopeID, uri: p.newURI}
-			if existingKeys[targetKey] {
+			if keptID, exists := existingKeyIDs[targetKey]; exists {
 				// Target URI already exists in this (scope, scope_id); drop the redundant core row.
 				if err := tx.SkillInjection.DeleteOneID(p.row.ID).Exec(ctx); err != nil {
 					return fmt.Errorf("deduplicating migrated skill injection %s: %w", p.row.ID, err)
 				}
+				droppedInjections = append(droppedInjections, droppedInjectionWarning{
+					droppedID: p.row.ID,
+					keptID:    keptID,
+					scope:     string(p.row.Scope),
+					scopeID:   p.row.ScopeID,
+					oldURI:    p.row.SkillURI,
+					targetURI: p.newURI,
+				})
 			} else {
 				if err := tx.SkillInjection.UpdateOneID(p.row.ID).SetSkillURI(p.newURI).Exec(ctx); err != nil {
 					return fmt.Errorf("rewriting skill injection %s (%q -> %q): %w", p.row.ID, p.row.SkillURI, p.newURI, err)
 				}
-				existingKeys[targetKey] = true
+				existingKeyIDs[targetKey] = p.row.ID
 			}
 			mutated = true
 		}
@@ -213,14 +241,38 @@ func MigrateSkillCoreScope(ctx context.Context, client *ent.Client) error {
 		if err := json.Unmarshal(hs.Value, &setting); err != nil {
 			return fmt.Errorf("parsing hub injected_skills setting: %w", err)
 		}
+		rewrittenURIs := make([]string, len(setting.UserDefined))
+		wasRewritten := make([]bool, len(setting.UserDefined))
 		settingChanged := false
 		for i := range setting.UserDefined {
 			if newURI, ok := rewriteCoreSkillURI(setting.UserDefined[i].URI, slugRemap); ok && newURI != setting.UserDefined[i].URI {
-				setting.UserDefined[i].URI = newURI
+				rewrittenURIs[i] = newURI
+				wasRewritten[i] = true
 				settingChanged = true
 			}
 		}
 		if settingChanged {
+			seenURIs := make(map[string]bool, len(setting.UserDefined))
+			for i, ref := range setting.UserDefined {
+				if !wasRewritten[i] {
+					seenURIs[ref.URI] = true
+				}
+			}
+			deduped := make([]api.SkillReference, 0, len(setting.UserDefined))
+			for i, ref := range setting.UserDefined {
+				if !wasRewritten[i] {
+					deduped = append(deduped, ref)
+					continue
+				}
+				ref.URI = rewrittenURIs[i]
+				if seenURIs[ref.URI] {
+					continue
+				}
+				seenURIs[ref.URI] = true
+				deduped = append(deduped, ref)
+			}
+			setting.UserDefined = deduped
+
 			raw, err := json.Marshal(setting)
 			if err != nil {
 				return fmt.Errorf("serializing migrated hub injected_skills setting: %w", err)
@@ -250,6 +302,16 @@ func MigrateSkillCoreScope(ctx context.Context, client *ent.Client) error {
 			"new_scope", migratedSkillScopeGlobal,
 			"new_slug", w.newSlug,
 			"new_uri", replacementGlobalSkillURIPrefx+w.newSlug,
+		)
+	}
+	for _, d := range droppedInjections {
+		slog.WarnContext(ctx, "dropped duplicate core skill injection during migration to global scope",
+			"dropped_injection_id", d.droppedID.String(),
+			"kept_injection_id", d.keptID.String(),
+			"scope", d.scope,
+			"scope_id", d.scopeID,
+			"old_uri", d.oldURI,
+			"target_uri", d.targetURI,
 		)
 	}
 
@@ -285,7 +347,7 @@ func nextCoreCollisionSlug(baseSlug string, occupied map[string]bool) string {
 
 // rewriteCoreSkillURI rewrites a Hub-registry core-scope skill URI
 // (skill://core/<slug>, skill://scion/core/<slug>, or skill:///core/<slug>,
-// with an optional @<version> suffix) to skill://global/<newSlug>[@<version>].
+// with an optional @<version> suffix) to skill://scion/global/<newSlug>[@<version>].
 func rewriteCoreSkillURI(raw string, slugRemap map[string]string) (string, bool) {
 	trimmed := strings.TrimSpace(raw)
 	var rest string

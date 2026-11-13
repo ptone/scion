@@ -120,7 +120,7 @@ func TestMigrateSkillCoreScope_Postgres(t *testing.T) {
 	require.NoError(t, err)
 	var gotSetting api.HubSkillInjectionSetting
 	require.NoError(t, json.Unmarshal(hs.Value, &gotSetting))
-	assert.Equal(t, []api.SkillReference{{URI: "skill://global/pg-clash-core@1.0.0"}}, gotSetting.UserDefined)
+	assert.Equal(t, []api.SkillReference{{URI: "skill://scion/global/pg-clash-core@1.0.0"}}, gotSetting.UserDefined)
 
 	projRows, err := client.SkillInjection.Query().
 		Where(entskillinjection.ScopeEQ(entskillinjection.ScopeProject), entskillinjection.ScopeIDEQ(projID)).
@@ -128,5 +128,5 @@ func TestMigrateSkillCoreScope_Postgres(t *testing.T) {
 		All(ctx)
 	require.NoError(t, err)
 	require.Len(t, projRows, 1)
-	assert.Equal(t, "skill://global/pg-solo", projRows[0].SkillURI)
+	assert.Equal(t, "skill://scion/global/pg-solo", projRows[0].SkillURI)
 }

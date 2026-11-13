@@ -309,7 +309,7 @@ func TestMigrateSkillCoreScope_KeepsStoragePath_FilesDownloadable(t *testing.T) 
 	injs, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
 	require.NoError(t, err)
 	require.Len(t, injs, 1)
-	assert.Equal(t, "skill://global/clash-skill-core", injs[0].SkillURI)
+	assert.Equal(t, "skill://scion/global/clash-skill-core", injs[0].SkillURI)
 
 	// Verify Carol (an ordinary hub member) can read, download, and resolve both migrated skills!
 	for _, tc := range []struct {
