@@ -59,7 +59,23 @@ func skillsListTags(cmd *cobra.Command) []string {
 	return tags
 }
 
+func validateSkillScopeFlag(scope string) error {
+	switch scope {
+	case "", "global", "project", "user":
+		return nil
+	case "core":
+		return newUsageError(`invalid --scope "core": the "core" skill scope is no longer supported; use "global" instead`)
+	default:
+		return newUsageError("invalid --scope %q: must be one of global, project, user", scope)
+	}
+}
+
 func runSkillsList(cmd *cobra.Command, args []string) error {
+	scope, _ := cmd.Flags().GetString("scope")
+	if err := validateSkillScopeFlag(scope); err != nil {
+		return err
+	}
+
 	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
@@ -68,7 +84,6 @@ func runSkillsList(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	scope, _ := cmd.Flags().GetString("scope")
 	search, _ := cmd.Flags().GetString("search")
 
 	opts := &hubclient.ListSkillsOptions{
@@ -246,6 +261,9 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 
 	if version == "" {
 		return newUsageError("--version is required")
+	}
+	if err := validateSkillScopeFlag(scope); err != nil {
+		return err
 	}
 
 	// Collect files
@@ -737,7 +755,7 @@ func init() {
 	skillsCmd.AddCommand(skillsResolveCmd)
 
 	// Flags for list command
-	skillsListCmd.Flags().String("scope", "", "Filter by scope (core, global, project, user)")
+	skillsListCmd.Flags().String("scope", "", "Filter by scope (global, project, user)")
 	skillsListCmd.Flags().String("search", "", "Search skills by name, description, or tags")
 	skillsListCmd.Flags().StringSlice("tags", nil, "Filter by tags (repeatable or comma-separated, AND semantics; each value is parsed as CSV, so a tag containing a double quote must be CSV-quoted)")
 
@@ -748,7 +766,7 @@ func init() {
 
 	// Flags for publish command
 	skillsPublishCmd.Flags().String("version", "", "Semver version to publish (required)")
-	skillsPublishCmd.Flags().String("scope", "", "Scope for new skills (core, global, project, user)")
+	skillsPublishCmd.Flags().String("scope", "", "Scope for new skills (global, project, user)")
 	skillsPublishCmd.Flags().String("skill-id", "", "Existing skill ID to publish a version for")
 
 	// Also add a 'skill' alias (singular) for convenience

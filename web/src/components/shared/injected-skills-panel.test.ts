@@ -197,7 +197,7 @@ describe('injected-skills-panel — discover button gating', () => {
 
   it('does not offer discovery for a skill:// URI', async () => {
     const el = await createPanel('project', []);
-    el.dialogUri = 'skill://scion/core/my-skill';
+    el.dialogUri = 'skill://scion/global/my-skill';
     el.dialogTransformed = null;
     expect(el.showDiscoverButton).toBe(false);
   });
@@ -906,7 +906,7 @@ describe('injected-skills-panel — search-mode picker URI', () => {
       id: 'test-id',
       name: 'Security Audit',
       slug: 'security-audit',
-      scope: 'core',
+      scope: 'global',
       status: 'active',
       created: '2026-01-01',
       updated: '2026-01-01',
@@ -933,7 +933,7 @@ describe('injected-skills-panel — search-mode picker URI', () => {
       id: 'test-id-2',
       name: 'Code Review',
       slug: 'code-review',
-      scope: 'core',
+      scope: 'global',
       status: 'active',
       created: '2026-01-01',
       updated: '2026-01-01',

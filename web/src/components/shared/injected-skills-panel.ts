@@ -1443,7 +1443,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
             : html`
                 <sl-input
                   label="Skill URI"
-                  placeholder="e.g. skill://scion/core/my-skill or https://github.com/org/repo/tree/main/skills/my-skill"
+                  placeholder="e.g. skill://global/my-skill or https://github.com/org/repo/tree/main/skills/my-skill"
                   help-text="Hub-skill URI (skill://…), GitHub tree or blob URL (auto-transformed), or gh:// shorthand."
                   .value=${this.dialogUri}
                   @sl-input=${(e: Event) => {
