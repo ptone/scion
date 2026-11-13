@@ -19,7 +19,7 @@ package hub
 // ptone/scion#1968: agents read skills. The granted set for an agent A in
 // project P, created by user U, is
 //
-//	G(A) = {global, core skills} ∪ {project skills of P} ∪ {U's own user skills}
+//	G(A) = {global skills} ∪ {project skills of P} ∪ {U's own user skills}
 //
 // gated by the agent JWT carrying project:read and by the delegation ceiling
 // (U must still hold skill.read). U is the agent's origin user (the human at
@@ -61,7 +61,7 @@ func TestAgentSkillRead_BaselineAndReadOnlySeeGrantedSet(t *testing.T) {
 		t.Run(string(role), func(t *testing.T) {
 			f := setupAgentSkillFixture(t)
 			token := f.newAgent(t, "as-agent-"+string(role), f.p.ID, f.u.ID, ScopesForRole(role))
-			f.assertAgentSees(t, token, agentSkillSet(f.sg, f.sc, f.sp, f.su))
+			f.assertAgentSees(t, token, agentSkillSet(f.sg, f.sp, f.su))
 		})
 	}
 }
@@ -138,7 +138,7 @@ func TestAgentSkillRead_ChildAgentSeesParentGrantedSet(t *testing.T) {
 		ScopesForRole(AgentRoleBaseline), child.Ancestry)
 	require.NoError(t, err)
 
-	want := agentSkillSet(f.sg, f.sc, f.sp, f.su)
+	want := agentSkillSet(f.sg, f.sp, f.su)
 	f.assertAgentSees(t, parentToken, want)
 	f.assertAgentSees(t, childToken, want)
 }
@@ -204,11 +204,10 @@ func TestAgentSkillRead_AccessConstraintDeniesAll(t *testing.T) {
 	f.assertAgentSees(t, token, agentSkillSet())
 }
 
-// Core/global coupling: listSkills uses one probe for both
-// global and core, so no constraint may split them. Access constraints are
-// keyed on system vs project scope, and both hub scopes resolve to system:
-// a project-scoped constraint on P removes Sp but leaves Sg and Sc together.
-func TestAgentSkillRead_CoreAndGlobalCannotDiverge(t *testing.T) {
+// Access constraints are keyed on system vs project scope, and hub scope
+// resolves to system: a project-scoped constraint on P removes Sp while
+// leaving Sg and Su intact.
+func TestAgentSkillRead_ProjectConstraintLeavesHubAndUserSkillsIntact(t *testing.T) {
 	f := setupAgentSkillFixture(t)
 	token := f.newAgent(t, "as-agent-ac-proj", f.p.ID, f.u.ID, ScopesForRole(AgentRoleBaseline))
 	agentType, agentID := "agent", tid("as-agent-ac-proj")
@@ -220,28 +219,14 @@ func TestAgentSkillRead_CoreAndGlobalCannotDiverge(t *testing.T) {
 	})
 	require.NoError(t, err)
 	// Su is not project-scoped, so a constraint on P does not reach it.
-	f.assertAgentSees(t, token, agentSkillSet(f.sg, f.sc, f.su))
-
-	// And at the Decide level: for every agent condition in this file,
-	// global and core decisions are identical.
-	authz := f.srv.authzService
-	ctx := context.Background()
-	for _, ident := range []AgentIdentity{
-		dcAgentIdentity(tid("as-agent-ac-proj"), f.p.ID, AgentRoleBaseline),
-		dcAgentIdentity(tid("as-agent-ac-proj"), f.p.ID, AgentRoleNone),
-		dcAgentIdentity(tid("as-agent-ac-proj"), "", AgentRoleBaseline),
-	} {
-		g := authz.CheckAccess(ctx, ident, skillScopeResource(store.SkillScopeGlobal, ""), ActionRead).Allowed
-		c := authz.CheckAccess(ctx, ident, skillScopeResource(store.SkillScopeCore, ""), ActionRead).Allowed
-		assert.Equal(t, g, c, "global and core must decide identically for an agent")
-	}
+	f.assertAgentSees(t, token, agentSkillSet(f.sg, f.su))
 }
 
 // A11: filter parameters and cursors cannot widen an agent's view.
 func TestAgentSkillRead_FilterParamsCannotWiden(t *testing.T) {
 	f := setupAgentSkillFixture(t)
 	token := f.newAgent(t, "as-agent-filters", f.p.ID, f.u.ID, ScopesForRole(AgentRoleBaseline))
-	granted := agentSkillSet(f.sg, f.sc, f.sp, f.su)
+	granted := agentSkillSet(f.sg, f.sp, f.su)
 	for _, extra := range []string{
 		"&scopeId=" + f.q.ID,
 		"&scope=project&scopeId=" + f.q.ID,
@@ -304,7 +289,7 @@ func TestAgentSkillRead_ProjectlessAgent(t *testing.T) {
 // agentPredicateMatches mirrors skillAccessScopePredicate for one row.
 func agentPredicateMatches(scope *store.SkillAccessScope, sk *store.Skill) bool {
 	switch sk.Scope {
-	case store.SkillScopeGlobal, store.SkillScopeCore:
+	case store.SkillScopeGlobal:
 		return scope.IncludeHubScope
 	case store.SkillScopeUser:
 		return scope.CallerID != "" && sk.ScopeID == scope.CallerID
@@ -319,15 +304,13 @@ func agentPredicateMatches(scope *store.SkillAccessScope, sk *store.Skill) bool 
 }
 
 // A15: the synthetic catalog grant applies to no
-// non-hub scope kind, including empty and unknown values.
+// non-hub scope kind, including empty, retired, and unknown values.
 func TestAgentSkillCatalogBinding_FilteredOutsideHubScope(t *testing.T) {
 	ident := dcAgentIdentity(tid("as-agent-a15"), tid("as-a15-project"), AgentRoleBaseline)
 	cb, role := agentSkillCatalogBinding(ident)
 	roleDefs := map[string]*RolePermissions{cb.RoleDefinitionID: role}
-	for _, sc := range []string{store.SkillScopeGlobal, store.SkillScopeCore} {
-		assert.Len(t, filterHubWideSkillGrants([]CandidateBinding{cb}, roleDefs, sc), 1, sc)
-	}
-	for _, sc := range []string{store.SkillScopeProject, store.SkillScopeUser, "", "future-scope"} {
+	assert.Len(t, filterHubWideSkillGrants([]CandidateBinding{cb}, roleDefs, store.SkillScopeGlobal), 1)
+	for _, sc := range []string{store.SkillScopeProject, store.SkillScopeUser, "", "core", "future-scope"} {
 		assert.Empty(t, filterHubWideSkillGrants([]CandidateBinding{cb}, roleDefs, sc), "scope %q", sc)
 	}
 	assert.Equal(t, ScopeTypeSystem, cb.ScopeType)
@@ -387,12 +370,12 @@ func TestAgentSkillRead_UserAndAdminUnchanged(t *testing.T) {
 	for _, sk := range resp.Skills {
 		got[sk.ID] = true
 	}
-	assert.Equal(t, agentSortedKeys(agentSkillSet(f.sg, f.sc, f.sp, f.sq, f.su)), agentSortedKeys(got))
-	assert.Equal(t, 5, resp.TotalCount)
+	assert.Equal(t, agentSortedKeys(agentSkillSet(f.sg, f.sp, f.sq, f.su)), agentSortedKeys(got))
+	assert.Equal(t, 4, resp.TotalCount)
 
 	admin := createSkillScopeAdmin(t, f.s, "agentskill-admin")
 	resp = decodeSkillsPage(t, f.srv, admin, "/api/v1/skills?status=active&limit=100")
-	assert.Equal(t, 6, resp.TotalCount)
+	assert.Equal(t, 5, resp.TotalCount)
 }
 
 // A12 at scale: >1000 hub skills plus out-of-scope noise,
@@ -405,7 +388,7 @@ func TestAgentSkillRead_ConsistencyAtScale(t *testing.T) {
 	f := setupAgentSkillFixture(t)
 	ctx := context.Background()
 	const hubN = 1005
-	want := agentSkillSet(f.sg, f.sc, f.sp, f.su)
+	want := agentSkillSet(f.sg, f.sp, f.su)
 	for i := 0; i < hubN; i++ {
 		want[createTestSkill(t, f.s, fmt.Sprintf("as-scale-global-%04d", i), store.SkillScopeGlobal, "", f.v.ID).ID] = true
 	}
@@ -446,7 +429,7 @@ func TestAgentSkillRead_OtherReadSurfacesAgreeWithGet(t *testing.T) {
 		require.NoError(t, err)
 		versions[sk.ID] = sv.ID
 	}
-	granted := agentSkillSet(f.sg, f.sc, f.sp, f.su)
+	granted := agentSkillSet(f.sg, f.sp, f.su)
 	token := f.newAgent(t, "as-agent-surfaces", f.p.ID, f.u.ID, ScopesForRole(AgentRoleBaseline))
 
 	surfaces := []struct {
@@ -500,7 +483,6 @@ func TestAgentSkillRead_OtherReadSurfacesAgreeWithGet(t *testing.T) {
 	t.Run("batch-resolve", func(t *testing.T) {
 		uris := map[string]string{
 			f.sg.ID: "skill://scion/global/" + f.sg.Slug,
-			f.sc.ID: "skill://scion/core/" + f.sc.Slug,
 			f.sp.ID: "skill://scion/project/" + f.p.ID + "/" + f.sp.Slug,
 			f.sq.ID: "skill://scion/project/" + f.q.ID + "/" + f.sq.Slug,
 			f.su.ID: "skill://scion/user/" + f.u.ID + "/" + f.su.Slug,

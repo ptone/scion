@@ -177,7 +177,7 @@ func TestSkillsResolve_FederationErrorsReturnFixedPhrase(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"resolved": []any{},
 				"errors": []map[string]any{{
-					"uri": "skill:///core/s@1.0", "code": code, "message": msg,
+					"uri": "skill:///global/s@1.0", "code": code, "message": msg,
 					"status": status, "correlationId": "remote-" + marker,
 				}},
 			})
@@ -187,7 +187,7 @@ func TestSkillsResolve_FederationErrorsReturnFixedPhrase(t *testing.T) {
 		return func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"resolved": []map[string]any{{
-				"uri": "skill:///core/s@1.0", "name": "s", "resolvedVersion": "1.0.0", "contentHash": hash,
+				"uri": "skill:///global/s@1.0", "name": "s", "resolvedVersion": "1.0.0", "contentHash": hash,
 			}}})
 		}
 	}
@@ -202,7 +202,7 @@ func TestSkillsResolve_FederationErrorsReturnFixedPhrase(t *testing.T) {
 		{
 			name: "registry not configured",
 			setup: func(t *testing.T, s store.Store, endpoint string) string {
-				return "skill://reg/core/s@1.0"
+				return "skill://reg/global/s@1.0"
 			},
 			want:    wantResolveError{code: "unknown_registry", message: "skill registry not configured"},
 			logText: `registry "reg" is not configured`,
@@ -211,7 +211,7 @@ func TestSkillsResolve_FederationErrorsReturnFixedPhrase(t *testing.T) {
 			name: "registry disabled",
 			setup: func(t *testing.T, s store.Store, endpoint string) string {
 				addFederationRegistry(t, s, "reg", endpoint, "hub", "trusted", "disabled")
-				return "skill://reg/core/s@1.0"
+				return "skill://reg/global/s@1.0"
 			},
 			want:    wantResolveError{code: "registry_disabled", message: "skill registry disabled"},
 			logText: `registry "reg" is disabled`,
@@ -220,7 +220,7 @@ func TestSkillsResolve_FederationErrorsReturnFixedPhrase(t *testing.T) {
 			name: "wrong registry type",
 			setup: func(t *testing.T, s store.Store, endpoint string) string {
 				addFederationRegistry(t, s, "reg", endpoint, "gcp", "trusted", "active")
-				return "skill://reg/core/s@1.0"
+				return "skill://reg/global/s@1.0"
 			},
 			want:    wantResolveError{code: "wrong_registry_type", message: "unsupported skill registry type"},
 			logText: `registry "reg" is type "gcp", not hub`,
@@ -233,7 +233,7 @@ func TestSkillsResolve_FederationErrorsReturnFixedPhrase(t *testing.T) {
 			},
 			setup: func(t *testing.T, s store.Store, endpoint string) string {
 				addFederationRegistry(t, s, "reg", endpoint, "hub", "trusted", "active")
-				return "skill://reg/core/s@1.0"
+				return "skill://reg/global/s@1.0"
 			},
 			want:    wantResolveError{code: "federation_error", message: "skill registry request failed", status: http.StatusBadGateway},
 			logText: `registry "reg" returned 502: upstream page ` + marker,
@@ -245,7 +245,7 @@ func TestSkillsResolve_FederationErrorsReturnFixedPhrase(t *testing.T) {
 			},
 			setup: func(t *testing.T, s store.Store, endpoint string) string {
 				addFederationRegistry(t, s, "reg", endpoint, "hub", "trusted", "active")
-				return "skill://reg/core/s@1.0"
+				return "skill://reg/global/s@1.0"
 			},
 			want:    wantResolveError{code: "federation_error", message: "skill registry request failed"},
 			logText: `failed to decode response from registry "reg"`,
@@ -255,7 +255,7 @@ func TestSkillsResolve_FederationErrorsReturnFixedPhrase(t *testing.T) {
 			handler: remoteBody("not_found", "remote text "+marker, http.StatusNotFound),
 			setup: func(t *testing.T, s store.Store, endpoint string) string {
 				addFederationRegistry(t, s, "reg", endpoint, "hub", "trusted", "active")
-				return "skill://reg/core/s@1.0"
+				return "skill://reg/global/s@1.0"
 			},
 			want:    wantResolveError{code: "not_found", message: "skill not found", status: http.StatusNotFound},
 			logText: `registry "reg": remote text ` + marker,
@@ -265,7 +265,7 @@ func TestSkillsResolve_FederationErrorsReturnFixedPhrase(t *testing.T) {
 			handler: remoteBody("bad code "+marker, "remote text "+marker, 0),
 			setup: func(t *testing.T, s store.Store, endpoint string) string {
 				addFederationRegistry(t, s, "reg", endpoint, "hub", "trusted", "active")
-				return "skill://reg/core/s@1.0"
+				return "skill://reg/global/s@1.0"
 			},
 			want:    wantResolveError{code: "federation_error", message: "skill registry request failed"},
 			logText: `registry "reg": remote text ` + marker,
@@ -275,7 +275,7 @@ func TestSkillsResolve_FederationErrorsReturnFixedPhrase(t *testing.T) {
 			handler: remoteBody("remote_specific_"+marker, "remote text "+marker, 0),
 			setup: func(t *testing.T, s store.Store, endpoint string) string {
 				addFederationRegistry(t, s, "reg", endpoint, "hub", "trusted", "active")
-				return "skill://reg/core/s@1.0"
+				return "skill://reg/global/s@1.0"
 			},
 			want:    wantResolveError{code: "remote_specific_" + marker, message: "resolver error"},
 			logText: `registry "reg": remote text ` + marker,
@@ -287,7 +287,7 @@ func TestSkillsResolve_FederationErrorsReturnFixedPhrase(t *testing.T) {
 			},
 			setup: func(t *testing.T, s store.Store, endpoint string) string {
 				addFederationRegistry(t, s, "reg", endpoint, "hub", "trusted", "active")
-				return "skill://reg/core/s@1.0"
+				return "skill://reg/global/s@1.0"
 			},
 			want:    wantResolveError{code: "not_found", message: "skill not found"},
 			logText: `skill not found in registry "reg"`,
@@ -297,20 +297,20 @@ func TestSkillsResolve_FederationErrorsReturnFixedPhrase(t *testing.T) {
 			handler: resolvedWithHash("sha256:" + marker),
 			setup: func(t *testing.T, s store.Store, endpoint string) string {
 				addFederationRegistry(t, s, "reg", endpoint, "hub", "pinned", "active")
-				return "skill://reg/core/s@1.0"
+				return "skill://reg/global/s@1.0"
 			},
 			want:    wantResolveError{code: "trust_violation", message: "skill content hash not trusted"},
-			logText: `no pinned hash for "skill://reg/core/s@1.0" in registry "reg"`,
+			logText: `no pinned hash for "skill://reg/global/s@1.0" in registry "reg"`,
 		},
 		{
 			name:    "content hash mismatch",
 			handler: resolvedWithHash("sha256:" + marker),
 			setup: func(t *testing.T, s store.Store, endpoint string) string {
 				reg := addFederationRegistry(t, s, "reg", endpoint, "hub", "pinned", "active")
-				if err := s.PinSkillHash(t.Context(), reg.ID, "skill://reg/core/s@1.0", "sha256:pinned"); err != nil {
+				if err := s.PinSkillHash(t.Context(), reg.ID, "skill://reg/global/s@1.0", "sha256:pinned"); err != nil {
 					t.Fatal(err)
 				}
-				return "skill://reg/core/s@1.0"
+				return "skill://reg/global/s@1.0"
 			},
 			want:    wantResolveError{code: "trust_violation", message: "skill content hash not trusted"},
 			logText: "expected sha256:pinned, got sha256:" + marker,
@@ -425,7 +425,7 @@ func TestSkillsResolve_FederationPeerFieldsBounded(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"resolved": []any{},
 					"errors": []map[string]any{{
-						"uri": "skill:///core/s@1.0", "code": tc.code, "message": tc.msg,
+						"uri": "skill:///global/s@1.0", "code": tc.code, "message": tc.msg,
 						"status": tc.status, "correlationId": tc.id,
 					}},
 				})
@@ -434,7 +434,7 @@ func TestSkillsResolve_FederationPeerFieldsBounded(t *testing.T) {
 			addFederationRegistry(t, s, "reg", mock.URL, "hub", "trusted", "active")
 			logs := captureJSONSlog(t)
 
-			const uri = "skill://reg/core/s@1.0"
+			const uri = "skill://reg/global/s@1.0"
 			const reqID = "req-5079-peer"
 			raw, errs := postSkillsResolve(t, srv, reqID, uri)
 			if len(errs) != 1 {
@@ -485,7 +485,7 @@ func TestSkillsResolve_FederationNonOKStatusRange(t *testing.T) {
 			addFederationRegistry(t, s, "reg", mock.URL, "hub", "trusted", "active")
 			logs := captureJSONSlog(t)
 
-			const uri = "skill://reg/core/s@1.0"
+			const uri = "skill://reg/global/s@1.0"
 			const reqID = "req-5079-nonok"
 			_, errs := postSkillsResolve(t, srv, reqID, uri)
 			if len(errs) != 1 {
@@ -510,12 +510,12 @@ func TestSkillsResolve_FederationConnectFailure(t *testing.T) {
 	logs := captureJSONSlog(t)
 
 	const reqID = "req-5079-connect"
-	_, errs := postSkillsResolve(t, srv, reqID, "skill://reg/core/s@1.0")
+	_, errs := postSkillsResolve(t, srv, reqID, "skill://reg/global/s@1.0")
 	if len(errs) != 1 {
 		t.Fatalf("errors = %v, want 1", errs)
 	}
 	assertResolveError(t, errs[0], wantResolveError{
-		uri: "skill://reg/core/s@1.0", code: "federation_error", message: "skill registry request failed",
+		uri: "skill://reg/global/s@1.0", code: "federation_error", message: "skill registry request failed",
 	}, reqID)
 	rec := findResolveLog(t, logs(), reqID, "federation_error")
 	got, _ := rec["error"].(string)
@@ -532,7 +532,7 @@ func TestSkillsResolve_FederationRedactedReference(t *testing.T) {
 	srv, _ := newFederationTestServer(t, mock)
 	logs := captureJSONSlog(t)
 
-	const uri = "skill://zquser:zqpass@reg/core/s@1.0"
+	const uri = "skill://zquser:zqpass@reg/global/s@1.0"
 	const reqID = "req-5079-redacted"
 	raw, errs := postSkillsResolve(t, srv, reqID, uri)
 	if len(errs) != 1 {

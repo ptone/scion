@@ -108,7 +108,7 @@ type Resource struct {
 
 	// ScopeKind is the resource's own scope classification for resource
 	// types whose records are themselves partitioned by scope: "skill"
-	// (store.SkillScopeGlobal/Core/Project/User), "template"
+	// (store.SkillScopeGlobal/Project/User), "template"
 	// (store.TemplateScopeGlobal/Project/User), and "harness_config"
 	// (store.HarnessConfigScopeGlobal/Project/User). It is distinct from
 	// ParentType/ParentID, which describe project containment for the

@@ -241,7 +241,7 @@ func classesInclude(classes []permissions.TargetClassKind, want ...permissions.T
 type targetFacts struct {
 	hasProjectParent bool
 	hasSystemParent  bool
-	hasGlobalScope   bool // explicit global/core/user ScopeKind, reviewed types only
+	hasGlobalScope   bool // explicit global/user ScopeKind, reviewed types only
 	hasProjectScope  bool // explicit "project" ScopeKind, reviewed types only
 }
 
@@ -303,7 +303,7 @@ func computeTargetFacts(effectiveType string, r Resource) (targetFacts, bool) {
 	}
 	if hasScopeKindSemantics {
 		switch r.ScopeKind {
-		case store.SkillScopeGlobal, store.SkillScopeCore, store.SkillScopeUser:
+		case store.SkillScopeGlobal, store.SkillScopeUser:
 			facts.hasGlobalScope = true
 		case store.SkillScopeProject:
 			facts.hasProjectScope = true
@@ -335,7 +335,7 @@ func isReviewedScopeKindResourceType(resourceType string) bool {
 // contradiction; any other unrecognized value is.
 func isRecognizedScopeKindValue(scopeKind string) bool {
 	switch scopeKind {
-	case "", store.SkillScopeProject, store.SkillScopeGlobal, store.SkillScopeCore, store.SkillScopeUser:
+	case "", store.SkillScopeProject, store.SkillScopeGlobal, store.SkillScopeUser:
 		return true
 	default:
 		return false
@@ -869,7 +869,7 @@ type ProjectTargetClass struct {
 // ContemplatedProjectClass returns the definite project-scoped
 // ProjectTargetClass for permissionID, for use where a real project ID is
 // known but no real target instance exists yet (Project-boundary mint, and
-// SystemAuthorityProof's caller in general) — never global/core for the
+// SystemAuthorityProof's caller in general) — never global for the
 // scope-kind-split types (skill/template/harness_config), empty ScopeKind
 // for every other resource type.
 func ContemplatedProjectClass(permissionID string) ProjectTargetClass {

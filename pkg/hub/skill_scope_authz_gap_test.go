@@ -202,10 +202,10 @@ func TestCanUseProjectGitHubToken_MemberAllowed(t *testing.T) {
 // TestFilterHubWideSkillGrants_FailsClosedOnUnrecognizedScope is the store/
 // authz-kernel-level regression for uat finding F4: filterHubWideSkillGrants
 // must filter the curated hub-member/hub-viewer grant for any ScopeKind that
-// is not explicitly "global" or "core" — including an empty string (the
+// is not explicitly "global" — including an empty string (the
 // exact shape of an ad hoc Resource literal that forgot to set it, as F3
-// was). Before the fix, only "user" and "project" were filtered, so an
-// empty ScopeKind fell through unfiltered.
+// was) and the retired "core" value. Before the fix, only "user" and
+// "project" were filtered, so an empty ScopeKind fell through unfiltered.
 func TestFilterHubWideSkillGrants_FailsClosedOnUnrecognizedScope(t *testing.T) {
 	hubMemberBinding := CandidateBinding{
 		BindingID: "b1", RoleDefinitionID: "hub-member-rd",
@@ -215,17 +215,13 @@ func TestFilterHubWideSkillGrants_FailsClosedOnUnrecognizedScope(t *testing.T) {
 		"hub-member-rd": NewRolePermissions("hub-member-rd", store.SystemRoleHubMember, store.RoleScopeSystem, []string{"skill.read", "skill.list"}),
 	}
 
-	for _, scope := range []string{"", "user", "project", "team"} {
+	for _, scope := range []string{"", "user", "project", "core", "team"} {
 		t.Run("scope="+scope, func(t *testing.T) {
 			out := filterHubWideSkillGrants([]CandidateBinding{hubMemberBinding}, roleDefs, scope)
 			assert.Empty(t, out, "an ad hoc or non-hub scope %q must filter the curated hub-member grant", scope)
 		})
 	}
 
-	for _, scope := range []string{store.SkillScopeGlobal, store.SkillScopeCore} {
-		t.Run("scope="+scope, func(t *testing.T) {
-			out := filterHubWideSkillGrants([]CandidateBinding{hubMemberBinding}, roleDefs, scope)
-			require.Len(t, out, 1, "an explicit hub scope %q must keep the curated hub-member grant", scope)
-		})
-	}
+	out := filterHubWideSkillGrants([]CandidateBinding{hubMemberBinding}, roleDefs, store.SkillScopeGlobal)
+	require.Len(t, out, 1, "an explicit hub scope %q must keep the curated hub-member grant", store.SkillScopeGlobal)
 }
