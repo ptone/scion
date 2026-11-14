@@ -207,8 +207,8 @@ describe('scion-page-skills pagination', () => {
     const loads = spyOnLoads();
     const stale = deferred<Response>();
     const { el, fetchMock } = mountWithHandler((url) => {
-      if (url.includes('scope=core')) {
-        return Promise.resolve(jsonResponse({ skills: [skill('core-1')] }));
+      if (url.includes('scope=global')) {
+        return Promise.resolve(jsonResponse({ skills: [skill('global-1')] }));
       }
       if (url.includes('cursor=c3'))
         return Promise.resolve(jsonResponse({ skills: [skill('c3')] }));
@@ -220,10 +220,10 @@ describe('scion-page-skills pagination', () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 
     // A scope change starts a newer load, which finishes first.
-    internals(el).scopeFilter = 'core';
+    internals(el).scopeFilter = 'global';
     await internals(el).loadSkills();
     await el.updateComplete;
-    expect(shownSkills(el)).toEqual(['/skills/core-1']);
+    expect(shownSkills(el)).toEqual(['/skills/global-1']);
 
     // The stale walk's last page arrives late and must not be shown.
     // It also has a further page, which the superseded walk must not fetch.
@@ -234,7 +234,7 @@ describe('scion-page-skills pagination', () => {
     );
     await el.updateComplete;
 
-    expect(shownSkills(el)).toEqual(['/skills/core-1']);
+    expect(shownSkills(el)).toEqual(['/skills/global-1']);
     expect(internals(el).loading).toBe(false);
     expect(el.shadowRoot?.querySelector('.partial-load-notice')).toBeNull();
     expect(el.shadowRoot?.querySelector('.error-state')).toBeNull();
@@ -244,8 +244,8 @@ describe('scion-page-skills pagination', () => {
     const loads = spyOnLoads();
     const stale = deferred<Response>();
     const { el, fetchMock } = mountWithHandler((url) => {
-      if (url.includes('scope=core')) {
-        return Promise.resolve(jsonResponse({ skills: [skill('core-1')] }));
+      if (url.includes('scope=global')) {
+        return Promise.resolve(jsonResponse({ skills: [skill('global-1')] }));
       }
       if (url.includes('cursor=c2')) return stale.promise;
       return Promise.resolve(jsonResponse(FIRST_PAGE));
@@ -253,14 +253,14 @@ describe('scion-page-skills pagination', () => {
     element = el;
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 
-    internals(el).scopeFilter = 'core';
+    internals(el).scopeFilter = 'global';
     await internals(el).loadSkills();
 
     stale.resolve(jsonResponse({ error: { code: 'internal' } }, 500));
     await loads[0];
     await el.updateComplete;
 
-    expect(shownSkills(el)).toEqual(['/skills/core-1']);
+    expect(shownSkills(el)).toEqual(['/skills/global-1']);
     expect(el.shadowRoot?.querySelector('.partial-load-notice')).toBeNull();
     expect(el.shadowRoot?.querySelector('.error-state')).toBeNull();
   });
@@ -268,9 +268,9 @@ describe('scion-page-skills pagination', () => {
   it('keeps loading while the newer load runs when a stale walk settles', async () => {
     const loads = spyOnLoads();
     const stale = deferred<Response>();
-    const core = deferred<Response>();
+    const globalLoad = deferred<Response>();
     const { el, fetchMock } = mountWithHandler((url) => {
-      if (url.includes('scope=core')) return core.promise;
+      if (url.includes('scope=global')) return globalLoad.promise;
       if (url.includes('cursor=c2')) return stale.promise;
       return Promise.resolve(jsonResponse(FIRST_PAGE));
     });
@@ -278,7 +278,7 @@ describe('scion-page-skills pagination', () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 
     // Start the newer load but leave its response pending.
-    internals(el).scopeFilter = 'core';
+    internals(el).scopeFilter = 'global';
     void internals(el).loadSkills();
 
     stale.resolve(jsonResponse({ skills: [skill('stale')] }));
@@ -287,11 +287,11 @@ describe('scion-page-skills pagination', () => {
     expect(internals(el).loading).toBe(true);
     expect(internals(el).skills.map((sk) => sk.id)).not.toContain('stale');
 
-    core.resolve(jsonResponse({ skills: [skill('core-1')] }));
+    globalLoad.resolve(jsonResponse({ skills: [skill('global-1')] }));
     await loads[1];
     await el.updateComplete;
     expect(internals(el).loading).toBe(false);
-    expect(shownSkills(el)).toEqual(['/skills/core-1']);
+    expect(shownSkills(el)).toEqual(['/skills/global-1']);
   });
 
   it('stops walking pages once the page is detached', async () => {

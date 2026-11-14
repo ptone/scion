@@ -3647,7 +3647,7 @@ type SkillFilter struct {
 // SkillAccessScope narrows a skill query to the rows a specific caller may
 // read, mirroring the ptone/scion#1901 and ptone/scion#1903 rulings —
 // creation scope is the only read boundary; visibility does not widen it:
-//   - IncludeHubScope: hub-scoped (global/core) skills are visible to any
+//   - IncludeHubScope: hub-scoped (global) skills are visible to any
 //     authenticated caller.
 //   - CallerID: a user-scoped skill is visible only when its ScopeID equals
 //     CallerID (the owning user; for an agent caller, its creator).

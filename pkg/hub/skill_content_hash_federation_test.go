@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const hashV2FedURI = "skill://ext-registry/core/hashv2-skill@1.0"
+const hashV2FedURI = "skill://ext-registry/global/hashv2-skill@1.0"
 
 // federatedLegacyFiles is the file list of goldenLegacySkillV1/V2 as a
 // registry serves it.

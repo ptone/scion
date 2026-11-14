@@ -161,7 +161,7 @@ func TestInstallResolvedSkills_Success(t *testing.T) {
 	skills := []ResolvedSkill{
 		{
 			Name:    "test-skill",
-			URI:     "skill://scion/core/test-skill@1.0",
+			URI:     "skill://scion/global/test-skill@1.0",
 			Version: "1.0.0",
 			Hash:    bundleHash,
 			Files: []ResolvedFile{
@@ -222,7 +222,7 @@ func TestInstallResolvedSkills_HashMismatch(t *testing.T) {
 	skills := []ResolvedSkill{
 		{
 			Name:    "bad-hash",
-			URI:     "skill://scion/core/bad-hash@1.0",
+			URI:     "skill://scion/global/bad-hash@1.0",
 			Version: "1.0.0",
 			Hash:    "sha256:bundlehash",
 			Files: []ResolvedFile{
@@ -268,7 +268,7 @@ func TestInstallResolvedSkills_PathTraversal(t *testing.T) {
 	skills := []ResolvedSkill{
 		{
 			Name:    "evil-skill",
-			URI:     "skill://scion/core/evil-skill@1.0",
+			URI:     "skill://scion/global/evil-skill@1.0",
 			Version: "1.0.0",
 			Files: []ResolvedFile{
 				{
@@ -310,7 +310,7 @@ func TestInstallResolvedSkills_DuplicateDestination(t *testing.T) {
 	skills := []ResolvedSkill{
 		{
 			Name:  "scion",
-			URI:   "skill://scion/core/scion@^1.0",
+			URI:   "skill://scion/global/scion@^1.0",
 			Scope: "template",
 			Hash:  bundleHash,
 			Files: []ResolvedFile{
@@ -356,7 +356,7 @@ func TestInstallResolvedSkills_DuplicateDestination(t *testing.T) {
 	if c.WinnerURI != "skill://project/custom@latest" {
 		t.Errorf("collision winner = %q, want project skill", c.WinnerURI)
 	}
-	if c.DroppedURI != "skill://scion/core/scion@^1.0" {
+	if c.DroppedURI != "skill://scion/global/scion@^1.0" {
 		t.Errorf("collision dropped = %q, want template skill", c.DroppedURI)
 	}
 }
@@ -437,10 +437,10 @@ func TestDownloadSkillFile_CrossHostRedirect(t *testing.T) {
 func TestMockResolver(t *testing.T) {
 	resolver := &mockResolver{
 		resolved: []ResolvedSkill{
-			{Name: "test", URI: "skill://scion/core/test@1.0", Version: "1.0.0"},
+			{Name: "test", URI: "skill://scion/global/test@1.0", Version: "1.0.0"},
 		},
 		errors: []ResolveError{
-			{URI: "skill://scion/core/missing@1.0", Code: "not_found", Message: "skill not found"},
+			{URI: "skill://scion/global/missing@1.0", Code: "not_found", Message: "skill not found"},
 		},
 	}
 
@@ -468,9 +468,9 @@ func TestMockResolver_Error(t *testing.T) {
 
 func TestCollectRequiredSkillURIs(t *testing.T) {
 	refs := []api.SkillReference{
-		{URI: "skill://scion/core/scion@^1.0"},
-		{URI: "skill://scion/core/optional@latest", Optional: true},
-		{URI: "skill://scion/core/required@1.0"},
+		{URI: "skill://scion/global/scion@^1.0"},
+		{URI: "skill://scion/global/optional@latest", Optional: true},
+		{URI: "skill://scion/global/required@1.0"},
 	}
 	got := collectRequiredSkillURIs(refs)
 	if len(got) != 2 {
@@ -497,7 +497,7 @@ func TestInstallResolvedSkills_WithAsRename(t *testing.T) {
 	skills := []ResolvedSkill{
 		{
 			Name:    "original-name",
-			URI:     "skill://scion/core/original-name@1.0",
+			URI:     "skill://scion/global/original-name@1.0",
 			As:      "custom-name",
 			Version: "1.0.0",
 			Hash:    bundleHash,
@@ -558,7 +558,7 @@ func TestInstallResolvedSkills_NestedFiles(t *testing.T) {
 	skills := []ResolvedSkill{
 		{
 			Name:    "nested-skill",
-			URI:     "skill://scion/core/nested-skill@1.0",
+			URI:     "skill://scion/global/nested-skill@1.0",
 			Version: "1.0.0",
 			Hash:    bundleHash,
 			Files: []ResolvedFile{
@@ -603,7 +603,7 @@ func TestInstallResolvedSkills_BundleHashMismatch(t *testing.T) {
 	skills := []ResolvedSkill{
 		{
 			Name:    "bundle-mismatch",
-			URI:     "skill://scion/core/bundle-mismatch@1.0",
+			URI:     "skill://scion/global/bundle-mismatch@1.0",
 			Version: "1.0.0",
 			Hash:    wrongBundleHash,
 			Files: []ResolvedFile{
@@ -727,7 +727,7 @@ func TestInstallResolvedSkills_OverridesExistingLocalSkill(t *testing.T) {
 	skills := []ResolvedSkill{
 		{
 			Name:    "my-skill",
-			URI:     "skill://scion/core/my-skill@1.0",
+			URI:     "skill://scion/global/my-skill@1.0",
 			Version: "1.0.0",
 			Hash:    bundleHash,
 			Files: []ResolvedFile{
@@ -963,7 +963,7 @@ func TestGitHubTokenFromContext(t *testing.T) {
 
 func TestDeduplicateByDestName_ProjectWinsOverTemplate(t *testing.T) {
 	skills := []ResolvedSkill{
-		{Name: "my-skill", URI: "skill://scion/core/my-skill@1.0", Scope: "template"},
+		{Name: "my-skill", URI: "skill://scion/global/my-skill@1.0", Scope: "template"},
 		{Name: "my-skill", URI: "gh://org/repo/skills/my-skill", Scope: "project"},
 	}
 
@@ -990,8 +990,8 @@ func TestDeduplicateByDestName_ProjectWinsOverTemplate(t *testing.T) {
 
 func TestDeduplicateByDestName_SameScopeLaterWins(t *testing.T) {
 	skills := []ResolvedSkill{
-		{Name: "my-skill", URI: "skill://scion/core/my-skill@1.0", Scope: "template"},
-		{Name: "my-skill", URI: "skill://scion/core/my-skill@2.0", Scope: "template"},
+		{Name: "my-skill", URI: "skill://scion/global/my-skill@1.0", Scope: "template"},
+		{Name: "my-skill", URI: "skill://scion/global/my-skill@2.0", Scope: "template"},
 	}
 
 	deduped, collisions := deduplicateByDestName(context.Background(), skills)
@@ -1000,22 +1000,22 @@ func TestDeduplicateByDestName_SameScopeLaterWins(t *testing.T) {
 		t.Fatalf("expected 1 skill after dedup, got %d", len(deduped))
 	}
 	// Later entry (index 1) should win on equal scope.
-	if deduped[0].URI != "skill://scion/core/my-skill@2.0" {
+	if deduped[0].URI != "skill://scion/global/my-skill@2.0" {
 		t.Errorf("expected later entry to win on same scope, got URI %q", deduped[0].URI)
 	}
 
 	if len(collisions) != 1 {
 		t.Fatalf("expected 1 collision, got %d", len(collisions))
 	}
-	if collisions[0].DroppedURI != "skill://scion/core/my-skill@1.0" {
+	if collisions[0].DroppedURI != "skill://scion/global/my-skill@1.0" {
 		t.Errorf("expected earlier entry to be dropped, got %q", collisions[0].DroppedURI)
 	}
 }
 
 func TestDeduplicateByDestName_NoCollision(t *testing.T) {
 	skills := []ResolvedSkill{
-		{Name: "skill-a", URI: "skill://scion/core/skill-a@1.0", Scope: "template"},
-		{Name: "skill-b", URI: "skill://scion/core/skill-b@1.0", Scope: "project"},
+		{Name: "skill-a", URI: "skill://scion/global/skill-a@1.0", Scope: "template"},
+		{Name: "skill-b", URI: "skill://scion/global/skill-b@1.0", Scope: "project"},
 		{Name: "skill-c", URI: "gh://org/repo/skills/skill-c", Scope: "hub"},
 	}
 
@@ -1098,8 +1098,8 @@ func TestDeduplicateByDestName_OptionalLoserUsesDebugLevel(t *testing.T) {
 	defer slog.SetDefault(oldLogger)
 
 	skills := []ResolvedSkill{
-		{Name: "my-skill", URI: "skill://scion/core/my-skill@1.0", Scope: "hub", Optional: true},
-		{Name: "my-skill", URI: "skill://scion/core/my-skill@2.0", Scope: "project"},
+		{Name: "my-skill", URI: "skill://scion/global/my-skill@1.0", Scope: "hub", Optional: true},
+		{Name: "my-skill", URI: "skill://scion/global/my-skill@2.0", Scope: "project"},
 	}
 
 	deduped, collisions := deduplicateByDestName(context.Background(), skills)
@@ -1107,13 +1107,13 @@ func TestDeduplicateByDestName_OptionalLoserUsesDebugLevel(t *testing.T) {
 	if len(deduped) != 1 {
 		t.Fatalf("expected 1 skill after dedup, got %d", len(deduped))
 	}
-	if deduped[0].URI != "skill://scion/core/my-skill@2.0" {
+	if deduped[0].URI != "skill://scion/global/my-skill@2.0" {
 		t.Errorf("expected project-scope skill to win, got URI %q", deduped[0].URI)
 	}
 	if len(collisions) != 1 {
 		t.Fatalf("expected 1 collision, got %d", len(collisions))
 	}
-	if collisions[0].DroppedURI != "skill://scion/core/my-skill@1.0" {
+	if collisions[0].DroppedURI != "skill://scion/global/my-skill@1.0" {
 		t.Errorf("expected optional skill to be dropped, got %q", collisions[0].DroppedURI)
 	}
 
@@ -1168,8 +1168,8 @@ func TestDeduplicateByDestName_DestNameErrorPassthrough(t *testing.T) {
 	// must not be silently dropped. It should pass through the dedup and surface
 	// as an error during install.
 	skills := []ResolvedSkill{
-		{Name: "good-skill", URI: "skill://scion/core/good-skill@1.0", Scope: "template"},
-		{Name: "INVALID", URI: "skill://scion/core/bad@1.0", Scope: "project"}, // invalid name
+		{Name: "good-skill", URI: "skill://scion/global/good-skill@1.0", Scope: "template"},
+		{Name: "INVALID", URI: "skill://scion/global/bad@1.0", Scope: "project"}, // invalid name
 	}
 
 	deduped, collisions := deduplicateByDestName(context.Background(), skills)
@@ -1245,7 +1245,7 @@ func TestDeduplicateByDestName_ThreeWayCollision(t *testing.T) {
 func TestDeduplicateByDestName_AsAlias(t *testing.T) {
 	// Skills with explicit As aliases that don't collide should pass through.
 	skills := []ResolvedSkill{
-		{Name: "my-skill", URI: "skill://scion/core/my-skill@1.0", Scope: "template"},
+		{Name: "my-skill", URI: "skill://scion/global/my-skill@1.0", Scope: "template"},
 		{Name: "my-skill", URI: "gh://org/repo/skills/my-skill", Scope: "project", As: "my-skill-alt"},
 	}
 

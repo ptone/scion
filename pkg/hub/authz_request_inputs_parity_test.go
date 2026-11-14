@@ -88,7 +88,7 @@ func alwaysFault(method string) func(string, int, context.Context) error {
 // addToHubMembersGroup adds userID to the seeded "hub-members" group, which
 // carries a system-scoped hub-member role binding (template/harness_config
 // read+list, among others). This is the ONLY way a plain project-scoped
-// principal reaches the global/core catalog the hub-wide filter guards —
+// principal reaches the global catalog the hub-wide filter guards —
 // a project-scoped binding alone grants nothing at system scope.
 func addToHubMembersGroup(t *testing.T, s store.Store, userID string) {
 	t.Helper()

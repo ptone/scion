@@ -365,7 +365,7 @@ const (
 	// applicable resource type with no scope-kind split at all — agent,
 	// gcp_service_account.assign's existing-SA project scope).
 	TargetClassKindProjectScoped TargetClassKind = "project_scoped"
-	// TargetClassKindGlobalCatalog represents the hub-wide (global/core)
+	// TargetClassKindGlobalCatalog represents the hub-wide (global)
 	// catalog instance space, for the resource types that have one
 	// (skill/template/harness_config read/list).
 	TargetClassKindGlobalCatalog TargetClassKind = "global_catalog"

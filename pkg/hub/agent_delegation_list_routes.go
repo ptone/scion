@@ -32,7 +32,7 @@ import (
 // against the route's delegated binding and seals the cursor it returns.
 // A refusal by the list arm, and a server error, answers 200 with an empty
 // list plus the arm's deny record. Only project-scoped items are ever
-// listed: hub-catalog (global and core) and user-scoped skills and
+// listed: hub-catalog (global) and user-scoped skills and
 // templates have no project parent, so the item filter never allows them,
 // and the store query already excludes them.
 

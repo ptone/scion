@@ -124,7 +124,7 @@ func TestInstallOneSkill_CacheHit(t *testing.T) {
 	skillsDest := t.TempDir()
 	skill := ResolvedSkill{
 		Name:    "cached-skill",
-		URI:     "skill://scion/core/cached-skill@1.0.0",
+		URI:     "skill://scion/global/cached-skill@1.0.0",
 		Version: "1.0.0",
 		Hash:    bundleHash,
 		Files: []ResolvedFile{
@@ -175,7 +175,7 @@ func TestInstallOneSkill_CacheMissPopulatesCache(t *testing.T) {
 	skillsDest := t.TempDir()
 	skill := ResolvedSkill{
 		Name:    "new-skill",
-		URI:     "skill://scion/core/new-skill@1.0.0",
+		URI:     "skill://scion/global/new-skill@1.0.0",
 		Version: "1.0.0",
 		Hash:    bundleHash,
 		Files: []ResolvedFile{
@@ -220,7 +220,7 @@ func TestInstallOneSkill_NoCacheStillWorks(t *testing.T) {
 	skillsDest := t.TempDir()
 	skill := ResolvedSkill{
 		Name:    "no-cache-skill",
-		URI:     "skill://scion/core/no-cache-skill@1.0.0",
+		URI:     "skill://scion/global/no-cache-skill@1.0.0",
 		Version: "1.0.0",
 		Hash:    bundleHash,
 		Files: []ResolvedFile{
@@ -267,7 +267,7 @@ func TestInstallOneSkill_SecondInstallUsesCacheFromFirstInstall(t *testing.T) {
 
 	skill := ResolvedSkill{
 		Name:    "repeat-skill",
-		URI:     "skill://scion/core/repeat-skill@1.0.0",
+		URI:     "skill://scion/global/repeat-skill@1.0.0",
 		Version: "1.0.0",
 		Hash:    bundleHash,
 		Files: []ResolvedFile{

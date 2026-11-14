@@ -2207,7 +2207,7 @@ export interface PolicyConditions {
 // Skills
 // ---------------------------------------------------------------------------
 
-export type SkillScope = 'core' | 'global' | 'project' | 'user';
+export type SkillScope = 'global' | 'project' | 'user';
 export type SkillVersionStatus = 'draft' | 'published' | 'deprecated' | 'archived';
 
 export interface Skill {

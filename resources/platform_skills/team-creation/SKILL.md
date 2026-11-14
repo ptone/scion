@@ -68,7 +68,7 @@ services:
 
 skills:
   - uri: "skill://scion/global/idea-refine@latest"
-  - uri: "skill://scion/core/scion@^1.0"
+  - uri: "skill://scion/global/code-review-and-quality@^1.0"
     optional: true
 ```
 
@@ -146,13 +146,13 @@ skill://<registry>/<scope>/<name>@<version>
 ```
 
 - **registry**: The registry host (typically `scion`)
-- **scope**: Where the skill lives — `core` (platform skills), `global` (hub-wide), `project/<id>` (project-scoped), or `user/<id>` (user-scoped)
+- **scope**: Where the skill lives — `global` (hub-wide), `project/<id>` (project-scoped), or `user/<id>` (user-scoped)
 - **name**: The skill name
 - **version**: Version constraint — an exact version (`1.0.0`), a range (`^1.0`), or `latest`
 
 Examples:
 - `skill://scion/global/idea-refine@latest` — a global-scope skill from the Hub
-- `skill://scion/core/scion@^1.0` — a core platform skill
+- `skill://scion/global/code-review-and-quality@^1.0` — a global-scope skill pinned to a major version
 - `skill://scion/project/my-custom-skill@1.0.0` — a project-scoped skill
 
 ### Declaring Skills in scion-agent.yaml
@@ -162,7 +162,7 @@ Add a `skills:` list to `scion-agent.yaml`:
 ```yaml
 skills:
   - uri: "skill://scion/global/idea-refine@latest"
-  - uri: "skill://scion/core/scion@^1.0"
+  - uri: "skill://scion/global/code-review-and-quality@^1.0"
     optional: true        # provisioning succeeds even if this can't be resolved
   - uri: "skill://scion/global/code-reviewer@latest"
     as: "review"          # install under a different directory name

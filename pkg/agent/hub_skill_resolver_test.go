@@ -79,7 +79,7 @@ func TestHubSkillResolver_Resolve(t *testing.T) {
 		resolveResp: &hubclient.ResolveSkillsResponse{
 			Resolved: []hubclient.ResolvedSkill{
 				{
-					URI:             "skill://scion/core/scion@^1.0",
+					URI:             "skill://scion/global/scion@^1.0",
 					Name:            "scion",
 					ResolvedVersion: "1.2.3",
 					ContentHash:     "sha256:abc123",
@@ -94,7 +94,7 @@ func TestHubSkillResolver_Resolve(t *testing.T) {
 
 	resolver := NewHubSkillResolver(mock)
 	refs := []api.SkillReference{
-		{URI: "skill://scion/core/scion@^1.0", As: "my-scion"},
+		{URI: "skill://scion/global/scion@^1.0", As: "my-scion"},
 	}
 	opts := ResolveOpts{ProjectID: "proj-123", UserID: "user-456"}
 
@@ -110,7 +110,7 @@ func TestHubSkillResolver_Resolve(t *testing.T) {
 	if mock.resolveReq.UserID != "user-456" {
 		t.Errorf("expected UserID=user-456, got %s", mock.resolveReq.UserID)
 	}
-	if len(mock.resolveReq.Skills) != 1 || mock.resolveReq.Skills[0].URI != "skill://scion/core/scion@^1.0" {
+	if len(mock.resolveReq.Skills) != 1 || mock.resolveReq.Skills[0].URI != "skill://scion/global/scion@^1.0" {
 		t.Errorf("unexpected skills in request: %+v", mock.resolveReq.Skills)
 	}
 
@@ -122,8 +122,8 @@ func TestHubSkillResolver_Resolve(t *testing.T) {
 	if rs.Name != "scion" {
 		t.Errorf("Name = %q, want %q", rs.Name, "scion")
 	}
-	if rs.URI != "skill://scion/core/scion@^1.0" {
-		t.Errorf("URI = %q, want %q", rs.URI, "skill://scion/core/scion@^1.0")
+	if rs.URI != "skill://scion/global/scion@^1.0" {
+		t.Errorf("URI = %q, want %q", rs.URI, "skill://scion/global/scion@^1.0")
 	}
 	if rs.Version != "1.2.3" {
 		t.Errorf("Version = %q, want %q", rs.Version, "1.2.3")
@@ -157,7 +157,7 @@ func TestHubSkillResolver_ResolveErrors(t *testing.T) {
 		resolveResp: &hubclient.ResolveSkillsResponse{
 			Resolved: []hubclient.ResolvedSkill{
 				{
-					URI:             "skill://scion/core/scion@^1.0",
+					URI:             "skill://scion/global/scion@^1.0",
 					Name:            "scion",
 					ResolvedVersion: "1.0.0",
 					ContentHash:     "sha256:ok",
@@ -165,7 +165,7 @@ func TestHubSkillResolver_ResolveErrors(t *testing.T) {
 			},
 			Errors: []hubclient.ResolveSkillError{
 				{
-					URI:     "skill://scion/core/missing@^2.0",
+					URI:     "skill://scion/global/missing@^2.0",
 					Code:    "not_found",
 					Message: "skill not found",
 				},
@@ -175,8 +175,8 @@ func TestHubSkillResolver_ResolveErrors(t *testing.T) {
 
 	resolver := NewHubSkillResolver(mock)
 	refs := []api.SkillReference{
-		{URI: "skill://scion/core/scion@^1.0"},
-		{URI: "skill://scion/core/missing@^2.0", Optional: true},
+		{URI: "skill://scion/global/scion@^1.0"},
+		{URI: "skill://scion/global/missing@^2.0", Optional: true},
 	}
 
 	result, err := resolver.Resolve(context.Background(), refs, ResolveOpts{})
@@ -192,8 +192,8 @@ func TestHubSkillResolver_ResolveErrors(t *testing.T) {
 	}
 
 	re := result.Errors[0]
-	if re.URI != "skill://scion/core/missing@^2.0" {
-		t.Errorf("error URI = %q, want %q", re.URI, "skill://scion/core/missing@^2.0")
+	if re.URI != "skill://scion/global/missing@^2.0" {
+		t.Errorf("error URI = %q, want %q", re.URI, "skill://scion/global/missing@^2.0")
 	}
 	if re.Code != "not_found" {
 		t.Errorf("error Code = %q, want %q", re.Code, "not_found")
@@ -210,7 +210,7 @@ func TestHubSkillResolver_TransportError(t *testing.T) {
 
 	resolver := NewHubSkillResolver(mock)
 	refs := []api.SkillReference{
-		{URI: "skill://scion/core/scion@^1.0"},
+		{URI: "skill://scion/global/scion@^1.0"},
 	}
 
 	_, err := resolver.Resolve(context.Background(), refs, ResolveOpts{})
@@ -226,16 +226,16 @@ func TestHubSkillResolver_MultipleSkills(t *testing.T) {
 	mock := &mockSkillService{
 		resolveResp: &hubclient.ResolveSkillsResponse{
 			Resolved: []hubclient.ResolvedSkill{
-				{URI: "skill://scion/core/scion@^1.0", Name: "scion", ResolvedVersion: "1.0.0", ContentHash: "sha256:a"},
-				{URI: "skill://scion/core/team-creation@^1.0", Name: "team-creation", ResolvedVersion: "1.1.0", ContentHash: "sha256:b"},
+				{URI: "skill://scion/global/scion@^1.0", Name: "scion", ResolvedVersion: "1.0.0", ContentHash: "sha256:a"},
+				{URI: "skill://scion/global/team-creation@^1.0", Name: "team-creation", ResolvedVersion: "1.1.0", ContentHash: "sha256:b"},
 			},
 		},
 	}
 
 	resolver := NewHubSkillResolver(mock)
 	refs := []api.SkillReference{
-		{URI: "skill://scion/core/scion@^1.0"},
-		{URI: "skill://scion/core/team-creation@^1.0", As: "teams"},
+		{URI: "skill://scion/global/scion@^1.0"},
+		{URI: "skill://scion/global/team-creation@^1.0", As: "teams"},
 	}
 
 	result, err := resolver.Resolve(context.Background(), refs, ResolveOpts{})

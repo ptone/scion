@@ -258,7 +258,7 @@ func TestSkillScope_ProjectScoped_DownloadDeniedForOtherHubMember(t *testing.T) 
 }
 
 // ----------------------------------------------------------------------
-// Hub-scoped (global/core) skills: still readable by every hub member.
+// Hub-scoped (global) skills: still readable by every hub member.
 // This is the control that proves the fix narrows, rather than removes,
 // the hub-member/hub-viewer grant.
 // ----------------------------------------------------------------------
@@ -270,15 +270,6 @@ func TestSkillScope_HubScoped_OtherHubMemberStillAllowed(t *testing.T) {
 	rec := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills/"+skill.ID, nil)
 	assert.Equal(t, http.StatusOK, rec.Code,
 		"every hub member must still read hub-scoped (global) skills; got: %s", rec.Body.String())
-}
-
-func TestSkillScope_CoreScoped_OtherHubMemberStillAllowed(t *testing.T) {
-	srv, s, alice, carol, _ := setupSkillScopeTest(t)
-	skill := createTestSkill(t, s, "core-catalog-skill", store.SkillScopeCore, "", alice.ID)
-
-	rec := doRequestAsUser(t, srv, carol, http.MethodGet, "/api/v1/skills/"+skill.ID, nil)
-	assert.Equal(t, http.StatusOK, rec.Code,
-		"every hub member must still read hub-scoped (core) skills; got: %s", rec.Body.String())
 }
 
 // ----------------------------------------------------------------------

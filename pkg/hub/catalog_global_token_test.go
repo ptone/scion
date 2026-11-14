@@ -142,22 +142,20 @@ func gcHarnessConfig(t *testing.T, s store.Store, scope, scopeID, name string) *
 }
 
 // TestGlobalSkillCreate_RequiresCreateGlobalSelectorAndHubBoundary pins
-// that a global or core skill create needs skill:create_global on a hub
-// boundary: a hub token with skill:create is refused, the selector cannot
-// be minted on a project boundary or by a user who holds no
-// skill.create_global, and a hub token with it creates the skill for a
-// super-admin and for a global catalog author.
+// that a global skill create needs skill:create_global on a hub boundary: a
+// hub token with skill:create is refused, the selector cannot be minted on a
+// project boundary or by a user who holds no skill.create_global, and a hub
+// token with it creates the skill for a super-admin and for a global catalog
+// author.
 func TestGlobalSkillCreate_RequiresCreateGlobalSelectorAndHubBoundary(t *testing.T) {
 	f := newGCFixture(t, false)
 	ctx := context.Background()
 
-	for _, scope := range []string{store.SkillScopeGlobal, store.SkillScopeCore} {
-		body := CreateSkillRequest{Name: "gc-" + scope + "-refused", Scope: scope}
-		rec := f.call(t, f.hubToken(t, "skill:create", "skill:read"), http.MethodPost, "/api/v1/skills", body)
-		assert.Equal(t, http.StatusForbidden, rec.Code, "scope %s with skill:create: %s", scope, rec.Body.String())
-		rec = f.call(t, f.projectToken(t, f.projectA, "skill:create"), http.MethodPost, "/api/v1/skills", body)
-		assert.Equal(t, http.StatusForbidden, rec.Code, "scope %s with a project token: %s", scope, rec.Body.String())
-	}
+	body := CreateSkillRequest{Name: "gc-global-refused", Scope: store.SkillScopeGlobal}
+	rec := f.call(t, f.hubToken(t, "skill:create", "skill:read"), http.MethodPost, "/api/v1/skills", body)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "global with skill:create: %s", rec.Body.String())
+	rec = f.call(t, f.projectToken(t, f.projectA, "skill:create"), http.MethodPost, "/api/v1/skills", body)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "global with a project token: %s", rec.Body.String())
 	skills, err := f.store.ListSkills(ctx, store.SkillFilter{Scope: store.SkillScopeGlobal}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
 	assert.Empty(t, skills.Items, "a refused create stores nothing")
@@ -169,16 +167,14 @@ func TestGlobalSkillCreate_RequiresCreateGlobalSelectorAndHubBoundary(t *testing
 	assert.Error(t, err, "a project member holds no skill.create_global")
 
 	with := f.hubToken(t, "skill:create_global")
-	for _, scope := range []string{store.SkillScopeGlobal, store.SkillScopeCore} {
-		rec := f.call(t, with, http.MethodPost, "/api/v1/skills", CreateSkillRequest{Name: "gc-" + scope + "-created", Scope: scope})
-		assert.Equal(t, http.StatusCreated, rec.Code, "scope %s: %s", scope, rec.Body.String())
-	}
+	rec = f.call(t, with, http.MethodPost, "/api/v1/skills", CreateSkillRequest{Name: "gc-global-created", Scope: store.SkillScopeGlobal})
+	assert.Equal(t, http.StatusCreated, rec.Code, "global: %s", rec.Body.String())
 
 	authorID := tid("gc-author")
 	createTestUserWithRole(t, f.store, authorID, authorID+"@test.com", "member", store.SystemRoleGlobalCatalogAuthor)
 	ensureHubMembership(ctx, f.store, authorID)
 	authorKey := mintHubConfigToken(t, f.srv, authorID, hubBoundary(), "skill:create_global")
-	rec := callWithKey(t, f.srv, authorKey, http.MethodPost, "/api/v1/skills", CreateSkillRequest{Name: "gc-author-skill"})
+	rec = callWithKey(t, f.srv, authorKey, http.MethodPost, "/api/v1/skills", CreateSkillRequest{Name: "gc-author-skill"})
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 

@@ -318,7 +318,7 @@
 - [harnessconfig.create](#harnessconfigcreate) — Create a harness configuration in the global, project or caller's own user scope the request body names; a user-scope config's scope and owner are the caller. A user-scope harness config refuses a federated caller (requireProfileWriter)
 - [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration: its definition and metadata, file uploads, finalize, the image check and file writes. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
 - [harnessconfig.delete](#harnessconfigdelete) — Delete a global or project harness configuration. The route gate needs harness_config read and the delete needs harness_config delete on the owning scope. A user-scope config is harnessconfig.user.delete
-- [skill.global.create](#skillglobalcreate) — Create a skill in the global catalog (global or core scope). The check is skill.create_global on a collection-level request at the hub scope, so a user access token needs skill:create_global on a hub boundary
+- [skill.global.create](#skillglobalcreate) — Create a skill in the global catalog (scope=global). The check is skill.create_global on a collection-level request at the hub scope, so a user access token needs skill:create_global on a hub boundary
 - [skill.global.update](#skillglobalupdate) — Update a global-catalog skill (scope=global): its metadata, version publishing and deprecation, file uploads and finalize. Selected by the stored skill record's scope via catalogWriteAction, requiring skill.update_global (skill:update_global on a hub boundary)
 - [skill.global.delete](#skillglobaldelete) — Delete a global-catalog skill definition (scope=global). Selected by the stored skill record's scope via catalogWriteAction, requiring skill.delete_global (skill:delete_global on a hub boundary)
 - [skill.discover.project](#skilldiscoverproject) — Discover the skills in a remote GitHub directory for a project named by the request body, spending that project's GitHub credentials. A user access token needs skill:create on a boundary that contains the project
@@ -11998,7 +11998,7 @@
 
 **Domain:** skill
 
-**Description:** Create a skill in the global catalog (global or core scope). The check is skill.create_global on a collection-level request at the hub scope, so a user access token needs skill:create_global on a hub boundary
+**Description:** Create a skill in the global catalog (scope=global). The check is skill.create_global on a collection-level request at the hub scope, so a user access token needs skill:create_global on a hub boundary
 
 ### Entry Points
 

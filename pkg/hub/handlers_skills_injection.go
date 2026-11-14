@@ -839,26 +839,19 @@ func skillInjectionToEntry(si store.SkillInjection) api.SkillInjectionEntry {
 // records and enriches them with skill bank metadata where available.
 // Enrichment is best-effort: any lookup error leaves SkillName/SkillSlug empty.
 //
-// To avoid N+1 queries, we batch-load all core and global skills in two list
-// calls and build an in-memory slug→skill map before iterating the entries.
-// Global entries take precedence over core entries when slugs collide.
+// To avoid N+1 queries, we batch-load all global skills in a single list call
+// and build an in-memory slug→skill map before iterating the entries.
 func (s *Server) enrichSkillInjections(ctx context.Context, sis []store.SkillInjection) []api.SkillInjectionEntry {
 	if len(sis) == 0 {
 		return []api.SkillInjectionEntry{}
 	}
 
-	// Build slug→skill map via two batch queries (core first, then global so
-	// that global entries win on slug collision — matching the previous per-entry
-	// lookup priority).
 	skillBySlug := make(map[string]*store.Skill)
-	for _, scope := range []string{store.SkillScopeCore, store.SkillScopeGlobal} {
-		result, err := s.store.ListSkills(ctx, store.SkillFilter{Scope: scope}, store.ListOptions{Limit: 1000})
-		if err != nil || result == nil {
-			continue
-		}
+	result, err := s.store.ListSkills(ctx, store.SkillFilter{Scope: store.SkillScopeGlobal}, store.ListOptions{Limit: 1000})
+	if err == nil && result != nil {
 		if result.TotalCount > len(result.Items) {
 			slog.Warn("skill enrichment truncated: more skills exist than fetched",
-				"scope", scope,
+				"scope", store.SkillScopeGlobal,
 				"fetched", len(result.Items),
 				"total", result.TotalCount)
 		}

@@ -72,7 +72,7 @@ func newExecSkillFixture(t *testing.T, modes map[string]string) *execSkillFixtur
 // response converted by hubResolveResponseToResult.
 func (fx *execSkillFixture) resolved(t *testing.T) ResolvedSkill {
 	t.Helper()
-	const uri = "skill://scion/core/exec-skill@1.0.0"
+	const uri = "skill://scion/global/exec-skill@1.0.0"
 	var files []hubclient.DownloadURLInfo
 	for _, p := range []string{"SKILL.md", "scripts/run.sh"} {
 		files = append(files, hubclient.DownloadURLInfo{

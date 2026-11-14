@@ -66,11 +66,11 @@ func TestParseSkillURI_ValidForms(t *testing.T) {
 		version  string
 	}{
 		// Full canonical
-		{"skill://scion/core/scion@^1.0", "scion", "core", "", "scion", "^1.0"},
+		{"skill://scion/global/scion@^1.0", "scion", "global", "", "scion", "^1.0"},
 		// No registry (empty → default scion)
-		{"skill:///core/scion@^1.0", "scion", "core", "", "scion", "^1.0"},
+		{"skill:///global/scion@^1.0", "scion", "global", "", "scion", "^1.0"},
 		// No version → latest
-		{"skill://scion/core/scion", "scion", "core", "", "scion", "latest"},
+		{"skill://scion/global/scion", "scion", "global", "", "scion", "latest"},
 		// With scope ID
 		{"skill://scion/project/my-proj/my-skill@1.0.0", "scion", "project", "my-proj", "my-skill", "1.0.0"},
 		// User scope
@@ -79,6 +79,9 @@ func TestParseSkillURI_ValidForms(t *testing.T) {
 		{"skill://scion/global/shared-tool@~1.2", "scion", "global", "", "shared-tool", "~1.2"},
 		// No scope (search order)
 		{"skill://scion/my-skill@latest", "scion", "", "", "my-skill", "latest"},
+		// Registry alias: global
+		{"skill://global/my-skill", "scion", "global", "", "my-skill", "latest"},
+		{"skill://global/my-skill@^1.0", "scion", "global", "", "my-skill", "^1.0"},
 		// Registry alias: project
 		{"skill://project/my-skill@latest", "scion", "project", "", "my-skill", "latest"},
 		// Registry alias: user
@@ -90,23 +93,26 @@ func TestParseSkillURI_ValidForms(t *testing.T) {
 		{"security-audit", "scion", "", "", "security-audit", "latest"},
 		{"my-skill-123", "scion", "", "", "my-skill-123", "latest"},
 		// Version: exact semver
-		{"skill://scion/core/scion@1.2.3", "scion", "core", "", "scion", "1.2.3"},
+		{"skill://scion/global/scion@1.2.3", "scion", "global", "", "scion", "1.2.3"},
 		// Version: caret
-		{"skill://scion/core/scion@^1.0", "scion", "core", "", "scion", "^1.0"},
+		{"skill://scion/global/scion@^1.0", "scion", "global", "", "scion", "^1.0"},
 		// Version: tilde
-		{"skill://scion/core/scion@~1.2", "scion", "core", "", "scion", "~1.2"},
+		{"skill://scion/global/scion@~1.2", "scion", "global", "", "scion", "~1.2"},
 		// Version: sha256
-		{"skill://scion/core/scion@sha256:abc123", "scion", "core", "", "scion", "sha256:abc123"},
+		{"skill://scion/global/scion@sha256:abc123", "scion", "global", "", "scion", "sha256:abc123"},
 		// Version: v prefix stripped
-		{"skill://scion/core/scion@v1.2.3", "scion", "core", "", "scion", "1.2.3"},
+		{"skill://scion/global/scion@v1.2.3", "scion", "global", "", "scion", "1.2.3"},
 		// Custom registry hostname
-		{"skill://registry.example.com/core/my-skill@1.0", "registry.example.com", "core", "", "my-skill", "1.0"},
+		{"skill://registry.example.com/global/my-skill@1.0", "registry.example.com", "global", "", "my-skill", "1.0"},
 		// No scope, no version
 		{"skill://scion/my-skill", "scion", "", "", "my-skill", "latest"},
 		// Single name after skill:// — equivalent to skill://scion/<name> (AC #5)
 		{"skill://my-skill", "scion", "", "", "my-skill", "latest"},
 		{"skill://my-skill@1.2", "scion", "", "", "my-skill", "1.2"},
 		{"skill://security-audit-v2", "scion", "", "", "security-audit-v2", "latest"},
+		// Single name "core" after skill:// — skill named "core", not retired scope
+		{"skill://core", "scion", "", "", "core", "latest"},
+		{"skill://core@1.0", "scion", "", "", "core", "1.0"},
 	}
 
 	for _, tc := range tests {
@@ -143,10 +149,10 @@ func TestParseSkillURI_InvalidForms(t *testing.T) {
 		desc  string
 	}{
 		{"", "empty URI"},
-		{"skill://scion/core/@^1.0", "empty name"},
-		{"skill://scion/core/My_Skill@1.0", "name not kebab-case"},
+		{"skill://scion/global/@^1.0", "empty name"},
+		{"skill://scion/global/My_Skill@1.0", "name not kebab-case"},
 		{"skill://scion/invalid-scope/team/name@1.0", "invalid-scope is not a valid scope"},
-		{"skill://scion/core/name@", "empty version after @"},
+		{"skill://scion/global/name@", "empty version after @"},
 		{"skill://scion/unknown-scope/name@1.0", "unrecognized scope keyword"},
 		{"../traversal", "path traversal in bare name"},
 		{"path/name", "slash in bare name"},
@@ -154,8 +160,10 @@ func TestParseSkillURI_InvalidForms(t *testing.T) {
 		{"skill://scion/a/b/c/d@1.0", "too many segments"},
 		{"UPPER", "uppercase bare name"},
 		{"-leading-hyphen", "leading hyphen in bare name"},
-		{"skill://scion/core/" + strings.Repeat("a", 65) + "@1.0", "name too long"},
+		{"skill://scion/global/" + strings.Repeat("a", 65) + "@1.0", "name too long"},
 		// Alias forms with no skill name still error (alias branch wins over single-segment rule)
+		{"skill://global", "alias global with no skill name"},
+		{"skill://global/some-id/my-skill", "alias global with scope ID"},
 		{"skill://project", "alias project with no skill name"},
 		{"skill://user", "alias user with no skill name"},
 		// Empty URI after skill://
@@ -172,12 +180,51 @@ func TestParseSkillURI_InvalidForms(t *testing.T) {
 	}
 }
 
+func TestParseSkillURI_CoreScopeRejected(t *testing.T) {
+	tests := []struct {
+		input           string
+		wantReplacement string
+	}{
+		{"skill://core/my-skill", "skill://scion/global/my-skill"},
+		{"skill://core/my-skill@^1.0", "skill://scion/global/my-skill@^1.0"},
+		{"skill://core/some-id/my-skill", "skill://scion/global/my-skill"},
+		{"skill://scion/core/my-skill", "skill://scion/global/my-skill"},
+		{"skill://scion/core/my-skill@v1.2.3", "skill://scion/global/my-skill@1.2.3"},
+		{"skill:///core/my-skill@^1.0", "skill://scion/global/my-skill@^1.0"},
+		{"skill://registry.example.com/core/my-skill@1.0", "skill://registry.example.com/global/my-skill@1.0"},
+		{"skill://registry.example.com/core/some-id/my-skill", "skill://registry.example.com/global/my-skill"},
+		{"skill://registry.example.com/core/INVALID_NAME", "skill://registry.example.com/global/<name>"},
+		{"skill://scion/core/some-id/my-skill", "skill://scion/global/my-skill"},
+		{"skill://core/", "skill://scion/global/<name>"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			_, err := ParseSkillURI(tc.input)
+			if err == nil {
+				t.Fatalf("ParseSkillURI(%q) expected error, got nil", tc.input)
+			}
+			if !strings.Contains(err.Error(), `"core" skill scope is no longer supported`) {
+				t.Errorf("ParseSkillURI(%q) error = %q, want retired core message", tc.input, err.Error())
+			}
+			if !strings.Contains(err.Error(), tc.wantReplacement) {
+				t.Errorf("ParseSkillURI(%q) error = %q, want replacement %q", tc.input, err.Error(), tc.wantReplacement)
+			}
+
+			// NormalizeSkillURI delegates skill:// inputs to ParseSkillURI and surfaces the same clear error.
+			if _, nerr := NormalizeSkillURI(tc.input); nerr == nil || !strings.Contains(nerr.Error(), tc.wantReplacement) {
+				t.Errorf("NormalizeSkillURI(%q) error = %v, want replacement %q", tc.input, nerr, tc.wantReplacement)
+			}
+		})
+	}
+}
+
 func TestSkillURIScheme(t *testing.T) {
 	tests := []struct {
 		uri    string
 		scheme string
 	}{
-		{"skill://scion/core/my-skill", "skill"},
+		{"skill://scion/global/my-skill", "skill"},
 		{"gh://owner/repo/name", "gh"},
 		{"gcp-skill://alias/ID", "gcp-skill"},
 		{"https://github.com/owner/repo/tree/main/skills/s", "https"},
