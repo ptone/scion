@@ -2832,7 +2832,7 @@ authDone:
 			return ""
 		}(),
 		Debug:                util.DebugEnabled(),
-		Resume:               opts.Resume && !opts.Persistence.IsEphemeral(), // an ephemeral session is never kept (ptone/scion#7780)
+		Resume:               harnessResume(opts),
 		Persistence:          opts.Persistence,
 		MetadataInterception: metadataInterceptionGranted(m.Runtime.Name(), networkMode, agentEnv),
 		ExtraHosts:           runExtraHosts,
@@ -3117,6 +3117,13 @@ var exportMountingRuntimes = map[string]bool{
 // gets an EmptyDir), and a clone-per-agent workspace is on the export only
 // in its own agent directory, which also needs the share. Other runtimes count only when
 // listed in exportMountingRuntimes.
+// harnessResume reports whether the harness is launched with its resume
+// flag: on a resume, except for an ephemeral agent, whose session is never
+// kept and so always starts fresh (ptone/scion#7780).
+func harnessResume(opts api.StartOptions) bool {
+	return opts.Resume && !opts.Persistence.IsEphemeral()
+}
+
 func workspacePlacementFor(in workspacePlacementInput) string {
 	if in.Ephemeral || in.Backend != "nfs" {
 		return api.WorkspacePlacementLocal

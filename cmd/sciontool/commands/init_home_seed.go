@@ -23,10 +23,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
-// Seams for tests: the effective UID and the no-follow chown.
+// Seams for tests: the one accepted seed path, the effective UID and the
+// no-follow chown.
 var (
-	homeSeedGeteuid = os.Geteuid
-	homeSeedLchown  = os.Lchown
+	homeSeedMountPath = api.HomeSeedMountPath
+	homeSeedGeteuid   = os.Geteuid
+	homeSeedLchown    = os.Lchown
 )
 
 // seedEphemeralHome copies the read-only home seed of an ephemeral instance
@@ -47,8 +49,8 @@ func seedEphemeralHome(agentHome, workspace string, uid, gid int) error {
 		return nil
 	}
 	_ = os.Unsetenv(api.HomeSeedEnvVar)
-	if seed != api.HomeSeedMountPath {
-		return fmt.Errorf("refusing the home seed: %s must be %s", api.HomeSeedEnvVar, api.HomeSeedMountPath)
+	if seed != homeSeedMountPath {
+		return fmt.Errorf("refusing the home seed: %s must be %s", api.HomeSeedEnvVar, homeSeedMountPath)
 	}
 	if homeSeedGeteuid() == 0 && uid != 0 {
 		for _, dir := range []string{workspace, agentHome} {
