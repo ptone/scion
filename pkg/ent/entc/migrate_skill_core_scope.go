@@ -30,14 +30,14 @@ import (
 )
 
 const (
-	retiredSkillScopeCore          = "core"
-	migratedSkillScopeGlobal       = "global"
-	maxMigratedSkillSlugLen        = 64
-	injectedSkillsHubSettingKey    = "injected_skills"
-	retiredCoreSkillAliasPrefix    = "skill://core/"
-	retiredCoreSkillScionPrefix    = "skill://scion/core/"
-	retiredCoreSkillDefaultPrefix  = "skill:///core/"
-	replacementGlobalSkillURIPrefx = "skill://scion/global/"
+	retiredSkillScopeCore           = "core"
+	migratedSkillScopeGlobal        = "global"
+	maxMigratedSkillSlugLen         = 64
+	injectedSkillsHubSettingKey     = "injected_skills"
+	retiredCoreSkillAliasPrefix     = "skill://core/"
+	retiredCoreSkillScionPrefix     = "skill://scion/core/"
+	retiredCoreSkillDefaultPrefix   = "skill:///core/"
+	replacementGlobalSkillURIPrefix = "skill://scion/global/"
 )
 
 type coreCollisionWarning struct {
@@ -53,6 +53,15 @@ type droppedInjectionWarning struct {
 	scopeID   string
 	oldURI    string
 	targetURI string
+}
+
+type droppedHubSettingInjectionWarning struct {
+	oldURI          string
+	targetURI       string
+	droppedAs       string
+	droppedOptional bool
+	keptAs          string
+	keptOptional    bool
 }
 
 // MigrateSkillCoreScope performs an idempotent data migration retiring the
@@ -86,6 +95,7 @@ func MigrateSkillCoreScope(ctx context.Context, client *ent.Client) error {
 	mutated := false
 	var warnings []coreCollisionWarning
 	var droppedInjections []droppedInjectionWarning
+	var droppedHubSettingInjections []droppedHubSettingInjectionWarning
 
 	coreSkills, err := tx.Skill.Query().
 		Where(entskill.ScopeEQ(retiredSkillScopeCore)).
@@ -252,10 +262,12 @@ func MigrateSkillCoreScope(ctx context.Context, client *ent.Client) error {
 			}
 		}
 		if settingChanged {
-			seenURIs := make(map[string]bool, len(setting.UserDefined))
+			keptRefs := make(map[string]api.SkillReference, len(setting.UserDefined))
 			for i, ref := range setting.UserDefined {
 				if !wasRewritten[i] {
-					seenURIs[ref.URI] = true
+					if _, exists := keptRefs[ref.URI]; !exists {
+						keptRefs[ref.URI] = ref
+					}
 				}
 			}
 			deduped := make([]api.SkillReference, 0, len(setting.UserDefined))
@@ -264,11 +276,20 @@ func MigrateSkillCoreScope(ctx context.Context, client *ent.Client) error {
 					deduped = append(deduped, ref)
 					continue
 				}
+				oldURI := ref.URI
 				ref.URI = rewrittenURIs[i]
-				if seenURIs[ref.URI] {
+				if keptRef, exists := keptRefs[ref.URI]; exists {
+					droppedHubSettingInjections = append(droppedHubSettingInjections, droppedHubSettingInjectionWarning{
+						oldURI:          oldURI,
+						targetURI:       ref.URI,
+						droppedAs:       ref.As,
+						droppedOptional: ref.Optional,
+						keptAs:          keptRef.As,
+						keptOptional:    keptRef.Optional,
+					})
 					continue
 				}
-				seenURIs[ref.URI] = true
+				keptRefs[ref.URI] = ref
 				deduped = append(deduped, ref)
 			}
 			setting.UserDefined = deduped
@@ -301,7 +322,7 @@ func MigrateSkillCoreScope(ctx context.Context, client *ent.Client) error {
 			"old_uri", retiredCoreSkillAliasPrefix+w.oldSlug,
 			"new_scope", migratedSkillScopeGlobal,
 			"new_slug", w.newSlug,
-			"new_uri", replacementGlobalSkillURIPrefx+w.newSlug,
+			"new_uri", replacementGlobalSkillURIPrefix+w.newSlug,
 		)
 	}
 	for _, d := range droppedInjections {
@@ -312,6 +333,17 @@ func MigrateSkillCoreScope(ctx context.Context, client *ent.Client) error {
 			"scope_id", d.scopeID,
 			"old_uri", d.oldURI,
 			"target_uri", d.targetURI,
+		)
+	}
+	for _, d := range droppedHubSettingInjections {
+		slog.WarnContext(ctx, "dropped duplicate core hub skill injection during migration to global scope",
+			"old_uri", d.oldURI,
+			"target_uri", d.targetURI,
+			"dropped_as", d.droppedAs,
+			"dropped_optional", d.droppedOptional,
+			"kept_uri", d.targetURI,
+			"kept_as", d.keptAs,
+			"kept_optional", d.keptOptional,
 		)
 	}
 
@@ -331,12 +363,6 @@ func nextCoreCollisionSlug(baseSlug string, occupied map[string]bool) string {
 		prefix := baseSlug
 		if len(prefix) > maxBase {
 			prefix = strings.TrimRight(prefix[:maxBase], "-")
-		}
-		if prefix == "" {
-			prefix = "skill"
-			if len(prefix) > maxBase && maxBase > 0 {
-				prefix = prefix[:maxBase]
-			}
 		}
 		candidate := prefix + suffix
 		if !occupied[candidate] {
@@ -380,5 +406,5 @@ func rewriteCoreSkillURI(raw string, slugRemap map[string]string) (string, bool)
 	if mapped, ok := slugRemap[oldSlug]; ok {
 		newSlug = mapped
 	}
-	return replacementGlobalSkillURIPrefx + newSlug + verSuffix, true
+	return replacementGlobalSkillURIPrefix + newSlug + verSuffix, true
 }

@@ -43,7 +43,7 @@ import (
 
 const (
 	githubAPIBase                = "https://api.github.com"
-	retiredSkillScopeCoreMessage = `invalid scope "core": the "core" skill scope is no longer supported; use "global" instead`
+	retiredSkillScopeCoreMessage = `invalid scope "core": the "core" skill scope is no longer supported; use "global" (skill://scion/global/<name>) instead`
 	githubRawBase                = "https://raw.githubusercontent.com"
 )
 

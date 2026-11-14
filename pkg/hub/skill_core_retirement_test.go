@@ -68,6 +68,7 @@ func TestCreateSkill_CoreScopeRejected(t *testing.T) {
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
 			assert.Equal(t, "validation_error", errResp.Error.Code)
 			assert.Contains(t, errResp.Error.Message, `"global"`, "400 response should direct callers to global scope")
+			assert.Contains(t, errResp.Error.Message, "skill://scion/global/<name>")
 			assert.Contains(t, errResp.Error.Message, "no longer supported")
 		})
 	}
@@ -77,7 +78,7 @@ func TestCreateSkill_CoreScopeRejected(t *testing.T) {
 	assert.Empty(t, listed.Items, "rejected core creates must store nothing")
 
 	// Also verify POST /api/v1/skills/resolve rejects skill://core/... URIs
-	// with invalid_uri and logs the guidance naming skill://global/<name>.
+	// with invalid_uri and logs the guidance naming skill://scion/global/<name>.
 	logs := captureJSONSlog(t)
 	rr := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
 		Skills: []ResolveSkillRef{
@@ -97,12 +98,12 @@ func TestCreateSkill_CoreScopeRejected(t *testing.T) {
 	logged := logs()
 	var sawGuidance bool
 	for _, rec := range logged {
-		if msg, _ := rec["error"].(string); strings.Contains(msg, "skill://global/my-skill") {
+		if msg, _ := rec["error"].(string); strings.Contains(msg, "skill://scion/global/my-skill") {
 			sawGuidance = true
 			break
 		}
 	}
-	assert.True(t, sawGuidance, "resolver log should record the skill://global/<name> migration hint")
+	assert.True(t, sawGuidance, "resolver log should record the skill://scion/global/<name> migration hint")
 }
 
 // TestListSkills_CoreScopeRejected verifies that GET /api/v1/skills?scope=core
@@ -131,6 +132,7 @@ func TestListSkills_CoreScopeRejected(t *testing.T) {
 			assert.Equal(t, "validation_error", errResp.Error.Code)
 			assert.Equal(t, retiredSkillScopeCoreMessage, errResp.Error.Message)
 			assert.Contains(t, errResp.Error.Message, `"global"`)
+			assert.Contains(t, errResp.Error.Message, "skill://scion/global/<name>")
 		})
 	}
 }

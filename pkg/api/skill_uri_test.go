@@ -185,17 +185,17 @@ func TestParseSkillURI_CoreScopeRejected(t *testing.T) {
 		input           string
 		wantReplacement string
 	}{
-		{"skill://core/my-skill", "skill://global/my-skill"},
-		{"skill://core/my-skill@^1.0", "skill://global/my-skill@^1.0"},
-		{"skill://core/some-id/my-skill", "skill://global/my-skill"},
-		{"skill://scion/core/my-skill", "skill://global/my-skill"},
-		{"skill://scion/core/my-skill@v1.2.3", "skill://global/my-skill@1.2.3"},
-		{"skill:///core/my-skill@^1.0", "skill://global/my-skill@^1.0"},
+		{"skill://core/my-skill", "skill://scion/global/my-skill"},
+		{"skill://core/my-skill@^1.0", "skill://scion/global/my-skill@^1.0"},
+		{"skill://core/some-id/my-skill", "skill://scion/global/my-skill"},
+		{"skill://scion/core/my-skill", "skill://scion/global/my-skill"},
+		{"skill://scion/core/my-skill@v1.2.3", "skill://scion/global/my-skill@1.2.3"},
+		{"skill:///core/my-skill@^1.0", "skill://scion/global/my-skill@^1.0"},
 		{"skill://registry.example.com/core/my-skill@1.0", "skill://registry.example.com/global/my-skill@1.0"},
 		{"skill://registry.example.com/core/some-id/my-skill", "skill://registry.example.com/global/my-skill"},
 		{"skill://registry.example.com/core/INVALID_NAME", "skill://registry.example.com/global/<name>"},
-		{"skill://scion/core/some-id/my-skill", "skill://global/my-skill"},
-		{"skill://core/", "skill://global/<name>"},
+		{"skill://scion/core/some-id/my-skill", "skill://scion/global/my-skill"},
+		{"skill://core/", "skill://scion/global/<name>"},
 	}
 
 	for _, tc := range tests {

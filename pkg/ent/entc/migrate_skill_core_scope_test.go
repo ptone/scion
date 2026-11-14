@@ -253,7 +253,7 @@ func TestMigrateSkillCoreScope_RewritesInjectionReferences(t *testing.T) {
 			{URI: "skill://core/dup-hub", As: "dropped-core"},
 			{URI: "skill://scion/global/dup-hub", As: "kept-global"},
 			{URI: "skill://core/dup-two", As: "first-core"},
-			{URI: "skill://scion/core/dup-two", As: "second-core"},
+			{URI: "skill://scion/core/dup-two", As: "second-core", Optional: true},
 			{URI: "gh://acme/skills/keep@main"},
 		},
 	}
@@ -364,6 +364,13 @@ func TestMigrateSkillCoreScope_RewritesInjectionReferences(t *testing.T) {
 	logs := logBuf.String()
 	assert.Contains(t, logs, "dropped_injection_id="+droppedCoreInjID.String())
 	assert.Contains(t, logs, "kept_injection_id="+keptGlobalInjID.String())
+	assert.Contains(t, logs, "old_uri=skill://core/dup-hub")
+	assert.Contains(t, logs, "dropped_as=dropped-core")
+	assert.Contains(t, logs, "kept_as=kept-global")
+	assert.Contains(t, logs, "old_uri=skill://scion/core/dup-two")
+	assert.Contains(t, logs, "dropped_as=second-core")
+	assert.Contains(t, logs, "dropped_optional=true")
+	assert.Contains(t, logs, "kept_as=first-core")
 
 	// Verify user SkillInjection rows.
 	userRows, err := client.SkillInjection.Query().

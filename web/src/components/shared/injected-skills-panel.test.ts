@@ -966,4 +966,18 @@ describe('injected-skills-panel — search-mode picker URI', () => {
     // No network calls should have been made.
     expect(calls.filter((c: Call) => c.method === 'POST')).toHaveLength(0);
   });
+
+  it('uses canonical skill://scion/global/<name> in URI-mode input placeholder', async () => {
+    const el = await createPanel('project', []);
+    el.dialogOpen = true;
+    el.dialogMode = 'uri';
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('sl-input[label="Skill URI"]');
+    expect(input).not.toBeNull();
+    const placeholder = input?.getAttribute('placeholder') ?? '';
+    expect(placeholder).toContain('skill://scion/global/my-skill');
+    expect(placeholder).not.toContain('skill://global/my-skill');
+    expect(placeholder).not.toContain('skill://scion/core/');
+  });
 });

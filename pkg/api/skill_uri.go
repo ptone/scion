@@ -312,7 +312,7 @@ func SkillURIScheme(uri string) string {
 }
 
 func retiredCoreScopeError(raw, registry, name, version string) error {
-	basePrefix := "skill://global/"
+	basePrefix := "skill://scion/global/"
 	if registry != "" && registry != defaultRegistry {
 		basePrefix = "skill://" + registry + "/global/"
 	}
