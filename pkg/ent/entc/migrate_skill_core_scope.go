@@ -47,12 +47,18 @@ type coreCollisionWarning struct {
 }
 
 type droppedInjectionWarning struct {
-	droppedID uuid.UUID
-	keptID    uuid.UUID
-	scope     string
-	scopeID   string
-	oldURI    string
-	targetURI string
+	droppedID           uuid.UUID
+	keptID              uuid.UUID
+	scope               string
+	scopeID             string
+	oldURI              string
+	targetURI           string
+	droppedAs           string
+	droppedOptional     bool
+	droppedAllowProgeny bool
+	keptAs              string
+	keptOptional        bool
+	keptAllowProgeny    bool
 }
 
 type droppedHubSettingInjectionWarning struct {
@@ -206,34 +212,40 @@ func MigrateSkillCoreScope(ctx context.Context, client *ent.Client) error {
 			scopeID string
 			uri     string
 		}
-		existingKeyIDs := make(map[injectionKey]uuid.UUID, len(existingInScopes))
+		existingKeyRows := make(map[injectionKey]*ent.SkillInjection, len(existingInScopes))
 		for _, si := range existingInScopes {
-			existingKeyIDs[injectionKey{scope: si.Scope, scopeID: si.ScopeID, uri: si.SkillURI}] = si.ID
+			existingKeyRows[injectionKey{scope: si.Scope, scopeID: si.ScopeID, uri: si.SkillURI}] = si
 		}
 
 		for _, p := range pendingInjections {
 			oldKey := injectionKey{scope: p.row.Scope, scopeID: p.row.ScopeID, uri: p.row.SkillURI}
-			delete(existingKeyIDs, oldKey)
+			delete(existingKeyRows, oldKey)
 
 			targetKey := injectionKey{scope: p.row.Scope, scopeID: p.row.ScopeID, uri: p.newURI}
-			if keptID, exists := existingKeyIDs[targetKey]; exists {
+			if keptRow, exists := existingKeyRows[targetKey]; exists {
 				// Target URI already exists in this (scope, scope_id); drop the redundant core row.
 				if err := tx.SkillInjection.DeleteOneID(p.row.ID).Exec(ctx); err != nil {
 					return fmt.Errorf("deduplicating migrated skill injection %s: %w", p.row.ID, err)
 				}
 				droppedInjections = append(droppedInjections, droppedInjectionWarning{
-					droppedID: p.row.ID,
-					keptID:    keptID,
-					scope:     string(p.row.Scope),
-					scopeID:   p.row.ScopeID,
-					oldURI:    p.row.SkillURI,
-					targetURI: p.newURI,
+					droppedID:           p.row.ID,
+					keptID:              keptRow.ID,
+					scope:               string(p.row.Scope),
+					scopeID:             p.row.ScopeID,
+					oldURI:              p.row.SkillURI,
+					targetURI:           p.newURI,
+					droppedAs:           p.row.SkillAs,
+					droppedOptional:     p.row.Optional,
+					droppedAllowProgeny: p.row.AllowProgeny,
+					keptAs:              keptRow.SkillAs,
+					keptOptional:        keptRow.Optional,
+					keptAllowProgeny:    keptRow.AllowProgeny,
 				})
 			} else {
 				if err := tx.SkillInjection.UpdateOneID(p.row.ID).SetSkillURI(p.newURI).Exec(ctx); err != nil {
 					return fmt.Errorf("rewriting skill injection %s (%q -> %q): %w", p.row.ID, p.row.SkillURI, p.newURI, err)
 				}
-				existingKeyIDs[targetKey] = p.row.ID
+				existingKeyRows[targetKey] = p.row
 			}
 			mutated = true
 		}
@@ -333,6 +345,12 @@ func MigrateSkillCoreScope(ctx context.Context, client *ent.Client) error {
 			"scope_id", d.scopeID,
 			"old_uri", d.oldURI,
 			"target_uri", d.targetURI,
+			"dropped_as", d.droppedAs,
+			"dropped_optional", d.droppedOptional,
+			"dropped_allow_progeny", d.droppedAllowProgeny,
+			"kept_as", d.keptAs,
+			"kept_optional", d.keptOptional,
+			"kept_allow_progeny", d.keptAllowProgeny,
 		)
 	}
 	for _, d := range droppedHubSettingInjections {

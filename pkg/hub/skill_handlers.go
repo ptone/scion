@@ -42,10 +42,11 @@ import (
 )
 
 const (
-	githubAPIBase                = "https://api.github.com"
-	retiredSkillScopeCoreMessage = `invalid scope "core": the "core" skill scope is no longer supported; use "global" (skill://scion/global/<name>) instead`
-	githubRawBase                = "https://raw.githubusercontent.com"
+	githubAPIBase = "https://api.github.com"
+	githubRawBase = "https://raw.githubusercontent.com"
 )
+
+const retiredSkillScopeCoreMessage = `invalid scope "core": the "core" skill scope is no longer supported; use "global" (skill://scion/global/<name>) instead`
 
 // CreateSkillRequest is the request body for creating a skill.
 type CreateSkillRequest struct {

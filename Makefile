@@ -374,12 +374,13 @@ MEMBERSHIP_LOSS_POSTGRES_TESTS := TestMembershipLossProcessor_vs_ProjectDelete_P
 # new skip in that package still fails the target.
 #
 # The pkg/ent/entc run covers the SQLite-to-Postgres `scion server migrate`
-# path (TestMigrateBeta_SQLiteToPostgres, ptone/scion#4366) and skill creation
+# path (TestMigrateBeta_SQLiteToPostgres, ptone/scion#4366), skill creation
 # against a pre-existing `visibility` column
 # (TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres,
-# ptone/scion#4370). Each works in its own throwaway schema, so neither
-# disturbs the shared database. Any skip fails the target first, then each
-# test must print its own PASS line.
+# ptone/scion#4370), and the core-to-global skill scope startup migration
+# (TestMigrateSkillCoreScope_Postgres, ptone/scion#1713). Each works in its
+# own throwaway schema, so none disturbs the shared database. Any skip fails
+# the target first, then each test must print its own PASS line.
 #
 # The cmd run covers the PostgreSQL search_path shadow guard in every
 # standalone command that migrates the hub database (server migrate,
@@ -541,7 +542,7 @@ test-store-postgres-tail: test-store-postgres-env-check
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestMigrateBeta_SQLiteToPostgres|TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres)$$' \
+		-run '^(TestMigrateBeta_SQLiteToPostgres|TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres|TestMigrateSkillCoreScope_Postgres)$$' \
 		./pkg/ent/entc/ > /tmp/test-launch-store-postgres-entc.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres-entc.log; \
@@ -556,6 +557,10 @@ test-store-postgres-tail: test-store-postgres-env-check
 	fi; \
 	if ! grep -qE '^--- PASS: TestSkillStore_CreateAgainstOldSchemaWithVisibilityColumn_Postgres ' /tmp/test-launch-store-postgres-entc.log; then \
 		echo "ERROR: the skill-visibility old-schema Postgres test did not run." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestMigrateSkillCoreScope_Postgres ' /tmp/test-launch-store-postgres-entc.log; then \
+		echo "ERROR: the core-to-global skill scope Postgres migration test did not run." >&2; \
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \

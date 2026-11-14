@@ -276,19 +276,21 @@ func TestMigrateSkillCoreScope_RewritesInjectionReferences(t *testing.T) {
 		"skill://project/local-tool",
 	} {
 		rowID := uuid.New()
-		switch uri {
-		case "skill://core/dup-skill":
-			droppedCoreInjID = rowID
-		case "skill://scion/global/dup-skill":
-			keptGlobalInjID = rowID
-		}
-		_, err = client.SkillInjection.Create().
+		create := client.SkillInjection.Create().
 			SetID(rowID).
 			SetScope(entskillinjection.ScopeProject).
 			SetScopeID(projID).
 			SetSkillURI(uri).
-			SetSortOrder(i + 1).
-			Save(ctx)
+			SetSortOrder(i + 1)
+		switch uri {
+		case "skill://core/dup-skill":
+			droppedCoreInjID = rowID
+			create.SetSkillAs("dropped-proj-as").SetOptional(true).SetAllowProgeny(true)
+		case "skill://scion/global/dup-skill":
+			keptGlobalInjID = rowID
+			create.SetSkillAs("kept-proj-as").SetOptional(false).SetAllowProgeny(false)
+		}
+		_, err = create.Save(ctx)
 		require.NoError(t, err)
 	}
 
@@ -362,8 +364,23 @@ func TestMigrateSkillCoreScope_RewritesInjectionReferences(t *testing.T) {
 	}, projURIs)
 
 	logs := logBuf.String()
-	assert.Contains(t, logs, "dropped_injection_id="+droppedCoreInjID.String())
-	assert.Contains(t, logs, "kept_injection_id="+keptGlobalInjID.String())
+	var droppedInjLine string
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, "dropped_injection_id="+droppedCoreInjID.String()) {
+			droppedInjLine = line
+			break
+		}
+	}
+	require.NotEmpty(t, droppedInjLine, "expected warning log line for dropped SkillInjection row in:\n%s", logs)
+	assert.Contains(t, droppedInjLine, "kept_injection_id="+keptGlobalInjID.String())
+	assert.Contains(t, droppedInjLine, "old_uri=skill://core/dup-skill")
+	assert.Contains(t, droppedInjLine, "target_uri=skill://scion/global/dup-skill")
+	assert.Contains(t, droppedInjLine, "dropped_as=dropped-proj-as")
+	assert.Contains(t, droppedInjLine, "dropped_optional=true")
+	assert.Contains(t, droppedInjLine, "dropped_allow_progeny=true")
+	assert.Contains(t, droppedInjLine, "kept_as=kept-proj-as")
+	assert.Contains(t, droppedInjLine, "kept_optional=false")
+	assert.Contains(t, droppedInjLine, "kept_allow_progeny=false")
 	assert.Contains(t, logs, "old_uri=skill://core/dup-hub")
 	assert.Contains(t, logs, "dropped_as=dropped-core")
 	assert.Contains(t, logs, "kept_as=kept-global")
