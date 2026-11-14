@@ -30,7 +30,7 @@ import {
   chromiumLaunchOptions,
 } from '../../playwright-chromium.js';
 
-const WEB_ROOT = resolve(__dirname, '../..');
+const WEB_ROOT = resolve(import.meta.dirname, '../..');
 const E2E_CONFIG_NAME = /^playwright.*\.config\.ts$/;
 
 /** Configs that deliberately run no browser tests. */
@@ -40,6 +40,10 @@ const NO_BROWSER_CONFIGS = new Set(['e2e/harness-selftest/playwright.config.ts']
 const INHERITED_BASE_CONFIGS = new Map<string, string>([
   ['e2e/port-proxy/playwright.view.config.ts', 'e2e/port-proxy/playwright.config.ts'],
 ]);
+
+function getRelativePath(fullPath: string): string {
+  return relative(WEB_ROOT, fullPath).replace(/\\/g, '/');
+}
 
 function walkConfigs(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -55,7 +59,7 @@ function browserPlaywrightConfigs(): string[] {
     ...walkConfigs(join(WEB_ROOT, 'e2e')).sort(),
     ...walkConfigs(join(WEB_ROOT, 'e2e-perf')).sort(),
   ];
-  return all.filter((full) => !NO_BROWSER_CONFIGS.has(relative(WEB_ROOT, full)));
+  return all.filter((full) => !NO_BROWSER_CONFIGS.has(getRelativePath(full)));
 }
 
 describe('chromiumExecutablePath', () => {
@@ -137,14 +141,14 @@ describe('Playwright configs and global-setup use chromiumLaunchOptions', () => 
   const configs = browserPlaywrightConfigs();
 
   it('discovers the root, e2e, and e2e-perf Playwright configs', () => {
-    const rels = configs.map((full) => relative(WEB_ROOT, full));
+    const rels = configs.map(getRelativePath);
     expect(rels).toContain('playwright.config.ts');
     expect(rels).toContain('e2e/terminal-owner/playwright.config.ts');
     expect(rels).toContain('e2e-perf/budgets/playwright.config.ts');
     expect(rels.length).toBeGreaterThanOrEqual(25);
   });
 
-  it.each(configs.map((full) => [relative(WEB_ROOT, full), full]))(
+  it.each(configs.map((full) => [getRelativePath(full), full]))(
     '%s resolves Chromium via chromiumLaunchOptions',
     (rel, full) => {
       const targetRel = INHERITED_BASE_CONFIGS.get(rel) ?? rel;
