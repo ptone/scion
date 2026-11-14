@@ -2292,7 +2292,7 @@ authDone:
 			// (cloudRunKeepSharedCheckout), which keeps that checkout and
 			// mode so its work stays where it is.
 			if isCloudRunRuntime(m.Runtime.Name()) && isClonePerAgentStart(opts) {
-				if keep, reason := cloudRunKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, api.Slugify(opts.Name)); keep {
+				if keep, reason := cloudRunKeepSharedCheckout(opts.FreshProvision, opts.Persistence.IsEphemeral(), agentDir, resolvedWorkspace, api.Slugify(opts.Name)); keep {
 					slog.Info("workspace_storage nfs: "+reason, "agent", opts.Name)
 					opts.Env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
 					agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeSharedPlain))

@@ -23,6 +23,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
+// homeSeedResetMarker is the broker's home-reset marker on the home leaf
+// (cloudRunHomeResetMarker in pkg/runtime): runtime metadata, never copied
+// into $HOME.
+const homeSeedResetMarker = ".scion-home-reset-id"
+
 // Seams for tests: the one accepted seed path, the effective UID and the
 // no-follow chown.
 var (
@@ -40,7 +45,7 @@ var (
 //
 // The workspace and home roots are instance-local memory volumes, which
 // Cloud Run mounts root-owned with mode 1777. When init runs as root they
-// are chowned to uid:gid first (without following a link), so $HOME is
+// are chowned to uid:gid first (without following a link, best effort), so $HOME is
 // owned by the scion user as some tools expect; the 1777 mode stays. The copy is
 // agenthome.SeedTree: no links followed or copied, every entry owned by
 // uid:gid, within agenthome.ProvisionedHomeLimits.
@@ -55,8 +60,9 @@ func seedEphemeralHome(agentHome, workspace string, uid, gid int) error {
 	}
 	if homeSeedGeteuid() == 0 && uid != 0 {
 		for _, dir := range []string{workspace, agentHome} {
+			// Best effort: a 1777 root works without it.
 			if err := homeSeedLchown(dir, uid, gid); err != nil {
-				return fmt.Errorf("home seed: chown %s: %w", dir, err)
+				log.Warn("home seed: could not chown %s to the scion user; continuing: %v", dir, err)
 			}
 		}
 	}
@@ -70,7 +76,12 @@ func seedEphemeralHome(agentHome, workspace string, uid, gid int) error {
 		return fmt.Errorf("home seed: %w", err)
 	}
 	defer func() { _ = home.Close() }()
-	res, err := home.SeedTree(src, agenthome.SeedOptions{UID: uid, GID: gid, Limits: agenthome.ProvisionedHomeLimits})
+	res, err := home.SeedTree(src, agenthome.SeedOptions{
+		Exclude: func(rel string) bool { return rel == homeSeedResetMarker },
+		UID:     uid,
+		GID:     gid,
+		Limits:  agenthome.ProvisionedHomeLimits,
+	})
 	if err != nil {
 		return fmt.Errorf("home seed: copy into %s: %w", agentHome, err)
 	}

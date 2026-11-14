@@ -183,3 +183,31 @@ func TestSeedEphemeralHome_BeforeStagedSecrets(t *testing.T) {
 		t.Errorf("secret target = %q, want the staged secret", b)
 	}
 }
+
+// TestSeedEphemeralHome_ChownBestEffort: a refused chown of a volume root
+// is logged and the seed still runs (a 1777 root works without it).
+func TestSeedEphemeralHome_ChownBestEffort(t *testing.T) {
+	seed, home, workspace, _ := homeSeedFixture(t, 0)
+	homeSeedLchown = func(string, int, int) error { return os.ErrPermission }
+	writeFile(t, filepath.Join(seed, ".bashrc"), "# rc")
+	if err := seedEphemeralHome(home, workspace, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("seedEphemeralHome with a refused chown: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".bashrc")); err != nil {
+		t.Errorf("home not seeded: %v", err)
+	}
+}
+
+// TestSeedEphemeralHome_ResetMarkerNotCopied: the broker's reset marker on
+// the home leaf stays out of $HOME.
+func TestSeedEphemeralHome_ResetMarkerNotCopied(t *testing.T) {
+	seed, home, workspace, _ := homeSeedFixture(t, 1000)
+	writeFile(t, filepath.Join(seed, homeSeedResetMarker), "ephemeral-0123456789abcdef")
+	writeFile(t, filepath.Join(seed, ".bashrc"), "# rc")
+	if err := seedEphemeralHome(home, workspace, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, homeSeedResetMarker)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("reset marker in $HOME: %v, want it left out", err)
+	}
+}

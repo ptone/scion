@@ -105,10 +105,9 @@ func ephemeralVolumeSize(spec *api.ResourceSpec) (ws, home string, err error) {
 		}
 		return "", "", NewResourceLimitsError("cloudrun: resources.disk for an ephemeral Cloud Run agent must be at least %s (got %s).", fmtMiB(ephemeralMinSizeMiB), sizeShown)
 	}
+	// Only a set resources.disk can get here: the default half leaves the
+	// other half, which the floor above already holds at 1Gi or more.
 	if memMiB-sizeMiB < ephemeralMinHeadroomMiB {
-		if disk == "" {
-			sizeShown = fmt.Sprintf("%dMi, half the memory by default", sizeMiB)
-		}
 		return "", "", NewResourceLimitsError("cloudrun: an ephemeral Cloud Run agent keeps its workspace in memory: resources.limits.memory (%s) must leave at least %s after resources.disk (%s). Raise the memory or lower resources.disk.",
 			memShown, headroom, sizeShown)
 	}

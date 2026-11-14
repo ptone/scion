@@ -277,9 +277,11 @@ const cloudRunAgentWorkspaceRecordFile = "cloudrun-agent-workspace.json"
 // agentDir, on a broker with the export mounted, where the agent's own
 // workspace does not exist. As in nfsKeepSharedCheckout, a create, a
 // record, an existing workspace, an unmounted export or any other stat
-// error keep the agent's own workspace. The check only reads.
-func cloudRunKeepSharedCheckout(fresh bool, agentDir string, resolved runtime.ResolvedWorkspace, agentName string) (bool, string) {
-	if fresh {
+// error keep the agent's own workspace. An ephemeral agent never keeps it:
+// it never has a workspace on the share, so a missing record must not turn
+// it into a shared-plain agent. The check only reads.
+func cloudRunKeepSharedCheckout(fresh, ephemeral bool, agentDir string, resolved runtime.ResolvedWorkspace, agentName string) (bool, string) {
+	if fresh || ephemeral {
 		return false, ""
 	}
 	if _, err := os.Stat(filepath.Join(agentDir, cloudRunAgentWorkspaceRecordFile)); err == nil {
