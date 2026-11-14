@@ -210,6 +210,19 @@ describe('set card, highlight only (default, ptone/scion#7842)', () => {
     ]);
   });
 
+  it('keeps a click on a preselected choice when the setting is turned off', async () => {
+    setPreselectRecommendedChoices(true);
+    const el = await mount(set());
+    expect(choice(el, 'r1', 'yes').getAttribute('aria-pressed')).toBe('true');
+    await click(el, choice(el, 'r1', 'yes'));
+    expect(apiFetch).not.toHaveBeenCalled();
+    setPreselectRecommendedChoices(false);
+    await settle(el);
+    expect(choice(el, 'r1', 'yes').getAttribute('aria-pressed')).toBe('true');
+    expect(choice(el, 'r3', 'no').getAttribute('aria-pressed')).toBe('false');
+    expect(counter(el)).toBe('2 remaining');
+  });
+
   it("an open card follows the setting, keeping the viewer's clicks", async () => {
     const el = await mount(set());
     await click(el, choice(el, 'r3', 'yes'));

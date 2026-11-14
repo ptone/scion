@@ -1576,7 +1576,10 @@ export class ScionChatChoices extends LitElement {
 
   private select(d: DecisionView, choiceId: string): void {
     if (!this.rowActionable(d) || this.setSubmitting || this.answerBlocked) return;
-    if (this.selectionOf(d) === choiceId) return;
+    // Compare with the click, not the effective selection: a click on a
+    // preselected recommended choice is recorded, so it survives the
+    // preselect setting being turned off while the card is open.
+    if (this.picked.get(d.rowId) === choiceId) return;
     const next = new Map(this.picked);
     next.set(d.rowId, choiceId);
     this.picked = next;
