@@ -193,13 +193,22 @@ func TestAgentDeleteEngine_FinalizeSeamErrorRollsBack(t *testing.T) {
 type hookRecordingExecutor struct {
 	mu       sync.Mutex
 	triggers []string
+	agentsOf []store.Agent
 }
 
-func (x *hookRecordingExecutor) Execute(_ context.Context, _ *store.LifecycleHook, _ *store.Agent, trigger string) error {
+func (x *hookRecordingExecutor) Execute(_ context.Context, _ *store.LifecycleHook, agent *store.Agent, trigger string) error {
 	x.mu.Lock()
 	x.triggers = append(x.triggers, trigger)
+	x.agentsOf = append(x.agentsOf, *agent)
 	x.mu.Unlock()
 	return nil
+}
+
+// agents returns the agents the recorded executions received, in order.
+func (x *hookRecordingExecutor) agents() []store.Agent {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return append([]store.Agent(nil), x.agentsOf...)
 }
 
 func (x *hookRecordingExecutor) fired(trigger string) int {

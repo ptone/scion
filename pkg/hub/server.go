@@ -2085,6 +2085,7 @@ type Server struct {
 	notificationDispatcher *NotificationDispatcher // Notification dispatcher for agent status events
 	lifecycleHookEvaluator *LifecycleHookEvaluator // Lifecycle hook evaluator for agent phase transitions
 	haltedDispatches       sync.WaitGroup          // Test handle: in-flight onAgentHalted dispatches; not drained on shutdown
+	deletedHookDispatches  sync.WaitGroup          // Test handle: in-flight fireDeletedHooks dispatches; not drained on shutdown
 
 	// delegationAdoptionCommitHook, when set, runs after authorization and
 	// before the delegation-adoption commit transaction. Tests use it to

@@ -3219,6 +3219,9 @@ const (
 	// LifecycleHookTriggerHalted fires when the platform halts an agent
 	// (ptone/scion#4853).
 	LifecycleHookTriggerHalted = "halted"
+	// LifecycleHookTriggerDeleted fires once when an agent delete
+	// completes, soft or hard (ptone/scion#2884).
+	LifecycleHookTriggerDeleted = "deleted"
 )
 
 // LifecycleHookActionType constants (v1).
