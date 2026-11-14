@@ -94,6 +94,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillinjection"
@@ -275,6 +276,8 @@ type Client struct {
 	Schedule *ScheduleClient
 	// ScheduledEvent is the client for interacting with the ScheduledEvent builders.
 	ScheduledEvent *ScheduledEventClient
+	// ScheduledExecRun is the client for interacting with the ScheduledExecRun builders.
+	ScheduledExecRun *ScheduledExecRunClient
 	// Secret is the client for interacting with the Secret builders.
 	Secret *SecretClient
 	// Skill is the client for interacting with the Skill builders.
@@ -400,6 +403,7 @@ func (c *Client) init() {
 	c.RuntimeBroker = NewRuntimeBrokerClient(c.config)
 	c.Schedule = NewScheduleClient(c.config)
 	c.ScheduledEvent = NewScheduledEventClient(c.config)
+	c.ScheduledExecRun = NewScheduledExecRunClient(c.config)
 	c.Secret = NewSecretClient(c.config)
 	c.Skill = NewSkillClient(c.config)
 	c.SkillInjection = NewSkillInjectionClient(c.config)
@@ -588,6 +592,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		RuntimeBroker:                 NewRuntimeBrokerClient(cfg),
 		Schedule:                      NewScheduleClient(cfg),
 		ScheduledEvent:                NewScheduledEventClient(cfg),
+		ScheduledExecRun:              NewScheduledExecRunClient(cfg),
 		Secret:                        NewSecretClient(cfg),
 		Skill:                         NewSkillClient(cfg),
 		SkillInjection:                NewSkillInjectionClient(cfg),
@@ -703,6 +708,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		RuntimeBroker:                 NewRuntimeBrokerClient(cfg),
 		Schedule:                      NewScheduleClient(cfg),
 		ScheduledEvent:                NewScheduledEventClient(cfg),
+		ScheduledExecRun:              NewScheduledExecRunClient(cfg),
 		Secret:                        NewSecretClient(cfg),
 		Skill:                         NewSkillClient(cfg),
 		SkillInjection:                NewSkillInjectionClient(cfg),
@@ -771,11 +777,12 @@ func (c *Client) Use(hooks ...Hook) {
 		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
 		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
 		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
-		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
-		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
-		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
-		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
-		c.UserDeletionAgent, c.UserTerminalWorkspace,
+		c.ScheduledEvent, c.ScheduledExecRun, c.Secret, c.Skill, c.SkillInjection,
+		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.Template,
+		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
+		c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation, c.User,
+		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
+		c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
 	}
@@ -806,11 +813,12 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
 		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
 		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
-		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
-		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
-		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
-		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
-		c.UserDeletionAgent, c.UserTerminalWorkspace,
+		c.ScheduledEvent, c.ScheduledExecRun, c.Secret, c.Skill, c.SkillInjection,
+		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.Template,
+		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
+		c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation, c.User,
+		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
+		c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -975,6 +983,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Schedule.mutate(ctx, m)
 	case *ScheduledEventMutation:
 		return c.ScheduledEvent.mutate(ctx, m)
+	case *ScheduledExecRunMutation:
+		return c.ScheduledExecRun.mutate(ctx, m)
 	case *SecretMutation:
 		return c.Secret.mutate(ctx, m)
 	case *SkillMutation:
@@ -11886,6 +11896,139 @@ func (c *ScheduledEventClient) mutate(ctx context.Context, m *ScheduledEventMuta
 	}
 }
 
+// ScheduledExecRunClient is a client for the ScheduledExecRun schema.
+type ScheduledExecRunClient struct {
+	config
+}
+
+// NewScheduledExecRunClient returns a client for the ScheduledExecRun from the given config.
+func NewScheduledExecRunClient(c config) *ScheduledExecRunClient {
+	return &ScheduledExecRunClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `scheduledexecrun.Hooks(f(g(h())))`.
+func (c *ScheduledExecRunClient) Use(hooks ...Hook) {
+	c.hooks.ScheduledExecRun = append(c.hooks.ScheduledExecRun, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `scheduledexecrun.Intercept(f(g(h())))`.
+func (c *ScheduledExecRunClient) Intercept(interceptors ...Interceptor) {
+	c.inters.ScheduledExecRun = append(c.inters.ScheduledExecRun, interceptors...)
+}
+
+// Create returns a builder for creating a ScheduledExecRun entity.
+func (c *ScheduledExecRunClient) Create() *ScheduledExecRunCreate {
+	mutation := newScheduledExecRunMutation(c.config, OpCreate)
+	return &ScheduledExecRunCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of ScheduledExecRun entities.
+func (c *ScheduledExecRunClient) CreateBulk(builders ...*ScheduledExecRunCreate) *ScheduledExecRunCreateBulk {
+	return &ScheduledExecRunCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *ScheduledExecRunClient) MapCreateBulk(slice any, setFunc func(*ScheduledExecRunCreate, int)) *ScheduledExecRunCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &ScheduledExecRunCreateBulk{err: fmt.Errorf("calling to ScheduledExecRunClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*ScheduledExecRunCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &ScheduledExecRunCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for ScheduledExecRun.
+func (c *ScheduledExecRunClient) Update() *ScheduledExecRunUpdate {
+	mutation := newScheduledExecRunMutation(c.config, OpUpdate)
+	return &ScheduledExecRunUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *ScheduledExecRunClient) UpdateOne(_m *ScheduledExecRun) *ScheduledExecRunUpdateOne {
+	mutation := newScheduledExecRunMutation(c.config, OpUpdateOne, withScheduledExecRun(_m))
+	return &ScheduledExecRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *ScheduledExecRunClient) UpdateOneID(id uuid.UUID) *ScheduledExecRunUpdateOne {
+	mutation := newScheduledExecRunMutation(c.config, OpUpdateOne, withScheduledExecRunID(id))
+	return &ScheduledExecRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for ScheduledExecRun.
+func (c *ScheduledExecRunClient) Delete() *ScheduledExecRunDelete {
+	mutation := newScheduledExecRunMutation(c.config, OpDelete)
+	return &ScheduledExecRunDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *ScheduledExecRunClient) DeleteOne(_m *ScheduledExecRun) *ScheduledExecRunDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *ScheduledExecRunClient) DeleteOneID(id uuid.UUID) *ScheduledExecRunDeleteOne {
+	builder := c.Delete().Where(scheduledexecrun.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &ScheduledExecRunDeleteOne{builder}
+}
+
+// Query returns a query builder for ScheduledExecRun.
+func (c *ScheduledExecRunClient) Query() *ScheduledExecRunQuery {
+	return &ScheduledExecRunQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeScheduledExecRun},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a ScheduledExecRun entity by its id.
+func (c *ScheduledExecRunClient) Get(ctx context.Context, id uuid.UUID) (*ScheduledExecRun, error) {
+	return c.Query().Where(scheduledexecrun.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *ScheduledExecRunClient) GetX(ctx context.Context, id uuid.UUID) *ScheduledExecRun {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *ScheduledExecRunClient) Hooks() []Hook {
+	return c.hooks.ScheduledExecRun
+}
+
+// Interceptors returns the client interceptors.
+func (c *ScheduledExecRunClient) Interceptors() []Interceptor {
+	return c.inters.ScheduledExecRun
+}
+
+func (c *ScheduledExecRunClient) mutate(ctx context.Context, m *ScheduledExecRunMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&ScheduledExecRunCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&ScheduledExecRunUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&ScheduledExecRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&ScheduledExecRunDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown ScheduledExecRun mutation op: %q", m.Op())
+	}
+}
+
 // SecretClient is a client for the Secret schema.
 type SecretClient struct {
 	config
@@ -14477,11 +14620,12 @@ type (
 		MutationAudit, NonceCache, Notification, NotificationSubscription,
 		PendingSecret, PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
 		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
-		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
-		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
-		Template, TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker,
-		ThreadGroup, ThreadGroupMember, UsageReservation, User, UserAccessToken,
-		UserDeletion, UserDeletionAgent, UserTerminalWorkspace []ent.Hook
+		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent,
+		ScheduledExecRun, Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
+		SubscriptionTemplate, Template, TestIdentityDelegation, TestIdentityLoginCode,
+		TestInfraMarker, ThreadGroup, ThreadGroupMember, UsageReservation, User,
+		UserAccessToken, UserDeletion, UserDeletionAgent,
+		UserTerminalWorkspace []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -14502,10 +14646,11 @@ type (
 		MutationAudit, NonceCache, Notification, NotificationSubscription,
 		PendingSecret, PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
 		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
-		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
-		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
-		Template, TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker,
-		ThreadGroup, ThreadGroupMember, UsageReservation, User, UserAccessToken,
-		UserDeletion, UserDeletionAgent, UserTerminalWorkspace []ent.Interceptor
+		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent,
+		ScheduledExecRun, Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
+		SubscriptionTemplate, Template, TestIdentityDelegation, TestIdentityLoginCode,
+		TestInfraMarker, ThreadGroup, ThreadGroupMember, UsageReservation, User,
+		UserAccessToken, UserDeletion, UserDeletionAgent,
+		UserTerminalWorkspace []ent.Interceptor
 	}
 )

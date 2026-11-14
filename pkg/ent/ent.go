@@ -90,6 +90,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillinjection"
@@ -246,6 +247,7 @@ func checkColumn(t, c string) error {
 			runtimebroker.Table:                 runtimebroker.ValidColumn,
 			schedule.Table:                      schedule.ValidColumn,
 			scheduledevent.Table:                scheduledevent.ValidColumn,
+			scheduledexecrun.Table:              scheduledexecrun.ValidColumn,
 			secret.Table:                        secret.ValidColumn,
 			skill.Table:                         skill.ValidColumn,
 			skillinjection.Table:                skillinjection.ValidColumn,

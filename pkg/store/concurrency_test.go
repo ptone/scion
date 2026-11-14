@@ -111,6 +111,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockAgentDelegatedCredentialPurge,
 		LockChatRetention,
 		LockPendingSecretExpiry,
+		LockScheduledExecRunSweep,
 	}
 
 	seen := make(map[AdvisoryLockKey]bool, len(singletonKeys)+2)
@@ -214,6 +215,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockChatRetention", LockChatRetention},
 		{"LockHubSettingsGuardedBatch", LockHubSettingsGuardedBatch},
 		{"LockPendingSecretExpiry", LockPendingSecretExpiry},
+		{"LockScheduledExecRunSweep", LockScheduledExecRunSweep},
 		{"LockPendingSecretOwnerWrite", LockPendingSecretOwnerWrite},
 	}
 
