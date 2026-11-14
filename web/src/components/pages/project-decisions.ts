@@ -830,8 +830,9 @@ export class ScionPageProjectDecisions extends LitElement {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
       if (!this.isConnected) return;
-      this.project = (await res.json()) as ProjectSummary;
-      dispatchPageTitle(this, 'Decisions', this.project.name || this.projectId);
+      const project = (await res.json()) as ProjectSummary | null;
+      this.project = project;
+      dispatchPageTitle(this, 'Decisions', project?.name || this.projectId);
     } catch (err) {
       if (!this.isConnected) return;
       this.error = err instanceof Error ? err.message : 'Failed to load project';
@@ -1127,7 +1128,7 @@ export class ScionPageProjectDecisions extends LitElement {
 
   private switchTab(next: 'pending' | 'made'): void {
     if (next !== 'pending' && next !== 'made') return;
-    const changed = this.activeTab !== next;
+    if (this.activeTab === next) return;
     this.activeTab = next;
 
     const params = new URLSearchParams(window.location.search);
@@ -1141,7 +1142,7 @@ export class ScionPageProjectDecisions extends LitElement {
     const group = this.shadowRoot?.querySelector('sl-tab-group') as
       | (HTMLElement & { show?: (panel: string) => void })
       | null;
-    if (changed && typeof group?.show === 'function') {
+    if (typeof group?.show === 'function') {
       group.show(next);
     }
 

@@ -26,6 +26,8 @@ import type {
   ProjectMadeDecisionsResponse,
   ProjectPendingDecisionsResponse,
 } from '../../client/project-decisions.js';
+import { PAGE_TITLE_EVENT } from '../../client/page-title.js';
+import type { PageTitleDetail } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import {
   CHAT_CHOICES_FLAG,
@@ -156,6 +158,7 @@ async function settle(el: ScionPageProjectDecisions, ms = 15): Promise<void> {
 describe('<scion-page-project-decisions>', () => {
   let pendingResponses: ProjectPendingDecisionsResponse[];
   let madeResponses: ProjectMadeDecisionsResponse[];
+  let projectHandler: ((url: URL, init?: RequestInit) => Promise<Response>) | null;
   let pendingHandler: ((url: URL, init?: RequestInit) => Promise<Response>) | null;
   let madeHandler: ((url: URL, init?: RequestInit) => Promise<Response>) | null;
   let requests: { method: string; url: string; body?: unknown }[];
@@ -177,6 +180,7 @@ describe('<scion-page-project-decisions>', () => {
     window.history.replaceState({}, '', '/projects/p-1/decisions');
     requests = [];
     navEvents = [];
+    projectHandler = null;
     pendingHandler = null;
     madeHandler = null;
     document.addEventListener('nav-click', onNavClick);
@@ -234,6 +238,7 @@ describe('<scion-page-project-decisions>', () => {
         requests.push({ method, url: url.pathname + url.search, body: parsedBody });
 
         if (url.pathname === '/api/v1/projects/p-1') {
+          if (projectHandler) return projectHandler(url, init);
           return jsonResponse({ id: 'p-1', name: 'scion', slug: 'scion' });
         }
         if (url.pathname === '/auth/me' || url.pathname === '/api/v1/auth/me') {
@@ -1499,5 +1504,64 @@ describe('<scion-page-project-decisions>', () => {
     expect(root.querySelector('.error-state h2')?.textContent).toBe('Failed to Load Decisions');
     expect(root.querySelector('.error-details')?.textContent).toContain('boot pending error');
     expect(root.querySelector('[data-empty="pending"]')).toBeNull();
+  });
+
+  it('falls back to projectId title without entering error state when project summary JSON is null', async () => {
+    enableBothFlags();
+    projectHandler = () =>
+      new Promise<Response>((resolve) => {
+        setTimeout(() => void jsonResponse(null).then(resolve), 5);
+      });
+    const titleEvents: string[][] = [];
+    const onTitle = (e: Event): void => {
+      const segs = (e as CustomEvent<PageTitleDetail>).detail?.segments;
+      if (segs) titleEvents.push(segs);
+    };
+    document.addEventListener(PAGE_TITLE_EVENT, onTitle);
+    try {
+      const el = await mount();
+      const root = el.shadowRoot!;
+
+      expect(root.querySelector('.error-state')).toBeNull();
+      expect(root.querySelector('[data-prompt-card="m-1"]')).not.toBeNull();
+      expect(root.querySelector('.crumbs a[href="/projects/p-1"]')?.textContent?.trim()).toBe(
+        'p-1'
+      );
+      expect(titleEvents).toContainEqual(['Decisions', 'p-1']);
+    } finally {
+      document.removeEventListener(PAGE_TITLE_EVENT, onTitle);
+    }
+  });
+
+  it('skips redundant history.replaceState on active-tab clicks and synchronous sl-tab-show re-entry', async () => {
+    enableBothFlags();
+    const el = await mount();
+    const root = el.shadowRoot!;
+
+    const group = root.querySelector('sl-tab-group') as HTMLElement & {
+      show?: (panel: string) => void;
+    };
+    group.show = (panel: string): void => {
+      group.dispatchEvent(new CustomEvent('sl-tab-show', { detail: { name: panel } }));
+    };
+
+    const replaceSpy = vi.spyOn(window.history, 'replaceState');
+    try {
+      replaceSpy.mockClear();
+
+      // (a) Clicking the already-active tab does not call history.replaceState
+      root.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
+      await settle(el, 15);
+      expect(replaceSpy).toHaveBeenCalledTimes(0);
+
+      // (b) Switching tabs when group.show synchronously fires sl-tab-show calls replaceState once and fetches Made once
+      root.querySelector<HTMLElement>('sl-tab[panel="made"]')!.click();
+      await settle(el, 25);
+      expect(replaceSpy).toHaveBeenCalledTimes(1);
+      expect(window.location.search).toBe('?tab=made');
+      expect(requests.filter((r) => r.url.includes('tab=made'))).toHaveLength(1);
+    } finally {
+      replaceSpy.mockRestore();
+    }
   });
 });
