@@ -96,6 +96,11 @@ type Limits struct {
 	MaxDepth int
 }
 
+// ProvisionedHomeLimits bound a broker-provisioned agent home copied into
+// a Cloud Run instance: the broker's copy onto the share and sciontool
+// init's copy of the read-only home seed into $HOME use the same limits.
+var ProvisionedHomeLimits = Limits{MaxFiles: 4096, MaxBytes: 64 << 20, MaxDepth: 32}
+
 // LimitError reports that InstallTree exceeded its Limits.
 type LimitError struct{ Limit string }
 

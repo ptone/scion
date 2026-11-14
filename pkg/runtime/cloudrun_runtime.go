@@ -245,6 +245,11 @@ func (r *CloudRunRuntime) Name() string { return "cloudrun" }
 // runtime is Cloud Run must not advertise the capability.
 func (r *CloudRunRuntime) SupportsEmptyPerAgentWorkspace() bool { return false }
 
+// SupportsEphemeralPersistence reports true: an ephemeral instance keeps its
+// home and workspace on an instance-local volume (buildCloudRunInstance).
+// Legacy and flat Cloud Run brokers both run this runtime.
+func (r *CloudRunRuntime) SupportsEphemeralPersistence() bool { return true }
+
 // SupportsAttach implements AttachCapableRuntime and reports false: the
 // agent terminal path cannot serve interactive attach for Cloud Run
 // instances, so the broker refuses attach up front (and reports it as
@@ -518,6 +523,14 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	resources, err := cloudRunContainerResources(cfg.Resources)
 	if err != nil {
 		return "", err
+	}
+	// An ephemeral instance's in-memory volume must fit that memory, and
+	// its home leaf (only the seed) is cleared at every start.
+	if err := checkCloudRunEphemeral(cfg); err != nil {
+		return "", err
+	}
+	if cfg.Persistence.IsEphemeral() {
+		cfg.HomeResetID = newEphemeralHomeResetID()
 	}
 	// The instance mounts its own home leaf from the NFS share in every
 	// homes mode, never cfg.HomeDir, so the hub-issued credential pkg/agent
@@ -1136,35 +1149,44 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 			workspaceMount = "/workspace"
 		}
 
-		volumes = append(volumes, &runpb.Volume{
-			Name: "workspace",
-			VolumeType: &runpb.Volume_Nfs{
-				Nfs: &runpb.NFSVolumeSource{
-					Server:   nfsPaths.server,
-					Path:     nfsPaths.workspaceExportPath,
-					ReadOnly: false,
+		if cfg.Persistence.IsEphemeral() {
+			v, m, err := cloudRunEphemeralVolumes(cfg, nfsPaths, workspaceMount, "/home/"+r.ExecUser())
+			if err != nil {
+				return nil, err
+			}
+			volumes = append(volumes, v...)
+			volumeMounts = append(volumeMounts, m...)
+		} else {
+			volumes = append(volumes, &runpb.Volume{
+				Name: "workspace",
+				VolumeType: &runpb.Volume_Nfs{
+					Nfs: &runpb.NFSVolumeSource{
+						Server:   nfsPaths.server,
+						Path:     nfsPaths.workspaceExportPath,
+						ReadOnly: false,
+					},
 				},
-			},
-		})
-		volumeMounts = append(volumeMounts, &runpb.VolumeMount{
-			Name:      "workspace",
-			MountPath: workspaceMount,
-		})
+			})
+			volumeMounts = append(volumeMounts, &runpb.VolumeMount{
+				Name:      "workspace",
+				MountPath: workspaceMount,
+			})
 
-		volumes = append(volumes, &runpb.Volume{
-			Name: "home",
-			VolumeType: &runpb.Volume_Nfs{
-				Nfs: &runpb.NFSVolumeSource{
-					Server:   nfsPaths.server,
-					Path:     nfsPaths.homeExportPath,
-					ReadOnly: false,
+			volumes = append(volumes, &runpb.Volume{
+				Name: "home",
+				VolumeType: &runpb.Volume_Nfs{
+					Nfs: &runpb.NFSVolumeSource{
+						Server:   nfsPaths.server,
+						Path:     nfsPaths.homeExportPath,
+						ReadOnly: false,
+					},
 				},
-			},
-		})
-		volumeMounts = append(volumeMounts, &runpb.VolumeMount{
-			Name:      "home",
-			MountPath: "/home/" + r.ExecUser(),
-		})
+			})
+			volumeMounts = append(volumeMounts, &runpb.VolumeMount{
+				Name:      "home",
+				MountPath: "/home/" + r.ExecUser(),
+			})
+		}
 
 		// File secrets travel in SCION_STAGED_SECRETS and are written to their
 		// targets by sciontool init (including paths below ~/.scion/secrets),
@@ -1216,6 +1238,9 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	// then ran without a PTY and crashed: "bubbletea: could not open TTY".
 	// A reserved name never reaches the instance, whatever its source.
 	envVars = slices.DeleteFunc(envVars, func(ev *runpb.EnvVar) bool { return reservedAgentEnvName(ev.GetName()) })
+	if nfsPaths != nil && cfg.Persistence.IsEphemeral() {
+		envVars = append(envVars, &runpb.EnvVar{Name: api.HomeSeedEnvVar, Values: &runpb.EnvVar_Value{Value: api.HomeSeedMountPath}})
+	}
 	container := &runpb.Container{
 		Name:         "scion-agent",
 		Image:        cfg.Image,
@@ -1593,8 +1618,15 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	// agent directory layout, which the broker's delete path removes), and
 	// clones into it in-container on its first start (sciontool init); a
 	// later start finds it populated and keeps the work.
+	// An ephemeral agent's workspace is instance-local: nothing for it is
+	// created or mounted on the share (checkCloudRunEphemeral has required
+	// clone-per-agent).
+	ephemeral := cfg.Persistence.IsEphemeral()
+	if ephemeral {
+		paths.workspaceExportPath, paths.workspaceHostPath = "", ""
+	}
 	clonePerAgent := isClonePerAgentRun(cfg)
-	if clonePerAgent {
+	if clonePerAgent && !ephemeral {
 		rel, err := cloudRunAgentWorkspaceRel(hostPaths.serverRelativePath, slug)
 		if err != nil {
 			return nil, err
@@ -1630,7 +1662,9 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	// The project's shared workspace is neither cloned nor mounted for a
 	// clone-per-agent agent: only its own (empty until its first start)
 	// workspace directory is created.
-	if clonePerAgent {
+	if ephemeral {
+		// Only the home leaf (the seed) below.
+	} else if clonePerAgent {
 		if err := paths.mkdirAgentDir(paths.workspaceHostPath, uid, gid); err != nil {
 			return nil, fmt.Errorf("cloudrun: provision NFS agent workspace %s via Hub-mounted path %s: %w",
 				paths.workspaceExportPath, paths.workspaceHostPath, err)
