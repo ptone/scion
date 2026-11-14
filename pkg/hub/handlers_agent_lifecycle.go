@@ -115,12 +115,16 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	status.ReportSource = store.StatusReportSourceAgent
 	status.ReportRunID = presentedAgentTokenRunID(ctx)
 	_, status.ReportAgentToken = identity.(AgentIdentity)
+	// before is the agent read ahead of a guarded write, for the error
+	// phase log after it; nil when the update touches no guarded field.
+	var before *store.Agent
 	if statusUpdateTouchesGuardedFields(status) {
 		agent, err := s.store.GetAgent(ctx, id)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		before = agent
 
 		// Observability only: start-time attribution from agent.Created to the
 		// first "running"/"working" status report, logged at whichever of two
@@ -244,6 +248,7 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	if agent, err := s.store.GetAgent(ctx, id); err == nil {
 		if agent.DeletedAt.IsZero() {
 			s.events.PublishAgentStatus(ctx, agent)
+			s.logAgentErrorPhaseEntry(before, agent, errorPhaseSourceAgentStatus)
 		}
 	} else {
 		s.agentLifecycleLog.Warn("Failed to fetch agent for status event", "agent_id", id, "error", err)
