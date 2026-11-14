@@ -440,12 +440,17 @@ _Avoid_: stalled, stuck, idle, waiting
 _See also_: Activity (Blocked is one of its values)
 
 **Stalled**:
-A platform-set activity for a `running` agent whose heartbeat is still arriving (the process is alive) but that has produced no activity events within the stall threshold (`server.hub.stalled_threshold`, default 5 minutes; a value under 2 minutes falls back to the default). Indicates a hung agent. Agents whose activity is `blocked`, `waiting_for_input`, `completed`, `limits_exceeded` or `offline` are excluded. Distinct from `offline`, which means no heartbeat for over 2 minutes.
+A platform-set activity for a `running` agent whose heartbeat is still arriving (the process is alive) but that has produced no activity events within the stall threshold (`server.hub.stalled_threshold`, default 5 minutes; a value under 2 minutes falls back to the default). Indicates a hung agent. Agents whose activity is `blocked`, `waiting_for_input`, `completed`, `limits_exceeded` or `offline` are excluded, and so is an agent whose container reported live work within the threshold. Distinct from `offline`, which means no heartbeat for over 2 minutes.
 _Avoid_: stuck, hung (as a state name), offline
-_See also_: Activity, Blocked, Auto-Suspend
+_See also_: Activity, Blocked, Auto-Suspend, Live work
+
+**Live work**:
+Work in an agent's container that emits no activity events, such as a build, a test run or a background job the agent is waiting on. `sciontool init` samples `/proc` on each 30-second Hub heartbeat and reports a process doing CPU work (at least 1% of one core since the previous sample). The tmux server, the pane shells, the harness's own process, sciontool and its services don't count. The Hub records it as `lastLiveWorkAt` and `lastLiveProcessAt`. An agent with live work is not marked `stalled` and is not auto-suspended. Detection never sets an activity.
+_Avoid_: busy (as a state name)
+_See also_: Stalled, Auto-Suspend
 
 **Auto-Suspend**:
-A Hub behavior, off by default (`server.hub.auto_suspend_stalled`), that suspends an agent when it is marked `stalled`, reclaiming its container. Agents whose harness does not support session resume are skipped. A message sent with wake (`scion message --wake`, or accepting the web UI's wake prompt) resumes the agent and then delivers it; a message without wake is not delivered (`scion message` gets `409 agent_not_running`).
+A Hub behavior, off by default (`server.hub.auto_suspend_stalled`), that suspends an agent when it is marked `stalled`, reclaiming its container. Agents whose harness does not support session resume are skipped, and so are agents whose container reported live work in the last 90 seconds. A message sent with wake (`scion message --wake`, or accepting the web UI's wake prompt) resumes the agent and then delivers it; a message without wake is not delivered (`scion message` gets `409 agent_not_running`).
 _Avoid_: idle timeout, auto-stop
 _See also_: Stalled, Phase
 

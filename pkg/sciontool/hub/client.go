@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/backoff"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/liveness"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -153,6 +154,9 @@ type StatusUpdate struct {
 	TaskSummary string            `json:"taskSummary,omitempty"`
 	Heartbeat   bool              `json:"heartbeat,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+	// LiveWork is the live work the heartbeat reports (ptone/scion#7855);
+	// nil when there is none, and the field is then omitted.
+	LiveWork *liveness.LiveWork `json:"liveWork,omitempty"`
 
 	// Limits tracking
 	CurrentTurns      *int   `json:"currentTurns,omitempty"`
@@ -490,8 +494,14 @@ func (c *Client) calculateBackoff(attempt int) time.Duration {
 // Its outcome is recorded in the client's credential state, including a
 // heartbeat that was not sent because status writes are paused.
 func (c *Client) Heartbeat(ctx context.Context) error {
+	return c.heartbeat(ctx, nil)
+}
+
+// heartbeat sends a heartbeat carrying liveWork (nil for none).
+func (c *Client) heartbeat(ctx context.Context, liveWork *liveness.LiveWork) error {
 	res, err := c.updateStatus(ctx, StatusUpdate{
 		Heartbeat: true,
+		LiveWork:  liveWork,
 	})
 	if c != nil && c.IsConfigured() {
 		c.recordHeartbeat(res, err)
@@ -2009,6 +2019,10 @@ type HeartbeatConfig struct {
 	OnError func(error)
 	// OnSuccess is called when a heartbeat succeeds. Optional.
 	OnSuccess func()
+	// LiveWork is called before each heartbeat for the container's live
+	// work (ptone/scion#7855); a non-nil result is sent as the heartbeat's
+	// liveWork. Optional.
+	LiveWork func() *liveness.LiveWork
 }
 
 // DefaultHeartbeatInterval is the default interval between heartbeats.
@@ -2549,6 +2563,7 @@ func (c *Client) StartHeartbeat(ctx context.Context, config *HeartbeatConfig) <-
 	timeout := DefaultHeartbeatTimeout
 	var onError func(error)
 	var onSuccess func()
+	var liveWork func() *liveness.LiveWork
 
 	if config != nil {
 		if config.Interval > 0 {
@@ -2559,6 +2574,7 @@ func (c *Client) StartHeartbeat(ctx context.Context, config *HeartbeatConfig) <-
 		}
 		onError = config.OnError
 		onSuccess = config.OnSuccess
+		liveWork = config.LiveWork
 	}
 
 	go func() {
@@ -2572,8 +2588,12 @@ func (c *Client) StartHeartbeat(ctx context.Context, config *HeartbeatConfig) <-
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				var lw *liveness.LiveWork
+				if liveWork != nil {
+					lw = liveWork()
+				}
 				heartbeatCtx, cancel := context.WithTimeout(ctx, timeout)
-				if err := c.Heartbeat(heartbeatCtx); err != nil {
+				if err := c.heartbeat(heartbeatCtx, lw); err != nil {
 					if onError != nil {
 						onError(err)
 					}
