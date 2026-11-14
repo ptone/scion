@@ -4622,6 +4622,8 @@ type AgentMutation struct {
 	updated                    *time.Time
 	last_seen                  *time.Time
 	last_activity_event        *time.Time
+	last_live_process_at       *time.Time
+	last_live_work_at          *time.Time
 	started_at                 *time.Time
 	deleted_at                 *time.Time
 	state_version              *int64
@@ -6941,6 +6943,104 @@ func (m *AgentMutation) LastActivityEventCleared() bool {
 func (m *AgentMutation) ResetLastActivityEvent() {
 	m.last_activity_event = nil
 	delete(m.clearedFields, agent.FieldLastActivityEvent)
+}
+
+// SetLastLiveProcessAt sets the "last_live_process_at" field.
+func (m *AgentMutation) SetLastLiveProcessAt(t time.Time) {
+	m.last_live_process_at = &t
+}
+
+// LastLiveProcessAt returns the value of the "last_live_process_at" field in the mutation.
+func (m *AgentMutation) LastLiveProcessAt() (r time.Time, exists bool) {
+	v := m.last_live_process_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastLiveProcessAt returns the old "last_live_process_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldLastLiveProcessAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastLiveProcessAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastLiveProcessAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastLiveProcessAt: %w", err)
+	}
+	return oldValue.LastLiveProcessAt, nil
+}
+
+// ClearLastLiveProcessAt clears the value of the "last_live_process_at" field.
+func (m *AgentMutation) ClearLastLiveProcessAt() {
+	m.last_live_process_at = nil
+	m.clearedFields[agent.FieldLastLiveProcessAt] = struct{}{}
+}
+
+// LastLiveProcessAtCleared returns if the "last_live_process_at" field was cleared in this mutation.
+func (m *AgentMutation) LastLiveProcessAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldLastLiveProcessAt]
+	return ok
+}
+
+// ResetLastLiveProcessAt resets all changes to the "last_live_process_at" field.
+func (m *AgentMutation) ResetLastLiveProcessAt() {
+	m.last_live_process_at = nil
+	delete(m.clearedFields, agent.FieldLastLiveProcessAt)
+}
+
+// SetLastLiveWorkAt sets the "last_live_work_at" field.
+func (m *AgentMutation) SetLastLiveWorkAt(t time.Time) {
+	m.last_live_work_at = &t
+}
+
+// LastLiveWorkAt returns the value of the "last_live_work_at" field in the mutation.
+func (m *AgentMutation) LastLiveWorkAt() (r time.Time, exists bool) {
+	v := m.last_live_work_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastLiveWorkAt returns the old "last_live_work_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldLastLiveWorkAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastLiveWorkAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastLiveWorkAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastLiveWorkAt: %w", err)
+	}
+	return oldValue.LastLiveWorkAt, nil
+}
+
+// ClearLastLiveWorkAt clears the value of the "last_live_work_at" field.
+func (m *AgentMutation) ClearLastLiveWorkAt() {
+	m.last_live_work_at = nil
+	m.clearedFields[agent.FieldLastLiveWorkAt] = struct{}{}
+}
+
+// LastLiveWorkAtCleared returns if the "last_live_work_at" field was cleared in this mutation.
+func (m *AgentMutation) LastLiveWorkAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldLastLiveWorkAt]
+	return ok
+}
+
+// ResetLastLiveWorkAt resets all changes to the "last_live_work_at" field.
+func (m *AgentMutation) ResetLastLiveWorkAt() {
+	m.last_live_work_at = nil
+	delete(m.clearedFields, agent.FieldLastLiveWorkAt)
 }
 
 // SetStartedAt sets the "started_at" field.
@@ -9688,7 +9788,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 95)
+	fields := make([]string, 0, 97)
 	if m.fixture_root_id != nil {
 		fields = append(fields, agent.FieldFixtureRootID)
 	}
@@ -9823,6 +9923,12 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.last_activity_event != nil {
 		fields = append(fields, agent.FieldLastActivityEvent)
+	}
+	if m.last_live_process_at != nil {
+		fields = append(fields, agent.FieldLastLiveProcessAt)
+	}
+	if m.last_live_work_at != nil {
+		fields = append(fields, agent.FieldLastLiveWorkAt)
 	}
 	if m.started_at != nil {
 		fields = append(fields, agent.FieldStartedAt)
@@ -10072,6 +10178,10 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.LastSeen()
 	case agent.FieldLastActivityEvent:
 		return m.LastActivityEvent()
+	case agent.FieldLastLiveProcessAt:
+		return m.LastLiveProcessAt()
+	case agent.FieldLastLiveWorkAt:
+		return m.LastLiveWorkAt()
 	case agent.FieldStartedAt:
 		return m.StartedAt()
 	case agent.FieldDeletedAt:
@@ -10271,6 +10381,10 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldLastSeen(ctx)
 	case agent.FieldLastActivityEvent:
 		return m.OldLastActivityEvent(ctx)
+	case agent.FieldLastLiveProcessAt:
+		return m.OldLastLiveProcessAt(ctx)
+	case agent.FieldLastLiveWorkAt:
+		return m.OldLastLiveWorkAt(ctx)
 	case agent.FieldStartedAt:
 		return m.OldStartedAt(ctx)
 	case agent.FieldDeletedAt:
@@ -10694,6 +10808,20 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetLastActivityEvent(v)
+		return nil
+	case agent.FieldLastLiveProcessAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastLiveProcessAt(v)
+		return nil
+	case agent.FieldLastLiveWorkAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastLiveWorkAt(v)
 		return nil
 	case agent.FieldStartedAt:
 		v, ok := value.(time.Time)
@@ -11261,6 +11389,12 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldLastActivityEvent) {
 		fields = append(fields, agent.FieldLastActivityEvent)
 	}
+	if m.FieldCleared(agent.FieldLastLiveProcessAt) {
+		fields = append(fields, agent.FieldLastLiveProcessAt)
+	}
+	if m.FieldCleared(agent.FieldLastLiveWorkAt) {
+		fields = append(fields, agent.FieldLastLiveWorkAt)
+	}
 	if m.FieldCleared(agent.FieldStartedAt) {
 		fields = append(fields, agent.FieldStartedAt)
 	}
@@ -11505,6 +11639,12 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldLastActivityEvent:
 		m.ClearLastActivityEvent()
+		return nil
+	case agent.FieldLastLiveProcessAt:
+		m.ClearLastLiveProcessAt()
+		return nil
+	case agent.FieldLastLiveWorkAt:
+		m.ClearLastLiveWorkAt()
 		return nil
 	case agent.FieldStartedAt:
 		m.ClearStartedAt()
@@ -11780,6 +11920,12 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldLastActivityEvent:
 		m.ResetLastActivityEvent()
+		return nil
+	case agent.FieldLastLiveProcessAt:
+		m.ResetLastLiveProcessAt()
+		return nil
+	case agent.FieldLastLiveWorkAt:
+		m.ResetLastLiveWorkAt()
 		return nil
 	case agent.FieldStartedAt:
 		m.ResetStartedAt()
