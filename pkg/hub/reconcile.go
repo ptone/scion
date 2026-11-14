@@ -726,6 +726,9 @@ func (s *Server) resolveDispatchAgent(ctx context.Context, d store.BrokerDispatc
 // control channel — the same path DispatchAgentMessage uses for a locally-
 // connected broker. reconcileBroker has already CAS-marked the message
 // dispatched before calling this, so just deliver.
+//
+// Nothing in production calls it today: reconcileBroker drains only
+// broker_dispatch rows (F-RS6-18, .design/authz-audit-findings.md).
 func (s *Server) deliverMessage(ctx context.Context, m *store.Message) error {
 	if m == nil || m.AgentID == "" {
 		return fmt.Errorf("message has no agent ID")
@@ -748,5 +751,11 @@ func (s *Server) deliverMessage(ctx context.Context, m *store.Message) error {
 	if dispatcher == nil {
 		return fmt.Errorf("no dispatcher available for message delivery")
 	}
-	return dispatcher.DispatchAgentMessage(ctx, agent, m.Msg, effectiveInterrupt(agent, m.Urgent), nil)
+	// A re-drive carries the hub message id and the envelope rebuilt from
+	// the row, never a raw body without attribution (ptone/scion#7949).
+	dctx, sm, err := storedMessageDispatch(ctx, m)
+	if err != nil {
+		return err
+	}
+	return dispatcher.DispatchAgentMessage(dctx, agent, sm.Msg, effectiveInterrupt(agent, m.Urgent), sm)
 }

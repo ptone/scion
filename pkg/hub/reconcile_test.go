@@ -170,16 +170,104 @@ func TestDeliverMessage_TunnelsViaDispatcher(t *testing.T) {
 	srv.deliverMsg = srv.deliverMessage
 
 	m := &store.Message{
-		ID:      uuid.NewString(),
-		AgentID: agent.ID.String(),
-		Msg:     "hello from reconcile",
-		Urgent:  true,
+		ID:          uuid.NewString(),
+		AgentID:     agent.ID.String(),
+		Sender:      "user:alice",
+		SenderID:    uuid.NewString(),
+		Recipient:   "agent:" + agent.Slug,
+		RecipientID: agent.ID.String(),
+		Msg:         "hello from reconcile",
+		Type:        messages.TypeInstruction,
+		Urgent:      true,
+		CreatedAt:   time.Now(),
 	}
 
 	err = srv.deliverMsg(ctx, m)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), dispatched.Load(), "message dispatched once")
 	assert.Equal(t, "hello from reconcile", lastMsg)
+}
+
+// TestDeliverMessage_CarriesHubMessageIDAndEnvelope verifies that a
+// re-driven row is dispatched with the hub message id on the context and
+// a structured envelope rebuilt from the row (ptone/scion#7949), so the
+// sender is attributed and the broker can bind and dedup by row id.
+func TestDeliverMessage_CarriesHubMessageIDAndEnvelope(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+
+	proj := &store.Project{ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8], OwnerID: uuid.NewString()}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	agent, err := client.Agent.Create().
+		SetSlug("a-" + uuid.NewString()[:8]).SetName("deliver-envelope").
+		SetProjectID(uuid.MustParse(proj.ID)).SetRuntimeBrokerID(uuid.NewString()).
+		Save(ctx)
+	require.NoError(t, err)
+
+	var gotID string
+	var gotSM *messages.StructuredMessage
+	var gotMsg string
+	srv := &Server{store: cs, instanceID: "hub-test", agentLifecycleLog: slog.Default()}
+	srv.SetDispatcher(&reconcileTestDispatcher{
+		onDispatch: func(ctx context.Context, _ *store.Agent, msg string, sm *messages.StructuredMessage) error {
+			gotID = dispatchMessageIDFromContext(ctx)
+			gotSM = sm
+			gotMsg = msg
+			return nil
+		},
+	})
+
+	m := &store.Message{
+		ID:          uuid.NewString(),
+		AgentID:     agent.ID.String(),
+		Sender:      "agent:sender",
+		SenderID:    uuid.NewString(),
+		Recipient:   "agent:" + agent.Slug,
+		RecipientID: agent.ID.String(),
+		Msg:         "re-driven body",
+		Type:        messages.TypeInstruction,
+		CreatedAt:   time.Now(),
+	}
+	require.NoError(t, srv.deliverMessage(ctx, m))
+
+	assert.Equal(t, m.ID, gotID, "dispatch context carries the hub message id")
+	require.NotNil(t, gotSM, "dispatch carries a structured envelope")
+	assert.Equal(t, "agent:sender", gotSM.Sender)
+	assert.Equal(t, m.SenderID, gotSM.SenderID)
+	assert.Equal(t, m.Recipient, gotSM.Recipient)
+	assert.Equal(t, "re-driven body", gotMsg)
+}
+
+// TestDeliverMessage_UnrecoverableEnvelopeNotDispatched verifies that a row
+// whose envelope cannot be rebuilt is refused rather than sent as a raw
+// body without attribution (ptone/scion#7949).
+func TestDeliverMessage_UnrecoverableEnvelopeNotDispatched(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+
+	proj := &store.Project{ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8], OwnerID: uuid.NewString()}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+	agent, err := client.Agent.Create().
+		SetSlug("a-" + uuid.NewString()[:8]).SetName("deliver-unrecoverable").
+		SetProjectID(uuid.MustParse(proj.ID)).SetRuntimeBrokerID(uuid.NewString()).
+		Save(ctx)
+	require.NoError(t, err)
+
+	var dispatched atomic.Int32
+	srv := &Server{store: cs, instanceID: "hub-test", agentLifecycleLog: slog.Default()}
+	srv.SetDispatcher(&reconcileTestDispatcher{
+		onMessage: func(*store.Agent, string) error { dispatched.Add(1); return nil },
+	})
+
+	// No sender: the envelope's attribution cannot be recovered.
+	m := &store.Message{ID: uuid.NewString(), AgentID: agent.ID.String(), Msg: "x", CreatedAt: time.Now()}
+	err = srv.deliverMessage(ctx, m)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errStoredMessageUnrecoverable)
+	assert.Equal(t, int32(0), dispatched.Load(), "nothing dispatched")
 }
 
 // TestDeliverMessage_MissingAgent returns an error when the agent doesn't exist.
@@ -202,6 +290,9 @@ func TestDeliverMessage_MissingAgent(t *testing.T) {
 // reconcileTestDispatcher is a minimal AgentDispatcher for deliverMessage tests.
 type reconcileTestDispatcher struct {
 	onMessage func(agent *store.Agent, msg string) error
+	// onDispatch, when set, sees the dispatch context and structured
+	// message as well (ptone/scion#7949).
+	onDispatch func(ctx context.Context, agent *store.Agent, msg string, sm *messages.StructuredMessage) error
 }
 
 func (d *reconcileTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) (*CreateDispatchResult, error) {
@@ -227,7 +318,10 @@ func (d *reconcileTestDispatcher) DispatchAgentResetAuth(_ context.Context, _ *s
 func (d *reconcileTestDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
 	return nil
 }
-func (d *reconcileTestDispatcher) DispatchAgentMessage(_ context.Context, agent *store.Agent, msg string, _ bool, _ *messages.StructuredMessage) error {
+func (d *reconcileTestDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, msg string, _ bool, sm *messages.StructuredMessage) error {
+	if d.onDispatch != nil {
+		return d.onDispatch(ctx, agent, msg, sm)
+	}
 	if d.onMessage != nil {
 		return d.onMessage(agent, msg)
 	}
