@@ -507,6 +507,87 @@ func TestBuildStartContext_GitClone(t *testing.T) {
 	}
 }
 
+func TestBuildStartContext_GitCloneNilDepthDefaultsEnvToOne(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name: "agent-nil-depth",
+		Config: &CreateAgentConfig{
+			GitClone: &api.GitCloneConfig{
+				URL:    "https://github.com/org/repo.git",
+				Branch: "main",
+				// Depth omitted (nil) — documented default is shallow depth 1.
+			},
+		},
+		EnvClassifications: map[string]api.EnvKind{},
+		HTTPRequest:        r,
+		Operation:          opCreate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := sc.Opts.Env["SCION_GIT_DEPTH"]; got != "1" {
+		t.Errorf("expected SCION_GIT_DEPTH='1' when GitClone.Depth is nil, got %q", got)
+	}
+	if kind, ok := sc.EnvClassifications["SCION_GIT_DEPTH"]; !ok || kind != api.EnvKindPlain {
+		t.Errorf("SCION_GIT_DEPTH classification: got (%q, %v), want (%q, true)", kind, ok, api.EnvKindPlain)
+	}
+}
+
+func TestBuildStartContext_NonCloneStripsStaleGitDepth(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	t.Run("non-clone drops stale ResolvedEnv and Config.Env SCION_GIT_DEPTH", func(t *testing.T) {
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:          "agent-shared",
+			ProjectPath:   "/some/path",
+			WorkspaceMode: "shared-plain",
+			ResolvedEnv:   map[string]string{"SCION_GIT_DEPTH": "1"},
+			Config: &CreateAgentConfig{
+				Env: []string{"SCION_GIT_DEPTH=1"},
+			},
+			EnvClassifications: map[string]api.EnvKind{"SCION_GIT_DEPTH": api.EnvKindPlain},
+			HTTPRequest:        httptest.NewRequest("POST", "/api/v1/agents", nil),
+			Operation:          opCreate,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := sc.Opts.Env["SCION_GIT_DEPTH"]; ok {
+			t.Errorf("expected SCION_GIT_DEPTH to be stripped for non-clone workspace, got %q", got)
+		}
+		if kind, ok := sc.EnvClassifications["SCION_GIT_DEPTH"]; ok {
+			t.Errorf("expected SCION_GIT_DEPTH classification to be stripped, got %q", kind)
+		}
+	})
+
+	t.Run("nil classifications stay nil when stripping SCION_GIT_DEPTH", func(t *testing.T) {
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:          "agent-empty",
+			ProjectPath:   "/some/path",
+			WorkspaceMode: "empty-per-agent",
+			ResolvedEnv:   map[string]string{"SCION_GIT_DEPTH": "1"},
+			HTTPRequest:   httptest.NewRequest("POST", "/api/v1/agents", nil),
+			Operation:     opCreate,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := sc.Opts.Env["SCION_GIT_DEPTH"]; ok {
+			t.Errorf("expected SCION_GIT_DEPTH to be stripped for empty-per-agent workspace, got %q", got)
+		}
+		if sc.EnvClassifications != nil {
+			t.Errorf("expected nil EnvClassifications to stay nil, got %v", sc.EnvClassifications)
+		}
+	})
+}
+
 func TestBuildStartContext_NilHTTPRequest(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()

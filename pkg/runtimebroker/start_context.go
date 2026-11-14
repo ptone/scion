@@ -721,12 +721,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 
 	// The git token remote is set only from the hub's GitClone (below), never
 	// from the request's env, so an env entry cannot bind the git token to
-	// another remote. Likewise the in-container clone URL is set only from
-	// GitClone, after the clone URL check (refusedCloneURL), so an env entry
-	// cannot start a clone that check never saw.
+	// another remote. Likewise the in-container clone URL and depth are set
+	// only from GitClone (after refusedCloneURL for the URL), so an env entry
+	// cannot start an unchecked clone or leak SCION_GIT_DEPTH into a non-clone
+	// workspace.
 	// Their classifications go too: a value set below is classified again
 	// there, and one that is not set leaves no stale entry.
-	for _, key := range []string{api.EnvGitTokenRemote, "SCION_GIT_CLONE_URL"} {
+	for _, key := range []string{api.EnvGitTokenRemote, "SCION_GIT_CLONE_URL", "SCION_GIT_DEPTH"} {
 		delete(env, key)
 		delete(envCls, key)
 	}
@@ -1336,10 +1337,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			env["SCION_GIT_BRANCH"] = gc.Branch
 			classifyBrokerEnv("SCION_GIT_BRANCH", api.EnvKindPlain)
 		}
+		depth := 1
 		if gc.Depth != nil {
-			env["SCION_GIT_DEPTH"] = strconv.Itoa(*gc.Depth)
-			classifyBrokerEnv("SCION_GIT_DEPTH", api.EnvKindPlain)
+			depth = *gc.Depth
 		}
+		env["SCION_GIT_DEPTH"] = strconv.Itoa(depth)
+		classifyBrokerEnv("SCION_GIT_DEPTH", api.EnvKindPlain)
 		// The project's recorded remote, as the hub sent it: sciontool init
 		// offers the git token to the clone only when the clone URL names it.
 		// Relayed unchanged; without it the clone gets no token.
