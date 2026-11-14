@@ -2529,10 +2529,12 @@ const stagedSecretWarnThreshold = 100 * 1024
 // A value supplied from outside would make init treat a broker-provided
 // token file as one it staged (stagedsecrets.HubTokenStagedEnvVar), or
 // read a resolved-auth carry file it did not write
-// (stagedsecrets.ResolvedAuthStagedEnvVar). Each runtime drops it where it
+// (stagedsecrets.ResolvedAuthStagedEnvVar), or seed $HOME from a path it
+// names (api.HomeSeedEnvVar; the Cloud Run runtime sets it itself, after
+// the drop, for an ephemeral instance). Each runtime drops it where it
 // assembles the container environment.
 func reservedAgentEnvName(name string) bool {
-	return name == stagedsecrets.HubTokenStagedEnvVar || name == stagedsecrets.ResolvedAuthStagedEnvVar
+	return name == stagedsecrets.HubTokenStagedEnvVar || name == stagedsecrets.ResolvedAuthStagedEnvVar || name == api.HomeSeedEnvVar
 }
 
 // dropReservedAgentEnv deletes the reservedAgentEnvName entries from an

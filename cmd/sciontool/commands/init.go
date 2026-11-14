@@ -530,6 +530,14 @@ func RunInit(args []string, opts InitRunOptions) int {
 		return 1
 	}
 
+	// An ephemeral instance's home starts empty: seed it before anything
+	// is written into it (ptone/scion#7780).
+	if err := seedEphemeralHome(agentHome, workspacePathOrDefault(), targetUID, targetGID); err != nil {
+		log.Error("%v", err)
+		reportInitFailure(agentHome, err)
+		return 1
+	}
+
 	// Move the bootstrap transport credential out of the environment and
 	// into the transport token file before anything else can inherit it.
 	// Child processes read the file (via SCION_TRANSPORT_TOKEN_FILE), which
