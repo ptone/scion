@@ -36,7 +36,7 @@ import (
 
 // adtCatalogWorld extends the list world with skills and templates in
 // every scope: project-scoped ones in P1 and P2 (where Alice may list and
-// read) and P3 (where she is not a member), a global and a core skill, a
+// read) and P3 (where she is not a member), a global skill, a
 // global template, Alice's own user-scoped skill and template, and a
 // legacy template whose deprecated project ID names P1 while its scope ID
 // names P3.
