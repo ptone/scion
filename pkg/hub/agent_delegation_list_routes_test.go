@@ -36,14 +36,14 @@ import (
 
 // adtCatalogWorld extends the list world with skills and templates in
 // every scope: project-scoped ones in P1 and P2 (where Alice may list and
-// read) and P3 (where she is not a member), a global and a core skill, a
+// read) and P3 (where she is not a member), a global skill, a
 // global template, Alice's own user-scoped skill and template, and a
 // legacy template whose deprecated project ID names P1 while its scope ID
 // names P3.
 type adtCatalogWorld struct {
 	*adtListWorld
-	skillP1, skillP2, skillP3, skillGlobal, skillCore, skillUser string
-	tmplP1, tmplP2, tmplP3, tmplGlobal, tmplUser, tmplLegacy     string
+	skillP1, skillP2, skillP3, skillGlobal, skillUser        string
+	tmplP1, tmplP2, tmplP3, tmplGlobal, tmplUser, tmplLegacy string
 }
 
 func newADTCatalogWorld(t *testing.T, name string) *adtCatalogWorld {
@@ -53,7 +53,6 @@ func newADTCatalogWorld(t *testing.T, name string) *adtCatalogWorld {
 	w.skillP2 = w.addSkill(t, name+"-s-p2", store.SkillScopeProject, w.other.ID)
 	w.skillP3 = w.addSkill(t, name+"-s-p3", store.SkillScopeProject, w.p3.ID)
 	w.skillGlobal = w.addSkill(t, name+"-s-global", store.SkillScopeGlobal, "")
-	w.skillCore = w.addSkill(t, name+"-s-core", store.SkillScopeCore, "")
 	w.skillUser = w.addSkill(t, name+"-s-user", store.SkillScopeUser, w.alice.ID)
 	w.tmplP1 = w.addTemplate(t, name+"-t-p1", store.TemplateScopeProject, w.proj.ID, "")
 	w.tmplP2 = w.addTemplate(t, name+"-t-p2", store.TemplateScopeProject, w.other.ID, "")
@@ -272,7 +271,7 @@ func TestDelegatedSkillList_ScopeAndItemFilter(t *testing.T) {
 	assert.Equal(t, []string{w.skillP1}, adtDecodeItems(t, w.listAt(t, cred.Token, "/api/v1/skills", q("scopeId", w.proj.ID)), "skills").ids)
 	assert.Empty(t, adtDecodeItems(t, w.listAt(t, cred.Token, "/api/v1/skills", q("scopeId", w.p3.ID)), "skills").ids)
 	assert.Equal(t, sortedIDs(w.skillP1, w.skillP2), adtDecodeItems(t, w.listAt(t, cred.Token, "/api/v1/skills", q("scope", "project")), "skills").ids)
-	for _, scope := range []string{"global", "core", "user"} {
+	for _, scope := range []string{"global", "user"} {
 		l := adtDecodeItems(t, w.listAt(t, cred.Token, "/api/v1/skills", q("scope", scope)), "skills")
 		assert.Empty(t, l.ids, "scope=%s lists nothing", scope)
 		assert.Zero(t, l.TotalCount)
@@ -368,7 +367,7 @@ func TestDelegatedTemplateList_ScopeAndItemFilter(t *testing.T) {
 // TestDelegatedCatalogLists_HubCatalogNeverListed: for an unrestricted
 // issuer (hub admin, AllProjects mode), the skill and template lists hold
 // project-scoped items of every project the issuer may read, and never a
-// hub-catalog (global or core) or user-scoped item. catalogListReadBatch
+// hub-catalog (global) or user-scoped item. catalogListReadBatch
 // denies every row for a delegated identity.
 func TestDelegatedCatalogLists_HubCatalogNeverListed(t *testing.T) {
 	w := newADTCatalogWorld(t, "adt-catlist")
@@ -380,7 +379,7 @@ func TestDelegatedCatalogLists_HubCatalogNeverListed(t *testing.T) {
 	for _, id := range []string{w.skillP1, w.skillP2, w.skillP3} {
 		assert.Contains(t, skills.ids, id, "an unrestricted issuer lists project skills of every project")
 	}
-	for _, id := range []string{w.skillGlobal, w.skillCore, w.skillUser} {
+	for _, id := range []string{w.skillGlobal, w.skillUser} {
 		assert.NotContains(t, skills.ids, id, "hub-catalog and user-scoped skills are never listed")
 	}
 	assert.Equal(t, len(skills.ids), skills.TotalCount)

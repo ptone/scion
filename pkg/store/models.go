@@ -4264,7 +4264,6 @@ const (
 
 // SkillScope constants
 const (
-	SkillScopeCore    = "core"
 	SkillScopeGlobal  = "global"
 	SkillScopeProject = "project"
 	SkillScopeUser    = "user"

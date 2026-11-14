@@ -197,7 +197,7 @@ describe('injected-skills-panel — discover button gating', () => {
 
   it('does not offer discovery for a skill:// URI', async () => {
     const el = await createPanel('project', []);
-    el.dialogUri = 'skill://scion/core/my-skill';
+    el.dialogUri = 'skill://scion/global/my-skill';
     el.dialogTransformed = null;
     expect(el.showDiscoverButton).toBe(false);
   });
@@ -906,7 +906,7 @@ describe('injected-skills-panel — search-mode picker URI', () => {
       id: 'test-id',
       name: 'Security Audit',
       slug: 'security-audit',
-      scope: 'core',
+      scope: 'global',
       status: 'active',
       created: '2026-01-01',
       updated: '2026-01-01',
@@ -933,7 +933,7 @@ describe('injected-skills-panel — search-mode picker URI', () => {
       id: 'test-id-2',
       name: 'Code Review',
       slug: 'code-review',
-      scope: 'core',
+      scope: 'global',
       status: 'active',
       created: '2026-01-01',
       updated: '2026-01-01',
@@ -965,5 +965,19 @@ describe('injected-skills-panel — search-mode picker URI', () => {
     expect(el.dialogError).toBe('Please select a skill from the search results');
     // No network calls should have been made.
     expect(calls.filter((c: Call) => c.method === 'POST')).toHaveLength(0);
+  });
+
+  it('uses canonical skill://scion/global/<name> in URI-mode input placeholder', async () => {
+    const el = await createPanel('project', []);
+    el.dialogOpen = true;
+    el.dialogMode = 'uri';
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('sl-input[label="Skill URI"]');
+    expect(input).not.toBeNull();
+    const placeholder = input?.getAttribute('placeholder') ?? '';
+    expect(placeholder).toContain('skill://scion/global/my-skill');
+    expect(placeholder).not.toContain('skill://global/my-skill');
+    expect(placeholder).not.toContain('skill://scion/core/');
   });
 });

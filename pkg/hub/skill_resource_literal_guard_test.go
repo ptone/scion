@@ -35,7 +35,7 @@ import (
 // any hub member could make the Hub mint any project's GitHub App token.
 //
 // Two fixes closed this: (1) filterHubWideSkillGrants now fails closed
-// (filters unless ScopeKind is explicitly "global"/"core"), and (2) every
+// (filters unless ScopeKind is explicitly "global"), and (2) every
 // ad hoc "skill" Resource is built through skillResource (from a real
 // store.Skill) or skillScopeResource (from a bare scope/scopeID pair), both
 // of which always set ScopeKind. This test is the guard against a third

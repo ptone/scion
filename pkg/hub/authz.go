@@ -942,11 +942,11 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 
 	// ── Step 5b2: Agent hub skill catalog (ptone/scion#1968) ──────────
-	// Agents may read the hub-wide (global/core) skill catalog. The
+	// Agents may read the hub-wide (global) skill catalog. The
 	// project-scoped JWT binding above cannot express that (a hub-scoped
 	// skill has no ProjectID, so scopeApplies rejects it), so add a
 	// synthetic system-scoped skill.read/skill.list binding. Step 5c strips
-	// it again for any skill that is not global/core, and the agent JWT
+	// it again for any skill that is not global, and the agent JWT
 	// restriction (7b) and delegation ceiling (10) still apply.
 	// A hub_delivery principal is skipped here too, before the AgentIdentity
 	// assertion: Step 0b already restricts it to ActionDeliver, so a
@@ -999,7 +999,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// #1916) ───────────────────────────────────────────────────────────
 	// The curated hub-member/hub-viewer roles carry skill/template/
 	// harness_config read/list at system scope purely so every hub member
-	// can browse the hub-wide (global/core) catalog. That grant must not
+	// can browse the hub-wide (global) catalog. That grant must not
 	// leak into user- or project-scoped records. applyHubWideScopeFilters
 	// (authz_boundary.go) is the single shared dispatcher for this rule —
 	// ptone/scion#2117's SystemAuthorityProof/MintTimeSystemGrant call the

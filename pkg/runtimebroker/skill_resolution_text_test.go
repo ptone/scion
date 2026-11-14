@@ -105,9 +105,9 @@ func TestPublicSkillRef(t *testing.T) {
 		"gh://u:pw-1@owner/repo/skill":                                  "(redacted URL)",
 		"gh://owner/repo/skill@main?token=NAME":                         "(redacted URL)",
 		"gh://owner/repo/https://h.example.test/x":                      "(redacted URL)",
-		"skill://scion/core/scion@^1.0":                                 "skill://scion/core/scion@^1.0",
-		"skill://scion/core/scion?k=qv-1":                               "(redacted URL)",
-		"skill://scion/core/sc ion":                                     "(redacted URL)",
+		"skill://scion/global/scion@^1.0":                               "skill://scion/global/scion@^1.0",
+		"skill://scion/global/scion?k=qv-1":                             "(redacted URL)",
+		"skill://scion/global/sc ion":                                   "(redacted URL)",
 		"gcp-skill://reg/some-skill":                                    "gcp-skill://reg/some-skill",
 		"gcp-skill://reg/some-skill#qv-1":                               "(redacted URL)",
 	}

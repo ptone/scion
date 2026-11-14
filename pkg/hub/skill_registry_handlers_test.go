@@ -386,7 +386,7 @@ func TestSkillRegistryPin(t *testing.T) {
 	_ = json.Unmarshal(rr.Body.Bytes(), &created)
 
 	// Pin
-	pinBody := `{"uri":"skill://pin-reg/core/test@1.0","hash":"sha256:abc123"}`
+	pinBody := `{"uri":"skill://pin-reg/global/test@1.0","hash":"sha256:abc123"}`
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/skill-registries/"+created.ID+"/pin", strings.NewReader(pinBody))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))

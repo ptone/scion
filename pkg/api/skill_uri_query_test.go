@@ -223,8 +223,8 @@ func TestParseSkillURI_ErrorsOmitQuery(t *testing.T) {
 		},
 		{
 			name:    "scoped skill:// version before the query",
-			input:   "skill://scion/core/my-skill@^1.0?token=made-up-value-17",
-			wantErr: `invalid skill URI "skill://scion/core/my-skill@^1.0"` + omitted,
+			input:   "skill://scion/global/my-skill@^1.0?token=made-up-value-17",
+			wantErr: `invalid skill URI "skill://scion/global/my-skill@^1.0"` + omitted,
 		},
 		{
 			name:    "bare name version before the query",
@@ -243,8 +243,8 @@ func TestParseSkillURI_ErrorsOmitQuery(t *testing.T) {
 		},
 		{
 			name:    "scoped skill:// version before a fragment",
-			input:   "skill://scion/core/my-skill@^1.0#made-up-value-20",
-			wantErr: `invalid skill URI "skill://scion/core/my-skill@^1.0"` + omitted,
+			input:   "skill://scion/global/my-skill@^1.0#made-up-value-20",
+			wantErr: `invalid skill URI "skill://scion/global/my-skill@^1.0"` + omitted,
 		},
 		{
 			name:    "bare name version before a fragment",
@@ -264,7 +264,7 @@ func TestParseSkillURI_ErrorsOmitQuery(t *testing.T) {
 		{
 			name:    "no query keeps the detailed error",
 			input:   "skill://scion/bogus/my-skill",
-			wantErr: `invalid skill URI "skill://scion/bogus/my-skill": unrecognized scope "bogus" (must be core, global, project, or user)`,
+			wantErr: `invalid skill URI "skill://scion/bogus/my-skill": unrecognized scope "bogus" (must be global, project, or user)`,
 		},
 	}
 	for _, tt := range tests {
@@ -296,7 +296,7 @@ func TestParseSkillURI_WithoutQueryUnchanged(t *testing.T) {
 		want  SkillURI
 	}{
 		{"skill://my-skill@1.0", SkillURI{Raw: "skill://my-skill@1.0", Registry: "scion", Name: "my-skill", Version: "1.0"}},
-		{"skill://scion/core/my-skill@^1.0", SkillURI{Raw: "skill://scion/core/my-skill@^1.0", Registry: "scion", Scope: "core", Name: "my-skill", Version: "^1.0"}},
+		{"skill://scion/global/my-skill@^1.0", SkillURI{Raw: "skill://scion/global/my-skill@^1.0", Registry: "scion", Scope: "global", Name: "my-skill", Version: "^1.0"}},
 		{"my-skill", SkillURI{Raw: "my-skill", Registry: "scion", Name: "my-skill", Version: "latest"}},
 	}
 	for _, tt := range tests {

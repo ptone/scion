@@ -76,7 +76,7 @@ func (skillProgenyAdapter) Sources(_ context.Context, q ProgenyQuery) ([]Sharing
 //
 // resource is ineligible — no progeny candidate is built at all — unless it
 // is an explicit user-scoped skill with a non-empty owning user: a skill of
-// any other scope (global/core/project), or a hand-built Resource that
+// any other scope (global/project), or a hand-built Resource that
 // carries ScopeUserID without ScopeKind == store.SkillScopeUser, must not
 // pick up a sharing source by accident. This mirrors the shape check the
 // retired agentCreatorUserSkillGrant used to make.

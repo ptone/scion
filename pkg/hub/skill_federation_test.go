@@ -50,7 +50,7 @@ func newFederationMockRegistry(t *testing.T, handler http.HandlerFunc) *httptest
 func TestFederateResolve_TrustedHappyPath(t *testing.T) {
 	mockResp := ResolveSkillsResponse{
 		Resolved: []ResolvedSkillResponse{{
-			URI:             "skill://ext-registry/core/test-skill@1.0",
+			URI:             "skill://ext-registry/global/test-skill@1.0",
 			Name:            "test-skill",
 			ResolvedVersion: "1.0.0",
 			ContentHash:     "sha256:abc123",
@@ -79,7 +79,7 @@ func TestFederateResolve_TrustedHappyPath(t *testing.T) {
 		t.Fatalf("failed to create registry: %v", err)
 	}
 
-	resolved, resolveErr := srv.federateResolve(t.Context(), "ext-registry", ResolveSkillRef{URI: "skill://ext-registry/core/test-skill@1.0"})
+	resolved, resolveErr := srv.federateResolve(t.Context(), "ext-registry", ResolveSkillRef{URI: "skill://ext-registry/global/test-skill@1.0"})
 	if resolveErr != nil {
 		t.Fatalf("unexpected error: %s", resolveErr.Message)
 	}
@@ -94,7 +94,7 @@ func TestFederateResolve_TrustedHappyPath(t *testing.T) {
 func TestFederateResolve_PinnedHappyPath(t *testing.T) {
 	mockResp := ResolveSkillsResponse{
 		Resolved: []ResolvedSkillResponse{{
-			URI:             "skill://ext-registry/core/pinned-skill@1.0",
+			URI:             "skill://ext-registry/global/pinned-skill@1.0",
 			Name:            "pinned-skill",
 			ResolvedVersion: "1.0.0",
 			ContentHash:     "sha256:matchme",
@@ -120,11 +120,11 @@ func TestFederateResolve_PinnedHappyPath(t *testing.T) {
 		t.Fatalf("failed to create registry: %v", err)
 	}
 
-	if err := s.PinSkillHash(t.Context(), registry.ID, "skill://ext-registry/core/pinned-skill@1.0", "sha256:matchme"); err != nil {
+	if err := s.PinSkillHash(t.Context(), registry.ID, "skill://ext-registry/global/pinned-skill@1.0", "sha256:matchme"); err != nil {
 		t.Fatalf("failed to pin hash: %v", err)
 	}
 
-	resolved, resolveErr := srv.federateResolve(t.Context(), "ext-registry", ResolveSkillRef{URI: "skill://ext-registry/core/pinned-skill@1.0"})
+	resolved, resolveErr := srv.federateResolve(t.Context(), "ext-registry", ResolveSkillRef{URI: "skill://ext-registry/global/pinned-skill@1.0"})
 	if resolveErr != nil {
 		t.Fatalf("unexpected error: %s", resolveErr.Message)
 	}
@@ -136,7 +136,7 @@ func TestFederateResolve_PinnedHappyPath(t *testing.T) {
 func TestFederateResolve_PinnedHashMismatch(t *testing.T) {
 	mockResp := ResolveSkillsResponse{
 		Resolved: []ResolvedSkillResponse{{
-			URI:             "skill://ext-registry/core/bad-skill@1.0",
+			URI:             "skill://ext-registry/global/bad-skill@1.0",
 			Name:            "bad-skill",
 			ResolvedVersion: "1.0.0",
 			ContentHash:     "sha256:different",
@@ -161,11 +161,11 @@ func TestFederateResolve_PinnedHashMismatch(t *testing.T) {
 	if err := s.CreateSkillRegistry(t.Context(), registry); err != nil {
 		t.Fatalf("failed to create registry: %v", err)
 	}
-	if err := s.PinSkillHash(t.Context(), registry.ID, "skill://ext-registry/core/bad-skill@1.0", "sha256:expected"); err != nil {
+	if err := s.PinSkillHash(t.Context(), registry.ID, "skill://ext-registry/global/bad-skill@1.0", "sha256:expected"); err != nil {
 		t.Fatalf("failed to pin hash: %v", err)
 	}
 
-	_, resolveErr := srv.federateResolve(t.Context(), "ext-registry", ResolveSkillRef{URI: "skill://ext-registry/core/bad-skill@1.0"})
+	_, resolveErr := srv.federateResolve(t.Context(), "ext-registry", ResolveSkillRef{URI: "skill://ext-registry/global/bad-skill@1.0"})
 	if resolveErr == nil {
 		t.Fatal("expected trust_violation error")
 	}
@@ -180,7 +180,7 @@ func TestFederateResolve_PinnedHashMismatch(t *testing.T) {
 func TestFederateResolve_NoPinConfigured(t *testing.T) {
 	mockResp := ResolveSkillsResponse{
 		Resolved: []ResolvedSkillResponse{{
-			URI:             "skill://ext-registry/core/unpinned@1.0",
+			URI:             "skill://ext-registry/global/unpinned@1.0",
 			Name:            "unpinned",
 			ResolvedVersion: "1.0.0",
 			ContentHash:     "sha256:any",
@@ -206,7 +206,7 @@ func TestFederateResolve_NoPinConfigured(t *testing.T) {
 		t.Fatalf("failed to create registry: %v", err)
 	}
 
-	_, resolveErr := srv.federateResolve(t.Context(), "ext-registry", ResolveSkillRef{URI: "skill://ext-registry/core/unpinned@1.0"})
+	_, resolveErr := srv.federateResolve(t.Context(), "ext-registry", ResolveSkillRef{URI: "skill://ext-registry/global/unpinned@1.0"})
 	if resolveErr == nil {
 		t.Fatal("expected trust_violation error for missing pin")
 	}
@@ -222,7 +222,7 @@ func TestFederateResolve_UnknownRegistry(t *testing.T) {
 	mock := newFederationMockRegistry(t, func(w http.ResponseWriter, r *http.Request) {})
 	srv, _ := newFederationTestServer(t, mock)
 
-	_, resolveErr := srv.federateResolve(t.Context(), "nonexistent", ResolveSkillRef{URI: "skill://nonexistent/core/test@1.0"})
+	_, resolveErr := srv.federateResolve(t.Context(), "nonexistent", ResolveSkillRef{URI: "skill://nonexistent/global/test@1.0"})
 	if resolveErr == nil {
 		t.Fatal("expected unknown_registry error")
 	}
@@ -246,7 +246,7 @@ func TestFederateResolve_DisabledRegistry(t *testing.T) {
 		t.Fatalf("failed to create registry: %v", err)
 	}
 
-	_, resolveErr := srv.federateResolve(t.Context(), "disabled-reg", ResolveSkillRef{URI: "skill://disabled-reg/core/test@1.0"})
+	_, resolveErr := srv.federateResolve(t.Context(), "disabled-reg", ResolveSkillRef{URI: "skill://disabled-reg/global/test@1.0"})
 	if resolveErr == nil {
 		t.Fatal("expected registry_disabled error")
 	}
@@ -270,7 +270,7 @@ func TestFederateResolve_WrongRegistryType(t *testing.T) {
 		t.Fatalf("failed to create registry: %v", err)
 	}
 
-	_, resolveErr := srv.federateResolve(t.Context(), "gcp-reg", ResolveSkillRef{URI: "skill://gcp-reg/core/test@1.0"})
+	_, resolveErr := srv.federateResolve(t.Context(), "gcp-reg", ResolveSkillRef{URI: "skill://gcp-reg/global/test@1.0"})
 	if resolveErr == nil {
 		t.Fatal("expected wrong_registry_type error")
 	}
@@ -298,7 +298,7 @@ func TestFederateResolve_ExternalRegistryDown(t *testing.T) {
 		t.Fatalf("failed to create registry: %v", err)
 	}
 
-	_, resolveErr := srv.federateResolve(t.Context(), "down-reg", ResolveSkillRef{URI: "skill://down-reg/core/test@1.0"})
+	_, resolveErr := srv.federateResolve(t.Context(), "down-reg", ResolveSkillRef{URI: "skill://down-reg/global/test@1.0"})
 	if resolveErr == nil {
 		t.Fatal("expected federation_error")
 	}
@@ -313,7 +313,7 @@ func TestFederateResolve_AuthTokenSent(t *testing.T) {
 		receivedAuth = r.Header.Get("Authorization")
 		resp := ResolveSkillsResponse{
 			Resolved: []ResolvedSkillResponse{{
-				URI:             "skill://auth-reg/core/test@1.0",
+				URI:             "skill://auth-reg/global/test@1.0",
 				Name:            "test",
 				ResolvedVersion: "1.0.0",
 				ContentHash:     "sha256:abc",
@@ -337,7 +337,7 @@ func TestFederateResolve_AuthTokenSent(t *testing.T) {
 		t.Fatalf("failed to create registry: %v", err)
 	}
 
-	_, resolveErr := srv.federateResolve(t.Context(), "auth-reg", ResolveSkillRef{URI: "skill://auth-reg/core/test@1.0"})
+	_, resolveErr := srv.federateResolve(t.Context(), "auth-reg", ResolveSkillRef{URI: "skill://auth-reg/global/test@1.0"})
 	if resolveErr != nil {
 		t.Fatalf("unexpected error: %s", resolveErr.Message)
 	}
@@ -352,7 +352,7 @@ func TestFederateResolve_CustomResolvePath(t *testing.T) {
 		receivedPath = r.URL.Path
 		resp := ResolveSkillsResponse{
 			Resolved: []ResolvedSkillResponse{{
-				URI:             "skill://custom-reg/core/test@1.0",
+				URI:             "skill://custom-reg/global/test@1.0",
 				Name:            "test",
 				ResolvedVersion: "1.0.0",
 				ContentHash:     "sha256:abc",
@@ -376,7 +376,7 @@ func TestFederateResolve_CustomResolvePath(t *testing.T) {
 		t.Fatalf("failed to create registry: %v", err)
 	}
 
-	_, resolveErr := srv.federateResolve(t.Context(), "custom-reg", ResolveSkillRef{URI: "skill://custom-reg/core/test@1.0"})
+	_, resolveErr := srv.federateResolve(t.Context(), "custom-reg", ResolveSkillRef{URI: "skill://custom-reg/global/test@1.0"})
 	if resolveErr != nil {
 		t.Fatalf("unexpected error: %s", resolveErr.Message)
 	}

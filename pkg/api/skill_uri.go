@@ -23,8 +23,8 @@ import (
 // SkillURI is the parsed representation of a skill reference URI.
 type SkillURI struct {
 	Registry string // "scion", "registry.example.com", etc. Default: "scion"
-	Scope    string // "core", "global", "project", "user", or "" (search)
-	ScopeID  string // project ID or user ID; empty for core/global or search
+	Scope    string // "global", "project", "user", or "" (search)
+	ScopeID  string // project ID or user ID; empty for global or search
 	Name     string // kebab-case skill name
 	Version  string // "1.2.3", "^1.0", "latest", "sha256:...", etc. Default: "latest"
 	Raw      string // original input for error messages
@@ -38,13 +38,13 @@ const (
 )
 
 var validScopes = map[string]bool{
-	"core":    true,
 	"global":  true,
 	"project": true,
 	"user":    true,
 }
 
 var registryAliases = map[string]string{
+	"global":  "global",
 	"project": "project",
 	"user":    "user",
 }
@@ -68,10 +68,10 @@ func ValidateSkillName(name string) error {
 
 // ParseSkillURI parses a skill URI string into its components.
 // Accepts all forms from the normative grammar:
-//   - Full:        skill://scion/core/scion@^1.0
-//   - No reg:      skill:///core/scion@^1.0
-//   - No ver:      skill://scion/core/scion
-//   - Alias:       skill://project/my-skill@latest
+//   - Full:        skill://scion/global/scion@^1.0
+//   - No reg:      skill:///global/scion@^1.0
+//   - No ver:      skill://scion/global/scion
+//   - Alias:       skill://global/my-skill, skill://project/my-skill@latest
 //   - Single name: skill://my-skill  (equivalent to skill://scion/my-skill; AC #5)
 //   - Bare:        scion
 //
@@ -153,6 +153,16 @@ func parseFullURI(raw string, uri *SkillURI) (*SkillURI, error) {
 	registry := segments[0]
 	pathSegments := segments[1:]
 
+	if registry == "core" && len(pathSegments) >= 1 {
+		name := ""
+		if len(pathSegments) == 1 {
+			name = pathSegments[0]
+		} else if len(pathSegments) == 2 {
+			name = pathSegments[1]
+		}
+		return nil, retiredCoreScopeError(raw, defaultRegistry, name, version)
+	}
+
 	// Handle registry aliases
 	if alias, ok := registryAliases[registry]; ok {
 		uri.Scope = alias
@@ -198,6 +208,9 @@ func parseAliasPath(raw string, uri *SkillURI, segments []string, version string
 		// skill://project/my-skill — no scope ID
 		uri.Name = segments[0]
 	case 2:
+		if uri.Scope == "global" {
+			return nil, fmt.Errorf("invalid skill URI %q: global scope does not take a scope ID", raw)
+		}
 		// skill://project/my-proj-id/my-skill — with scope ID
 		uri.ScopeID = segments[0]
 		uri.Name = segments[1]
@@ -225,18 +238,24 @@ func parseScopedPath(raw string, uri *SkillURI, segments []string, version strin
 		// skill://scion/my-skill — scope is empty (search order)
 		uri.Name = segments[0]
 	case 2:
-		// skill://scion/core/my-skill — with scope keyword
+		// skill://scion/global/my-skill — with scope keyword
 		scope := segments[0]
+		if scope == "core" {
+			return nil, retiredCoreScopeError(raw, uri.Registry, segments[1], version)
+		}
 		if !validScopes[scope] {
-			return nil, fmt.Errorf("invalid skill URI %q: unrecognized scope %q (must be core, global, project, or user)", raw, scope)
+			return nil, fmt.Errorf("invalid skill URI %q: unrecognized scope %q (must be global, project, or user)", raw, scope)
 		}
 		uri.Scope = scope
 		uri.Name = segments[1]
 	case 3:
 		// skill://scion/project/my-proj-id/my-skill — with scope keyword and scope ID
 		scope := segments[0]
+		if scope == "core" {
+			return nil, retiredCoreScopeError(raw, uri.Registry, segments[2], version)
+		}
 		if !validScopes[scope] {
-			return nil, fmt.Errorf("invalid skill URI %q: unrecognized scope %q (must be core, global, project, or user)", raw, scope)
+			return nil, fmt.Errorf("invalid skill URI %q: unrecognized scope %q (must be global, project, or user)", raw, scope)
 		}
 		uri.Scope = scope
 		uri.ScopeID = segments[1]
@@ -290,6 +309,21 @@ func SkillURIScheme(uri string) string {
 		return strings.ToLower(uri[:idx])
 	}
 	return "skill"
+}
+
+func retiredCoreScopeError(raw, registry, name, version string) error {
+	basePrefix := "skill://scion/global/"
+	if registry != "" && registry != defaultRegistry {
+		basePrefix = "skill://" + registry + "/global/"
+	}
+	replacement := basePrefix + "<name>"
+	if name != "" && ValidateSkillName(name) == nil {
+		replacement = basePrefix + name
+		if version != "" {
+			replacement += "@" + version
+		}
+	}
+	return fmt.Errorf("invalid skill URI %q: the \"core\" skill scope is no longer supported; use %s instead", raw, replacement)
 }
 
 func stripVersionPrefix(v string) string {
