@@ -576,6 +576,9 @@ type UserPreferences struct {
 	DefaultProfile  string `json:"defaultProfile,omitempty"`
 	Theme           string `json:"theme,omitempty"`
 	Timezone        string `json:"timezone,omitempty"`
+	// PreselectRecommendedChoices makes multi-decision choices cards start
+	// with recommended choices selected.
+	PreselectRecommendedChoices bool `json:"preselectRecommendedChoices,omitempty"`
 }
 
 // EnvVar represents an environment variable from the Hub API.

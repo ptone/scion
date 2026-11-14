@@ -57,11 +57,17 @@ const isPhone = (page: Page): boolean => (page.viewportSize()?.width ?? 0) <= 76
  * applied the way index.html applies a saved choice (so the real theme
  * tokens are in effect).
  */
+/**
+ * Opens the thread with choice cards on. `preselect` gives the signed-in
+ * user the preselectRecommendedChoices profile setting (ptone/scion#7842);
+ * without it recommended choices are only outlined.
+ */
 async function openChoices(
   page: Page,
   theme: Theme,
   thread: ChoiceThread,
-  asker: AskerLookup = 'ok'
+  asker: AskerLookup = 'ok',
+  { preselect = false }: { preselect?: boolean } = {}
 ): Promise<void> {
   await openChatRail(page, async (p) => {
     await p.addInitScript((t) => {
@@ -69,6 +75,17 @@ async function openChoices(
       window.__SCION_FEATURES__ = { ...window.__SCION_FEATURES__, 'web.chat_choices': true };
     }, theme);
     await routeChoiceThread(p, thread, asker);
+    if (preselect) {
+      await p.route('**/auth/me', (route) =>
+        route.fulfill({
+          json: {
+            id: SELF_ID,
+            email: 'fixture@example.test',
+            preferences: { preselectRecommendedChoices: true },
+          },
+        })
+      );
+    }
   });
   if (isPhone(page)) await openGeneralThread(page);
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
@@ -225,10 +242,40 @@ for (const theme of ['light', 'dark'] as const) {
       await shot(page, testInfo, theme, '02-single-answered', ['prompt-1']);
     });
 
-    test('set pending: defaults selected, "1 remaining", Submit disabled naming 17', async ({
+    test('set pending (default): recommended outlined, nothing selected, "3 remaining"', async ({
       page,
     }, testInfo) => {
       await openChoices(page, theme, setThread('prompt-set', setDecisions('prompt-set')));
+      await markdownReady(page, 'prompt-set');
+      const c = card(page, 'prompt-set');
+      await expect(c.locator('.row[role="group"]')).toHaveCount(3);
+      await expect(c.getByRole('button', { pressed: true })).toHaveCount(0);
+      const d234 = c.getByRole('group', { name: 'Ship v0.9 today?' });
+      const yes = d234.getByRole('button', { name: /^Yes/, pressed: false });
+      await expect(yes).toHaveAttribute('data-look', 'outline');
+      await expect(yes).toHaveAttribute('title', 'Yes (recommended)');
+      const shipNow = c.getByRole('group', { name: 'Deploy to prod after tagging?' });
+      await expect(shipNow.getByRole('button', { name: /^No/, pressed: false })).toHaveAttribute(
+        'data-look',
+        'outline'
+      );
+      await expect(c.locator('.counter')).toHaveText('3 remaining');
+      await expect(c.locator('.counter')).toHaveClass(/missing/);
+      const submit = c.locator('sl-button.submit');
+      await expect(submit).toHaveAttribute('aria-disabled', 'true');
+      await expect(c.locator('sl-tooltip')).toHaveAttribute(
+        'content',
+        'Choose an answer for D234, 17, ship-now first'
+      );
+      await shot(page, testInfo, theme, '04-set-pending', ['prompt-set']);
+    });
+
+    test('set pending, preselect setting on: defaults selected, "1 remaining", Submit disabled naming 17', async ({
+      page,
+    }, testInfo) => {
+      await openChoices(page, theme, setThread('prompt-set', setDecisions('prompt-set')), 'ok', {
+        preselect: true,
+      });
       await markdownReady(page, 'prompt-set');
       const c = card(page, 'prompt-set');
       await expect(c.locator('.card.set')).toHaveAttribute(
@@ -257,7 +304,7 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(c.locator(`[id="${hintId}"]`)).toHaveText('Choose an answer for 17 first');
       // A filled (selected) choice has a white label in both themes, as in the mocks.
       await expect(d234.locator('[data-choice="yes"]')).toHaveCSS('color', 'rgb(255, 255, 255)');
-      await shot(page, testInfo, theme, '04-set-pending', ['prompt-set']);
+      await shot(page, testInfo, theme, '04b-set-pending-preselect', ['prompt-set']);
     });
 
     test('set pending with a stacked row (mobile mock)', async ({ page }, testInfo) => {
@@ -273,7 +320,7 @@ for (const theme of ['light', 'dark'] as const) {
       await markdownReady(page, 'prompt-set');
       const c = card(page, 'prompt-set');
       await expect(c.locator('.row[data-row="prompt-set-17"] .choices.stack')).toBeVisible();
-      await expect(c.locator('.counter')).toHaveText('1 remaining');
+      await expect(c.locator('.counter')).toHaveText('3 remaining');
       await shot(page, testInfo, theme, '13-set-pending-stacked', ['prompt-set']);
     });
 
@@ -282,7 +329,10 @@ for (const theme of ['light', 'dark'] as const) {
       await openChoices(page, theme, setThread('prompt-set', decisions));
       await markdownReady(page, 'prompt-set');
       const c = card(page, 'prompt-set');
+      await c.locator('.row[data-row="prompt-set-d234"] [data-choice="yes"]').click();
       await c.locator('.row[data-row="prompt-set-17"] [data-choice="a"]').click();
+      await expect(c.locator('.counter')).toHaveText('1 remaining');
+      await c.locator('.row[data-row="prompt-set-ship-now"] [data-choice="no"]').click();
       await expect(c.locator('.counter')).toHaveText('0 remaining');
       await expect(c.locator('.counter')).not.toHaveClass(/missing/);
       const submit = c.locator('sl-button.submit');
@@ -354,7 +404,7 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(replaced.locator('.row-foot')).toContainText('Replaced by v2');
       await expect(replaced.locator('a.jump')).toHaveText('Jump to v2');
       await expect(replaced.locator('[data-choice]').first()).toBeDisabled();
-      await expect(c.locator('.counter')).toHaveText('0 remaining · 1 replaced');
+      await expect(c.locator('.counter')).toHaveText('2 remaining · 1 replaced');
       await shot(page, testInfo, theme, '07-set-replaced-row', ['prompt-set']);
     });
 
@@ -367,6 +417,7 @@ for (const theme of ['light', 'dark'] as const) {
       const c = card(page, 'prompt-set');
       await c.locator('.row[data-row="prompt-set-d234"] [data-choice="no"]').click();
       await c.locator('.row[data-row="prompt-set-17"] [data-choice="a"]').click();
+      await c.locator('.row[data-row="prompt-set-ship-now"] [data-choice="no"]').click();
       await page.route('**/api/v1/choice-prompts/*/answers', (route) =>
         route.fulfill({
           status: 409,
@@ -698,7 +749,9 @@ for (const theme of ['light', 'dark'] as const) {
       ];
       const thread = setThread('prompt-p24', decisions, 'Two calls before the release.');
       thread.messages.push(row('reply-p24', 2, 'instruction', 'Ship v0.9 today.', 'self'));
-      await openChoices(page, theme, thread);
+      // With the preselect setting on (ptone/scion#7842), so the pending row
+      // starts on its default and the interpreted row shows it beats one.
+      await openChoices(page, theme, thread, 'ok', { preselect: true });
       await markdownReady(page, 'prompt-p24');
 
       const c = card(page, 'prompt-p24');

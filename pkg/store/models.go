@@ -1964,6 +1964,10 @@ type UserPreferences struct {
 	DefaultProfile  string `json:"defaultProfile,omitempty"`
 	Theme           string `json:"theme,omitempty"`    // light, dark
 	Timezone        string `json:"timezone,omitempty"` // IANA zone name; empty means Auto (browser zone)
+	// PreselectRecommendedChoices makes a multi-decision choices card start
+	// with each recommended choice selected. Off by default: recommended
+	// choices are only outlined (ptone/scion#7842).
+	PreselectRecommendedChoices bool `json:"preselectRecommendedChoices,omitempty"`
 }
 
 // UserRole constants

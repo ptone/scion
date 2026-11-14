@@ -35,6 +35,12 @@ export interface UserPreferences {
    * browser's zone). See `web/src/utils/time.ts`'s `effectiveTimeZone`.
    */
   timezone?: string | undefined;
+  /**
+   * Whether multi-decision choices cards start with each recommended choice
+   * selected (ptone/scion#7842). Absent means off: recommended choices are
+   * only outlined. See `web/src/client/choice-preferences.ts`.
+   */
+  preselectRecommendedChoices?: boolean | undefined;
 }
 
 /**

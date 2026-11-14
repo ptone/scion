@@ -16,7 +16,8 @@
 
 /**
  * `<scion-chat-choices>` in set mode (ptone/scion#7673, design §4.2, §4.3,
- * §4.7): defaults pre-selected, local selection, the "N remaining" counter,
+ * §4.7): the highlight-only default and the preselect profile setting
+ * (ptone/scion#7842), local selection, the "N remaining" counter,
  * Submit gating and its missing-keys hint, the set POST, the submitted
  * footer, 409 answer_set_changed, rows answered elsewhere, and replaced
  * rows left out of a smaller set.
@@ -25,6 +26,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { DecisionView } from '../../../shared/types.js';
 import type { ChoiceAnsweredDetail } from '../../../client/chat-choices.js';
+import { setPreselectRecommendedChoices } from '../../../client/choice-preferences.js';
 
 const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: RequestInit) => Promise<Response>>());
 const showToast = vi.hoisted(() => vi.fn());
@@ -150,13 +152,94 @@ async function click(el: ScionChatChoices, node: HTMLElement): Promise<void> {
 beforeEach(() => {
   apiFetch.mockReset();
   showToast.mockReset();
+  // Most suites below build on recommended choices starting selected, the
+  // viewer's opt-in setting; 'set card, highlight only' covers the default.
+  setPreselectRecommendedChoices(true);
 });
 
 afterEach(() => {
   document.body.innerHTML = '';
+  setPreselectRecommendedChoices(false);
 });
 
-describe('set card, pending', () => {
+describe('set card, highlight only (default, ptone/scion#7842)', () => {
+  beforeEach(() => setPreselectRecommendedChoices(false));
+
+  it('outlines recommended choices and selects nothing', async () => {
+    const el = await mount(set());
+    expect(root(el).querySelectorAll('.row [aria-pressed="true"]')).toHaveLength(0);
+    for (const [rowId, id] of [
+      ['r1', 'yes'],
+      ['r3', 'no'],
+    ] as const) {
+      const rec = choice(el, rowId, id);
+      expect(rec.getAttribute('data-look')).toBe('outline');
+      expect(rec.getAttribute('aria-pressed')).toBe('false');
+      expect(rec.getAttribute('title')).toContain('(recommended)');
+    }
+    expect(choice(el, 'r1', 'no').getAttribute('data-look')).toBe('default');
+  });
+
+  it('starts the counter at the full count and names every key in the Submit hint', async () => {
+    const el = await mount(set());
+    expect(counter(el)).toBe('3 remaining');
+    expect(submit(el).hasAttribute('disabled')).toBe(true);
+    expect(root(el).querySelector('sl-tooltip')!.getAttribute('content')).toBe(
+      'Choose an answer for D234, 17, ship-now first'
+    );
+  });
+
+  it('needs a click on every row, then submits the clicked choices', async () => {
+    apiFetch.mockResolvedValueOnce(
+      res(200, { decisions: set().map((d, i) => decidedBy(d, ['yes', 'a', 'yes'][i]!, ME)) })
+    );
+    const el = await mount(set());
+    await click(el, choice(el, 'r1', 'yes'));
+    expect(choice(el, 'r1', 'yes').getAttribute('data-look')).toBe('filled');
+    expect(counter(el)).toBe('2 remaining');
+    await click(el, choice(el, 'r2', 'a'));
+    await click(el, choice(el, 'r3', 'yes'));
+    expect(counter(el)).toBe('0 remaining');
+    expect(choice(el, 'r3', 'no').getAttribute('data-look')).toBe('outline');
+    await click(el, submit(el));
+    const body = JSON.parse(apiFetch.mock.calls[0]![1]!.body as string);
+    expect(body.answers).toEqual([
+      { decision_row_id: 'r1', choice_id: 'yes' },
+      { decision_row_id: 'r2', choice_id: 'a' },
+      { decision_row_id: 'r3', choice_id: 'yes' },
+    ]);
+  });
+
+  it('keeps a click on a preselected choice when the setting is turned off', async () => {
+    setPreselectRecommendedChoices(true);
+    const el = await mount(set());
+    expect(choice(el, 'r1', 'yes').getAttribute('aria-pressed')).toBe('true');
+    await click(el, choice(el, 'r1', 'yes'));
+    expect(apiFetch).not.toHaveBeenCalled();
+    setPreselectRecommendedChoices(false);
+    await settle(el);
+    expect(choice(el, 'r1', 'yes').getAttribute('aria-pressed')).toBe('true');
+    expect(choice(el, 'r3', 'no').getAttribute('aria-pressed')).toBe('false');
+    expect(counter(el)).toBe('2 remaining');
+  });
+
+  it("an open card follows the setting, keeping the viewer's clicks", async () => {
+    const el = await mount(set());
+    await click(el, choice(el, 'r3', 'yes'));
+    setPreselectRecommendedChoices(true);
+    await settle(el);
+    expect(choice(el, 'r1', 'yes').getAttribute('aria-pressed')).toBe('true');
+    expect(choice(el, 'r3', 'yes').getAttribute('aria-pressed')).toBe('true');
+    expect(counter(el)).toBe('1 remaining');
+    setPreselectRecommendedChoices(false);
+    await settle(el);
+    expect(choice(el, 'r1', 'yes').getAttribute('aria-pressed')).toBe('false');
+    expect(choice(el, 'r3', 'yes').getAttribute('aria-pressed')).toBe('true');
+    expect(counter(el)).toBe('2 remaining');
+  });
+});
+
+describe('set card, pending, preselect setting on', () => {
   it('renders the header with the count and every key badge', async () => {
     const el = await mount(set());
     const head = root(el).querySelector('.card-head')!;

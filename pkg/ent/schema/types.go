@@ -24,6 +24,8 @@ type UserPreferences struct {
 	DefaultProfile  string `json:"defaultProfile,omitempty"`
 	Theme           string `json:"theme,omitempty"`
 	Timezone        string `json:"timezone,omitempty"`
+	// PreselectRecommendedChoices: see store.UserPreferences.
+	PreselectRecommendedChoices bool `json:"preselectRecommendedChoices,omitempty"`
 }
 
 // DelegatedFromCondition specifies a delegation source for policy matching.

@@ -64,10 +64,11 @@ func storePrefsToEnt(p *store.UserPreferences) *entschema.UserPreferences {
 		return nil
 	}
 	return &entschema.UserPreferences{
-		DefaultTemplate: p.DefaultTemplate,
-		DefaultProfile:  p.DefaultProfile,
-		Theme:           p.Theme,
-		Timezone:        p.Timezone,
+		DefaultTemplate:             p.DefaultTemplate,
+		DefaultProfile:              p.DefaultProfile,
+		Theme:                       p.Theme,
+		Timezone:                    p.Timezone,
+		PreselectRecommendedChoices: p.PreselectRecommendedChoices,
 	}
 }
 
@@ -77,10 +78,11 @@ func entPrefsToStore(p *entschema.UserPreferences) *store.UserPreferences {
 		return nil
 	}
 	return &store.UserPreferences{
-		DefaultTemplate: p.DefaultTemplate,
-		DefaultProfile:  p.DefaultProfile,
-		Theme:           p.Theme,
-		Timezone:        p.Timezone,
+		DefaultTemplate:             p.DefaultTemplate,
+		DefaultProfile:              p.DefaultProfile,
+		Theme:                       p.Theme,
+		Timezone:                    p.Timezone,
+		PreselectRecommendedChoices: p.PreselectRecommendedChoices,
 	}
 }
 

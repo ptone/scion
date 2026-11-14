@@ -466,6 +466,8 @@ type userPreferencesPatch struct {
 	DefaultProfile  *string
 	Theme           *string
 	Timezone        *string
+
+	PreselectRecommendedChoices *bool
 }
 
 // decodeStringPref unmarshals one preferences sub-field's raw JSON value
@@ -478,6 +480,18 @@ func decodeStringPref(key string, rv json.RawMessage) (string, error) {
 	var v string
 	if err := json.Unmarshal(rv, &v); err != nil {
 		return "", fmt.Errorf("invalid preferences.%s: %w", key, err)
+	}
+	return v, nil
+}
+
+// decodeBoolPref unmarshals one boolean preferences sub-field for the
+// per-key preferences PATCH merge. A JSON null decodes to false, which
+// clears the preference like decodeStringPref's ""; a non-boolean JSON value
+// is a decode error, which the caller reports as a 400.
+func decodeBoolPref(key string, rv json.RawMessage) (bool, error) {
+	var v bool
+	if err := json.Unmarshal(rv, &v); err != nil {
+		return false, fmt.Errorf("invalid preferences.%s: %w", key, err)
 	}
 	return v, nil
 }
@@ -626,6 +640,14 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 						return
 					}
 					patch.Timezone = &v
+					hasFields = true
+				case "preselectRecommendedChoices":
+					v, err := decodeBoolPref(key, rv)
+					if err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					patch.PreselectRecommendedChoices = &v
 					hasFields = true
 				default:
 					// Unknown preferences keys are silently ignored (200, no
@@ -864,6 +886,9 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			}
 			if prefsPatch.Timezone != nil {
 				txUser.Preferences.Timezone = *prefsPatch.Timezone
+			}
+			if prefsPatch.PreselectRecommendedChoices != nil {
+				txUser.Preferences.PreselectRecommendedChoices = *prefsPatch.PreselectRecommendedChoices
 			}
 		}
 

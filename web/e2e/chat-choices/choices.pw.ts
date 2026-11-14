@@ -541,6 +541,103 @@ test.describe('Interactive chat choices on real hub (web.chat_choices)', () => {
     }
   });
 
+  test('set card: recommended choices outlined by default; the profile setting preselects them (ptone/scion#7842)', async ({
+    browser,
+  }) => {
+    // A user of its own, so the stored preference cannot reach other tests.
+    const carol = await createSession(hub.baseURL, {
+      email: 'carol-choices@e2e.test',
+      role: 'member',
+      displayName: 'Carol Choices',
+    });
+    const rolesRes = await hubApi<{ items?: Array<{ id: string; name: string }> }>(
+      hub,
+      hub.devToken,
+      'GET',
+      `/api/v1/projects/${encodeURIComponent(projectId)}/members/assignable-roles`
+    );
+    const answererRole = (rolesRes.body.items ?? []).find((r) => r.name === 'project-admin');
+    const addRes = await hubApi(
+      hub,
+      hub.devToken,
+      'POST',
+      `/api/v1/projects/${encodeURIComponent(projectId)}/members`,
+      {
+        roleDefinitionId: answererRole!.id,
+        principalType: 'user',
+        principalId: carol.user.email,
+      }
+    );
+    expect([200, 201], JSON.stringify(addRes.body)).toContain(addRes.status);
+
+    const topicName = 'choices-preselect';
+    const topicId = await createProjectTopic(hub, projectId, topicName);
+    const routePath = `/chat/space/${projectId}/thread/${topicId}`;
+    const subject = `project.${projectId}.chat.>`;
+
+    const { context, page } = await openUserContext(browser, hub, carol);
+    try {
+      await openChatAndAwaitSSE(page, routePath, subject);
+      const sendRes = await agent.sendChoicePrompt({
+        conversationRef: `#${topicName}`,
+        msg: 'Release calls:',
+        choices: [
+          {
+            id: 'D-SHIP',
+            question: 'Ship today?',
+            choices: [
+              { id: 'yes', label: 'Yes' },
+              { id: 'no', label: 'No' },
+            ],
+            default: 'yes',
+          },
+          {
+            id: 'D-NOTE',
+            question: 'Post release notes?',
+            choices: [
+              { id: 'now', label: 'Now' },
+              { id: 'later', label: 'Later' },
+            ],
+          },
+        ],
+      });
+      const shipRowId = sendRes.decisions![0].row_id;
+      const card = (): ReturnType<Page['locator']> =>
+        page.locator(
+          `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-choices .card.set`
+        );
+
+      // Default: highlight only.
+      await expect(card()).toBeVisible({ timeout: 15_000 });
+      const yes = (): ReturnType<Page['locator']> =>
+        card().locator(`[data-row="${shipRowId}"] button[data-choice="yes"]`);
+      await expect(yes()).toHaveAttribute('aria-pressed', 'false');
+      await expect(yes()).toHaveAttribute('data-look', 'outline');
+      await expect(card().locator('.card-foot .counter')).toHaveText('2 remaining');
+
+      // Turn the setting on in profile settings; it is stored on the hub.
+      await page.goto('/profile/settings', { waitUntil: 'domcontentloaded' });
+      const toggle = page.locator('sl-switch.preselect-recommended-switch');
+      await expect(toggle).toBeVisible({ timeout: 15_000 });
+      await expect(toggle).not.toHaveAttribute('checked', '');
+      const saved = page.waitForResponse(
+        (r) => r.request().method() === 'PATCH' && /\/api\/v1\/users\/[^/]+$/.test(r.url())
+      );
+      await toggle.click();
+      expect((await saved).status()).toBe(200);
+      await expect(toggle).toHaveAttribute('checked', '');
+
+      // A fresh load reads it back from the hub: the recommended choice
+      // starts selected.
+      await openChatAndAwaitSSE(page, routePath, subject);
+      await expect(card()).toBeVisible({ timeout: 15_000 });
+      await expect(yes()).toHaveAttribute('aria-pressed', 'true');
+      await expect(card().locator('.card-foot .counter')).toHaveText('1 remaining');
+    } finally {
+      await context.close();
+    }
+  });
+
   test('replacement with choicesUpdate flips open v1 card live over SSE to Replaced by v2', async ({
     browser,
   }) => {

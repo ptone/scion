@@ -175,6 +175,7 @@ describe('interpreted answer', () => {
     const r1 = root(el).querySelector('.row[data-row="r1"]')!;
     expect(text(r1.querySelector('.row-foot'))).toMatch(/^Interpreted by agent-x/);
     expect(r1.querySelector('[data-choice="a"]')!.hasAttribute('disabled')).toBe(true);
-    expect(text(root(el).querySelector('.counter'))).toBe('0 remaining · 1 answered by alice');
+    // Row 18's recommended choice is only outlined (ptone/scion#7842).
+    expect(text(root(el).querySelector('.counter'))).toBe('1 remaining · 1 answered by alice');
   });
 });

@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { getPreferredTimeZone, setPreferredTimeZone } from '../../utils/time.js';
+import { setFeatureFlag } from '../../utils/feature-flags.js';
+import {
+  preselectRecommendedChoices,
+  setPreselectRecommendedChoices,
+} from '../../client/choice-preferences.js';
 
 // ── Fetch mock ──
 
@@ -585,5 +590,90 @@ describe('scion-page-profile-settings — view mode shortcuts', () => {
       expect(removed('storage')).toContain(storageHandler);
       expect(removed(VIEW_MODE_SHORTCUTS_CHANGED_EVENT)).toContain(changedHandler);
     });
+  });
+});
+
+describe('scion-page-profile-settings — preselect recommended choices (ptone/scion#7842)', () => {
+  let element: AnyEl = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler({})));
+    await import('./profile-settings.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    const features = { ...window.__SCION_FEATURES__ };
+    delete features['web.chat_choices'];
+    window.__SCION_FEATURES__ = features;
+    setPreselectRecommendedChoices(false);
+    vi.restoreAllMocks();
+  });
+
+  const preselectSwitch = (el: AnyEl): AnyEl =>
+    el.shadowRoot?.querySelector('sl-switch.preselect-recommended-switch');
+
+  const authMe = (preselect?: boolean): AuthMeFixture => ({
+    body: {
+      ...makeAuthMe(),
+      preferences: preselect === undefined ? {} : { preselectRecommendedChoices: preselect },
+    },
+  });
+
+  it('is hidden while web.chat_choices is off', async () => {
+    setFeatureFlag('web.chat_choices', false);
+    element = await createComponent(createFetchHandler({}, undefined, authMe(true)));
+    expect(preselectSwitch(element)).toBeNull();
+    expect(shadowText(element)).not.toContain('Preselect recommended choices');
+  });
+
+  it('is off by default and shows the stored preference', async () => {
+    setFeatureFlag('web.chat_choices', true);
+    element = await createComponent(createFetchHandler({}, undefined, authMe()));
+    expect(preselectSwitch(element)?.hasAttribute('checked')).toBe(false);
+    element.remove();
+
+    element = await createComponent(createFetchHandler({}, undefined, authMe(true)));
+    expect(preselectSwitch(element)?.hasAttribute('checked')).toBe(true);
+  });
+
+  it('saves with a per-key preferences PATCH and applies it to open cards', async () => {
+    setFeatureFlag('web.chat_choices', true);
+    let sent: Record<string, unknown> | null = null;
+    element = await createComponent(
+      createFetchHandler({}, undefined, authMe(), (body) => {
+        sent = body;
+        return { status: 200, body: { id: 'u1' } };
+      })
+    );
+    const sw = preselectSwitch(element);
+    sw.checked = true;
+    sw.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(element);
+    await settle(element);
+
+    expect(sent).toEqual({ preferences: { preselectRecommendedChoices: true } });
+    expect(preselectRecommendedChoices()).toBe(true);
+    expect(preselectSwitch(element)?.hasAttribute('checked')).toBe(true);
+  });
+
+  it('reverts the switch and shows the error when the PATCH fails', async () => {
+    setFeatureFlag('web.chat_choices', true);
+    element = await createComponent(
+      createFetchHandler({}, undefined, authMe(), () => ({
+        status: 500,
+        body: { error: { code: 'INTERNAL', message: 'boom' } },
+      }))
+    );
+    const sw = preselectSwitch(element);
+    sw.checked = true;
+    sw.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(element);
+    await settle(element);
+
+    expect(preselectRecommendedChoices()).toBe(false);
+    expect(preselectSwitch(element)?.hasAttribute('checked')).toBe(false);
+    expect(shadowText(element)).toContain('boom');
   });
 });
