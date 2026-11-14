@@ -20,7 +20,7 @@ unchanged: the old harness session, transcripts, memory edits, installed tools
 and dotfile edits are lost. There is no rollback. Run `--dry-run` first to review
 the HOME RESET warning and provide a handoff for continuity. Supported runtimes
 are Docker, Podman, Apple Container, Cloud Run / Cloud Run Instances and
-Kubernetes; Worktree-per-agent agents remain unsupported. See
+Kubernetes; agents in worktree-per-agent projects remain unsupported. See
 [Switching harness-config](/scion/local/agent-lifecycle/#switching-harness-config)
 for requirements and recovery.
 

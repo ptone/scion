@@ -234,7 +234,7 @@ The Runtime Broker also gathers required values before resetting the home.
 | `cloudrun-sandbox` | No; refused |
 | `substrate` | No; refused |
 
-The existing workspace requirements still apply: **Worktree-per-agent agents are
+The existing workspace requirements still apply: **Agents in worktree-per-agent projects are
 refused**, and this table does not add support for ephemeral workspaces. Kubernetes
 NFS-home resets require an agent image whose `sciontool version --features` reports
 `home-reset-v1`. An older image refuses the start with `home_prepare_failed` and
