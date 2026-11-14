@@ -369,6 +369,29 @@ func TestMandatoryBoilerplateFS(t *testing.T) {
 	}
 }
 
+func TestPlatformSkillsFS_NoRetiredCoreSkillScopeURIs(t *testing.T) {
+	fsys := PlatformSkillsFS()
+	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, readErr := fs.ReadFile(fsys, path)
+		if readErr != nil {
+			t.Fatalf("reading embedded platform skill file %q: %v", path, readErr)
+		}
+		text := string(data)
+		for _, retired := range []string{"skill://core/", "skill://scion/core/", "skill:///core/"} {
+			if strings.Contains(text, retired) {
+				t.Errorf("embedded platform skill %q still references retired core skill URI prefix %q", path, retired)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking PlatformSkillsFS: %v", err)
+	}
+}
+
 func assertSourceURL(t *testing.T, r BundledResource) {
 	t.Helper()
 	if r.Kind == storage.ResourceKindHarnessConfig {

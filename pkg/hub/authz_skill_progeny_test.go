@@ -162,7 +162,7 @@ func TestSkillProgenyRead_Conditions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Isolate the progeny relationship candidate itself, the same
 			// isolation level the retired pure-function test had. Full
-			// Decide is not used here: a global/core skill is separately
+			// Decide is not used here: a global skill is separately
 			// allowed for any agent through the unrelated synthetic
 			// agent-skill-catalog kernel binding (ptone/scion#1968), which
 			// would otherwise mask what this grant does or does not admit.

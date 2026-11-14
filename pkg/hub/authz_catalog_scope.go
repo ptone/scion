@@ -27,13 +27,11 @@ import (
 //
 // For skills and templates, global-scope create, update, and delete map to
 // their respective *_global twins (create_global, update_global,
-// delete_global). Skill core scope keeps its interim mapping (create ->
-// create_global, update/delete -> plain) until core scope is retired.
+// delete_global).
 func catalogWriteAction(kind, scope string, a Action) Action {
 	switch kind {
 	case permissions.ResourceSkill:
-		switch scope {
-		case store.SkillScopeGlobal:
+		if scope == store.SkillScopeGlobal {
 			switch a {
 			case ActionCreate:
 				return ActionCreateGlobal
@@ -41,10 +39,6 @@ func catalogWriteAction(kind, scope string, a Action) Action {
 				return ActionUpdateGlobal
 			case ActionDelete:
 				return ActionDeleteGlobal
-			}
-		case store.SkillScopeCore:
-			if a == ActionCreate {
-				return ActionCreateGlobal
 			}
 		}
 	case permissions.ResourceTemplate:

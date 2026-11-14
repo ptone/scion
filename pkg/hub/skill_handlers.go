@@ -46,6 +46,8 @@ const (
 	githubRawBase = "https://raw.githubusercontent.com"
 )
 
+const retiredSkillScopeCoreMessage = `invalid scope "core": the "core" skill scope is no longer supported; use "global" (skill://scion/global/<name>) instead`
+
 // CreateSkillRequest is the request body for creating a skill.
 type CreateSkillRequest struct {
 	Name        string   `json:"name"`
@@ -254,6 +256,10 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		Status:  query.Get("status"),
 		Search:  query.Get("search"),
 	}
+	if filter.Scope == "core" {
+		ValidationError(w, retiredSkillScopeCoreMessage, nil)
+		return
+	}
 	if tagsParam := query.Get("tags"); tagsParam != "" {
 		filter.Tags = strings.Split(tagsParam, ",")
 	}
@@ -329,7 +335,7 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		filter.AccessScope = &store.SkillAccessScope{}
 	case isAgentIdentity(identity):
 		// ptone/scion#1968: agents read exactly their granted set — the hub
-		// catalog (global/core), their own project's skills, and their
+		// catalog (global), their own project's skills, and their
 		// creator's own user-scoped skills, each gated
 		// by the agent JWT scope restriction and the delegation ceiling. See
 		// agentSkillAccessScope for why per-bucket probes equal the per-row
@@ -466,7 +472,7 @@ func (s *Server) listSkillsForToken(w http.ResponseWriter, r *http.Request, toke
 func (s *Server) skillListCapabilities(ctx context.Context, scopeFilter, scopeIDFilter string, projects ScopeSet) *Capabilities {
 	scopes := []string{scopeFilter}
 	if scopeFilter == "" {
-		scopes = []string{store.SkillScopeUser, store.SkillScopeProject, store.SkillScopeGlobal, store.SkillScopeCore}
+		scopes = []string{store.SkillScopeUser, store.SkillScopeProject, store.SkillScopeGlobal}
 	}
 	for _, scope := range scopes {
 		if s.canCreateSkillInScope(ctx, scope, scopeIDFilter, projects) {
@@ -486,7 +492,7 @@ func (s *Server) canCreateSkillInScope(ctx context.Context, scope, scopeID strin
 		// user scope, so another user's scope is never creatable.
 		userIdent := GetUserIdentityFromContext(ctx)
 		return userIdent != nil && (scopeID == "" || scopeID == userIdent.ID())
-	case store.SkillScopeGlobal, store.SkillScopeCore:
+	case store.SkillScopeGlobal:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			return false
@@ -525,7 +531,7 @@ func (s *Server) canCreateSkillInScope(ctx context.Context, scope, scopeID strin
 // For an agent principal every term of Decide depends on a skill row only
 // through its bucket: (scope kind, project) for hub and project skills, and
 // (scope kind, owning user) for user skills. The project-scoped JWT binding,
-// the synthetic agent-skill-catalog binding (Step 5b/5b2, global/core only
+// the synthetic agent-skill-catalog binding (Step 5b/5b2, global only
 // after Step 5c), the personal-skill progeny relationship grant (Step 9, user
 // skills owned by the agent's origin user only, with that user's admission to
 // the agent's execution project, a per-agent fact), the JWT scope restriction
@@ -535,8 +541,6 @@ func (s *Server) canCreateSkillInScope(ctx context.Context, scope, scopeID strin
 // that bucket, and the store predicate built from the probes returns exactly
 // the rows the per-row check allows.
 //
-// global and core share one probe: the store predicate groups them
-// (ScopeIn(global, core)) and every Decide input treats them identically.
 // The only user bucket that can be granted is the origin user's, so that is
 // the only one probed; every other user's skills stay out of the predicate.
 func (s *Server) agentSkillAccessScope(ctx context.Context, agent AgentIdentity) *store.SkillAccessScope {
@@ -638,21 +642,24 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 		scope = store.SkillScopeGlobal
 	}
 	switch scope {
-	case store.SkillScopeGlobal, store.SkillScopeProject, store.SkillScopeUser, store.SkillScopeCore:
+	case store.SkillScopeGlobal, store.SkillScopeProject, store.SkillScopeUser:
+	case "core":
+		ValidationError(w, retiredSkillScopeCoreMessage, nil)
+		return
 	default:
-		ValidationError(w, fmt.Sprintf("invalid scope %q: must be one of global, project, user, core", scope), nil)
+		ValidationError(w, fmt.Sprintf("invalid scope %q: must be one of global, project, user", scope), nil)
 		return
 	}
 
 	// Authorize
 	switch scope {
-	case store.SkillScopeGlobal, store.SkillScopeCore:
+	case store.SkillScopeGlobal:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		// A global or core skill is a new record in the hub catalog: the
+		// A global skill is a new record in the hub catalog: the
 		// check is skill.create_global on a collection-level request at the
 		// hub scope, so a user access token needs skill:create_global on a
 		// hub boundary.
@@ -1876,7 +1883,7 @@ func determineScopeSearchOrder(uri *api.SkillURI, projectID string) []scopeEntry
 		return []scopeEntry{{scope: uri.Scope, scopeID: uri.ScopeID}}
 	}
 
-	// Default search order: user > project > global > core
+	// Default search order: user > project > global
 	var order []scopeEntry
 	if uri.ScopeID != "" {
 		order = append(order, scopeEntry{scope: store.SkillScopeUser, scopeID: uri.ScopeID})
@@ -1884,10 +1891,7 @@ func determineScopeSearchOrder(uri *api.SkillURI, projectID string) []scopeEntry
 	if projectID != "" {
 		order = append(order, scopeEntry{scope: store.SkillScopeProject, scopeID: projectID})
 	}
-	order = append(order,
-		scopeEntry{scope: store.SkillScopeGlobal},
-		scopeEntry{scope: store.SkillScopeCore},
-	)
+	order = append(order, scopeEntry{scope: store.SkillScopeGlobal})
 	return order
 }
 
@@ -1936,7 +1940,7 @@ func writeSkillLookupError(w http.ResponseWriter, err error) {
 // (e.g. minting a project's GitHub App token before any specific skill is
 // resolved — see canUseProjectGitHubToken). scope should be one of the
 // store.SkillScope* constants; scopeID is the owning user or project ID and
-// is ignored for global/core scope.
+// is ignored for global scope.
 //
 // ptone/scion#1901 finding F3/F4: every ad hoc skill Resource literal must
 // set ScopeKind through this constructor (or skillResource, for a real

@@ -21,7 +21,7 @@ import (
 // curatedSkillDirectoryRoles are the built-in, system-scoped roles whose
 // skill.read/skill.list permission (hubMemberPermissionIDs,
 // hubViewerPermissionIDs in seed.go) exists purely so every hub member can
-// browse the hub-wide (global/core) skill catalog. It is a directory
+// browse the hub-wide (global) skill catalog. It is a directory
 // convenience for hub-scoped resources, not a scope override for user- or
 // project-scoped skills.
 var curatedSkillDirectoryRoles = map[string]struct{}{
@@ -31,7 +31,7 @@ var curatedSkillDirectoryRoles = map[string]struct{}{
 }
 
 // agentSkillCatalogRoleName names the synthetic, never-persisted role that
-// Decide grants agent principals so they can read the hub-wide (global/core)
+// Decide grants agent principals so they can read the hub-wide (global)
 // skill catalog (ptone/scion#1968). No role definition or binding with this
 // name is stored. It is listed in curatedSkillDirectoryRoles so that
 // filterHubWideSkillGrants strips it for every non-hub-scoped skill exactly
@@ -75,7 +75,7 @@ func agentSkillCatalogBinding(agent AgentIdentity) (CandidateBinding, *RolePermi
 
 // filterHubWideSkillGrants removes system-scoped candidate bindings for the
 // curated hub-member/hub-viewer roles unless the target skill is itself
-// hub-scoped (scope "global" or "core").
+// hub-scoped (scope "global").
 //
 // ptone/scion#1901: a hub member must not be able to read another user's
 // user-scoped skill, or another project's project-scoped skill, merely
@@ -100,7 +100,7 @@ func agentSkillCatalogBinding(agent AgentIdentity) (CandidateBinding, *RolePermi
 //
 // skillScope is the skill's own Scope value (store.SkillScope*), taken from
 // Resource.ScopeKind. ptone/scion#1901 finding F4: this fails closed. Only
-// "global" and "core" are exempt; user, project, an empty string, and any
+// "global" is exempt; user, project, an empty string, and any
 // future or unrecognized value are all filtered like project/user. Before
 // this fix, an ad hoc Resource{Type:"skill"} literal that forgot to set
 // ScopeKind (see finding F3, canUseProjectGitHubToken) silently kept the
@@ -113,7 +113,7 @@ func filterHubWideSkillGrants(candidates []CandidateBinding, roleDefs map[string
 		return candidates
 	}
 	// Fail closed (ptone/scion#1901 finding F4): only an explicit hub-scope
-	// value (global/core) is exempt from filtering. Anything else — user,
+	// value (global) is exempt from filtering. Anything else — user,
 	// project, an unrecognized future scope, or a caller-built Resource
 	// literal that forgot to set ScopeKind — is filtered the same as
 	// user/project. A hand-built ad hoc Resource{Type:"skill"} literal that
@@ -121,7 +121,7 @@ func filterHubWideSkillGrants(candidates []CandidateBinding, roleDefs map[string
 	// open and re-admit the curated hub-member/hub-viewer grant; every
 	// legitimate caller builds its Resource via skillResource or
 	// skillScopeResource, both of which always set ScopeKind explicitly.
-	if skillScope == store.SkillScopeGlobal || skillScope == store.SkillScopeCore {
+	if skillScope == store.SkillScopeGlobal {
 		return candidates
 	}
 

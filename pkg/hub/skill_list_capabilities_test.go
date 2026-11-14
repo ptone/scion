@@ -88,7 +88,6 @@ func TestListSkills_Capabilities_ScopeFilterDenied(t *testing.T) {
 	}{
 		{"non-member in project", bob, "scope=project&scopeId=" + project.ID},
 		{"member in global", alice, "scope=global"},
-		{"member in core", alice, "scope=core"},
 		{"another user's scope", alice, "scope=user&scopeId=" + bob.ID},
 		{"unknown scope", alice, "scope=nonexistent"},
 	}
@@ -203,7 +202,6 @@ func TestListSkills_Capabilities_Agent(t *testing.T) {
 		"scope=project&scopeId=" + f.q.ID,
 		"scope=user",
 		"scope=global",
-		"scope=core",
 	} {
 		assert.Empty(t, agentSkillCapabilities(t, f.srv, creator, query), "query %q", query)
 	}
@@ -237,7 +235,7 @@ func TestListSkills_Capabilities_SuperAdmin(t *testing.T) {
 
 	// An unrestricted caller's projects are not enumerated; project scope
 	// without a scopeId is still reported as creatable.
-	for _, query := range []string{"", "scope=global", "scope=core", "scope=project", "scope=project&scopeId=" + project.ID} {
+	for _, query := range []string{"", "scope=global", "scope=project", "scope=project&scopeId=" + project.ID} {
 		assert.Equal(t, []string{"create"}, listSkillCapabilities(t, srv, admin, query), "query %q", query)
 	}
 	assert.Equal(t, http.StatusCreated,

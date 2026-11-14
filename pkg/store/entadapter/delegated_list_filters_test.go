@@ -66,7 +66,6 @@ func TestSkillStore_AccessScopeAllProjects(t *testing.T) {
 	pA := mk("all-projects-a", store.SkillScopeProject, "project-a")
 	pB := mk("all-projects-b", store.SkillScopeProject, "project-b")
 	mk("all-projects-global", store.SkillScopeGlobal, "")
-	mk("all-projects-core", store.SkillScopeCore, "")
 	user := mk("all-projects-user", store.SkillScopeUser, "user-1")
 
 	all, err := cs.ListSkills(ctx, store.SkillFilter{Status: "active", AccessScope: &store.SkillAccessScope{AllProjects: true}}, store.ListOptions{})

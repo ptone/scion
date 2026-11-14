@@ -177,11 +177,10 @@ The old `scion://` scheme is no longer supported and is rejected during validati
 
 ### Scopes and resolution order
 
-Skills live in one of four **scopes**:
+Skills live in one of three **scopes**:
 
 | Scope | Description |
 | :--- | :--- |
-| `core` | Built-in platform skills. |
 | `global` | Shared across all users of the Hub. |
 | `project` | Scoped to a specific project (requires a scope ID). |
 | `user` | Personal to a specific user (requires a scope ID). |
@@ -189,7 +188,7 @@ Skills live in one of four **scopes**:
 When a reference does not name a scope, the Hub searches in this order and returns the first match:
 
 ```text
-user → project → global → core
+user → project → global
 ```
 
 More specific scopes therefore override broader ones — a user's own skill shadows a global skill of the same name.
@@ -240,7 +239,7 @@ scion skills publish ./deploy-checklist --version 1.1.0 --skill-id <skill-id>
 | Flag | Default | Description |
 | :--- | :--- | :--- |
 | `--version` | *(required)* | SemVer version to publish (e.g. `1.0.0`). |
-| `--scope` | `global` | Scope for a **newly created** skill: `core`, `global`, `project`, or `user`. With `project`, the skill is attached to the current Hub-linked project. The command fails if no project can be determined (run `scion hub link` first). |
+| `--scope` | `global` | Scope for a **newly created** skill: `global`, `project`, or `user`. With `project`, the skill is attached to the current Hub-linked project. The command fails if no project can be determined (run `scion hub link` first). |
 | `--skill-id` | *(auto)* | Publish a new version for an existing skill ID. If omitted, Scion matches by directory name and creates the skill when no match exists. |
 
 :::note[Global scope permissions]

@@ -40,7 +40,7 @@ var redactCases = []struct {
 	{"gh with userinfo", "gh://user:x@owner/repo/s", RedactedURL},
 	{"other scheme", "ssh://user:x@example.com/s", RedactedURL},
 	{"plain gh", redactTestPlainRef, redactTestPlainRef},
-	{"plain skill", "skill://scion/core/s@1.0", "skill://scion/core/s@1.0"},
+	{"plain skill", "skill://scion/global/s@1.0", "skill://scion/global/s@1.0"},
 	{"plain name", "my-skill", "my-skill"},
 	{"https path only", "https://example.com/s", "https://example.com/s"},
 }

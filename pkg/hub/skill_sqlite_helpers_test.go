@@ -72,7 +72,6 @@ func setupAgentSkillFixture(t *testing.T) *agentSkillFixture {
 	// grant never confounds U's results, except Su which is U's own.
 	f := &agentSkillFixture{srv: srv, s: s, u: u, v: v, bob: bob, p: p, q: q}
 	f.sg = createTestSkill(t, s, "as-global", store.SkillScopeGlobal, "", alice.ID)
-	f.sc = createTestSkill(t, s, "as-core", store.SkillScopeCore, "", alice.ID)
 	f.sp = createTestSkill(t, s, "as-project-p", store.SkillScopeProject, p.ID, alice.ID)
 	f.sq = createTestSkill(t, s, "as-project-q", store.SkillScopeProject, q.ID, alice.ID)
 	f.su = createTestSkill(t, s, "as-user-u", store.SkillScopeUser, u.ID, u.ID)
@@ -340,11 +339,11 @@ type agentSkillFixture struct {
 	bob  *store.User // not a hub member, no project roles
 	p, q *store.Project
 
-	sg, sc, sp, sq, su, sv *store.Skill
+	sg, sp, sq, su, sv *store.Skill
 }
 
 func (f *agentSkillFixture) all() []*store.Skill {
-	return []*store.Skill{f.sg, f.sc, f.sp, f.sq, f.su, f.sv}
+	return []*store.Skill{f.sg, f.sp, f.sq, f.su, f.sv}
 }
 
 // newAgent creates agent name in projectID, delegated by delegatorID (edge at

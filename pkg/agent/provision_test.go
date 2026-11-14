@@ -2221,7 +2221,7 @@ func TestProvisionAgent_SkillsWithMockResolver(t *testing.T) {
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
-			{"uri": "skill://scion/core/test-skill@1.0"}
+			{"uri": "skill://scion/global/test-skill@1.0"}
 		]
 	}`
 	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
@@ -2238,7 +2238,7 @@ func TestProvisionAgent_SkillsWithMockResolver(t *testing.T) {
 		resolved: []ResolvedSkill{
 			{
 				Name:    "test-skill",
-				URI:     "skill://scion/core/test-skill@1.0",
+				URI:     "skill://scion/global/test-skill@1.0",
 				Version: "1.0.0",
 				Hash:    "", // Skip bundle hash verification for integration test
 				Files:   []ResolvedFile{},
@@ -2291,8 +2291,8 @@ func TestProvisionAgent_RequiredSkillsNoResolver(t *testing.T) {
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
-			{"uri": "skill://scion/core/scion@^1.0"},
-			{"uri": "skill://scion/core/team-creation@^1.0"}
+			{"uri": "skill://scion/global/scion@^1.0"},
+			{"uri": "skill://scion/global/team-creation@^1.0"}
 		]
 	}`
 	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
@@ -2309,7 +2309,7 @@ func TestProvisionAgent_RequiredSkillsNoResolver(t *testing.T) {
 	if !strings.Contains(err.Error(), "no skill resolver available") {
 		t.Errorf("error should mention no resolver, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "skill://scion/core/scion@^1.0") {
+	if !strings.Contains(err.Error(), "skill://scion/global/scion@^1.0") {
 		t.Errorf("error should list the required skill URIs, got: %v", err)
 	}
 }
@@ -2335,7 +2335,7 @@ func TestProvisionAgent_OptionalSkillsNoResolver(t *testing.T) {
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
-			{"uri": "skill://scion/core/optional-skill@latest", "optional": true}
+			{"uri": "skill://scion/global/optional-skill@latest", "optional": true}
 		]
 	}`
 	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
@@ -2580,7 +2580,7 @@ func TestProvisionAgent_SkillsYAMLParsing(t *testing.T) {
 	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `default_harness_config: claude
 skills:
-  - uri: "skill://scion/core/scion@^1.0"
+  - uri: "skill://scion/global/scion@^1.0"
   - uri: "skill://project/custom@latest"
     as: my-custom
     optional: true
@@ -2597,7 +2597,7 @@ skills:
 		t.Fatal("expected error for required skill with no resolver")
 	}
 	// Verify the error mentions the correct URI from YAML
-	if !strings.Contains(err.Error(), "skill://scion/core/scion@^1.0") {
+	if !strings.Contains(err.Error(), "skill://scion/global/scion@^1.0") {
 		t.Errorf("error should list the YAML-parsed skill URI, got: %v", err)
 	}
 	// The optional skill should not appear in the error
@@ -2626,7 +2626,7 @@ func TestProvisionAgent_SkillsResolverError(t *testing.T) {
 	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{
 		"default_harness_config": "claude",
-		"skills": [{"uri": "skill://scion/core/scion@^1.0"}]
+		"skills": [{"uri": "skill://scion/global/scion@^1.0"}]
 	}`
 	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
@@ -2637,7 +2637,7 @@ func TestProvisionAgent_SkillsResolverError(t *testing.T) {
 	// Resolver that returns a per-skill error for a required skill
 	resolver := &mockResolver{
 		errors: []ResolveError{
-			{URI: "skill://scion/core/scion@^1.0", Code: "not_found", Message: "skill not found in registry"},
+			{URI: "skill://scion/global/scion@^1.0", Code: "not_found", Message: "skill not found in registry"},
 		},
 	}
 	ctx := ContextWithSkillResolver(context.Background(), resolver)
@@ -2671,8 +2671,8 @@ func TestProvisionAgent_RequiredSkillOmittedFromResolverResponse(t *testing.T) {
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
-			{"uri": "skill://scion/core/skill-a@1.0"},
-			{"uri": "skill://scion/core/skill-b@1.0"}
+			{"uri": "skill://scion/global/skill-a@1.0"},
+			{"uri": "skill://scion/global/skill-b@1.0"}
 		]
 	}`
 	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
@@ -2684,7 +2684,7 @@ func TestProvisionAgent_RequiredSkillOmittedFromResolverResponse(t *testing.T) {
 	// Resolver returns only skill-a, silently omitting skill-b
 	resolver := &mockResolver{
 		resolved: []ResolvedSkill{
-			{Name: "skill-a", URI: "skill://scion/core/skill-a@1.0", Version: "1.0.0"},
+			{Name: "skill-a", URI: "skill://scion/global/skill-a@1.0", Version: "1.0.0"},
 		},
 	}
 	ctx := ContextWithSkillResolver(context.Background(), resolver)
@@ -2721,8 +2721,8 @@ func TestProvisionAgent_OptionalSkillOmittedFromResolverResponse(t *testing.T) {
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
-			{"uri": "skill://scion/core/skill-a@1.0"},
-			{"uri": "skill://scion/core/skill-b@1.0", "optional": true}
+			{"uri": "skill://scion/global/skill-a@1.0"},
+			{"uri": "skill://scion/global/skill-b@1.0", "optional": true}
 		]
 	}`
 	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
@@ -2734,7 +2734,7 @@ func TestProvisionAgent_OptionalSkillOmittedFromResolverResponse(t *testing.T) {
 	// Resolver returns only skill-a; optional skill-b is omitted entirely
 	resolver := &mockResolver{
 		resolved: []ResolvedSkill{
-			{Name: "skill-a", URI: "skill://scion/core/skill-a@1.0", Version: "1.0.0"},
+			{Name: "skill-a", URI: "skill://scion/global/skill-a@1.0", Version: "1.0.0"},
 		},
 	}
 	ctx := ContextWithSkillResolver(context.Background(), resolver)
@@ -2765,7 +2765,7 @@ func TestProvisionAgent_UnrequestedSkillFromResolver(t *testing.T) {
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
-			{"uri": "skill://scion/core/skill-a@1.0"}
+			{"uri": "skill://scion/global/skill-a@1.0"}
 		]
 	}`
 	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
@@ -2777,7 +2777,7 @@ func TestProvisionAgent_UnrequestedSkillFromResolver(t *testing.T) {
 	// Resolver returns the requested skill plus an unrequested extra one
 	resolver := &mockResolver{
 		resolved: []ResolvedSkill{
-			{Name: "skill-a", URI: "skill://scion/core/skill-a@1.0", Version: "1.0.0"},
+			{Name: "skill-a", URI: "skill://scion/global/skill-a@1.0", Version: "1.0.0"},
 			{Name: "evil-skill", URI: "skill://evil/injected@1.0", Version: "1.0.0"},
 		},
 	}
@@ -2815,7 +2815,7 @@ func TestProvisionAgent_DuplicateResolvedSkill(t *testing.T) {
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
-			{"uri": "skill://scion/core/skill-a@1.0"}
+			{"uri": "skill://scion/global/skill-a@1.0"}
 		]
 	}`
 	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
@@ -2827,8 +2827,8 @@ func TestProvisionAgent_DuplicateResolvedSkill(t *testing.T) {
 	// Resolver returns the same skill twice
 	resolver := &mockResolver{
 		resolved: []ResolvedSkill{
-			{Name: "skill-a", URI: "skill://scion/core/skill-a@1.0", Version: "1.0.0"},
-			{Name: "skill-a", URI: "skill://scion/core/skill-a@1.0", Version: "1.0.0"},
+			{Name: "skill-a", URI: "skill://scion/global/skill-a@1.0", Version: "1.0.0"},
+			{Name: "skill-a", URI: "skill://scion/global/skill-a@1.0", Version: "1.0.0"},
 		},
 	}
 	ctx := ContextWithSkillResolver(context.Background(), resolver)

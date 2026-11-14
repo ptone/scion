@@ -327,7 +327,7 @@ func skillAccessScopePredicate(scope *store.SkillAccessScope) predicate.Skill {
 
 	var terms []predicate.Skill
 	if scope.IncludeHubScope {
-		terms = append(terms, entskill.ScopeIn(store.SkillScopeGlobal, store.SkillScopeCore))
+		terms = append(terms, entskill.ScopeEQ(store.SkillScopeGlobal))
 	}
 	if scope.CallerID != "" {
 		terms = append(terms, entskill.And(
