@@ -44,6 +44,7 @@
 
 import { dispatchTeardown } from '../utils/auth.js';
 import { setPreferredTimeZone } from '../utils/time.js';
+import { setPreselectRecommendedChoices } from './choice-preferences.js';
 import { isFeatureEnabled, SSE_HIDDEN_TAB_CLOSE_FLAG } from '../utils/feature-flags.js';
 import type { AuthMeResponse } from '../shared/types.js';
 import { apiFetch } from './api.js';
@@ -390,12 +391,13 @@ export class SSEClient extends EventTarget {
       // Review R1-6: this reconnect check already fetches /auth/me live, so
       // it is also the place a preference changed in another tab or on
       // another device reaches a long-lived tab — refresh the effective-zone
-      // store from the same response instead of leaving it stale until some
+      // store (and the choices-card preference) from the same response instead of leaving it stale until some
       // unrelated render.
       if (resp.ok) {
         try {
           const data = (await resp.json()) as AuthMeResponse;
           setPreferredTimeZone(data.preferences?.timezone);
+          setPreselectRecommendedChoices(data.preferences?.preselectRecommendedChoices);
         } catch {
           // Malformed/non-JSON body — not this check's concern.
         }

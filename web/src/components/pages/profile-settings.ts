@@ -44,6 +44,8 @@ import {
 } from '../../client/view-mode-shortcuts.js';
 import { isMacPlatform } from '../../utils/platform.js';
 import { setPreferredTimeZone, browserTimeZone } from '../../utils/time.js';
+import { chatChoicesEnabled } from '../../client/chat-choices.js';
+import { setPreselectRecommendedChoices } from '../../client/choice-preferences.js';
 import '../shared/subscription-manager.js';
 import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
@@ -93,6 +95,17 @@ export class ScionPageProfileSettings extends LitElement {
 
   @state()
   private _displayTimezoneSaved = false;
+
+  /**
+   * `preferences.preselectRecommendedChoices` (ptone/scion#7842): whether
+   * multi-decision choices cards start with recommended choices selected.
+   * Shown only while web.chat_choices is on.
+   */
+  @state()
+  private _preselectRecommended = false;
+
+  @state()
+  private _preselectError: string | null = null;
 
   /**
    * Bumped to force the picker to remount after a failed PATCH or the
@@ -301,10 +314,11 @@ export class ScionPageProfileSettings extends LitElement {
       if (!res.ok) return;
       const data = (await res.json()) as {
         id?: string;
-        preferences?: { timezone?: string };
+        preferences?: { timezone?: string; preselectRecommendedChoices?: boolean };
       };
       this._userId = data.id ?? '';
       this._displayTimezone = data.preferences?.timezone ?? '';
+      this._preselectRecommended = data.preferences?.preselectRecommendedChoices === true;
     } catch {
       // Non-critical — the card still renders; saving just has nothing to
       // PATCH against until a reload succeeds.
@@ -396,6 +410,41 @@ export class ScionPageProfileSettings extends LitElement {
     const target = e.target as HTMLInputElement & { checked: boolean };
     setViewModeShortcutsEnabled(target.checked);
     this._viewModeShortcutsEnabled = areViewModeShortcutsEnabled();
+  }
+
+  /**
+   * Saves the choices-card preselect preference with a per-key
+   * `preferences` PATCH and applies it to open cards at once; reverts the
+   * switch when the PATCH fails.
+   */
+  private async _handlePreselectToggle(e: Event): Promise<void> {
+    const target = e.target as HTMLInputElement & { checked: boolean };
+    const enabled = target.checked;
+    this._preselectError = null;
+    const revert = (message: string): void => {
+      target.checked = !enabled;
+      this._preselectRecommended = !enabled;
+      this._preselectError = message;
+    };
+    if (!this._userId) {
+      revert('Failed to update the setting');
+      return;
+    }
+    this._preselectRecommended = enabled;
+    try {
+      const res = await apiFetch(`/api/v1/users/${encodeURIComponent(this._userId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preferences: { preselectRecommendedChoices: enabled } }),
+      });
+      if (!res.ok) {
+        revert(await extractApiError(res, 'Failed to update the setting'));
+        return;
+      }
+      setPreselectRecommendedChoices(enabled);
+    } catch {
+      revert('Failed to update the setting');
+    }
   }
 
   private async _handleADCToggle(e: Event): Promise<void> {
@@ -601,6 +650,44 @@ export class ScionPageProfileSettings extends LitElement {
         </div>
       </div>
 
+      ${chatChoicesEnabled()
+        ? html`
+            <div class="settings-card">
+              <h2 class="section-title">
+                <sl-icon name="list-check"></sl-icon>
+                Choices
+              </h2>
+
+              <div class="setting-row">
+                <div class="setting-info">
+                  <p class="setting-label">Preselect recommended choices</p>
+                  <p class="setting-description">
+                    When a message asks several questions at once, start with each recommended
+                    choice selected. When off, recommended choices are only outlined and every
+                    question needs a click before you can submit.
+                  </p>
+                </div>
+                <div class="setting-control">
+                  <sl-switch
+                    class="preselect-recommended-switch"
+                    aria-label="Preselect recommended choices"
+                    ?checked=${this._preselectRecommended}
+                    @sl-change=${(e: Event): Promise<void> => this._handlePreselectToggle(e)}
+                  ></sl-switch>
+                </div>
+              </div>
+
+              ${this._preselectError
+                ? html`
+                    <div class="permission-status status-denied">
+                      <sl-icon name="exclamation-triangle"></sl-icon>
+                      ${this._preselectError}
+                    </div>
+                  `
+                : nothing}
+            </div>
+          `
+        : nothing}
       ${this._gcloudADCAvailable && this._isWorkstation
         ? html`
             <div class="settings-card">

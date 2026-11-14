@@ -53,6 +53,7 @@ import { resolveBrokerRoute } from './broker-routes.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
 import { apiFetch } from './api.js';
 import { setPreferredTimeZone } from '../utils/time.js';
+import { setPreselectRecommendedChoices } from './choice-preferences.js';
 import { withTimeout } from './with-timeout.js';
 import {
   type AdminStatus,
@@ -422,7 +423,8 @@ async function fetchCurrentUser(): Promise<User | null> {
 
 /**
  * Refreshes the display-timezone preference and applies it to the
- * effective-zone store (`setPreferredTimeZone`). Used when the SSR-injected
+ * effective-zone store (`setPreferredTimeZone`), and the choices-card
+ * preference (`setPreselectRecommendedChoices`). Used when the SSR-injected
  * user (`prefetchPageData`, `pkg/hub/web.go`) already supplied `currentUser`
  * without `preferences` — that field is deliberately never cached on the
  * session (`webSessionUser.Preferences`) and so is absent from SSR data,
@@ -454,6 +456,7 @@ async function loadPreferredTimeZone(): Promise<void> {
     if (!res.ok) return;
     const data = (await res.json()) as AuthMeResponse;
     setPreferredTimeZone(data.preferences?.timezone);
+    setPreselectRecommendedChoices(data.preferences?.preselectRecommendedChoices);
   } catch {
     // Non-critical — the effective zone falls back to the browser zone.
   }
@@ -975,6 +978,7 @@ async function init(): Promise<void> {
     currentUser = await fetchCurrentUser();
     if (currentUser) {
       setPreferredTimeZone(currentUser.preferences?.timezone);
+      setPreselectRecommendedChoices(currentUser.preferences?.preselectRecommendedChoices);
     }
   } else {
     // SSR supplied the user without `preferences` (never cached on the

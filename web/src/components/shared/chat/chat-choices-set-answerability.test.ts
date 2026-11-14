@@ -24,6 +24,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { DecisionView } from '../../../shared/types.js';
 import type { AskerAnswerability, ChoiceAnswerDeniedDetail } from '../../../client/chat-choices.js';
+import { setPreselectRecommendedChoices } from '../../../client/choice-preferences.js';
 
 const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: RequestInit) => Promise<Response>>());
 const showToast = vi.hoisted(() => vi.fn());
@@ -57,7 +58,10 @@ function row(rowId: string, key: string, over: Partial<DecisionView> = {}): Deci
   };
 }
 
-/** Two rows, both recommended: Submit is ready unless blocked. */
+/**
+ * Two rows, both recommended: with the preselect setting on (beforeEach),
+ * Submit is ready unless blocked.
+ */
 function set(): DecisionView[] {
   return [row('r1', 'D234'), row('r2', '17')];
 }
@@ -124,10 +128,12 @@ async function settle(el: ScionChatChoices): Promise<void> {
 beforeEach(() => {
   apiFetch.mockReset();
   showToast.mockReset();
+  setPreselectRecommendedChoices(true);
 });
 
 afterEach(() => {
   document.body.innerHTML = '';
+  setPreselectRecommendedChoices(false);
 });
 
 describe('blocked set card', () => {

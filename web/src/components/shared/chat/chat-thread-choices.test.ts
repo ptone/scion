@@ -363,7 +363,8 @@ describe('set prompts and jump links', () => {
     const card = cardOf(el)!;
     await card.updateComplete;
     const counter = card.shadowRoot.querySelector('.counter')?.textContent?.replace(/\s+/g, ' ');
-    expect(counter?.trim()).toBe('0 remaining · 1 answered by Bob');
+    // Row 17's recommended choice is only outlined (ptone/scion#7842).
+    expect(counter?.trim()).toBe('1 remaining · 1 answered by Bob');
   });
 
   it('scrolls to the replacement when a card emits choice-jump', async () => {

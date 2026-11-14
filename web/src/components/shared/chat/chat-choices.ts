@@ -24,9 +24,12 @@
  * `choice-answered` so the thread holds the same view; other tabs get it
  * over `chat.choice.updated`.
  *
- * Set mode (`answerMode=set`): clicks only select, rows with a recommended
- * choice start selected, and one Submit answers sends every actionable row
- * through `POST /api/v1/choice-prompts/{messageId}/answers`. A 409
+ * Set mode (`answerMode=set`): clicks only select. Recommended choices are
+ * outlined and nothing is selected until the viewer clicks, unless their
+ * `preselectRecommendedChoices` profile setting is on, which starts each
+ * recommended choice selected (ptone/scion#7842). One Submit answers sends
+ * every actionable row through
+ * `POST /api/v1/choice-prompts/{messageId}/answers`. A 409
  * `answer_set_changed` takes the fresh views and names the changed rows
  * inline; rows answered elsewhere lock as their updates arrive.
  *
@@ -55,6 +58,10 @@ import {
   answerabilityFromDenial,
   newerDecisionView,
 } from '../../../client/chat-choices.js';
+import {
+  ChoicePreferencesController,
+  preselectRecommendedChoices,
+} from '../../../client/choice-preferences.js';
 import type {
   AskerAnswerability,
   ChoiceAnswerDeniedDetail,
@@ -68,6 +75,7 @@ let hintSeq = 0;
 @customElement('scion-chat-choices')
 export class ScionChatChoices extends LitElement {
   readonly _zone = new DisplayZoneController(this);
+  readonly _choicePrefs = new ChoicePreferencesController(this);
 
   /** The choice-prompt message id. */
   @property()
@@ -1541,8 +1549,8 @@ export class ScionChatChoices extends LitElement {
 
   /**
    * The row's selection: the viewer's click, else their own interpreted
-   * choice (which beats `defaultChoiceId`, Mock P2-4), else the recommended
-   * choice on a pending row.
+   * choice (which beats `defaultChoiceId`, Mock P2-4), else, with the
+   * viewer's preselect setting on, the recommended choice on a pending row.
    */
   private selectionOf(d: DecisionView): string | undefined {
     const picked = this.picked.get(d.rowId);
@@ -1556,6 +1564,7 @@ export class ScionChatChoices extends LitElement {
       return d.decision.choiceId;
     }
     if (
+      preselectRecommendedChoices() &&
       d.status === 'pending' &&
       d.defaultChoiceId &&
       d.choices.some((c) => c.id === d.defaultChoiceId)
