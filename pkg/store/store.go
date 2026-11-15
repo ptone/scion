@@ -747,9 +747,10 @@ type AgentStore interface {
 	RecordAgentRunStarted(ctx context.Context, agentID, runID string, startedAt time.Time) (bool, error)
 
 	// ListActiveAgentsForMaxDuration returns non-deleted agents in phase
-	// running or starting that have a recorded RunStartedAt matching their
-	// current RunID, ordered oldest RunStartedAt first (ptone/scion#7929).
-	ListActiveAgentsForMaxDuration(ctx context.Context) ([]Agent, error)
+	// running or starting whose recorded RunStartedAt is strictly before
+	// startedBefore and matches their current RunID, ordered oldest
+	// RunStartedAt first (ptone/scion#7929).
+	ListActiveAgentsForMaxDuration(ctx context.Context, startedBefore time.Time) ([]Agent, error)
 
 	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
 	// it currently equals expectedRunID, and reports whether it did. A

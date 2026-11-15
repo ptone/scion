@@ -42,13 +42,12 @@ func TestRecordAgentRunStarted_CurrentRunAndFirstStampWins(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, want, ok)
 	}
-	checkStored := func(wantRun, wantStampRun string, wantAt time.Time) {
+	checkStored := func(wantRun string, wantAt time.Time) {
 		t.Helper()
 		got, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
-		assert.Equal(t, wantRun, got.RunID)
-		assert.Equal(t, wantStampRun, got.RunStartedAtRunID)
 		require.NotNil(t, got.RunStartedAt)
+		assert.Equal(t, [2]string{wantRun, wantRun}, [2]string{got.RunID, got.RunStartedAtRunID})
 		assert.True(t, got.RunStartedAt.Equal(wantAt))
 	}
 
@@ -59,21 +58,19 @@ func TestRecordAgentRunStarted_CurrentRunAndFirstStampWins(t *testing.T) {
 	checkRecord(a.ID, "run-other", t1, false)
 	checkRecord(a.ID, "run-1", t1, true)
 	checkRecord(a.ID, "run-1", t2, false) // repeat keeps first stamp
-	checkStored("run-1", "run-1", t1)
+	checkStored("run-1", t1)
 
-	// Minting run-2 and reverting back to run-1 preserves run-1's timestamp.
 	prev, err := s.SetAgentRunID(ctx, a.ID, "run-2", nil)
 	require.NoError(t, err)
 	reverted, err := s.RevertAgentRunID(ctx, a.ID, "run-2", prev)
 	require.NoError(t, err)
 	assert.True(t, reverted)
-	checkStored("run-1", "run-1", t1)
+	checkStored("run-1", t1)
 
-	// A landed new run accepts a fresh timestamp.
 	_, err = s.SetAgentRunID(ctx, a.ID, "run-3", nil)
 	require.NoError(t, err)
 	checkRecord(a.ID, "run-3", t3, true)
-	checkStored("run-3", "run-3", t3)
+	checkStored("run-3", t3)
 	checkRecord(uuid.NewString(), "run-3", t3, false)
 }
 
@@ -81,11 +78,7 @@ func TestRecordAgentRunStarted_RefusedWhileDeleteHoldsRow(t *testing.T) {
 	ctx, now := context.Background(), time.Now().UTC()
 	s, projectID := newTestAgentStore(t)
 	live, del, fin := now.Add(time.Hour), store.DeletionStateDeleting, store.DeletionStateFinalizing
-	for i, set := range []store.DeletionFields{
-		{State: &del, LeaseAt: &live},
-		{State: &fin, LeaseAt: &live},
-		{DeletedAt: &now},
-	} {
+	for i, set := range []store.DeletionFields{{State: &del, LeaseAt: &live}, {State: &fin, LeaseAt: &live}, {DeletedAt: &now}} {
 		a := makeAgent(projectID, uuid.NewString()[:8]+string(rune('0'+i)))
 		require.NoError(t, s.CreateAgent(ctx, a))
 		_, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
@@ -100,12 +93,10 @@ func TestRecordAgentRunStarted_RefusedWhileDeleteHoldsRow(t *testing.T) {
 }
 
 func TestListActiveAgentsForMaxDuration(t *testing.T) {
-	ctx := context.Background()
+	ctx, base := context.Background(), time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 	s, projectID := newTestAgentStore(t)
-	base := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
-	tOld, tMid, tNew := base.Add(-2*time.Hour), base.Add(-time.Hour), base.Add(-30*time.Minute)
-
-	seed := func(slug, phase, runID string, stamp *time.Time, nextRun string) *store.Agent {
+	tOld, tMid, tNew, tYoung := base.Add(-2*time.Hour), base.Add(-time.Hour), base.Add(-30*time.Minute), base.Add(-5*time.Minute)
+	seed := func(slug, phase, runID string, stamp *time.Time, nextRun string) string {
 		a := makeAgent(projectID, slug)
 		a.Phase = phase
 		require.NoError(t, s.CreateAgent(ctx, a))
@@ -120,19 +111,18 @@ func TestListActiveAgentsForMaxDuration(t *testing.T) {
 		if nextRun != "" {
 			_, _ = s.SetAgentRunID(ctx, a.ID, nextRun, nil)
 		}
-		return a
+		return a.ID
 	}
 
-	newer := seed("newer-running", string(state.PhaseRunning), "run-new", &tNew, "")
-	oldest := seed("oldest-starting", string(state.PhaseStarting), "run-old", &tOld, "")
-	middle := seed("middle-running", string(state.PhaseRunning), "run-mid", &tMid, "")
-	_ = seed("stopped-agent", string(state.PhaseStopped), "run-stopped", &tOld, "")
-	_ = seed("suspended-agent", string(state.PhaseSuspended), "run-susp", &tOld, "")
-	_ = seed("no-stamp-agent", string(state.PhaseRunning), "run-nostamp", nil, "")
-	_ = seed("starting-unsettled-next-run", string(state.PhaseStarting), "run-prev", &tOld, "run-next")
+	newer, oldest, middle := seed("newer", string(state.PhaseRunning), "r-new", &tNew, ""), seed("oldest", string(state.PhaseStarting), "r-old", &tOld, ""), seed("middle", string(state.PhaseRunning), "r-mid", &tMid, "")
+	seed("stopped", string(state.PhaseStopped), "r-stop", &tOld, "")
+	seed("suspended", string(state.PhaseSuspended), "r-susp", &tOld, "")
+	seed("no-stamp", string(state.PhaseRunning), "r-none", nil, "")
+	seed("unsettled-next", string(state.PhaseStarting), "r-prev", &tOld, "r-next")
+	seed("young-inside-grace", string(state.PhaseRunning), "r-young", &tYoung, "")
 
-	got, err := s.ListActiveAgentsForMaxDuration(ctx)
+	got, err := s.ListActiveAgentsForMaxDuration(ctx, base.Add(-10*time.Minute))
 	require.NoError(t, err)
 	require.Len(t, got, 3)
-	assert.Equal(t, []string{oldest.ID, middle.ID, newer.ID}, []string{got[0].ID, got[1].ID, got[2].ID})
+	assert.Equal(t, []string{oldest, middle, newer}, []string{got[0].ID, got[1].ID, got[2].ID})
 }

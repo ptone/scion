@@ -3617,11 +3617,12 @@ func (s *AgentStore) RecordAgentRunStarted(ctx context.Context, agentID, runID s
 
 // ListActiveAgentsForMaxDuration implements
 // store.AgentStore.ListActiveAgentsForMaxDuration (ptone/scion#7929).
-func (s *AgentStore) ListActiveAgentsForMaxDuration(ctx context.Context) ([]store.Agent, error) {
+func (s *AgentStore) ListActiveAgentsForMaxDuration(ctx context.Context, startedBefore time.Time) ([]store.Agent, error) {
 	rows, err := s.client.Agent.Query().
 		Where(
 			agent.DeletedAtIsNil(),
 			agent.RunStartedAtNotNil(),
+			agent.RunStartedAtLT(startedBefore.UTC()),
 			agent.PhaseIn(string(state.PhaseRunning), string(state.PhaseStarting)),
 		).
 		Order(ent.Asc(agent.FieldRunStartedAt)).
