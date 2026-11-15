@@ -40,3 +40,12 @@ func (p Persistence) Validate() error {
 
 // IsEphemeral reports whether p is PersistenceEphemeral.
 func (p Persistence) IsEphemeral() bool { return p == PersistenceEphemeral }
+
+// HomeSeedEnvVar names the read-only home seed an ephemeral instance's
+// sciontool init copies into $HOME before anything else is written there.
+// Its only accepted value is HomeSeedMountPath. Runtimes never pass a value
+// for it from any agent env source.
+const (
+	HomeSeedEnvVar    = "SCION_HOME_SEED"
+	HomeSeedMountPath = "/run/scion/home-seed"
+)

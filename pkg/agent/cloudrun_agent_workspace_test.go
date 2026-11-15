@@ -96,41 +96,45 @@ func TestCloudRunKeepSharedCheckout(t *testing.T) {
 	resolved := resolveTestNFSWorkspace(t, mountRoot)
 
 	t.Run("existing agent without record or workspace keeps the shared checkout", func(t *testing.T) {
-		keep, reason := cloudRunKeepSharedCheckout(false, t.TempDir(), resolved, "test-agent")
+		keep, reason := cloudRunKeepSharedCheckout(false, false, t.TempDir(), resolved, "test-agent")
 		assert.True(t, keep)
 		assert.Contains(t, reason, "keeps the shared checkout")
 	})
 	t.Run("an existing home in the agent directory does not count", func(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Join(nfsTestAgentDir(mountRoot, "homed-agent"), cloudRunTestHomeLeaf), 0o770))
-		keep, _ := cloudRunKeepSharedCheckout(false, t.TempDir(), resolved, "homed-agent")
+		keep, _ := cloudRunKeepSharedCheckout(false, false, t.TempDir(), resolved, "homed-agent")
 		assert.True(t, keep, "Cloud Run homes live in agents/<slug>; only the workspace decides")
 	})
+	t.Run("an ephemeral agent never keeps the shared checkout", func(t *testing.T) {
+		keep, _ := cloudRunKeepSharedCheckout(false, true, t.TempDir(), resolved, "test-agent")
+		assert.False(t, keep, "an ephemeral agent has no workspace on the share, record or not")
+	})
 	t.Run("a create gets its own workspace", func(t *testing.T) {
-		keep, _ := cloudRunKeepSharedCheckout(true, t.TempDir(), resolved, "test-agent")
+		keep, _ := cloudRunKeepSharedCheckout(true, false, t.TempDir(), resolved, "test-agent")
 		assert.False(t, keep)
 	})
 	t.Run("a recorded agent gets its own workspace", func(t *testing.T) {
 		dir := t.TempDir()
 		recordCloudRunAgentWorkspace(dir, "test-agent")
 		require.FileExists(t, filepath.Join(dir, cloudRunAgentWorkspaceRecordFile))
-		keep, _ := cloudRunKeepSharedCheckout(false, dir, resolved, "test-agent")
+		keep, _ := cloudRunKeepSharedCheckout(false, false, dir, resolved, "test-agent")
 		assert.False(t, keep)
 	})
 	t.Run("the Kubernetes record does not count", func(t *testing.T) {
 		dir := t.TempDir()
 		recordNFSAgentDir(dir, "test-agent")
-		keep, _ := cloudRunKeepSharedCheckout(false, dir, resolved, "test-agent")
+		keep, _ := cloudRunKeepSharedCheckout(false, false, dir, resolved, "test-agent")
 		assert.True(t, keep, "every create writes nfs-agent-dir.json, including Cloud Run agents that used the shared checkout")
 	})
 	t.Run("an existing own workspace is kept", func(t *testing.T) {
 		cloudRunTestAgentDir(t, mountRoot, "ws-agent")
-		keep, _ := cloudRunKeepSharedCheckout(false, t.TempDir(), resolved, "ws-agent")
+		keep, _ := cloudRunKeepSharedCheckout(false, false, t.TempDir(), resolved, "ws-agent")
 		assert.False(t, keep)
 	})
 	t.Run("an unmounted export decides nothing", func(t *testing.T) {
 		gone := resolved
 		gone.HostBase = filepath.Join(t.TempDir(), "not-mounted")
-		keep, _ := cloudRunKeepSharedCheckout(false, t.TempDir(), gone, "test-agent")
+		keep, _ := cloudRunKeepSharedCheckout(false, false, t.TempDir(), gone, "test-agent")
 		assert.False(t, keep)
 	})
 }

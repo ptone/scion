@@ -171,9 +171,8 @@ func HasEmptyPerAgentSupport(rt Runtime) bool {
 
 // EphemeralPersistenceRuntime is an optional capability a Runtime implements
 // when it can run an agent with api.PersistenceEphemeral: a fresh home and
-// workspace at every start (ptone/scion#7780). No runtime implements it
-// yet (Cloud Run will); a runtime without it refuses an ephemeral start
-// (CheckPersistenceSupported).
+// workspace at every start (ptone/scion#7780). Only Cloud Run does; every
+// other runtime refuses an ephemeral start (CheckPersistenceSupported).
 type EphemeralPersistenceRuntime interface {
 	SupportsEphemeralPersistence() bool
 }
@@ -195,7 +194,7 @@ func CheckPersistenceSupported(rt Runtime, p api.Persistence) error {
 		if rt != nil {
 			name = rt.Name()
 		}
-		return fmt.Errorf("ephemeral persistence is not supported by the %s runtime", name)
+		return fmt.Errorf("ephemeral persistence is not supported by the %s runtime; it is supported on Cloud Run only", name)
 	}
 	return nil
 }

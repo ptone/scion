@@ -68,11 +68,14 @@ func TestEphemeralPersistenceRefusal(t *testing.T) {
 	}
 }
 
-// TestStaticCapabilities_EphemeralPersistence: no broker advertises
-// ephemeralPersistence until its runtime implements it (Cloud Run, in a
-// follow-up), so the hub never accepts an ephemeral create a Run refuses.
+// TestStaticCapabilities_EphemeralPersistence: only a Cloud Run broker
+// (legacy or flat: the same runtime) advertises ephemeralPersistence.
 func TestStaticCapabilities_EphemeralPersistence(t *testing.T) {
-	for _, rt := range []scionrt.Runtime{nil, &scionrt.CloudRunRuntime{}, &scionrt.DockerRuntime{}, &scionrt.KubernetesRuntime{}} {
+	if !StaticCapabilities(&scionrt.CloudRunRuntime{}, "").EphemeralPersistence ||
+		!slices.Contains(StaticCapabilityNames(&scionrt.CloudRunRuntime{}), "ephemeralPersistence") {
+		t.Error("a Cloud Run broker does not advertise ephemeralPersistence")
+	}
+	for _, rt := range []scionrt.Runtime{nil, &scionrt.DockerRuntime{}, &scionrt.KubernetesRuntime{}} {
 		if StaticCapabilities(rt, "").EphemeralPersistence || slices.Contains(StaticCapabilityNames(rt), "ephemeralPersistence") {
 			t.Errorf("%T advertises ephemeralPersistence", rt)
 		}

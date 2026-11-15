@@ -20,7 +20,6 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"cloud.google.com/go/run/apiv2/runpb"
@@ -117,15 +116,14 @@ func TestCloudRunInstanceGolden_PersistentExplicit(t *testing.T) {
 	checkInstanceGolden(t, "persistent", cfg)
 }
 
-// TestCheckPersistenceSupported: no runtime runs an ephemeral agent until
-// one implements EphemeralPersistenceRuntime; persistent runs anywhere.
-func TestCheckPersistenceSupported(t *testing.T) {
-	for _, rt := range []Runtime{&CloudRunRuntime{}, &DockerRuntime{}} {
-		if err := CheckPersistenceSupported(rt, api.PersistenceEphemeral); err == nil || !strings.Contains(err.Error(), "ephemeral persistence is not supported") {
-			t.Errorf("%T ephemeral = %v, want a refusal", rt, err)
-		}
-		if err := CheckPersistenceSupported(rt, api.PersistencePersistent); err != nil {
-			t.Errorf("%T persistent: %v", rt, err)
-		}
-	}
+// TestCloudRunInstanceGolden_Ephemeral pins the ephemeral instance: two
+// memory volumes at the workspace and the home (no subPath), the home leaf
+// read-only as the seed, SCION_HOME_SEED set by the runtime (a value from
+// the agent env is dropped), and no workspace volume on the share.
+func TestCloudRunInstanceGolden_Ephemeral(t *testing.T) {
+	cfg := goldenInstanceCfg()
+	cfg.Persistence = api.PersistenceEphemeral
+	cfg.Env = append(cfg.Env, api.HomeSeedEnvVar+"=/etc")
+	cfg.Resources = &api.ResourceSpec{Limits: api.ResourceList{Memory: "4Gi"}}
+	checkInstanceGolden(t, "ephemeral", cfg)
 }

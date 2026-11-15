@@ -91,6 +91,7 @@ var harnessStrippedEnvNames = []string{
 	"SCION_TRANSPORT_TOKEN_FILE", // stripped on the refused-start path; init sets it for children otherwise
 	"SCION_EXTRA_PATH",
 	"SCION_NATIVE_TELEMETRY_POLICY",
+	"SCION_HOME_SEED", // api.HomeSeedEnvVar: init unsets it once it has seeded the home
 }
 
 // HarnessStrippedEnvNames returns a copy of the names sciontool init

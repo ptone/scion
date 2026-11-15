@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
@@ -47,6 +48,7 @@ var harnessStripNameExprs = map[string]string{
 	"transportauth.EnvTransportTokenExpiry": transportauth.EnvTransportTokenExpiry,
 	"transportauth.EnvTransportTokenFile":   transportauth.EnvTransportTokenFile,
 	"hooks.NativeTelemetryPolicyKey":        hooks.NativeTelemetryPolicyKey,
+	"api.HomeSeedEnvVar":                    api.HomeSeedEnvVar,
 }
 
 // isHarnessStripCall reports whether call is os.Unsetenv(name) or
