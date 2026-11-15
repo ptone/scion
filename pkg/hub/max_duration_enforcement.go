@@ -80,8 +80,15 @@ func parseMaxDurationRung(raw string) (dur time.Duration, unlimited, ok bool) {
 }
 
 func (s *Server) snapshotTemplateMaxDuration(ctx context.Context, tmpl *store.Template) *string {
+	if tmpl == nil {
+		return nil
+	}
+	jc := s.templateJobConfig(ctx, tmpl)
+	if tmpl.AgentConfig == nil && templateHasAgentConfigFile(tmpl) {
+		return nil
+	}
 	var raw string
-	if jc := s.templateJobConfig(ctx, tmpl); jc != nil {
+	if jc != nil {
 		raw = strings.TrimSpace(jc.MaxDuration)
 	}
 	return &raw

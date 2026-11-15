@@ -235,8 +235,16 @@ func TestMaxDurationEnforcement_TemplateSnapshotSurvivesEditDeleteAndReincarnate
 	emptyTmpl := createMaxDurTestTemplate(t, f.s, f.project.ID, "snap-empty", "sha256:v1", &api.ScionConfig{})
 	delDurTmpl := createMaxDurTestTemplate(t, f.s, f.project.ID, "del-dur", "sha256:v1", &api.ScionConfig{MaxDuration: "2h"})
 	delEmptyTmpl := createMaxDurTestTemplate(t, f.s, f.project.ID, "del-empty", "sha256:v1", &api.ScionConfig{})
+	unreadableTmpl := createMaxDurTestTemplate(t, f.s, f.project.ID, "snap-unreadable", "sha256:v1", nil, store.TemplateFile{Path: "scion-agent.yaml"})
 	durA, emptyA := deriveWithTmpl("edited-dur-a", durTmpl), deriveWithTmpl("edited-empty-a", emptyTmpl)
 	delDurA, delEmptyA := deriveWithTmpl("del-dur-a", delDurTmpl), deriveWithTmpl("del-empty-a", delEmptyTmpl)
+	unreadableA := newActiveMaxDurAgent(t, f, "unreadable-snap-a", string(state.PhaseRunning), "working", &store.AgentAppliedConfig{CreateInputs: &store.AgentCreateInputs{}}, start)
+	unreadableA.Template = unreadableTmpl.Slug
+	require.NoError(t, f.srv.deriveAgentConfig(ctx, unreadableA, f.project, unreadableTmpl))
+	require.NoError(t, f.s.UpdateAgent(ctx, unreadableA))
+	gotUnreadable, err := f.s.GetAgent(ctx, unreadableA.ID)
+	require.NoError(t, err)
+	assert.Nil(t, gotUnreadable.AppliedConfig.TemplateMaxDuration, "unreadable template agent config must leave TemplateMaxDuration nil")
 	assert.Equal(t, [2]string{"2h", ""}, [2]string{*durA.AppliedConfig.TemplateMaxDuration, *emptyA.AppliedConfig.TemplateMaxDuration})
 
 	for _, tm := range []*store.Template{durTmpl, emptyTmpl} {
@@ -250,13 +258,14 @@ func TestMaxDurationEnforcement_TemplateSnapshotSurvivesEditDeleteAndReincarnate
 	for _, id := range []string{durA.ID, delDurA.ID} {
 		assertLimitsStopped(t, f.s, id)
 	}
-	for _, id := range []string{emptyA.ID, delEmptyA.ID} {
+	for _, id := range []string{emptyA.ID, delEmptyA.ID, unreadableA.ID} {
 		assertAgentPhase(t, f.s, id, state.PhaseRunning)
 	}
 	f.srv.enforceMaxDurationAt(ctx, start.Add(config.DefaultHubMaxDurationValue+11*time.Minute))
 	for _, id := range []string{emptyA.ID, delEmptyA.ID} {
 		assertLimitsStopped(t, f.s, id)
 	}
+	assertAgentPhase(t, f.s, unreadableA.ID, state.PhaseRunning)
 
 	fresh, _, err := f.srv.buildFreshAppliedConfig(ctx, durA, f.project, "")
 	require.NoError(t, err)
@@ -352,7 +361,9 @@ func TestMaxDurationEnforcement_RunGoneAndAgentRefusalDoNotBlockBroker(t *testin
 
 	f.srv.enforceMaxDurationAt(ctx, start.Add(2*time.Hour+time.Minute))
 	assert.Equal(t, 1, selDisp.callsByAgt[runGoneA.ID], "run-gone row must not be retried on later ticks")
-	assert.Equal(t, 1, strings.Count(logBuf.String(), "dispatch failed"), "systemStopSkipped refusal logged once per run")
+	assert.Equal(t, 1, strings.Count(logBuf.String(), "dispatch failed"), "Phase 2 systemStopSkipped refusal logged once per run")
+	assert.False(t, f.srv.stopCurrentRun(ctx, refusedA.ID, "run-pin-refused", "limits_exceeded stop"))
+	assert.Equal(t, 2, strings.Count(logBuf.String(), "dispatch failed"), "Phase 1 logs unconditionally without Phase 2 dedupe")
 }
 
 func TestMaxDurationEnforcement_PerTickCapFailedBrokerSkipAndBlockedStates(t *testing.T) {

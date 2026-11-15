@@ -200,14 +200,15 @@ func (s *Server) stopCurrentRunWithOutcome(ctx context.Context, agentID, runID, 
 		return dispatcher.DispatchAgentStop(dctx, agent)
 	}); err != nil {
 		s.logStopRunMismatch(agent, action, err)
+		if !hasOutcome {
+			s.agentLifecycleLog.Error("Agent "+action+": dispatch failed", "agent_id", agentID, "error", err)
+			return systemStopBrokerFailed
+		}
 		outcome = classifyStopDispatchError(err, runID)
 		if outcome != systemStopRunGone {
 			if outcome != systemStopSkipped || s.shouldLogMaxDurationSkip(agentID, runID, "stop-skip") {
 				s.agentLifecycleLog.Error("Agent "+action+": dispatch failed", "agent_id", agentID, "run_id", runID, "error", err)
 			}
-			return outcome
-		}
-		if !hasOutcome {
 			return outcome
 		}
 	}

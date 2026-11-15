@@ -150,6 +150,7 @@ func TestResolveDerivedConfig_GoldenCreatePath(t *testing.T) {
   },
   "templateId": %q,
   "templateHash": "tmpl-golden-hash-v1",
+  "templateMaxDuration": "",
   "harnessConfigId": %q,
   "harnessConfigHash": "hc-golden-hash-v1",
   "creatorName": "dev@localhost",
