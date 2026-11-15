@@ -239,6 +239,13 @@ type Agent struct {
 	SSHHostKey      string `json:"-"`
 	SSHHostKeyRunID string `json:"-"`
 
+	// RunStartedAt is when the hub observed the run in RunStartedAtRunID
+	// start on its Runtime Broker (ptone/scion#7929). Read only while
+	// RunStartedAtRunID equals RunID; CreateAgent and UpdateAgent never
+	// write them.
+	RunStartedAt      *time.Time `json:"-"`
+	RunStartedAtRunID string     `json:"-"`
+
 	// RunIntent is whether the agent should be running ("running" or
 	// "stopped"); "" means unknown (NULL). RunIntentAt is the store-clock
 	// time of the last intent write. Internal bookkeeping, untagged like the

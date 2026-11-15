@@ -767,3 +767,25 @@ func TestProjectDecisions_RegisteredDefaultOff(t *testing.T) {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }
+
+// TestMaxDurationEnforcement_RegisteredDefaultOff pins
+// hub.max_duration_enforcement (ptone/scion#7929): server-layer only, alpha,
+// and off by default.
+func TestMaxDurationEnforcement_RegisteredDefaultOff(t *testing.T) {
+	e, ok := Default().Lookup(MaxDurationEnforcement)
+	if !ok {
+		t.Fatalf("%s is not registered", MaxDurationEnforcement)
+	}
+	if MaxDurationEnforcement != "hub.max_duration_enforcement" {
+		t.Fatalf("frozen name changed: %q", MaxDurationEnforcement)
+	}
+	if e.Default {
+		t.Fatal("hub.max_duration_enforcement must default to off")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#7929" || e.Stage != StageAlpha || e.Owner != "cloudrun-runtime" {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}

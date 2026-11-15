@@ -1039,6 +1039,46 @@ func (_u *AgentUpdate) ClearSSHHostKeyRunID() *AgentUpdate {
 	return _u
 }
 
+// SetRunStartedAt sets the "run_started_at" field.
+func (_u *AgentUpdate) SetRunStartedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetRunStartedAt(v)
+	return _u
+}
+
+// SetNillableRunStartedAt sets the "run_started_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunStartedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetRunStartedAt(*v)
+	}
+	return _u
+}
+
+// ClearRunStartedAt clears the value of the "run_started_at" field.
+func (_u *AgentUpdate) ClearRunStartedAt() *AgentUpdate {
+	_u.mutation.ClearRunStartedAt()
+	return _u
+}
+
+// SetRunStartedAtRunID sets the "run_started_at_run_id" field.
+func (_u *AgentUpdate) SetRunStartedAtRunID(v string) *AgentUpdate {
+	_u.mutation.SetRunStartedAtRunID(v)
+	return _u
+}
+
+// SetNillableRunStartedAtRunID sets the "run_started_at_run_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunStartedAtRunID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetRunStartedAtRunID(*v)
+	}
+	return _u
+}
+
+// ClearRunStartedAtRunID clears the value of the "run_started_at_run_id" field.
+func (_u *AgentUpdate) ClearRunStartedAtRunID() *AgentUpdate {
+	_u.mutation.ClearRunStartedAtRunID()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdate) SetLaunchState(v string) *AgentUpdate {
 	_u.mutation.SetLaunchState(v)
@@ -2326,6 +2366,18 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.SSHHostKeyRunIDCleared() {
 		_spec.ClearField(agent.FieldSSHHostKeyRunID, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunStartedAt(); ok {
+		_spec.SetField(agent.FieldRunStartedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunStartedAtCleared() {
+		_spec.ClearField(agent.FieldRunStartedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.RunStartedAtRunID(); ok {
+		_spec.SetField(agent.FieldRunStartedAtRunID, field.TypeString, value)
+	}
+	if _u.mutation.RunStartedAtRunIDCleared() {
+		_spec.ClearField(agent.FieldRunStartedAtRunID, field.TypeString)
 	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
@@ -3778,6 +3830,46 @@ func (_u *AgentUpdateOne) ClearSSHHostKeyRunID() *AgentUpdateOne {
 	return _u
 }
 
+// SetRunStartedAt sets the "run_started_at" field.
+func (_u *AgentUpdateOne) SetRunStartedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetRunStartedAt(v)
+	return _u
+}
+
+// SetNillableRunStartedAt sets the "run_started_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunStartedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunStartedAt(*v)
+	}
+	return _u
+}
+
+// ClearRunStartedAt clears the value of the "run_started_at" field.
+func (_u *AgentUpdateOne) ClearRunStartedAt() *AgentUpdateOne {
+	_u.mutation.ClearRunStartedAt()
+	return _u
+}
+
+// SetRunStartedAtRunID sets the "run_started_at_run_id" field.
+func (_u *AgentUpdateOne) SetRunStartedAtRunID(v string) *AgentUpdateOne {
+	_u.mutation.SetRunStartedAtRunID(v)
+	return _u
+}
+
+// SetNillableRunStartedAtRunID sets the "run_started_at_run_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunStartedAtRunID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunStartedAtRunID(*v)
+	}
+	return _u
+}
+
+// ClearRunStartedAtRunID clears the value of the "run_started_at_run_id" field.
+func (_u *AgentUpdateOne) ClearRunStartedAtRunID() *AgentUpdateOne {
+	_u.mutation.ClearRunStartedAtRunID()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdateOne) SetLaunchState(v string) *AgentUpdateOne {
 	_u.mutation.SetLaunchState(v)
@@ -5095,6 +5187,18 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.SSHHostKeyRunIDCleared() {
 		_spec.ClearField(agent.FieldSSHHostKeyRunID, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunStartedAt(); ok {
+		_spec.SetField(agent.FieldRunStartedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunStartedAtCleared() {
+		_spec.ClearField(agent.FieldRunStartedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.RunStartedAtRunID(); ok {
+		_spec.SetField(agent.FieldRunStartedAtRunID, field.TypeString, value)
+	}
+	if _u.mutation.RunStartedAtRunIDCleared() {
+		_spec.ClearField(agent.FieldRunStartedAtRunID, field.TypeString)
 	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)

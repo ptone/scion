@@ -340,6 +340,17 @@ func (Agent) Fields() []ent.Field {
 			Optional(),
 		field.String("ssh_host_key_run_id").
 			Optional(),
+		// run_started_at is when the hub observed the run in
+		// run_started_at_run_id start on its Runtime Broker
+		// (ptone/scion#7929). Written only by RecordAgentRunStarted (and the
+		// running_observed launch fallback in UpdateAgentStatus), never by
+		// CreateAgent or UpdateAgent, and read only while
+		// run_started_at_run_id equals run_id.
+		field.Time("run_started_at").
+			Optional().
+			Nillable(),
+		field.String("run_started_at_run_id").
+			Optional(),
 		// launch_state is "active" while a launch is in flight, "ended" once
 		// it has reached a terminal outcome, or "" for an agent that has
 		// never had a launch (pre-T1 rows, or rows created before P1b-3 turns
@@ -620,6 +631,12 @@ func (Agent) Indexes() []ent.Index {
 		index.Fields("start_claim_state", "start_claim_lease_until").
 			Annotations(
 				entsql.IndexWhere("start_claim_id IS NOT NULL"),
+			),
+		// Partial index backing the max_duration enforcement scan
+		// (ptone/scion#7929): active agents ordered by run_started_at.
+		index.Fields("run_started_at").
+			Annotations(
+				entsql.IndexWhere("run_started_at IS NOT NULL AND deleted_at IS NULL AND phase IN ('running', 'starting')"),
 			),
 		// Partial index backing CompositeStore.ReconcileHarnessConfigColumn's
 		// every-boot scan (GoogleCloudPlatform/scion#2153), which queries

@@ -316,6 +316,16 @@ func SSHHostKeyRunID(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldSSHHostKeyRunID, v))
 }
 
+// RunStartedAt applies equality check predicate on the "run_started_at" field. It's identical to RunStartedAtEQ.
+func RunStartedAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunStartedAt, v))
+}
+
+// RunStartedAtRunID applies equality check predicate on the "run_started_at_run_id" field. It's identical to RunStartedAtRunIDEQ.
+func RunStartedAtRunID(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunStartedAtRunID, v))
+}
+
 // LaunchState applies equality check predicate on the "launch_state" field. It's identical to LaunchStateEQ.
 func LaunchState(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchState, v))
@@ -3669,6 +3679,131 @@ func SSHHostKeyRunIDEqualFold(v string) predicate.Agent {
 // SSHHostKeyRunIDContainsFold applies the ContainsFold predicate on the "ssh_host_key_run_id" field.
 func SSHHostKeyRunIDContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldSSHHostKeyRunID, v))
+}
+
+// RunStartedAtEQ applies the EQ predicate on the "run_started_at" field.
+func RunStartedAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunStartedAt, v))
+}
+
+// RunStartedAtNEQ applies the NEQ predicate on the "run_started_at" field.
+func RunStartedAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldRunStartedAt, v))
+}
+
+// RunStartedAtIn applies the In predicate on the "run_started_at" field.
+func RunStartedAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldRunStartedAt, vs...))
+}
+
+// RunStartedAtNotIn applies the NotIn predicate on the "run_started_at" field.
+func RunStartedAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldRunStartedAt, vs...))
+}
+
+// RunStartedAtGT applies the GT predicate on the "run_started_at" field.
+func RunStartedAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldRunStartedAt, v))
+}
+
+// RunStartedAtGTE applies the GTE predicate on the "run_started_at" field.
+func RunStartedAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldRunStartedAt, v))
+}
+
+// RunStartedAtLT applies the LT predicate on the "run_started_at" field.
+func RunStartedAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldRunStartedAt, v))
+}
+
+// RunStartedAtLTE applies the LTE predicate on the "run_started_at" field.
+func RunStartedAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldRunStartedAt, v))
+}
+
+// RunStartedAtIsNil applies the IsNil predicate on the "run_started_at" field.
+func RunStartedAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldRunStartedAt))
+}
+
+// RunStartedAtNotNil applies the NotNil predicate on the "run_started_at" field.
+func RunStartedAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldRunStartedAt))
+}
+
+// RunStartedAtRunIDEQ applies the EQ predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunStartedAtRunID, v))
+}
+
+// RunStartedAtRunIDNEQ applies the NEQ predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldRunStartedAtRunID, v))
+}
+
+// RunStartedAtRunIDIn applies the In predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldRunStartedAtRunID, vs...))
+}
+
+// RunStartedAtRunIDNotIn applies the NotIn predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldRunStartedAtRunID, vs...))
+}
+
+// RunStartedAtRunIDGT applies the GT predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldRunStartedAtRunID, v))
+}
+
+// RunStartedAtRunIDGTE applies the GTE predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldRunStartedAtRunID, v))
+}
+
+// RunStartedAtRunIDLT applies the LT predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldRunStartedAtRunID, v))
+}
+
+// RunStartedAtRunIDLTE applies the LTE predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldRunStartedAtRunID, v))
+}
+
+// RunStartedAtRunIDContains applies the Contains predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldRunStartedAtRunID, v))
+}
+
+// RunStartedAtRunIDHasPrefix applies the HasPrefix predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldRunStartedAtRunID, v))
+}
+
+// RunStartedAtRunIDHasSuffix applies the HasSuffix predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldRunStartedAtRunID, v))
+}
+
+// RunStartedAtRunIDIsNil applies the IsNil predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldRunStartedAtRunID))
+}
+
+// RunStartedAtRunIDNotNil applies the NotNil predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldRunStartedAtRunID))
+}
+
+// RunStartedAtRunIDEqualFold applies the EqualFold predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldRunStartedAtRunID, v))
+}
+
+// RunStartedAtRunIDContainsFold applies the ContainsFold predicate on the "run_started_at_run_id" field.
+func RunStartedAtRunIDContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldRunStartedAtRunID, v))
 }
 
 // LaunchStateEQ applies the EQ predicate on the "launch_state" field.

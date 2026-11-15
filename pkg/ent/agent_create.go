@@ -792,6 +792,34 @@ func (_c *AgentCreate) SetNillableSSHHostKeyRunID(v *string) *AgentCreate {
 	return _c
 }
 
+// SetRunStartedAt sets the "run_started_at" field.
+func (_c *AgentCreate) SetRunStartedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetRunStartedAt(v)
+	return _c
+}
+
+// SetNillableRunStartedAt sets the "run_started_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRunStartedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetRunStartedAt(*v)
+	}
+	return _c
+}
+
+// SetRunStartedAtRunID sets the "run_started_at_run_id" field.
+func (_c *AgentCreate) SetRunStartedAtRunID(v string) *AgentCreate {
+	_c.mutation.SetRunStartedAtRunID(v)
+	return _c
+}
+
+// SetNillableRunStartedAtRunID sets the "run_started_at_run_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRunStartedAtRunID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetRunStartedAtRunID(*v)
+	}
+	return _c
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_c *AgentCreate) SetLaunchState(v string) *AgentCreate {
 	_c.mutation.SetLaunchState(v)
@@ -1936,6 +1964,14 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.SSHHostKeyRunID(); ok {
 		_spec.SetField(agent.FieldSSHHostKeyRunID, field.TypeString, value)
 		_node.SSHHostKeyRunID = value
+	}
+	if value, ok := _c.mutation.RunStartedAt(); ok {
+		_spec.SetField(agent.FieldRunStartedAt, field.TypeTime, value)
+		_node.RunStartedAt = &value
+	}
+	if value, ok := _c.mutation.RunStartedAtRunID(); ok {
+		_spec.SetField(agent.FieldRunStartedAtRunID, field.TypeString, value)
+		_node.RunStartedAtRunID = value
 	}
 	if value, ok := _c.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
@@ -3133,6 +3169,42 @@ func (u *AgentUpsert) UpdateSSHHostKeyRunID() *AgentUpsert {
 // ClearSSHHostKeyRunID clears the value of the "ssh_host_key_run_id" field.
 func (u *AgentUpsert) ClearSSHHostKeyRunID() *AgentUpsert {
 	u.SetNull(agent.FieldSSHHostKeyRunID)
+	return u
+}
+
+// SetRunStartedAt sets the "run_started_at" field.
+func (u *AgentUpsert) SetRunStartedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldRunStartedAt, v)
+	return u
+}
+
+// UpdateRunStartedAt sets the "run_started_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRunStartedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldRunStartedAt)
+	return u
+}
+
+// ClearRunStartedAt clears the value of the "run_started_at" field.
+func (u *AgentUpsert) ClearRunStartedAt() *AgentUpsert {
+	u.SetNull(agent.FieldRunStartedAt)
+	return u
+}
+
+// SetRunStartedAtRunID sets the "run_started_at_run_id" field.
+func (u *AgentUpsert) SetRunStartedAtRunID(v string) *AgentUpsert {
+	u.Set(agent.FieldRunStartedAtRunID, v)
+	return u
+}
+
+// UpdateRunStartedAtRunID sets the "run_started_at_run_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRunStartedAtRunID() *AgentUpsert {
+	u.SetExcluded(agent.FieldRunStartedAtRunID)
+	return u
+}
+
+// ClearRunStartedAtRunID clears the value of the "run_started_at_run_id" field.
+func (u *AgentUpsert) ClearRunStartedAtRunID() *AgentUpsert {
+	u.SetNull(agent.FieldRunStartedAtRunID)
 	return u
 }
 
@@ -4927,6 +4999,48 @@ func (u *AgentUpsertOne) UpdateSSHHostKeyRunID() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearSSHHostKeyRunID() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearSSHHostKeyRunID()
+	})
+}
+
+// SetRunStartedAt sets the "run_started_at" field.
+func (u *AgentUpsertOne) SetRunStartedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunStartedAt(v)
+	})
+}
+
+// UpdateRunStartedAt sets the "run_started_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRunStartedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunStartedAt()
+	})
+}
+
+// ClearRunStartedAt clears the value of the "run_started_at" field.
+func (u *AgentUpsertOne) ClearRunStartedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunStartedAt()
+	})
+}
+
+// SetRunStartedAtRunID sets the "run_started_at_run_id" field.
+func (u *AgentUpsertOne) SetRunStartedAtRunID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunStartedAtRunID(v)
+	})
+}
+
+// UpdateRunStartedAtRunID sets the "run_started_at_run_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRunStartedAtRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunStartedAtRunID()
+	})
+}
+
+// ClearRunStartedAtRunID clears the value of the "run_started_at_run_id" field.
+func (u *AgentUpsertOne) ClearRunStartedAtRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunStartedAtRunID()
 	})
 }
 
@@ -6998,6 +7112,48 @@ func (u *AgentUpsertBulk) UpdateSSHHostKeyRunID() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearSSHHostKeyRunID() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearSSHHostKeyRunID()
+	})
+}
+
+// SetRunStartedAt sets the "run_started_at" field.
+func (u *AgentUpsertBulk) SetRunStartedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunStartedAt(v)
+	})
+}
+
+// UpdateRunStartedAt sets the "run_started_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRunStartedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunStartedAt()
+	})
+}
+
+// ClearRunStartedAt clears the value of the "run_started_at" field.
+func (u *AgentUpsertBulk) ClearRunStartedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunStartedAt()
+	})
+}
+
+// SetRunStartedAtRunID sets the "run_started_at_run_id" field.
+func (u *AgentUpsertBulk) SetRunStartedAtRunID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunStartedAtRunID(v)
+	})
+}
+
+// UpdateRunStartedAtRunID sets the "run_started_at_run_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRunStartedAtRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunStartedAtRunID()
+	})
+}
+
+// ClearRunStartedAtRunID clears the value of the "run_started_at_run_id" field.
+func (u *AgentUpsertBulk) ClearRunStartedAtRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunStartedAtRunID()
 	})
 }
 
