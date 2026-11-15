@@ -141,6 +141,9 @@ func (d *DeclarativeGenericHarness) GetEnv(agentName, agentHome, unixUsername st
 		"SCION_AGENT_NAME": agentName,
 	}
 	for k, v := range d.entry.EnvTemplate {
+		if config.IsReservedLifecycleEnvKey(k) {
+			continue
+		}
 		out[k] = expandEnvTemplate(v, agentName, agentHome, unixUsername)
 	}
 	return out

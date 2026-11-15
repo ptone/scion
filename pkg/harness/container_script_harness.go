@@ -280,6 +280,9 @@ func (c *ContainerScriptHarness) GetEnv(agentName, agentHome, unixUsername strin
 		"SCION_AGENT_NAME": agentName,
 	}
 	for k, v := range c.entry.EnvTemplate {
+		if config.IsReservedLifecycleEnvKey(k) {
+			continue
+		}
 		out[k] = expandEnvTemplate(v, agentName, agentHome, unixUsername)
 	}
 	return out
