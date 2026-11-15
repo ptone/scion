@@ -631,9 +631,9 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // that wrapped ctx.
 //
 // Exceptions — these ignore whether the slot is already set:
-//   - TemplateID and TemplateHash are replaced whenever resolvedTemplate is
-//     non-nil. A template no longer sets HubAccessScopes (ptone/scion#4224);
-//     an existing value is left as-is.
+//   - TemplateID, TemplateHash and TemplateMaxDuration are replaced whenever
+//     resolvedTemplate is non-nil. A template no longer sets HubAccessScopes
+//     (ptone/scion#4224); an existing value is left as-is.
 //   - Model-alias resolution: when AppliedConfig.Model is an alias, rewrites
 //     it to the resolved concrete name, and overwrites a non-empty
 //     InlineConfig.Model with that same resolved value (InlineConfig.Model
@@ -695,14 +695,17 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	if resolvedTemplate != nil {
 		agent.AppliedConfig.TemplateID = resolvedTemplate.ID
 		agent.AppliedConfig.TemplateHash = resolvedTemplate.ContentHash
+		agent.AppliedConfig.TemplateMaxDuration = s.snapshotTemplateMaxDuration(ctx, resolvedTemplate)
 
-		// The template's job keys are not copied here. Its model is filled
-		// by deriveAgentConfig's template rung, from the AgentConfig
-		// snapshot. Its image, env and telemetry are not copied at all, for
-		// any broker (ptone/scion#4222): image and telemetry are
-		// environment keys a template cannot set (ptone/scion#4524), and
-		// the template's own env reaches the agent from its file on the
-		// broker, ranked by the environment-variable order.
+		// The template's job keys are not copied into InlineConfig here. Its
+		// model is filled by deriveAgentConfig's template rung, from the
+		// AgentConfig snapshot, and its max_duration is snapshotted onto
+		// TemplateMaxDuration above for hub-side enforcement (ptone/scion#7929).
+		// Its image, env and telemetry are not copied at all, for any broker
+		// (ptone/scion#4222): image and telemetry are environment keys a
+		// template cannot set (ptone/scion#4524), and the template's own env
+		// reaches the agent from its file on the broker, ranked by the
+		// environment-variable order.
 	}
 
 	// Populate harness config ID and hash for broker hydration.

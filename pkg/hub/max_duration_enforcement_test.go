@@ -207,6 +207,63 @@ func (w *getTemplateFaultStore) GetTemplate(ctx context.Context, id string) (*st
 	return w.Store.GetTemplate(ctx, id)
 }
 
+func createMaxDurTestTemplate(t *testing.T, s store.Store, projectID, slug, hash string, cfg *api.ScionConfig, files ...store.TemplateFile) *store.Template {
+	t.Helper()
+	tm := &store.Template{
+		ID: api.NewUUID(), Slug: slug, Name: slug, ContentHash: hash, Scope: store.TemplateScopeProject,
+		ScopeID: projectID, Status: store.TemplateStatusActive, AgentConfig: cfg, Files: files,
+	}
+	require.NoError(t, s.CreateTemplate(context.Background(), tm))
+	return tm
+}
+
+func TestMaxDurationEnforcement_TemplateSnapshotSurvivesEditDeleteAndReincarnate(t *testing.T) {
+	ctx, f, start := context.Background(), newHaltFixture(t), time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
+	enableMaxDurationExperiment(t, f.srv, true)
+	_, _ = f.s.SetRunIntent(ctx, f.agent.ID, store.RunIntentStopped)
+	deriveWithTmpl := func(slug string, tm *store.Template) *store.Agent {
+		a := newActiveMaxDurAgent(t, f, slug, string(state.PhaseRunning), "working", &store.AgentAppliedConfig{CreateInputs: &store.AgentCreateInputs{}}, start)
+		a.Template = tm.Slug
+		require.NoError(t, f.srv.deriveAgentConfig(ctx, a, f.project, tm))
+		require.NoError(t, f.s.UpdateAgent(ctx, a))
+		got, err := f.s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.AppliedConfig.TemplateMaxDuration)
+		return got
+	}
+	durTmpl := createMaxDurTestTemplate(t, f.s, f.project.ID, "snap-dur", "sha256:v1", &api.ScionConfig{MaxDuration: "2h"})
+	emptyTmpl := createMaxDurTestTemplate(t, f.s, f.project.ID, "snap-empty", "sha256:v1", &api.ScionConfig{})
+	delDurTmpl := createMaxDurTestTemplate(t, f.s, f.project.ID, "del-dur", "sha256:v1", &api.ScionConfig{MaxDuration: "2h"})
+	delEmptyTmpl := createMaxDurTestTemplate(t, f.s, f.project.ID, "del-empty", "sha256:v1", &api.ScionConfig{})
+	durA, emptyA := deriveWithTmpl("edited-dur-a", durTmpl), deriveWithTmpl("edited-empty-a", emptyTmpl)
+	delDurA, delEmptyA := deriveWithTmpl("del-dur-a", delDurTmpl), deriveWithTmpl("del-empty-a", delEmptyTmpl)
+	assert.Equal(t, [2]string{"2h", ""}, [2]string{*durA.AppliedConfig.TemplateMaxDuration, *emptyA.AppliedConfig.TemplateMaxDuration})
+
+	for _, tm := range []*store.Template{durTmpl, emptyTmpl} {
+		tm.ContentHash, tm.AgentConfig = "sha256:v2", &api.ScionConfig{MaxDuration: "72h"}
+		require.NoError(t, f.s.UpdateTemplateContent(ctx, tm, store.TemplateContentPrecondition{ContentHash: "sha256:v1"}))
+	}
+	require.NoError(t, f.s.DeleteTemplate(ctx, delDurTmpl.ID))
+	require.NoError(t, f.s.DeleteTemplate(ctx, delEmptyTmpl.ID))
+
+	f.srv.enforceMaxDurationAt(ctx, start.Add(2*time.Hour+11*time.Minute))
+	for _, id := range []string{durA.ID, delDurA.ID} {
+		assertLimitsStopped(t, f.s, id)
+	}
+	for _, id := range []string{emptyA.ID, delEmptyA.ID} {
+		assertAgentPhase(t, f.s, id, state.PhaseRunning)
+	}
+	f.srv.enforceMaxDurationAt(ctx, start.Add(config.DefaultHubMaxDurationValue+11*time.Minute))
+	for _, id := range []string{emptyA.ID, delEmptyA.ID} {
+		assertLimitsStopped(t, f.s, id)
+	}
+
+	fresh, _, err := f.srv.buildFreshAppliedConfig(ctx, durA, f.project, "")
+	require.NoError(t, err)
+	require.NotNil(t, fresh.TemplateMaxDuration)
+	assert.Equal(t, [2]string{"sha256:v2", "72h"}, [2]string{fresh.TemplateHash, *fresh.TemplateMaxDuration})
+}
+
 func TestMaxDurationEnforcement_TemplateMissingErrorHashMismatchFailOpen(t *testing.T) {
 	ctx, start := context.Background(), time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
 	var fault *storeFaultSwitch
@@ -219,18 +276,10 @@ func TestMaxDurationEnforcement_TemplateMissingErrorHashMismatchFailOpen(t *test
 	})
 	enableMaxDurationExperiment(t, srv, true)
 	f := haltFixture{srv: srv, s: s, project: project, broker: broker}
-	mkTmpl := func(slug, hash string, cfg *api.ScionConfig, files ...store.TemplateFile) *store.Template {
-		tm := &store.Template{
-			ID: api.NewUUID(), Slug: slug, Name: slug, ContentHash: hash, Scope: store.TemplateScopeProject,
-			ScopeID: project.ID, Status: store.TemplateStatusActive, AgentConfig: cfg, Files: files,
-		}
-		require.NoError(t, s.CreateTemplate(ctx, tm))
-		return tm
-	}
-	emptyDurTmpl := mkTmpl("empty-dur", "sha256:v1", &api.ScionConfig{})
-	editedTmpl := mkTmpl("edited-dur", "sha256:v2", &api.ScionConfig{MaxDuration: "30m"})
-	lazyUnreadableTmpl := mkTmpl("lazy-unreadable", "sha256:v1", nil, store.TemplateFile{Path: "scion-agent.yaml"})
-	faultedTmpl := mkTmpl("faulted-dur", "sha256:v1", &api.ScionConfig{MaxDuration: "30m"})
+	emptyDurTmpl := createMaxDurTestTemplate(t, s, project.ID, "empty-dur", "sha256:v1", &api.ScionConfig{})
+	editedTmpl := createMaxDurTestTemplate(t, s, project.ID, "edited-dur", "sha256:v2", &api.ScionConfig{MaxDuration: "30m"})
+	lazyUnreadableTmpl := createMaxDurTestTemplate(t, s, project.ID, "lazy-unreadable", "sha256:v1", nil, store.TemplateFile{Path: "scion-agent.yaml"})
+	faultedTmpl := createMaxDurTestTemplate(t, s, project.ID, "faulted-dur", "sha256:v1", &api.ScionConfig{MaxDuration: "30m"})
 
 	missingA := newActiveMaxDurAgent(t, f, "tmpl-missing", string(state.PhaseRunning), "working", &store.AgentAppliedConfig{TemplateID: api.NewUUID()}, start)
 	mismatchA := newActiveMaxDurAgent(t, f, "tmpl-mismatch", string(state.PhaseRunning), "working", &store.AgentAppliedConfig{TemplateID: editedTmpl.ID, TemplateHash: "sha256:v1"}, start)
@@ -276,6 +325,8 @@ func (d *brokerSelectiveStopDispatcher) DispatchAgentStop(ctx context.Context, a
 
 func TestMaxDurationEnforcement_RunGoneAndAgentRefusalDoNotBlockBroker(t *testing.T) {
 	ctx, f, start := context.Background(), newHaltFixture(t), time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC)
+	var logBuf bytes.Buffer
+	f.srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	enableMaxDurationExperiment(t, f.srv, true)
 	setHubDefaultMaxDur(f.srv, "30m")
 	_, _ = f.s.SetRunIntent(ctx, f.agent.ID, store.RunIntentStopped)
@@ -301,6 +352,7 @@ func TestMaxDurationEnforcement_RunGoneAndAgentRefusalDoNotBlockBroker(t *testin
 
 	f.srv.enforceMaxDurationAt(ctx, start.Add(2*time.Hour+time.Minute))
 	assert.Equal(t, 1, selDisp.callsByAgt[runGoneA.ID], "run-gone row must not be retried on later ticks")
+	assert.Equal(t, 1, strings.Count(logBuf.String(), "dispatch failed"), "systemStopSkipped refusal logged once per run")
 }
 
 func TestMaxDurationEnforcement_PerTickCapFailedBrokerSkipAndBlockedStates(t *testing.T) {

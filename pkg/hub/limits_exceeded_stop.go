@@ -202,7 +202,9 @@ func (s *Server) stopCurrentRunWithOutcome(ctx context.Context, agentID, runID, 
 		s.logStopRunMismatch(agent, action, err)
 		outcome = classifyStopDispatchError(err, runID)
 		if outcome != systemStopRunGone {
-			s.agentLifecycleLog.Error("Agent "+action+": dispatch failed", "agent_id", agentID, "error", err)
+			if outcome != systemStopSkipped || s.shouldLogMaxDurationSkip(agentID, runID, "stop-skip") {
+				s.agentLifecycleLog.Error("Agent "+action+": dispatch failed", "agent_id", agentID, "run_id", runID, "error", err)
+			}
 			return outcome
 		}
 		if !hasOutcome {

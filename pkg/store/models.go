@@ -452,6 +452,11 @@ type AgentAppliedConfig struct {
 	// Template info for Runtime Broker hydration
 	TemplateID   string `json:"templateId,omitempty"`   // Hub template ID for fetching
 	TemplateHash string `json:"templateHash,omitempty"` // Content hash for cache validation
+	// TemplateMaxDuration snapshots the resolved Hub template's max_duration
+	// at create or reincarnation ("" when the template set none; nil on rows
+	// created before this field existed or when no Hub template was resolved;
+	// ptone/scion#7929).
+	TemplateMaxDuration *string `json:"templateMaxDuration,omitempty"`
 
 	// RuntimeTargetCandidate is a target reported by one heartbeat that
 	// differs from RuntimeTarget. It becomes RuntimeTarget only when the next
@@ -649,6 +654,10 @@ func (ac *AgentAppliedConfig) ResponseView(canAttach bool) *AgentAppliedConfig {
 		return nil
 	}
 	view := *ac
+	if ac.TemplateMaxDuration != nil {
+		v := *ac.TemplateMaxDuration
+		view.TemplateMaxDuration = &v
+	}
 	view.envResponseVisible = canAttach
 	view.InlineConfig = redactInlineConfigForResponse(ac.InlineConfig, canAttach)
 	view.CreateInputs = redactCreateInputsForResponse(ac.CreateInputs, canAttach)

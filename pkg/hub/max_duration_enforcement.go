@@ -61,7 +61,8 @@ func (d *HTTPAgentDispatcher) recordRunStarted(ctx context.Context, agent *store
 
 // parseMaxDurationRung interprets one rung of the max_duration precedence
 // ladder. Empty or unparseable values return ok=false so resolution falls
-// through to the next rung (the safe direction, toward hub default / 24h);
+// through to the next rung (the bounding direction, toward hub default / 24h;
+// inside the container sciontool treats an unparseable value as no limit);
 // "0" or a non-positive duration returns (0, true, true) to opt out.
 func parseMaxDurationRung(raw string) (dur time.Duration, unlimited, ok bool) {
 	v := strings.TrimSpace(raw)
@@ -76,6 +77,14 @@ func parseMaxDurationRung(raw string) (dur time.Duration, unlimited, ok bool) {
 		return 0, false, false
 	}
 	return max(d, 0), d <= 0, true
+}
+
+func (s *Server) snapshotTemplateMaxDuration(ctx context.Context, tmpl *store.Template) *string {
+	var raw string
+	if jc := s.templateJobConfig(ctx, tmpl); jc != nil {
+		raw = strings.TrimSpace(jc.MaxDuration)
+	}
+	return &raw
 }
 
 type tmplMaxDurEntry struct {
@@ -99,24 +108,27 @@ func (s *Server) lookupTemplateForMaxDuration(ctx context.Context, templateID st
 	return tmplMaxDurEntry{tmpl: tmpl, cfg: cfg}
 }
 
-func (s *Server) shouldLogMaxDurationTmplSkip(agentID, runID, kind string, seen map[string]bool) bool {
-	key := agentID + ":" + kind
-	seen[key] = true
-	prev, loaded := s.maxDurationTmplSkipLogged.Swap(key, runID)
+func (s *Server) shouldLogMaxDurationSkip(agentID, runID, kind string) bool {
+	prev, loaded := s.maxDurationSkipLogged.Swap(agentID+":"+kind, runID)
 	return !loaded || prev != runID
 }
 
 // resolveAgentMaxDuration resolves inline/project > hub template > hub default > 24h.
-// On a template read error, missing template, or content-hash mismatch it logs
-// once per agent and run and returns (0, false) so the sweep fails open for
-// this tick rather than falling through to a shorter default.
-func (s *Server) resolveAgentMaxDuration(ctx context.Context, a *store.Agent, hubDefaults opsettings.AgentDefaultsSettings, tmplCache map[string]tmplMaxDurEntry, seenSkips map[string]bool) (time.Duration, bool) {
+// Agents created or reincarnated since ptone/scion#7929 carry a TemplateMaxDuration
+// snapshot and never re-read GetTemplate; transitional legacy rows without the
+// snapshot read the Hub template live and fail open (logged once per run) on a
+// read error, missing template, or content-hash mismatch.
+func (s *Server) resolveAgentMaxDuration(ctx context.Context, a *store.Agent, hubDefaults opsettings.AgentDefaultsSettings, tmplCache map[string]tmplMaxDurEntry) (time.Duration, bool) {
 	if a.AppliedConfig != nil && a.AppliedConfig.InlineConfig != nil {
 		if d, unlimited, ok := parseMaxDurationRung(a.AppliedConfig.InlineConfig.MaxDuration); ok {
 			return d, !unlimited
 		}
 	}
-	if a.AppliedConfig != nil && a.AppliedConfig.TemplateID != "" {
+	if a.AppliedConfig != nil && a.AppliedConfig.TemplateMaxDuration != nil {
+		if d, unlimited, ok := parseMaxDurationRung(*a.AppliedConfig.TemplateMaxDuration); ok {
+			return d, !unlimited
+		}
+	} else if a.AppliedConfig != nil && a.AppliedConfig.TemplateID != "" {
 		tid := a.AppliedConfig.TemplateID
 		entry, cached := tmplCache[tid]
 		if !cached {
@@ -124,14 +136,14 @@ func (s *Server) resolveAgentMaxDuration(ctx context.Context, a *store.Agent, hu
 			tmplCache[tid] = entry
 		}
 		if entry.err != nil {
-			if s.shouldLogMaxDurationTmplSkip(a.ID, a.RunID, "err", seenSkips) {
+			if s.shouldLogMaxDurationSkip(a.ID, a.RunID, "tmpl-err") {
 				s.agentLifecycleLog.Warn("max_duration enforcement: skipping agent; could not read template",
 					"agent_id", a.ID, "run_id", a.RunID, "template_id", tid, "error", entry.err)
 			}
 			return 0, false
 		}
 		if a.AppliedConfig.TemplateHash != "" && entry.tmpl.ContentHash != a.AppliedConfig.TemplateHash {
-			if s.shouldLogMaxDurationTmplSkip(a.ID, a.RunID, "hash", seenSkips) {
+			if s.shouldLogMaxDurationSkip(a.ID, a.RunID, "tmpl-hash") {
 				s.agentLifecycleLog.Info("max_duration enforcement: skipping agent; template hash changed since provision",
 					"agent_id", a.ID, "run_id", a.RunID, "template_id", tid, "applied_hash", a.AppliedConfig.TemplateHash, "current_hash", entry.tmpl.ContentHash)
 			}
@@ -166,11 +178,14 @@ func (s *Server) enforceMaxDurationAt(ctx context.Context, now time.Time) {
 		s.agentLifecycleLog.Error("max_duration enforcement: failed to list active agents", "error", err)
 		return
 	}
-	hubDefaults, tmplCache, failedBrokers, seenSkips := s.hubAgentDefaults(), make(map[string]tmplMaxDurEntry), make(map[string]bool), make(map[string]bool)
-	attempts, hitCap := 0, false
+	activeIDs := make(map[string]bool, len(agents))
+	for i := range agents {
+		activeIDs[agents[i].ID] = true
+	}
+	hubDefaults, tmplCache, failedBrokers := s.hubAgentDefaults(), make(map[string]tmplMaxDurEntry), make(map[string]bool)
+	attempts := 0
 	for i := range agents {
 		if attempts >= maxDurationEnforcementPerTickCap {
-			hitCap = true
 			break
 		}
 		a := &agents[i]
@@ -178,7 +193,7 @@ func (s *Server) enforceMaxDurationAt(ctx context.Context, now time.Time) {
 			a.RuntimeBrokerID == "" || failedBrokers[a.RuntimeBrokerID] || systemStopBlocked(a) {
 			continue
 		}
-		maxDur, ok := s.resolveAgentMaxDuration(ctx, a, hubDefaults, tmplCache, seenSkips)
+		maxDur, ok := s.resolveAgentMaxDuration(ctx, a, hubDefaults, tmplCache)
 		if !ok || !now.After(a.RunStartedAt.Add(maxDur+maxDurationEnforcementGrace)) {
 			continue
 		}
@@ -192,12 +207,12 @@ func (s *Server) enforceMaxDurationAt(ctx context.Context, now time.Time) {
 			failedBrokers[a.RuntimeBrokerID] = true
 		}
 	}
-	if !hitCap && len(failedBrokers) == 0 {
-		s.maxDurationTmplSkipLogged.Range(func(k, _ any) bool {
-			if ks, ok := k.(string); ok && !seenSkips[ks] {
-				s.maxDurationTmplSkipLogged.Delete(k)
+	s.maxDurationSkipLogged.Range(func(k, _ any) bool {
+		if ks, ok := k.(string); ok {
+			if id, _, _ := strings.Cut(ks, ":"); !activeIDs[id] {
+				s.maxDurationSkipLogged.Delete(k)
 			}
-			return true
-		})
-	}
+		}
+		return true
+	})
 }
