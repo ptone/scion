@@ -766,7 +766,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 	}
 	templateEnv := templateChainEnv(envChain)
-	if envChain == nil && (templateUnresolvable || opts.TemplateEnvSource != "") {
+	templatesUnresolvable := envChain == nil && (templateUnresolvable || opts.TemplateEnvSource != "")
+	if templatesUnresolvable {
 		if label := templateDisplayName(templateName, provenance, finalScionCfg); label != "" {
 			warnings = append(warnings, fmt.Sprintf("Warning: template %s not found; its env fallback is not applied", label))
 		}
@@ -1236,7 +1237,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			return writeAgentHome(ctx, fn)
 		})
 	}
-	if err := clearDisallowedBundleHooksOnStart(ctx, opts.Name, harnessConfigName, resolvedHCDir, envChain, agentDir, agentHome, func(fn func() error) error {
+	if err := clearDisallowedBundleHooksOnStart(ctx, opts.Name, harnessConfigName, resolvedHCDir, envChain, templatesUnresolvable, agentDir, agentHome, func(fn func() error) error {
 		return writeAgentHome(ctx, fn)
 	}); err != nil {
 		return nil, err
@@ -4057,6 +4058,7 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 				continue
 			}
 			if config.IsReservedLifecycleEnvKey(expandedKey) {
+				slog.Warn("ignoring reserved lifecycle environment variable in agent config", "key", expandedKey)
 				warnings = append(warnings, fmt.Sprintf("Warning: ignoring %s: reserved for container lifecycle initialization", expandedKey))
 				continue
 			}
@@ -4243,8 +4245,10 @@ func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSet
 			if opts.Env == nil {
 				opts.Env = make(map[string]string)
 			}
+			var droppedReserved []string
 			for k, v := range hcEntry.Env {
 				if config.IsReservedLifecycleEnvKey(k) {
+					droppedReserved = append(droppedReserved, k)
 					continue
 				}
 				if skipBrokerLocalEnvKey(opts.BrokerMode, k) {
@@ -4254,6 +4258,10 @@ func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSet
 				if _, exists := opts.Env[k]; !exists { // never clobber hub-supplied values
 					opts.Env[k] = v
 				}
+			}
+			slices.Sort(droppedReserved)
+			for _, k := range droppedReserved {
+				slog.Warn("ignoring reserved lifecycle environment variable in harness-config", "key", k)
 			}
 		}
 	}

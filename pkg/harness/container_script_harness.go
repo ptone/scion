@@ -281,6 +281,7 @@ func (c *ContainerScriptHarness) GetEnv(agentName, agentHome, unixUsername strin
 	}
 	for k, v := range c.entry.EnvTemplate {
 		if config.IsReservedLifecycleEnvKey(k) {
+			slog.Warn("ignoring reserved lifecycle environment variable in harness-config", "key", k)
 			continue
 		}
 		out[k] = expandEnvTemplate(v, agentName, agentHome, unixUsername)

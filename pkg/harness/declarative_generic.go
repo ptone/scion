@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -142,6 +143,7 @@ func (d *DeclarativeGenericHarness) GetEnv(agentName, agentHome, unixUsername st
 	}
 	for k, v := range d.entry.EnvTemplate {
 		if config.IsReservedLifecycleEnvKey(k) {
+			slog.Warn("ignoring reserved lifecycle environment variable in harness-config", "key", k)
 			continue
 		}
 		out[k] = expandEnvTemplate(v, agentName, agentHome, unixUsername)
