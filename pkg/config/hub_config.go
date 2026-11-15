@@ -2342,6 +2342,13 @@ func loadBootstrapKoanf(configPath string, withSeed, withDefaults bool) *koanf.K
 	return k
 }
 
+// DefaultHubMaxDuration is the hub's built-in default for agent_defaults.default_max_duration
+// when no seed, settings.yaml, or admin override configures one (ptone/scion#7929).
+const (
+	DefaultHubMaxDuration      = "24h"
+	DefaultHubMaxDurationValue = 24 * time.Hour
+)
+
 // loadBootstrapDefaults loads the coded defaults of the bootstrap merge into k.
 func loadBootstrapDefaults(k *koanf.Koanf) {
 	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
@@ -2361,6 +2368,7 @@ func loadBootstrapDefaults(k *koanf.Koanf) {
 		"server.storage.provider": defaults.Storage.Provider,
 		"server.secrets.backend":  defaults.Secrets.Backend,
 		"server.log_level":        defaults.LogLevel,
+		"default_max_duration":    DefaultHubMaxDuration,
 	}, "."), nil)
 
 	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the

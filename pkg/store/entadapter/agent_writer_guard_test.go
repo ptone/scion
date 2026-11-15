@@ -122,6 +122,7 @@ var agentWriterClasses = map[string]writerEntry{
 	"agent_store.go:AgentStore.MarkStalledAgents":                                                   {classExempt, "activity / stalled_from_activity only"},
 	"agent_store.go:AgentStore.SetAgentAnnotation":                                                  {classExempt, "annotations are not exported"},
 	"agent_store.go:AgentStore.SetAgentSSHHostKey":                                                  {classExempt, "not a snapshot input"},
+	"agent_store.go:AgentStore.RecordAgentRunStarted":                                               {classExempt, "not a snapshot input"},
 	"agent_store.go:AgentStore.SetAgentSoftDeleteOpID":                                              {classExempt, "not a snapshot input"},
 	"agent_store.go:AgentStore.SetAgentWorkspacePlacement":                                          {classExempt, "not a snapshot input"},
 	"agent_store.go:AgentStore.UpdateAgentConfig":                                                   {classObserved, "metadata_changed (held config edits: fold at start, discard)"},

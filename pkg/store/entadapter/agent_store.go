@@ -160,6 +160,8 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 	}
 	sa.SSHHostKey = a.SSHHostKey
 	sa.SSHHostKeyRunID = a.SSHHostKeyRunID
+	sa.RunStartedAt = copyTimePtr(a.RunStartedAt)
+	sa.RunStartedAtRunID = a.RunStartedAtRunID
 	sa.Fixture = fixtureProvenanceFromColumns(a.FixtureRootID, a.FixtureIssuerID)
 	sa.PinnedRuntimeBrokerID = derefString(a.PinnedRuntimeBrokerID)
 	sa.PinnedRuntimeTargetID = derefString(a.PinnedRuntimeTargetID)
@@ -1936,6 +1938,11 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetLaunchState(store.LaunchStateEnded)
 			upd.SetLaunchEndReason(store.LaunchEndReasonRunningObserved)
 		}
+		if current.RunID != "" && current.RunStartedAtRunID != current.RunID &&
+			(current.LaunchState != store.LaunchStateActive || current.LaunchRunID == "" || current.RunID == current.LaunchRunID) {
+			upd.SetRunStartedAt(now.UTC())
+			upd.SetRunStartedAtRunID(current.RunID)
+		}
 	}
 
 	if su.Message != "" {
@@ -3581,6 +3588,57 @@ func (s *AgentStore) SetAgentSSHHostKey(ctx context.Context, agentID, runID, pub
 		return store.SSHHostKeyUnchanged, nil
 	}
 	return store.SSHHostKeyAlreadySet, nil
+}
+
+// RecordAgentRunStarted implements store.AgentStore.RecordAgentRunStarted:
+// one conditional write, applied only while run_id equals runID (non-empty),
+// no delete holds the row, and no start timestamp is recorded for runID yet
+// (first stamp per run wins; ptone/scion#7929).
+func (s *AgentStore) RecordAgentRunStarted(ctx context.Context, agentID, runID string, startedAt time.Time) (bool, error) {
+	if runID == "" {
+		return false, nil
+	}
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return false, err
+	}
+	n, err := s.client.Agent.Update().
+		Where(
+			agent.IDEQ(uid), agent.RunIDEQ(runID), runIDWritable(time.Now()),
+			agent.Or(agent.RunStartedAtRunIDIsNil(), agent.RunStartedAtRunIDNEQ(runID)),
+		).
+		SetRunStartedAt(startedAt.UTC()).
+		SetRunStartedAtRunID(runID).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
+}
+
+// ListActiveAgentsForMaxDuration implements
+// store.AgentStore.ListActiveAgentsForMaxDuration (ptone/scion#7929).
+func (s *AgentStore) ListActiveAgentsForMaxDuration(ctx context.Context, startedBefore time.Time) ([]store.Agent, error) {
+	rows, err := s.client.Agent.Query().
+		Where(
+			agent.DeletedAtIsNil(),
+			agent.RunStartedAtNotNil(),
+			agent.RunStartedAtLT(startedBefore.UTC()),
+			agent.PhaseIn(string(state.PhaseRunning), string(state.PhaseStarting)),
+		).
+		Order(ent.Asc(agent.FieldRunStartedAt)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.Agent, 0, len(rows))
+	for _, r := range rows {
+		if r.RunID == "" || r.RunStartedAtRunID != r.RunID {
+			continue
+		}
+		out = append(out, *entAgentToStore(r))
+	}
+	return out, nil
 }
 
 // CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.

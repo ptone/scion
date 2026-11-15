@@ -1890,6 +1890,7 @@ func (d *HTTPAgentDispatcher) adoptBrokerRunID(ctx context.Context, agent *store
 	}
 	if resp.Agent.RunID == "" || resp.Agent.RunID == minted {
 		d.swapRunID(ctx, agent, minted, minted, true, "settled the run")
+		d.recordRunStarted(ctx, agent, minted)
 		return
 	}
 	actual := resp.Agent.RunID
@@ -4167,6 +4168,9 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		// The broker accepted the start without a parseable body; the
 		// recorded target is stale all the same.
 		d.forgetRuntimeTarget(ctx, agent)
+		if recorded {
+			d.recordRunStarted(ctx, agent, runID)
+		}
 	}
 	return nil, nil
 }

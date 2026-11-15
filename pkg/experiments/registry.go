@@ -481,10 +481,28 @@ const WelcomeProject = "hub.welcome_project"
 // it is off.
 const ProjectDecisions = "web.project_decisions"
 
+// MaxDurationEnforcement gates hub-side enforcement of agent max_duration
+// (ptone/scion#7929): while it is on, a periodic hub job stops active runs
+// whose hub-recorded run_started_at exceeds the agent's effective
+// max_duration plus a 10-minute grace period, even if sciontool never
+// reported limits_exceeded.
+const MaxDurationEnforcement = "hub.max_duration_enforcement"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        MaxDurationEnforcement,
+		Title:       "Enforce agent max_duration in the hub",
+		Description: "Stops active agents whose current run has exceeded its effective max_duration plus a 10-minute grace period, recording phase stopped and activity and exit_reason limits_exceeded even when sciontool does not report limits_exceeded. While off, only sciontool's in-container timer enforces max_duration.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7929",
+		Owner:       "cloudrun-runtime",
+		ReviewBy:    "2027-02-15",
+	},
 	{
 		Name:        ProjectSelfLeave,
 		Title:       "Leave a project",

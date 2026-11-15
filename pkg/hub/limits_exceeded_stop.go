@@ -18,6 +18,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/url"
 	"slices"
 	"time"
 
@@ -103,6 +106,50 @@ func (s *Server) stopRunOnLimitsExceeded(ctx context.Context, before *store.Agen
 	}()
 }
 
+type systemStopOutcome int
+
+const (
+	systemStopSkipped systemStopOutcome = iota
+	systemStopDispatched
+	systemStopRunGone
+	systemStopBrokerFailed
+)
+
+// classifyStopDispatchError distinguishes run-scoped 404s (systemStopRunGone),
+// broker-level failures (transport/unreachable, deferred-dispatch or sync
+// timeout, broker 5xx -> systemStopBrokerFailed), and agent-scoped refusals
+// such as missing broker or stale placement pins (systemStopSkipped).
+func classifyStopDispatchError(err error, runID string) systemStopOutcome {
+	if errors.Is(err, ErrStopRunNotFound) {
+		return systemStopRunGone
+	}
+	if runID != "" {
+		if _, ok := brokerRunMismatch(err); ok {
+			return systemStopRunGone
+		}
+	}
+	if _, ok := placementRefusalOf(err); ok || errors.Is(err, errNoRuntimeBrokerAssigned) ||
+		errors.Is(err, errPlacementCheckNoStore) || errors.Is(err, context.Canceled) {
+		return systemStopSkipped
+	}
+	var se *brokerStatusError
+	if errors.As(err, &se) {
+		if se.StatusCode >= http.StatusInternalServerError {
+			return systemStopBrokerFailed
+		}
+		return systemStopSkipped
+	}
+	var netErr net.Error
+	var urlErr *url.Error
+	if errors.Is(err, ErrDispatchFailed) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, errStartBrokerNotConnected) || errors.Is(err, errBrokerResponseTimeout) ||
+		errors.Is(err, errBrokerConnectionLost) || errors.Is(err, errStartRequestNotSent) ||
+		errors.As(err, &netErr) || errors.As(err, &urlErr) {
+		return systemStopBrokerFailed
+	}
+	return systemStopSkipped
+}
+
 // stopCurrentRun is a system stop of run runID of agent agentID: it
 // dispatches the stop and, unless the row already records the run's end,
 // writes phase stopped while the row holds runID and the phase it was read
@@ -111,48 +158,83 @@ func (s *Server) stopRunOnLimitsExceeded(ctx context.Context, before *store.Agen
 // the stop was dispatched; it does nothing when the run changed, there is
 // no broker, or systemStopBlocked refuses. action names the stop in logs.
 func (s *Server) stopCurrentRun(ctx context.Context, agentID, runID, action string) bool {
+	return s.stopCurrentRunWithOutcome(ctx, agentID, runID, action, "", "") == systemStopDispatched
+}
+
+// stopCurrentRunWithOutcome stops run runID of agent agentID and, when
+// activity or exitReason is non-empty, requires the row to still be active or
+// stopping ahead of dispatch and records that terminal outcome on the stopped
+// row (including when sciontool caught SIGTERM during DispatchAgentStop and
+// reported stopped/signaled meanwhile, or when the broker reports no entry for
+// runID via ErrStopRunNotFound; ptone/scion#7929). With empty activity and
+// exitReason it preserves Phase 1's exact stopCurrentRun behavior.
+func (s *Server) stopCurrentRunWithOutcome(ctx context.Context, agentID, runID, action string, activity state.Activity, exitReason state.ExitReason) systemStopOutcome {
 	ctx, cancel := detachStopFromClient(ctx, stopWriteBudget())
 	defer cancel()
 
+	hasOutcome := activity != "" || exitReason != ""
 	agent, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			s.agentLifecycleLog.Error("Agent "+action+": could not read agent", "agent_id", agentID, "error", err)
 		}
-		return false
+		return systemStopSkipped
 	}
-	if agent.RunID != runID || agent.RuntimeBrokerID == "" || systemStopBlocked(agent) {
-		s.agentLifecycleLog.Info("Agent "+action+": skipped; the run changed, or it was stopped, suspended, halted, deleted or reincarnated",
+	preActive := state.Phase(agent.Phase).IsActivePhase() || agent.Phase == string(state.PhaseStopping)
+	if agent.RunID != runID || agent.RuntimeBrokerID == "" || systemStopBlocked(agent) || (hasOutcome && !preActive) {
+		s.agentLifecycleLog.Info("Agent "+action+": skipped; the run changed, is no longer active, or was stopped, suspended, halted, deleted or reincarnated",
 			"agent_id", agentID, "run_id", runID, "current_run_id", agent.RunID, "phase", agent.Phase)
-		return false
+		return systemStopSkipped
 	}
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
-		return false
+		return systemStopSkipped
 	}
 
 	// The container is stopped before phase=stopped is written; see
 	// beginLifecycleOp.
 	endLifecycleOp := s.beginLifecycleOp(agent.ID)
 	defer endLifecycleOp()
+	outcome := systemStopDispatched
 	if err := syncDispatch(ctx, func(dctx context.Context) error {
 		return dispatcher.DispatchAgentStop(dctx, agent)
 	}); err != nil {
 		s.logStopRunMismatch(agent, action, err)
-		s.agentLifecycleLog.Error("Agent "+action+": dispatch failed", "agent_id", agentID, "error", err)
-		return false
+		if !hasOutcome {
+			s.agentLifecycleLog.Error("Agent "+action+": dispatch failed", "agent_id", agentID, "error", err)
+			return systemStopBrokerFailed
+		}
+		outcome = classifyStopDispatchError(err, runID)
+		if outcome != systemStopRunGone {
+			if outcome != systemStopSkipped || s.shouldLogMaxDurationSkip(agentID, runID, "stop-skip") {
+				s.agentLifecycleLog.Error("Agent "+action+": dispatch failed", "agent_id", agentID, "run_id", runID, "error", err)
+			}
+			return outcome
+		}
 	}
 
-	// The agent's own stopped report, a crash or a platform halt may have
-	// recorded the end of the run: that record is kept.
+	// With no caller-supplied outcome (Phase 1), the agent's own stopped
+	// report, a crash or a platform halt keeps its recorded end. When the hub
+	// itself enforces max_duration (Phase 2, preActive verified above), a row
+	// that moved to stopped during a succeeded DispatchAgentStop (sciontool
+	// catching SIGTERM) still receives limits_exceeded unless it crashed or
+	// systemStopBlocked holds; a run-gone 404 settles an active/stopping row
+	// conditionally so it is not re-dispatched on later ticks.
 	cur, err := s.store.GetAgent(ctx, agentID)
-	if err != nil || cur.RunID != runID ||
-		(!state.Phase(cur.Phase).IsActivePhase() && cur.Phase != string(state.PhaseStopping)) {
-		return true
+	if err != nil || cur.RunID != runID || (outcome == systemStopRunGone && systemStopBlocked(cur)) {
+		return outcome
+	}
+	activeOrStopping := state.Phase(cur.Phase).IsActivePhase() || cur.Phase == string(state.PhaseStopping)
+	sigtermStopped := outcome == systemStopDispatched && hasOutcome && preActive && cur.Phase == string(state.PhaseStopped) &&
+		cur.Activity != string(state.ActivityCrashed) && !systemStopBlocked(cur)
+	if !activeOrStopping && !sigtermStopped {
+		return outcome
 	}
 	err = s.store.UpdateAgentStatus(ctx, agentID, store.AgentStatusUpdate{
 		Phase:           string(state.PhaseStopped),
 		ContainerStatus: "stopped",
+		Activity:        string(activity),
+		ExitReason:      string(exitReason),
 		IfPhase:         cur.Phase,
 		IfRunID:         runID,
 	})
@@ -166,7 +248,7 @@ func (s *Server) stopCurrentRun(ctx context.Context, agentID, runID, action stri
 		if !errors.Is(err, store.ErrVersionConflict) {
 			s.agentLifecycleLog.Error("Agent "+action+": status write failed", "agent_id", agentID, "error", err)
 		}
-		return true
+		return outcome
 	}
 	// A stopped agent has no running container: release its broker and
 	// project reservations, but only for the stopped run and not while a
@@ -177,5 +259,5 @@ func (s *Server) stopCurrentRun(ctx context.Context, agentID, runID, action stri
 	if updated, err := s.store.GetAgent(ctx, agentID); err == nil && updated.DeletedAt.IsZero() {
 		s.events.PublishAgentStatus(ctx, updated)
 	}
-	return true
+	return outcome
 }

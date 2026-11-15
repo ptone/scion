@@ -279,6 +279,11 @@ const (
 	// unused gap of the range.
 	LockPendingSecretExpiry AdvisoryLockKey = 0x5C10001B
 
+	// LockAgentMaxDurationEnforcement guards the periodic hub-side
+	// max_duration enforcement sweep ("agent-max-duration",
+	// ptone/scion#7929), so one replica per tick stops overdue runs.
+	LockAgentMaxDurationEnforcement AdvisoryLockKey = 0x5C100079
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid

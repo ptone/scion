@@ -740,6 +740,18 @@ type AgentStore interface {
 	// a run is kept; a repeat of the same key succeeds (unchanged).
 	SetAgentSSHHostKey(ctx context.Context, agentID, runID, publicKey string) (SSHHostKeyResult, error)
 
+	// RecordAgentRunStarted records startedAt as the hub-observed start time
+	// of agentID's run runID (ptone/scion#7929). It writes only while the
+	// stored run_id equals runID (non-empty), no delete holds the row, and no
+	// start time is recorded for runID yet (first stamp per run wins).
+	RecordAgentRunStarted(ctx context.Context, agentID, runID string, startedAt time.Time) (bool, error)
+
+	// ListActiveAgentsForMaxDuration returns non-deleted agents in phase
+	// running or starting whose recorded RunStartedAt is strictly before
+	// startedBefore and matches their current RunID, ordered oldest
+	// RunStartedAt first (ptone/scion#7929).
+	ListActiveAgentsForMaxDuration(ctx context.Context, startedBefore time.Time) ([]Agent, error)
+
 	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
 	// it currently equals expectedRunID, and reports whether it did. A
 	// dispatch uses it to correct (or revert) the run ID it minted without

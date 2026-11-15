@@ -2577,6 +2577,9 @@ type Server struct {
 	// limitsStopWait, when set, replaces the limits_exceeded stop's grace
 	// wait (tests only).
 	limitsStopWait func()
+	// maxDurationSkipLogged rate-limits per-agent skip and refusal logs in
+	// max_duration enforcement to once per agent and run (agentID:kind -> runID).
+	maxDurationSkipLogged sync.Map
 	// httpDrains marks brokers with a heartbeat-triggered drain of queued
 	// stops running on this node (http_broker_drain.go).
 	httpDrains sync.Map
@@ -7371,6 +7374,7 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.reconcileQuotaReservations)
 	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("start-claim-reaper", 1, store.LockStartClaimReaper, s.startClaimReaperHandler())
+	s.scheduler.RegisterRecurringSingleton("agent-max-duration", 1, store.LockAgentMaxDurationEnforcement, s.agentMaxDurationEnforcementHandler())
 	// Forced user deletions (ptone/scion#2143): every minute, on every
 	// replica (the engine's per-agent lease and the completion's
 	// compare-and-set make concurrent runs safe). It runs whether or not

@@ -4641,6 +4641,8 @@ type AgentMutation struct {
 	run_id_updated_at          *time.Time
 	ssh_host_key               *string
 	ssh_host_key_run_id        *string
+	run_started_at             *time.Time
+	run_started_at_run_id      *string
 	launch_state               *string
 	launch_end_reason          *string
 	launch_kind                *string
@@ -7649,6 +7651,104 @@ func (m *AgentMutation) ResetSSHHostKeyRunID() {
 	delete(m.clearedFields, agent.FieldSSHHostKeyRunID)
 }
 
+// SetRunStartedAt sets the "run_started_at" field.
+func (m *AgentMutation) SetRunStartedAt(t time.Time) {
+	m.run_started_at = &t
+}
+
+// RunStartedAt returns the value of the "run_started_at" field in the mutation.
+func (m *AgentMutation) RunStartedAt() (r time.Time, exists bool) {
+	v := m.run_started_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunStartedAt returns the old "run_started_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldRunStartedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunStartedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunStartedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunStartedAt: %w", err)
+	}
+	return oldValue.RunStartedAt, nil
+}
+
+// ClearRunStartedAt clears the value of the "run_started_at" field.
+func (m *AgentMutation) ClearRunStartedAt() {
+	m.run_started_at = nil
+	m.clearedFields[agent.FieldRunStartedAt] = struct{}{}
+}
+
+// RunStartedAtCleared returns if the "run_started_at" field was cleared in this mutation.
+func (m *AgentMutation) RunStartedAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldRunStartedAt]
+	return ok
+}
+
+// ResetRunStartedAt resets all changes to the "run_started_at" field.
+func (m *AgentMutation) ResetRunStartedAt() {
+	m.run_started_at = nil
+	delete(m.clearedFields, agent.FieldRunStartedAt)
+}
+
+// SetRunStartedAtRunID sets the "run_started_at_run_id" field.
+func (m *AgentMutation) SetRunStartedAtRunID(s string) {
+	m.run_started_at_run_id = &s
+}
+
+// RunStartedAtRunID returns the value of the "run_started_at_run_id" field in the mutation.
+func (m *AgentMutation) RunStartedAtRunID() (r string, exists bool) {
+	v := m.run_started_at_run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunStartedAtRunID returns the old "run_started_at_run_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldRunStartedAtRunID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunStartedAtRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunStartedAtRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunStartedAtRunID: %w", err)
+	}
+	return oldValue.RunStartedAtRunID, nil
+}
+
+// ClearRunStartedAtRunID clears the value of the "run_started_at_run_id" field.
+func (m *AgentMutation) ClearRunStartedAtRunID() {
+	m.run_started_at_run_id = nil
+	m.clearedFields[agent.FieldRunStartedAtRunID] = struct{}{}
+}
+
+// RunStartedAtRunIDCleared returns if the "run_started_at_run_id" field was cleared in this mutation.
+func (m *AgentMutation) RunStartedAtRunIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldRunStartedAtRunID]
+	return ok
+}
+
+// ResetRunStartedAtRunID resets all changes to the "run_started_at_run_id" field.
+func (m *AgentMutation) ResetRunStartedAtRunID() {
+	m.run_started_at_run_id = nil
+	delete(m.clearedFields, agent.FieldRunStartedAtRunID)
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (m *AgentMutation) SetLaunchState(s string) {
 	m.launch_state = &s
@@ -9740,7 +9840,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 96)
+	fields := make([]string, 0, 98)
 	if m.fixture_root_id != nil {
 		fields = append(fields, agent.FieldFixtureRootID)
 	}
@@ -9917,6 +10017,12 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.ssh_host_key_run_id != nil {
 		fields = append(fields, agent.FieldSSHHostKeyRunID)
+	}
+	if m.run_started_at != nil {
+		fields = append(fields, agent.FieldRunStartedAt)
+	}
+	if m.run_started_at_run_id != nil {
+		fields = append(fields, agent.FieldRunStartedAtRunID)
 	}
 	if m.launch_state != nil {
 		fields = append(fields, agent.FieldLaunchState)
@@ -10155,6 +10261,10 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.SSHHostKey()
 	case agent.FieldSSHHostKeyRunID:
 		return m.SSHHostKeyRunID()
+	case agent.FieldRunStartedAt:
+		return m.RunStartedAt()
+	case agent.FieldRunStartedAtRunID:
+		return m.RunStartedAtRunID()
 	case agent.FieldLaunchState:
 		return m.LaunchState()
 	case agent.FieldLaunchEndReason:
@@ -10356,6 +10466,10 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldSSHHostKey(ctx)
 	case agent.FieldSSHHostKeyRunID:
 		return m.OldSSHHostKeyRunID(ctx)
+	case agent.FieldRunStartedAt:
+		return m.OldRunStartedAt(ctx)
+	case agent.FieldRunStartedAtRunID:
+		return m.OldRunStartedAtRunID(ctx)
 	case agent.FieldLaunchState:
 		return m.OldLaunchState(ctx)
 	case agent.FieldLaunchEndReason:
@@ -10851,6 +10965,20 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSSHHostKeyRunID(v)
+		return nil
+	case agent.FieldRunStartedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunStartedAt(v)
+		return nil
+	case agent.FieldRunStartedAtRunID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunStartedAtRunID(v)
 		return nil
 	case agent.FieldLaunchState:
 		v, ok := value.(string)
@@ -11360,6 +11488,12 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldSSHHostKeyRunID) {
 		fields = append(fields, agent.FieldSSHHostKeyRunID)
 	}
+	if m.FieldCleared(agent.FieldRunStartedAt) {
+		fields = append(fields, agent.FieldRunStartedAt)
+	}
+	if m.FieldCleared(agent.FieldRunStartedAtRunID) {
+		fields = append(fields, agent.FieldRunStartedAtRunID)
+	}
 	if m.FieldCleared(agent.FieldLaunchState) {
 		fields = append(fields, agent.FieldLaunchState)
 	}
@@ -11607,6 +11741,12 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldSSHHostKeyRunID:
 		m.ClearSSHHostKeyRunID()
+		return nil
+	case agent.FieldRunStartedAt:
+		m.ClearRunStartedAt()
+		return nil
+	case agent.FieldRunStartedAtRunID:
+		m.ClearRunStartedAtRunID()
 		return nil
 	case agent.FieldLaunchState:
 		m.ClearLaunchState()
@@ -11894,6 +12034,12 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldSSHHostKeyRunID:
 		m.ResetSSHHostKeyRunID()
+		return nil
+	case agent.FieldRunStartedAt:
+		m.ResetRunStartedAt()
+		return nil
+	case agent.FieldRunStartedAtRunID:
+		m.ResetRunStartedAtRunID()
 		return nil
 	case agent.FieldLaunchState:
 		m.ResetLaunchState()

@@ -206,6 +206,11 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// it from the row's own phase and activity and ignores the caller's
 	// value, so a reflection-filled value cannot round-trip.
 	"ActivitySince": true,
+	// run_started_at and run_started_at_run_id are written only through
+	// RecordAgentRunStarted (and the running_observed launch fallback in
+	// UpdateAgentStatus); CreateAgent and UpdateAgent never write them.
+	"RunStartedAt":      true,
+	"RunStartedAtRunID": true,
 	// workspace_placement is written only through SetAgentWorkspacePlacement
 	// (ptone/scion#2727): CreateAgent and UpdateAgent never write it, so it
 	// cannot round-trip here. It is not an authz input.
