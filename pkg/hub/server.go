@@ -7371,6 +7371,7 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.reconcileQuotaReservations)
 	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("start-claim-reaper", 1, store.LockStartClaimReaper, s.startClaimReaperHandler())
+	s.scheduler.RegisterRecurringSingleton("agent-max-duration", 1, store.LockAgentMaxDurationEnforcement, s.agentMaxDurationEnforcementHandler())
 	// Forced user deletions (ptone/scion#2143): every minute, on every
 	// replica (the engine's per-agent lease and the completion's
 	// compare-and-set make concurrent runs safe). It runs whether or not

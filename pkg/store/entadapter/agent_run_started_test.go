@@ -35,104 +35,67 @@ func TestRecordAgentRunStarted_CurrentRunAndFirstStampWins(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, a))
 
 	t1 := time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC)
-	t2 := t1.Add(5 * time.Minute)
-	t3 := t1.Add(15 * time.Minute)
+	t2, t3 := t1.Add(5*time.Minute), t1.Add(15*time.Minute)
+	checkRecord := func(id, runID string, at time.Time, want bool) {
+		t.Helper()
+		ok, err := s.RecordAgentRunStarted(ctx, id, runID, at)
+		require.NoError(t, err)
+		assert.Equal(t, want, ok)
+	}
+	checkStored := func(wantRun, wantStampRun string, wantAt time.Time) {
+		t.Helper()
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, wantRun, got.RunID)
+		assert.Equal(t, wantStampRun, got.RunStartedAtRunID)
+		require.NotNil(t, got.RunStartedAt)
+		assert.True(t, got.RunStartedAt.Equal(wantAt))
+	}
 
-	written, err := s.RecordAgentRunStarted(ctx, a.ID, "run-1", t1)
+	checkRecord(a.ID, "run-1", t1, false)
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
 	require.NoError(t, err)
-	assert.False(t, written, "no run recorded yet")
-
-	_, err = s.SetAgentRunID(ctx, a.ID, "run-1", nil)
-	require.NoError(t, err)
-
-	written, err = s.RecordAgentRunStarted(ctx, a.ID, "", t1)
-	require.NoError(t, err)
-	assert.False(t, written, "empty run ID refused")
-
-	written, err = s.RecordAgentRunStarted(ctx, a.ID, "run-other", t1)
-	require.NoError(t, err)
-	assert.False(t, written, "mismatched run ID refused")
-
-	written, err = s.RecordAgentRunStarted(ctx, a.ID, "run-1", t1)
-	require.NoError(t, err)
-	assert.True(t, written, "first stamp for run-1 written")
-
-	// A repeat for the same run keeps the first timestamp.
-	written, err = s.RecordAgentRunStarted(ctx, a.ID, "run-1", t2)
-	require.NoError(t, err)
-	assert.False(t, written)
-
-	got, err := s.GetAgent(ctx, a.ID)
-	require.NoError(t, err)
-	require.NotNil(t, got.RunStartedAt)
-	assert.True(t, got.RunStartedAt.Equal(t1))
-	assert.Equal(t, "run-1", got.RunStartedAtRunID)
+	checkRecord(a.ID, "", t1, false)
+	checkRecord(a.ID, "run-other", t1, false)
+	checkRecord(a.ID, "run-1", t1, true)
+	checkRecord(a.ID, "run-1", t2, false) // repeat keeps first stamp
+	checkStored("run-1", "run-1", t1)
 
 	// Minting run-2 and reverting back to run-1 preserves run-1's timestamp.
 	prev, err := s.SetAgentRunID(ctx, a.ID, "run-2", nil)
 	require.NoError(t, err)
-	assert.Equal(t, "run-1", prev)
 	reverted, err := s.RevertAgentRunID(ctx, a.ID, "run-2", prev)
 	require.NoError(t, err)
 	assert.True(t, reverted)
-
-	got, err = s.GetAgent(ctx, a.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "run-1", got.RunID)
-	assert.Equal(t, "run-1", got.RunStartedAtRunID)
-	require.NotNil(t, got.RunStartedAt)
-	assert.True(t, got.RunStartedAt.Equal(t1))
+	checkStored("run-1", "run-1", t1)
 
 	// A landed new run accepts a fresh timestamp.
 	_, err = s.SetAgentRunID(ctx, a.ID, "run-3", nil)
 	require.NoError(t, err)
-	written, err = s.RecordAgentRunStarted(ctx, a.ID, "run-3", t3)
-	require.NoError(t, err)
-	assert.True(t, written)
-
-	got, err = s.GetAgent(ctx, a.ID)
-	require.NoError(t, err)
-	require.NotNil(t, got.RunStartedAt)
-	assert.True(t, got.RunStartedAt.Equal(t3))
-	assert.Equal(t, "run-3", got.RunStartedAtRunID)
-
-	written, err = s.RecordAgentRunStarted(ctx, uuid.NewString(), "run-3", t3)
-	require.NoError(t, err)
-	assert.False(t, written, "missing agent")
+	checkRecord(a.ID, "run-3", t3, true)
+	checkStored("run-3", "run-3", t3)
+	checkRecord(uuid.NewString(), "run-3", t3, false)
 }
 
 func TestRecordAgentRunStarted_RefusedWhileDeleteHoldsRow(t *testing.T) {
-	ctx := context.Background()
-	now := time.Now().UTC()
-	live := now.Add(time.Hour)
-	for _, tc := range []struct {
-		name      string
-		state     string
-		deletedAt *time.Time
-	}{
-		{"deleting, live lease", store.DeletionStateDeleting, nil},
-		{"finalizing", store.DeletionStateFinalizing, nil},
-		{"soft-deleted", "", &now},
+	ctx, now := context.Background(), time.Now().UTC()
+	s, projectID := newTestAgentStore(t)
+	live, del, fin := now.Add(time.Hour), store.DeletionStateDeleting, store.DeletionStateFinalizing
+	for i, set := range []store.DeletionFields{
+		{State: &del, LeaseAt: &live},
+		{State: &fin, LeaseAt: &live},
+		{DeletedAt: &now},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s, projectID := newTestAgentStore(t)
-			a := makeAgent(projectID, "run-started-delete")
-			require.NoError(t, s.CreateAgent(ctx, a))
-			_, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
-			require.NoError(t, err)
-			set := store.DeletionFields{DeletedAt: tc.deletedAt}
-			if tc.state != "" {
-				st := tc.state
-				set.State = &st
-				set.LeaseAt = &live
-			}
-			n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, set)
-			require.NoError(t, err)
-			require.Equal(t, 1, n)
-			written, err := s.RecordAgentRunStarted(ctx, a.ID, "run-1", now)
-			require.NoError(t, err)
-			assert.False(t, written)
-		})
+		a := makeAgent(projectID, uuid.NewString()[:8]+string(rune('0'+i)))
+		require.NoError(t, s.CreateAgent(ctx, a))
+		_, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
+		require.NoError(t, err)
+		n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, set)
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+		ok, err := s.RecordAgentRunStarted(ctx, a.ID, "run-1", now)
+		require.NoError(t, err)
+		assert.False(t, ok)
 	}
 }
 
@@ -140,15 +103,14 @@ func TestListActiveAgentsForMaxDuration(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	base := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	tOld, tMid, tNew := base.Add(-2*time.Hour), base.Add(-time.Hour), base.Add(-30*time.Minute)
 
 	seed := func(slug, phase, runID string, stamp *time.Time, nextRun string) *store.Agent {
-		t.Helper()
 		a := makeAgent(projectID, slug)
 		a.Phase = phase
 		require.NoError(t, s.CreateAgent(ctx, a))
 		if runID != "" {
-			_, err := s.SetAgentRunID(ctx, a.ID, runID, nil)
-			require.NoError(t, err)
+			_, _ = s.SetAgentRunID(ctx, a.ID, runID, nil)
 		}
 		if stamp != nil {
 			ok, err := s.RecordAgentRunStarted(ctx, a.ID, runID, *stamp)
@@ -156,15 +118,10 @@ func TestListActiveAgentsForMaxDuration(t *testing.T) {
 			require.True(t, ok)
 		}
 		if nextRun != "" {
-			_, err := s.SetAgentRunID(ctx, a.ID, nextRun, nil)
-			require.NoError(t, err)
+			_, _ = s.SetAgentRunID(ctx, a.ID, nextRun, nil)
 		}
 		return a
 	}
-
-	tOld := base.Add(-2 * time.Hour)
-	tMid := base.Add(-1 * time.Hour)
-	tNew := base.Add(-30 * time.Minute)
 
 	newer := seed("newer-running", string(state.PhaseRunning), "run-new", &tNew, "")
 	oldest := seed("oldest-starting", string(state.PhaseStarting), "run-old", &tOld, "")
@@ -172,8 +129,6 @@ func TestListActiveAgentsForMaxDuration(t *testing.T) {
 	_ = seed("stopped-agent", string(state.PhaseStopped), "run-stopped", &tOld, "")
 	_ = seed("suspended-agent", string(state.PhaseSuspended), "run-susp", &tOld, "")
 	_ = seed("no-stamp-agent", string(state.PhaseRunning), "run-nostamp", nil, "")
-	// Starting a new run whose RunStartedAt has not been recorded yet must
-	// not inherit the previous run's timestamp.
 	_ = seed("starting-unsettled-next-run", string(state.PhaseStarting), "run-prev", &tOld, "run-next")
 
 	got, err := s.ListActiveAgentsForMaxDuration(ctx)

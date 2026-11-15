@@ -40,6 +40,9 @@ const compensatingDeleteTimeout = 30 * time.Second
 // checked.
 func (d *HTTPAgentDispatcher) settleLandedRun(ctx context.Context, agent *store.Agent, minted string, recorded bool, resp *RemoteAgentResponse) {
 	d.adoptBrokerRunID(ctx, agent, minted, resp)
+	if recorded && (resp == nil || resp.Agent == nil) {
+		d.recordRunStarted(ctx, agent, minted)
+	}
 	onSyncDispatchAnswer(ctx, d, agent, resp)
 	if recorded {
 		d.compensateLandedRun(ctx, agent, resp)

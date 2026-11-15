@@ -968,3 +968,31 @@ func TestLoadAboveSeedBootstrapKoanf(t *testing.T) {
 		t.Errorf("default_template = %v, want it unset (only a seed value sets it)", k.Get("default_template"))
 	}
 }
+
+func TestLoadBootstrapKoanf_DefaultMaxDuration24hAndOverrides(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SCION_SEED_DEFAULTMAXDURATION", "")
+	t.Setenv("SCION_SERVER_DEFAULTMAXDURATION", "")
+
+	if got := LoadBootstrapKoanf().String("default_max_duration"); got != "24h" {
+		t.Fatalf("LoadBootstrapKoanf default_max_duration = %q, want 24h", got)
+	}
+	if above := LoadAboveSeedBootstrapKoanfWithConfigPath(""); above.Exists("default_max_duration") {
+		t.Fatalf("LoadAboveSeedBootstrapKoanf default_max_duration = %v, want unset", above.Get("default_max_duration"))
+	}
+	t.Setenv("SCION_SEED_DEFAULTMAXDURATION", "0")
+	if got := LoadBootstrapKoanf().String("default_max_duration"); got != "0" {
+		t.Fatalf("seed 0 override: default_max_duration = %q, want 0", got)
+	}
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte("schema_version: \"1\"\ndefault_max_duration: 6h\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadBootstrapKoanf().String("default_max_duration"); got != "6h" {
+		t.Fatalf("settings.yaml override: default_max_duration = %q, want 6h", got)
+	}
+}

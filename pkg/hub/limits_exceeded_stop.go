@@ -111,6 +111,15 @@ func (s *Server) stopRunOnLimitsExceeded(ctx context.Context, before *store.Agen
 // the stop was dispatched; it does nothing when the run changed, there is
 // no broker, or systemStopBlocked refuses. action names the stop in logs.
 func (s *Server) stopCurrentRun(ctx context.Context, agentID, runID, action string) bool {
+	return s.stopCurrentRunWithOutcome(ctx, agentID, runID, action, "", "")
+}
+
+// stopCurrentRunWithOutcome stops run runID of agent agentID and, when
+// activity or exitReason is non-empty, records that terminal outcome on the
+// stopped row (including when sciontool caught SIGTERM during DispatchAgentStop
+// and reported stopped/signaled first; ptone/scion#7929). With empty activity
+// and exitReason it preserves Phase 1's exact stopCurrentRun behavior.
+func (s *Server) stopCurrentRunWithOutcome(ctx context.Context, agentID, runID, action string, activity state.Activity, exitReason state.ExitReason) bool {
 	ctx, cancel := detachStopFromClient(ctx, stopWriteBudget())
 	defer cancel()
 
@@ -143,16 +152,28 @@ func (s *Server) stopCurrentRun(ctx context.Context, agentID, runID, action stri
 		return false
 	}
 
-	// The agent's own stopped report, a crash or a platform halt may have
-	// recorded the end of the run: that record is kept.
+	// With no caller-supplied outcome (Phase 1), the agent's own stopped
+	// report, a crash or a platform halt keeps its recorded end. When the hub
+	// itself enforces max_duration (Phase 2), a SIGTERM-triggered stopped
+	// report from sciontool during DispatchAgentStop still receives the
+	// limits_exceeded activity and exit reason unless the run crashed or
+	// systemStopBlocked now holds (user stop, suspend, halt, delete, reincarnate).
 	cur, err := s.store.GetAgent(ctx, agentID)
-	if err != nil || cur.RunID != runID ||
-		(!state.Phase(cur.Phase).IsActivePhase() && cur.Phase != string(state.PhaseStopping)) {
+	if err != nil || cur.RunID != runID {
+		return true
+	}
+	hasOutcome := activity != "" || exitReason != ""
+	activeOrStopping := state.Phase(cur.Phase).IsActivePhase() || cur.Phase == string(state.PhaseStopping)
+	sigtermStopped := hasOutcome && cur.Phase == string(state.PhaseStopped) &&
+		cur.Activity != string(state.ActivityCrashed) && !systemStopBlocked(cur)
+	if !activeOrStopping && !sigtermStopped {
 		return true
 	}
 	err = s.store.UpdateAgentStatus(ctx, agentID, store.AgentStatusUpdate{
 		Phase:           string(state.PhaseStopped),
 		ContainerStatus: "stopped",
+		Activity:        string(activity),
+		ExitReason:      string(exitReason),
 		IfPhase:         cur.Phase,
 		IfRunID:         runID,
 	})
