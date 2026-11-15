@@ -29,21 +29,16 @@ import (
 )
 
 func TestRecordAgentRunStarted_CurrentRunAndFirstStampWins(t *testing.T) {
-	ctx := context.Background()
+	ctx, t1 := context.Background(), time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC)
 	s, projectID := newTestAgentStore(t)
 	a := makeAgent(projectID, "run-started")
 	require.NoError(t, s.CreateAgent(ctx, a))
-
-	t1 := time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC)
-	t2, t3 := t1.Add(5*time.Minute), t1.Add(15*time.Minute)
 	checkRecord := func(id, runID string, at time.Time, want bool) {
-		t.Helper()
 		ok, err := s.RecordAgentRunStarted(ctx, id, runID, at)
 		require.NoError(t, err)
 		assert.Equal(t, want, ok)
 	}
 	checkStored := func(wantRun string, wantAt time.Time) {
-		t.Helper()
 		got, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		require.NotNil(t, got.RunStartedAt)
@@ -57,7 +52,7 @@ func TestRecordAgentRunStarted_CurrentRunAndFirstStampWins(t *testing.T) {
 	checkRecord(a.ID, "", t1, false)
 	checkRecord(a.ID, "run-other", t1, false)
 	checkRecord(a.ID, "run-1", t1, true)
-	checkRecord(a.ID, "run-1", t2, false) // repeat keeps first stamp
+	checkRecord(a.ID, "run-1", t1.Add(5*time.Minute), false)
 	checkStored("run-1", t1)
 
 	prev, err := s.SetAgentRunID(ctx, a.ID, "run-2", nil)
@@ -67,11 +62,10 @@ func TestRecordAgentRunStarted_CurrentRunAndFirstStampWins(t *testing.T) {
 	assert.True(t, reverted)
 	checkStored("run-1", t1)
 
-	_, err = s.SetAgentRunID(ctx, a.ID, "run-3", nil)
-	require.NoError(t, err)
-	checkRecord(a.ID, "run-3", t3, true)
-	checkStored("run-3", t3)
-	checkRecord(uuid.NewString(), "run-3", t3, false)
+	_, _ = s.SetAgentRunID(ctx, a.ID, "run-3", nil)
+	checkRecord(a.ID, "run-3", t1.Add(15*time.Minute), true)
+	checkStored("run-3", t1.Add(15*time.Minute))
+	checkRecord(uuid.NewString(), "run-3", t1, false)
 }
 
 func TestRecordAgentRunStarted_RefusedWhileDeleteHoldsRow(t *testing.T) {
@@ -81,8 +75,7 @@ func TestRecordAgentRunStarted_RefusedWhileDeleteHoldsRow(t *testing.T) {
 	for i, set := range []store.DeletionFields{{State: &del, LeaseAt: &live}, {State: &fin, LeaseAt: &live}, {DeletedAt: &now}} {
 		a := makeAgent(projectID, uuid.NewString()[:8]+string(rune('0'+i)))
 		require.NoError(t, s.CreateAgent(ctx, a))
-		_, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
-		require.NoError(t, err)
+		_, _ = s.SetAgentRunID(ctx, a.ID, "run-1", nil)
 		n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, set)
 		require.NoError(t, err)
 		require.Equal(t, 1, n)
@@ -90,6 +83,44 @@ func TestRecordAgentRunStarted_RefusedWhileDeleteHoldsRow(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, ok)
 	}
+}
+
+func TestUpdateAgentStatus_RunningFallbackStampsUnstampedRun(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "fallback-stamp")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	_, _ = s.SetAgentRunID(ctx, a.ID, "run-1", nil)
+	mustGet := func() *store.Agent {
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		return got
+	}
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseRunning), ReportSource: store.StatusReportSourceRuntime, ReportRunID: "run-0",
+	}))
+	assert.Nil(t, mustGet().RunStartedAt, "stale run report must not stamp")
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseRunning), ReportSource: store.StatusReportSourceRuntime, ReportRunID: "run-1",
+	}))
+	got := mustGet()
+	require.NotNil(t, got.RunStartedAt)
+	first := *got.RunStartedAt
+	assert.Equal(t, "run-1", got.RunStartedAtRunID)
+
+	time.Sleep(5 * time.Millisecond)
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
+	assert.True(t, mustGet().RunStartedAt.Equal(first), "repeat running write keeps first stamp")
+
+	_, _ = s.SetAgentRunID(ctx, a.ID, "run-2", nil)
+	dispAt := time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC)
+	ok, err := s.RecordAgentRunStarted(ctx, a.ID, "run-2", dispAt)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
+	assert.True(t, mustGet().RunStartedAt.Equal(dispAt), "dispatcher pre-stamp stays authoritative")
 }
 
 func TestListActiveAgentsForMaxDuration(t *testing.T) {

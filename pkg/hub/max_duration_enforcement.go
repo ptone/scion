@@ -59,12 +59,6 @@ func (d *HTTPAgentDispatcher) recordRunStarted(ctx context.Context, agent *store
 	}
 }
 
-func (s *Server) recordLaunchedRunStarted(ctx context.Context, agentID, runID string, row *store.Agent) {
-	if s != nil {
-		recordAgentRunStartedBestEffort(ctx, s.store, s.agentLifecycleLog, agentID, runID, row)
-	}
-}
-
 // parseMaxDurationRung interprets one rung of the max_duration precedence
 // ladder. Empty or unparseable values return ok=false so resolution falls
 // through to the next rung (the safe direction, toward hub default / 24h);
@@ -105,11 +99,18 @@ func (s *Server) lookupTemplateForMaxDuration(ctx context.Context, templateID st
 	return tmplMaxDurEntry{tmpl: tmpl, cfg: cfg}
 }
 
+func (s *Server) shouldLogMaxDurationTmplSkip(agentID, runID, kind string, seen map[string]bool) bool {
+	key := agentID + ":" + kind
+	seen[key] = true
+	prev, loaded := s.maxDurationTmplSkipLogged.Swap(key, runID)
+	return !loaded || prev != runID
+}
+
 // resolveAgentMaxDuration resolves inline/project > hub template > hub default > 24h.
 // On a template read error, missing template, or content-hash mismatch it logs
-// and returns (0, false) so the sweep fails open for this tick rather than
-// falling through to a shorter default.
-func (s *Server) resolveAgentMaxDuration(ctx context.Context, a *store.Agent, hubDefaults opsettings.AgentDefaultsSettings, tmplCache map[string]tmplMaxDurEntry) (time.Duration, bool) {
+// once per agent and run and returns (0, false) so the sweep fails open for
+// this tick rather than falling through to a shorter default.
+func (s *Server) resolveAgentMaxDuration(ctx context.Context, a *store.Agent, hubDefaults opsettings.AgentDefaultsSettings, tmplCache map[string]tmplMaxDurEntry, seenSkips map[string]bool) (time.Duration, bool) {
 	if a.AppliedConfig != nil && a.AppliedConfig.InlineConfig != nil {
 		if d, unlimited, ok := parseMaxDurationRung(a.AppliedConfig.InlineConfig.MaxDuration); ok {
 			return d, !unlimited
@@ -123,13 +124,17 @@ func (s *Server) resolveAgentMaxDuration(ctx context.Context, a *store.Agent, hu
 			tmplCache[tid] = entry
 		}
 		if entry.err != nil {
-			s.agentLifecycleLog.Warn("max_duration enforcement: skipping agent; could not read template",
-				"agent_id", a.ID, "template_id", tid, "error", entry.err)
+			if s.shouldLogMaxDurationTmplSkip(a.ID, a.RunID, "err", seenSkips) {
+				s.agentLifecycleLog.Warn("max_duration enforcement: skipping agent; could not read template",
+					"agent_id", a.ID, "run_id", a.RunID, "template_id", tid, "error", entry.err)
+			}
 			return 0, false
 		}
 		if a.AppliedConfig.TemplateHash != "" && entry.tmpl.ContentHash != a.AppliedConfig.TemplateHash {
-			s.agentLifecycleLog.Info("max_duration enforcement: skipping agent; template hash changed since provision",
-				"agent_id", a.ID, "template_id", tid, "applied_hash", a.AppliedConfig.TemplateHash, "current_hash", entry.tmpl.ContentHash)
+			if s.shouldLogMaxDurationTmplSkip(a.ID, a.RunID, "hash", seenSkips) {
+				s.agentLifecycleLog.Info("max_duration enforcement: skipping agent; template hash changed since provision",
+					"agent_id", a.ID, "run_id", a.RunID, "template_id", tid, "applied_hash", a.AppliedConfig.TemplateHash, "current_hash", entry.tmpl.ContentHash)
+			}
 			return 0, false
 		}
 		if entry.cfg != nil {
@@ -148,6 +153,10 @@ func (s *Server) agentMaxDurationEnforcementHandler() func(context.Context) {
 	return func(ctx context.Context) { s.enforceMaxDurationAt(ctx, time.Now()) }
 }
 
+// enforceMaxDurationAt stops up to maxDurationEnforcementPerTickCap overdue
+// runs, oldest first. Stops run serially under LockAgentMaxDurationEnforcement,
+// so a 50-stop tick (or slow brokers up to syncDispatchTimeout) can outlast the
+// 1-minute periodic interval while other replicas skip the tick.
 func (s *Server) enforceMaxDurationAt(ctx context.Context, now time.Time) {
 	if !s.experimentEnabled(experiments.MaxDurationEnforcement) {
 		return
@@ -157,12 +166,11 @@ func (s *Server) enforceMaxDurationAt(ctx context.Context, now time.Time) {
 		s.agentLifecycleLog.Error("max_duration enforcement: failed to list active agents", "error", err)
 		return
 	}
-	if len(agents) == 0 {
-		return
-	}
-	hubDefaults, tmplCache, failedBrokers, attempts := s.hubAgentDefaults(), make(map[string]tmplMaxDurEntry), make(map[string]bool), 0
+	hubDefaults, tmplCache, failedBrokers, seenSkips := s.hubAgentDefaults(), make(map[string]tmplMaxDurEntry), make(map[string]bool), make(map[string]bool)
+	attempts, hitCap := 0, false
 	for i := range agents {
 		if attempts >= maxDurationEnforcementPerTickCap {
+			hitCap = true
 			break
 		}
 		a := &agents[i]
@@ -170,18 +178,26 @@ func (s *Server) enforceMaxDurationAt(ctx context.Context, now time.Time) {
 			a.RuntimeBrokerID == "" || failedBrokers[a.RuntimeBrokerID] || systemStopBlocked(a) {
 			continue
 		}
-		maxDur, ok := s.resolveAgentMaxDuration(ctx, a, hubDefaults, tmplCache)
+		maxDur, ok := s.resolveAgentMaxDuration(ctx, a, hubDefaults, tmplCache, seenSkips)
 		if !ok || !now.After(a.RunStartedAt.Add(maxDur+maxDurationEnforcementGrace)) {
 			continue
 		}
 		s.agentLifecycleLog.Info("Agent exceeded max_duration plus hub grace; stopping run",
 			"agent_id", a.ID, "slug", a.Slug, "run_id", a.RunID, "run_started_at", a.RunStartedAt.UTC(), "max_duration", maxDur, "grace", maxDurationEnforcementGrace)
 		switch s.stopCurrentRunWithOutcome(ctx, a.ID, a.RunID, "max_duration enforcement stop", state.ActivityLimitsExceeded, state.ExitReasonLimitsExceeded) {
-		case systemStopDispatched:
+		case systemStopDispatched, systemStopRunGone:
 			attempts++
-		case systemStopDispatchFailed:
+		case systemStopBrokerFailed:
 			attempts++
 			failedBrokers[a.RuntimeBrokerID] = true
 		}
+	}
+	if !hitCap && len(failedBrokers) == 0 {
+		s.maxDurationTmplSkipLogged.Range(func(k, _ any) bool {
+			if ks, ok := k.(string); ok && !seenSkips[ks] {
+				s.maxDurationTmplSkipLogged.Delete(k)
+			}
+			return true
+		})
 	}
 }

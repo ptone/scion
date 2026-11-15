@@ -251,7 +251,7 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		launchedRunID := updated.RunID
 		s.settleLaunchedRun(ctx, &updated, req.Agent, launchSettleReport{Result: answer.Result, LaunchID: sr.LaunchID, BrokerID: brokerID})
 		if req.Agent == nil || req.Agent.RunID == "" || req.Agent.RunID == launchedRunID {
-			s.recordLaunchedRunStarted(ctx, agentID, launchedRunID, &updated)
+			recordAgentRunStartedBestEffort(ctx, s.store, s.agentLifecycleLog, agentID, launchedRunID, &updated)
 		}
 	}
 

@@ -2577,6 +2577,9 @@ type Server struct {
 	// limitsStopWait, when set, replaces the limits_exceeded stop's grace
 	// wait (tests only).
 	limitsStopWait func()
+	// maxDurationTmplSkipLogged rate-limits template read-error and hash-mismatch
+	// skip logs in enforceMaxDurationAt to once per agent and run (agentID:kind -> runID).
+	maxDurationTmplSkipLogged sync.Map
 	// httpDrains marks brokers with a heartbeat-triggered drain of queued
 	// stops running on this node (http_broker_drain.go).
 	httpDrains sync.Map

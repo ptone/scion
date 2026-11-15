@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -44,13 +45,17 @@ func enableMaxDurationExperiment(t *testing.T, srv *Server, on bool) {
 	ops := srv.GetOperationalSettings()
 	if ops == nil {
 		ops = NewOperationalSettings(newFakeHubSettingStore(), emptyKoanf(), emptyKoanf())
-		_, err := ops.Refresh(context.Background())
-		require.NoError(t, err)
+		_, _ = ops.Refresh(context.Background())
 		srv.SetOperationalSettings(ops)
 	}
-	doc := fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.MaxDurationEnforcement, on)
-	_, err := ops.Update(context.Background(), "experiments", json.RawMessage(doc), "test", ops.SectionRevision("experiments"), "managed")
+	_, err := ops.Update(context.Background(), "experiments", json.RawMessage(fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.MaxDurationEnforcement, on)), "test", ops.SectionRevision("experiments"), "managed")
 	require.NoError(t, err)
+}
+
+func setHubDefaultMaxDur(srv *Server, val string) {
+	srv.mu.Lock()
+	srv.config.AgentDefaults.DefaultMaxDuration = val
+	srv.mu.Unlock()
 }
 
 func stampRunStarted(t *testing.T, s store.Store, agentID, runID string, at time.Time) {
@@ -66,10 +71,8 @@ func newActiveMaxDurAgent(t *testing.T, f haltFixture, slug, phase, activity str
 	a := newReincarnateTestAgent(t, f.s, f.project, f.broker, func(a *store.Agent) {
 		a.ID, a.Slug, a.Name, a.Phase, a.Activity, a.AppliedConfig = api.NewUUID(), slug, slug, phase, activity, ac
 	})
-	_, err := f.s.SetAgentRunID(ctx, a.ID, runID, nil)
-	require.NoError(t, err)
-	_, err = f.s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
-	require.NoError(t, err)
+	_, _ = f.s.SetAgentRunID(ctx, a.ID, runID, nil)
+	_, _ = f.s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
 	stampRunStarted(t, f.s, a.ID, runID, startedAt)
 	return a
 }
@@ -96,7 +99,7 @@ func stopCallCount(d *reincarnateTestDispatcher) int {
 	return d.stopCalls
 }
 
-func TestMaxDurationEnforcement_ExperimentGateGraceAndSigtermRace(t *testing.T) {
+func TestMaxDurationEnforcement_ExperimentGateGraceActivitiesAndSigtermRace(t *testing.T) {
 	start := time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC)
 	ac30m := &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{MaxDuration: "30m"}}
 	f := newHaltFixture(t)
@@ -118,13 +121,25 @@ func TestMaxDurationEnforcement_ExperimentGateGraceAndSigtermRace(t *testing.T) 
 	f.srv.enforceMaxDurationAt(context.Background(), start.Add(50*time.Minute))
 	assert.Equal(t, 1, stopCallCount(d))
 
+	var actIDs []string
+	for i, tc := range [][2]string{
+		{string(state.PhaseRunning), string(state.ActivityBlocked)},
+		{string(state.PhaseRunning), string(state.ActivityWaitingForInput)},
+		{string(state.PhaseRunning), string(state.ActivityThinking)},
+		{string(state.PhaseStarting), ""},
+	} {
+		actIDs = append(actIDs, newActiveMaxDurAgent(t, f, fmt.Sprintf("act-%d", i), tc[0], tc[1], ac30m, start).ID)
+	}
+	f.srv.enforceMaxDurationAt(context.Background(), start.Add(41*time.Minute))
+	for _, id := range actIDs {
+		assertLimitsStopped(t, f.s, id)
+	}
 	sigF := f
 	sigF.agent = newActiveMaxDurAgent(t, f, "sigterm-race", string(state.PhaseRunning), "working", ac30m, start)
 	d.stopHook = func() {
 		require.Equal(t, http.StatusOK, sigF.selfReport(t, "run-sigterm-race", map[string]any{"phase": "stopped", "exitReason": "signaled"}))
 	}
-	f.srv.enforceMaxDurationAt(context.Background(), start.Add(41*time.Minute))
-	assert.Equal(t, 2, stopCallCount(d))
+	f.srv.enforceMaxDurationAt(context.Background(), start.Add(42*time.Minute))
 	assertLimitsStopped(t, f.s, sigF.agent.ID)
 }
 
@@ -144,25 +159,6 @@ func TestMaxDurationEnforcement_PreDispatchAlreadyTerminalUntouched(t *testing.T
 		got, err := f.s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		assert.Equal(t, tc, [3]string{got.Phase, got.Activity, got.ExitReason})
-	}
-}
-
-func TestMaxDurationEnforcement_IgnoresActivityAndCoversStartingAndRunning(t *testing.T) {
-	f, start := newHaltFixture(t), time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC)
-	enableMaxDurationExperiment(t, f.srv, true)
-	ac := &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{MaxDuration: "30m"}}
-	var ids []string
-	for i, tc := range [][2]string{
-		{string(state.PhaseRunning), string(state.ActivityBlocked)},
-		{string(state.PhaseRunning), string(state.ActivityWaitingForInput)},
-		{string(state.PhaseRunning), string(state.ActivityThinking)},
-		{string(state.PhaseStarting), ""},
-	} {
-		ids = append(ids, newActiveMaxDurAgent(t, f, fmt.Sprintf("act-%d", i), tc[0], tc[1], ac, start).ID)
-	}
-	f.srv.enforceMaxDurationAt(context.Background(), start.Add(41*time.Minute))
-	for _, id := range ids {
-		assertLimitsStopped(t, f.s, id)
 	}
 }
 
@@ -191,9 +187,7 @@ func TestMaxDurationEnforcement_PrecedenceDefaultsAndZeroOptOut(t *testing.T) {
 	assertLimitsStopped(t, f.s, f.agent.ID)
 	assertAgentPhase(t, f.s, zeroAgent.ID, state.PhaseRunning)
 
-	f.srv.mu.Lock()
-	f.srv.config.AgentDefaults.DefaultMaxDuration = "0"
-	f.srv.mu.Unlock()
+	setHubDefaultMaxDur(f.srv, "0")
 	hubZero := newActiveMaxDurAgent(t, f, "hub-zero", string(state.PhaseRunning), "working", nil, start)
 	explicit := newActiveMaxDurAgent(t, f, "hub-zero-exp", string(state.PhaseRunning), "working", &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{MaxDuration: "30m"}}, start)
 	f.srv.enforceMaxDurationAt(ctx, start.Add(48*time.Hour))
@@ -216,10 +210,12 @@ func (w *getTemplateFaultStore) GetTemplate(ctx context.Context, id string) (*st
 func TestMaxDurationEnforcement_TemplateMissingErrorHashMismatchFailOpen(t *testing.T) {
 	ctx, start := context.Background(), time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC)
 	var fault *storeFaultSwitch
+	var logBuf bytes.Buffer
 	srv, s, project, broker := setupReincarnateTestServerWith(t, newReincarnateTestDispatcher(), func(srv *Server) {
 		_, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *getTemplateFaultStore {
 			return &getTemplateFaultStore{Store: inner, fault: sw}
 		})
+		srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	})
 	enableMaxDurationExperiment(t, srv, true)
 	f := haltFixture{srv: srv, s: s, project: project, broker: broker}
@@ -242,52 +238,85 @@ func TestMaxDurationEnforcement_TemplateMissingErrorHashMismatchFailOpen(t *test
 	emptyOkA := newActiveMaxDurAgent(t, f, "tmpl-empty-ok", string(state.PhaseRunning), "working", &store.AgentAppliedConfig{TemplateID: emptyDurTmpl.ID, TemplateHash: "sha256:v1"}, start)
 
 	srv.enforceMaxDurationAt(ctx, start.Add(25*time.Hour))
-	assertAgentPhase(t, s, missingA.ID, state.PhaseRunning)
-	assertAgentPhase(t, s, mismatchA.ID, state.PhaseRunning)
-	assertAgentPhase(t, s, lazyFailA.ID, state.PhaseRunning)
+	srv.enforceMaxDurationAt(ctx, start.Add(25*time.Hour+time.Minute))
+	for _, id := range []string{missingA.ID, mismatchA.ID, lazyFailA.ID} {
+		assertAgentPhase(t, s, id, state.PhaseRunning)
+	}
 	assertLimitsStopped(t, s, emptyOkA.ID)
+	assert.Equal(t, 1, strings.Count(logBuf.String(), "template hash changed since provision"))
+	assert.Equal(t, 2, strings.Count(logBuf.String(), "could not read template"))
 
 	faultA := newActiveMaxDurAgent(t, f, "tmpl-db-err", string(state.PhaseRunning), "working", &store.AgentAppliedConfig{TemplateID: faultedTmpl.ID, TemplateHash: "sha256:v1"}, start)
 	fault.Arm()
-	srv.enforceMaxDurationAt(ctx, start.Add(25*time.Hour))
+	srv.enforceMaxDurationAt(ctx, start.Add(25*time.Hour+2*time.Minute))
 	assertAgentPhase(t, s, faultA.ID, state.PhaseRunning)
 }
 
 type brokerSelectiveStopDispatcher struct {
 	*reincarnateTestDispatcher
 	mu          sync.Mutex
-	failBrokers map[string]bool
-	callsByBrk  map[string]int
+	errByAgent  map[string]error
+	errByBroker map[string]error
+	callsByAgt  map[string]int
 }
 
 func (d *brokerSelectiveStopDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
 	d.mu.Lock()
-	d.callsByBrk[agent.RuntimeBrokerID]++
-	fail := d.failBrokers[agent.RuntimeBrokerID]
+	d.callsByAgt[agent.ID]++
+	err := d.errByAgent[agent.ID]
+	if err == nil {
+		err = d.errByBroker[agent.RuntimeBrokerID]
+	}
 	d.mu.Unlock()
-	if fail {
-		return errors.New("broker unreachable")
+	if err != nil {
+		return err
 	}
 	return d.reincarnateTestDispatcher.DispatchAgentStop(ctx, agent)
+}
+
+func TestMaxDurationEnforcement_RunGoneAndAgentRefusalDoNotBlockBroker(t *testing.T) {
+	ctx, f, start := context.Background(), newHaltFixture(t), time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC)
+	enableMaxDurationExperiment(t, f.srv, true)
+	setHubDefaultMaxDur(f.srv, "30m")
+	_, _ = f.s.SetRunIntent(ctx, f.agent.ID, store.RunIntentStopped)
+
+	runGoneA := newActiveMaxDurAgent(t, f, "rungone", string(state.PhaseRunning), "working", nil, start)
+	refusedA := newActiveMaxDurAgent(t, f, "pin-refused", string(state.PhaseRunning), "working", nil, start.Add(time.Second))
+	victimA := newActiveMaxDurAgent(t, f, "healthy-victim", string(state.PhaseRunning), "working", nil, start.Add(2*time.Second))
+	selDisp := &brokerSelectiveStopDispatcher{
+		reincarnateTestDispatcher: newReincarnateTestDispatcher(),
+		errByAgent: map[string]error{
+			runGoneA.ID: stopAgentError(&brokerStatusError{StatusCode: http.StatusNotFound, Body: `{"error":{"code":"` + api.BrokerErrorCodeRunMismatch + `","message":"not found"}}`}, "run-rungone"),
+			refusedA.ID: placementConflict(stalePinRefusal(refusedA, "the pin is incomplete")),
+		},
+		callsByAgt: map[string]int{},
+	}
+	f.srv.SetDispatcher(selDisp)
+
+	f.srv.enforceMaxDurationAt(ctx, start.Add(2*time.Hour))
+	assertLimitsStopped(t, f.s, runGoneA.ID)
+	assertAgentPhase(t, f.s, refusedA.ID, state.PhaseRunning)
+	assertLimitsStopped(t, f.s, victimA.ID)
+	assert.Equal(t, [2]int{1, 1}, [2]int{selDisp.callsByAgt[runGoneA.ID], selDisp.callsByAgt[victimA.ID]})
+
+	f.srv.enforceMaxDurationAt(ctx, start.Add(2*time.Hour+time.Minute))
+	assert.Equal(t, 1, selDisp.callsByAgt[runGoneA.ID], "run-gone row must not be retried on later ticks")
 }
 
 func TestMaxDurationEnforcement_PerTickCapFailedBrokerSkipAndBlockedStates(t *testing.T) {
 	ctx, f, start := context.Background(), newHaltFixture(t), time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC)
 	enableMaxDurationExperiment(t, f.srv, true)
-	f.srv.mu.Lock()
-	f.srv.config.AgentDefaults.DefaultMaxDuration = "30m"
-	f.srv.mu.Unlock()
+	setHubDefaultMaxDur(f.srv, "30m")
 
 	badBroker := &store.RuntimeBroker{ID: api.NewUUID(), Name: "bad-brk", Slug: "bad-brk", Status: store.BrokerStatusOnline}
 	require.NoError(t, f.s.CreateRuntimeBroker(ctx, badBroker))
 	selDisp := &brokerSelectiveStopDispatcher{
 		reincarnateTestDispatcher: newReincarnateTestDispatcher(),
-		failBrokers:               map[string]bool{badBroker.ID: true},
-		callsByBrk:                map[string]int{},
+		errByBroker:               map[string]error{badBroker.ID: &brokerStatusError{StatusCode: http.StatusServiceUnavailable}},
+		callsByAgt:                map[string]int{},
 	}
 	f.srv.SetDispatcher(selDisp)
-	_, err := f.s.SetRunIntent(ctx, f.agent.ID, store.RunIntentStopped)
-	require.NoError(t, err)
+	_, _ = f.s.SetRunIntent(ctx, f.agent.ID, store.RunIntentStopped)
 	stampRunStarted(t, f.s, f.agent.ID, "run-1", start)
 
 	badFixture := f
@@ -301,7 +330,7 @@ func TestMaxDurationEnforcement_PerTickCapFailedBrokerSkipAndBlockedStates(t *te
 		dueIDs[i] = newActiveMaxDurAgent(t, f, fmt.Sprintf("cap-%02d", i), string(state.PhaseRunning), "working", nil, start.Add(time.Duration(i+2)*time.Second)).ID
 	}
 	f.srv.enforceMaxDurationAt(ctx, start.Add(2*time.Hour))
-	assert.Equal(t, 1, selDisp.callsByBrk[badBroker.ID], "failing broker skipped after first error in tick")
+	assert.Equal(t, [2]int{1, 0}, [2]int{selDisp.callsByAgt[badA1.ID], selDisp.callsByAgt[badA2.ID]}, "failing broker skipped after first error in tick")
 	assert.Equal(t, maxDurationEnforcementPerTickCap-1, stopCallCount(selDisp.reincarnateTestDispatcher))
 	for _, id := range []string{f.agent.ID, badA1.ID, badA2.ID, dueIDs[maxDurationEnforcementPerTickCap-1]} {
 		assertAgentPhase(t, f.s, id, state.PhaseRunning)

@@ -1937,10 +1937,11 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		if current.LaunchState == store.LaunchStateActive {
 			upd.SetLaunchState(store.LaunchStateEnded)
 			upd.SetLaunchEndReason(store.LaunchEndReasonRunningObserved)
-			if current.RunID != "" && current.RunID == current.LaunchRunID && current.RunStartedAtRunID != current.RunID {
-				upd.SetRunStartedAt(now)
-				upd.SetRunStartedAtRunID(current.RunID)
-			}
+		}
+		if current.RunID != "" && current.RunStartedAtRunID != current.RunID &&
+			(current.LaunchState != store.LaunchStateActive || current.LaunchRunID == "" || current.RunID == current.LaunchRunID) {
+			upd.SetRunStartedAt(now.UTC())
+			upd.SetRunStartedAtRunID(current.RunID)
 		}
 	}
 
