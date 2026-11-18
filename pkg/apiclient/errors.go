@@ -149,6 +149,11 @@ const (
 	// ErrCodeMessageDenied is returned when message-send authorization
 	// denies a delivery. Details carry reason, senderMode and recipientMode.
 	ErrCodeMessageDenied = "message_denied"
+	// ErrCodeMissingScope is the hub's 403 code when an agent credential
+	// lacks one or more ceiling-optional scopes required for an operation.
+	// Details carry every missing scope under "scopes" (and the first under
+	// "scope").
+	ErrCodeMissingScope = "missing_scope"
 )
 
 // errorResponse matches the API error response format.
