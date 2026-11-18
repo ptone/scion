@@ -7649,7 +7649,6 @@ export class ScionChatThread extends LitElement {
               .messages=${group}
               ?global-expanded=${this.interagentExpandAll}
               ?hidden=${!this.interagentVisible}
-              current-project-id=${this.projectId}
             ></scion-chat-interagent-marker>
           `,
         });
