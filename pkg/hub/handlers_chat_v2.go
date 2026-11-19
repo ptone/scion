@@ -4901,6 +4901,10 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 // collected so far.
 var spaceMembersMaxAgents = 10000
 
+// spaceMembersMessageRunes bounds the freeform agent status detail carried on
+// each agent member entry (rendered only in the sidebar row tooltip).
+const spaceMembersMessageRunes = 280
+
 // handleSpaceMembers handles GET /api/v1/chat/spaces/{projectId}/members.
 func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
@@ -4931,38 +4935,62 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 	s.mu.RUnlock()
 
 	// --- Humans: list project members via role bindings (PM1) ---
-	var humans []chatMemberEntry
 	projectMembers, err := s.store.ListProjectMembers(ctx, project.ID)
 	if err != nil {
 		slog.Error("chat members: failed to list project members", "project", project.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list project members", nil)
 		return
 	}
-	seen := make(map[string]bool)
+	type uniqueMember struct {
+		userID string
+		role   string
+	}
+	uniqueMembers := make([]uniqueMember, 0, len(projectMembers))
+	memberIDs := make([]string, 0, len(projectMembers))
+	seen := make(map[string]bool, len(projectMembers))
 	for _, m := range projectMembers {
-		if seen[m.UserID] {
+		if m == nil || seen[m.UserID] {
 			continue
 		}
 		seen[m.UserID] = true
-		u, err := s.store.GetUser(ctx, m.UserID)
+		uniqueMembers = append(uniqueMembers, uniqueMember{userID: m.UserID, role: m.Role})
+		memberIDs = append(memberIDs, m.UserID)
+	}
+
+	var usersByID map[string]*store.User
+	if len(memberIDs) > 0 {
+		usersByID, err = s.store.GetUsersByIDs(ctx, memberIDs)
 		if err != nil {
+			slog.Error("chat members: failed to load project member users", "project", project.ID, "error", err)
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list project members", nil)
+			return
+		}
+	}
+
+	humans := make([]chatHumanMemberEntry, 0, len(uniqueMembers))
+	for _, m := range uniqueMembers {
+		u := usersByID[m.userID]
+		if u == nil {
 			continue
 		}
-		entry := chatMemberEntry{
+		entry := chatHumanMemberEntry{
 			ID:          u.ID,
-			Kind:        "user",
 			DisplayName: u.DisplayName,
 			Email:       u.Email,
 			AvatarURL:   u.AvatarURL,
-			Role:        m.Role,
+			Role:        m.role,
 		}
 		if pm != nil {
 			entry.PresenceState = string(pm.GetState(u.ID))
 		}
 		humans = append(humans, entry)
 	}
-	if humans == nil {
-		humans = []chatMemberEntry{}
+
+	if r.URL.Query().Get("include") == "humans" {
+		writeJSON(w, http.StatusOK, chatMembersHumansResponse{
+			Humans: humans,
+		})
+		return
 	}
 
 	// --- Agents: list agents for the project ---
@@ -4977,12 +5005,11 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 	if !agentsVisible {
 		writeJSON(w, http.StatusOK, chatMembersResponse{
 			Humans: humans,
-			Agents: []chatMemberEntry{},
+			Agents: []chatAgentMemberEntry{},
 		})
 		return
 	}
 
-	var agents []chatMemberEntry
 	projectAgents, truncated, err := walkProjectAgentPages(ctx, s.store, project.ID, spaceMembersMaxAgents)
 	if err != nil {
 		// A client that has gone away is not a server failure, and nothing
@@ -5004,21 +5031,23 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 	// and access constraints load once instead of once per agent. Every
 	// decision still runs, and is audited, individually.
 	attachCtx := withAuthzInputMemo(ctx)
+	now := time.Now()
+	seesDeletionDetail := callerSeesDeletionDetail(ctx)
+	agents := make([]chatAgentMemberEntry, 0, len(projectAgents))
 	for _, a := range projectAgents {
 		// Each attach check reads the store and may write an audit record,
 		// so stop once the client has gone rather than finishing the list.
 		if ctx.Err() != nil {
 			return
 		}
-		entry := chatMemberEntry{
+		entry := chatAgentMemberEntry{
 			ID:          a.ID,
-			Kind:        "agent",
 			DisplayName: a.Name,
 			Slug:        a.Slug,
 			Phase:       a.Phase,
 			Activity:    a.Activity,
-			ProjectID:   a.ProjectID,
-			Message:     a.Message,
+			Message:     truncatePreview(a.Message, spaceMembersMessageRunes),
+			Deletion:    deletionViewForCaller(&a, now, seesDeletionDetail),
 		}
 		// Whether this viewer may open a terminal on this agent. The PTY
 		// route gates on authorizeAgentLifecycle, which decides
@@ -5026,9 +5055,6 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 		// rather than offering a control the server will refuse.
 		entry.CanAttach = s.authzService.CheckAccess(
 			attachCtx, user, agentResource(&a), ActionAttach).Allowed
-		if !a.LastSeen.IsZero() {
-			entry.LastSeen = a.LastSeen.UTC().Format(time.RFC3339)
-		}
 		switch {
 		case !a.LastActivityEvent.IsZero():
 			entry.LastActivityEvent = a.LastActivityEvent.UTC().Format(time.RFC3339)
@@ -5036,9 +5062,6 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 			entry.LastActivityEvent = a.Updated.UTC().Format(time.RFC3339)
 		}
 		agents = append(agents, entry)
-	}
-	if agents == nil {
-		agents = []chatMemberEntry{}
 	}
 
 	writeJSON(w, http.StatusOK, chatMembersResponse{
@@ -6362,8 +6385,48 @@ type chatDMEntry struct {
 }
 
 type chatMembersResponse struct {
-	Humans []chatMemberEntry `json:"humans"`
-	Agents []chatMemberEntry `json:"agents"`
+	Humans []chatHumanMemberEntry `json:"humans"`
+	Agents []chatAgentMemberEntry `json:"agents"`
+}
+
+// chatMembersHumansResponse is the `?include=humans` wire shape: `agents` is
+// omitted so "not requested" cannot be mistaken for "zero agents".
+type chatMembersHumansResponse struct {
+	Humans []chatHumanMemberEntry `json:"humans"`
+}
+
+type chatHumanMemberEntry struct {
+	ID            string `json:"id"`
+	DisplayName   string `json:"displayName"`
+	Email         string `json:"email,omitempty"`
+	AvatarURL     string `json:"avatarUrl,omitempty"`
+	Role          string `json:"role,omitempty"`
+	PresenceState string `json:"presenceState,omitempty"`
+}
+
+type chatAgentMemberEntry struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName"`
+	Slug        string `json:"slug,omitempty"`
+	Phase       string `json:"phase,omitempty"`
+	Activity    string `json:"activity,omitempty"`
+	// Message is the agent's freeform status detail, truncated to
+	// spaceMembersMessageRunes runes for tooltip display.
+	Message string `json:"message,omitempty"`
+	// LastActivityEvent is when the agent last changed state, RFC3339, with
+	// the record's update time as a fallback.
+	LastActivityEvent string `json:"lastActivityEvent,omitempty"`
+	// Deletion is the redacted client-facing deletion view when an async
+	// delete is active or failed within the display TTL; omitted otherwise.
+	Deletion *store.DeletionInfo `json:"deletion,omitempty"`
+	// CanAttach reports whether the requesting user may open a terminal on
+	// this agent, mirroring the ActionAttach decision the PTY route makes.
+	//
+	// Deliberately NOT omitempty: false is the value the client most needs to
+	// receive. With omitempty a denied agent serialises to nothing, the client
+	// cannot distinguish "not allowed" from "field absent", and the control it
+	// gates stays visible — which is the exact case this field exists for.
+	CanAttach bool `json:"canAttach"`
 }
 
 type chatSearchResponse struct {
