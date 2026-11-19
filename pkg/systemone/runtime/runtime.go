@@ -24,6 +24,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/textproto"
 	"net/url"
 	"slices"
 	"strconv"
@@ -163,15 +164,18 @@ type EvalOptions struct {
 }
 
 type transportKey struct {
-	id         string
-	name       string
-	revision   int64
-	endpoint   string
-	authKind   string
-	secretName string
-	headerName string
-	audience   string
-	scopes     string
+	id              string
+	name            string
+	revision        int64
+	adapter         string
+	endpoint        string
+	authKind        string
+	secretName      string
+	headerName      string
+	audience        string
+	scopes          string
+	placementKind   provider.AuthKind
+	placementHeader string
 }
 
 // Runtime executes compiled System One rules under bounded deadlines and
@@ -384,7 +388,7 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	// Step 6: Build credential-free ModelRequest from compiled spec + selected fields only (AC-2).
 	req := buildModelRequest(evalID, compiled, selectedFields)
 	instView := inst.View()
-	transport := r.transportForInstance(inst)
+	transport := r.transportForInstance(inst, caps.AuthScheme)
 
 	attemptStart := time.Now().UTC()
 	res, invokeErr, panicked := invokeSafely(attemptCtx, adapter, transport, instView, req)
@@ -552,7 +556,7 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 	callCtx, cancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
 	defer cancel()
 
-	models, err, listPanicked := listModelsSafely(callCtx, lister, r.transportForInstance(inst), inst.View())
+	models, err, listPanicked := listModelsSafely(callCtx, lister, r.transportForInstance(inst, caps.AuthScheme), inst.View())
 	if listPanicked {
 		return nil, provider.NewProviderError(provider.FailInternal, false, 0, 0, "adapter panic recovered")
 	}
@@ -752,17 +756,41 @@ func canonicalScopesKey(scopes []string) string {
 	return b.String()
 }
 
-func (r *Runtime) transportForInstance(inst Instance) provider.Transport {
+func placementFromAuthScheme(scheme provider.AuthScheme) egress.Placement {
+	return egress.Placement{
+		Kind:       scheme.Kind,
+		HeaderName: scheme.HeaderName,
+	}
+}
+
+func canonicalPlacementKey(p egress.Placement) (provider.AuthKind, string) {
+	kind := p.Kind
+	if kind == "" {
+		kind = provider.AuthKindBearer
+	}
+	var hdr string
+	if p.HeaderName != "" {
+		hdr = textproto.CanonicalMIMEHeaderKey(p.HeaderName)
+	}
+	return kind, hdr
+}
+
+func (r *Runtime) transportForInstance(inst Instance, adapterScheme provider.AuthScheme) provider.Transport {
+	placement := placementFromAuthScheme(adapterScheme)
+	placementKind, placementHeader := canonicalPlacementKey(placement)
 	key := transportKey{
-		id:         inst.ID,
-		name:       inst.Name,
-		revision:   inst.Revision,
-		endpoint:   inst.Endpoint,
-		authKind:   inst.Auth.Kind,
-		secretName: inst.Auth.SecretName,
-		headerName: inst.Auth.HeaderName,
-		audience:   inst.Auth.Audience,
-		scopes:     canonicalScopesKey(inst.Auth.Scopes),
+		id:              inst.ID,
+		name:            inst.Name,
+		revision:        inst.Revision,
+		adapter:         inst.Adapter,
+		endpoint:        inst.Endpoint,
+		authKind:        inst.Auth.Kind,
+		secretName:      inst.Auth.SecretName,
+		headerName:      inst.Auth.HeaderName,
+		audience:        inst.Auth.Audience,
+		scopes:          canonicalScopesKey(inst.Auth.Scopes),
+		placementKind:   placementKind,
+		placementHeader: placementHeader,
 	}
 	r.transportMu.Lock()
 	defer r.transportMu.Unlock()
@@ -789,7 +817,10 @@ func (r *Runtime) transportForInstance(inst Instance) provider.Transport {
 		}
 		return creds(reqCtx, instSnap)
 	}
-	tr := egress.NewClient(bearer, r.egressOpts...)
+	opts := make([]egress.Option, 0, len(r.egressOpts)+1)
+	opts = append(opts, egress.WithCredentialPlacement(placement))
+	opts = append(opts, r.egressOpts...)
+	tr := egress.NewClient(bearer, opts...)
 	r.transports[key] = tr
 	return tr
 }
@@ -922,12 +953,28 @@ func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, instAuth Instan
 	case provider.AuthKindBearer:
 		switch instAuth.Kind {
 		case "", "api_key", string(provider.AuthKindBearer):
+			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme)); err != nil {
+				return provider.FailInternal
+			}
+			return ""
+		default:
+			return provider.FailUnsupported
+		}
+	case provider.AuthKindHeader:
+		switch instAuth.Kind {
+		case "", "api_key":
+			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme)); err != nil {
+				return provider.FailInternal
+			}
 			return ""
 		default:
 			return provider.FailUnsupported
 		}
 	case provider.AuthKindNone:
 		if instAuth.Kind == "" || instAuth.Kind == string(provider.AuthKindNone) {
+			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme)); err != nil {
+				return provider.FailInternal
+			}
 			return ""
 		}
 		return provider.FailUnsupported
@@ -1050,6 +1097,8 @@ func classifyInvokeError(
 		return provider.FailUnavailable, statusClass
 	case egress.IsAuthError(err):
 		return provider.FailAuth, statusClass
+	case egress.IsInvalidPlacement(err):
+		return provider.FailInternal, statusClass
 	case egress.IsRedirectBlocked(err),
 		egress.IsBlockedDestination(err),
 		egress.IsSchemeNotAllowed(err),
