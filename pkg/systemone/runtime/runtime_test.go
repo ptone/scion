@@ -1976,6 +1976,7 @@ func TestRuntime_InstanceAuthSupportMatrix(t *testing.T) {
 		name          string
 		adapterScheme provider.AuthScheme
 		instAuthKind  string
+		instScopes    []string
 		wantFail      provider.FailReason
 	}{
 		{name: "bearer_adapter_with_empty_inst_auth", adapterScheme: provider.AuthBearer, instAuthKind: "", wantFail: ""},
@@ -1994,7 +1995,8 @@ func TestRuntime_InstanceAuthSupportMatrix(t *testing.T) {
 		{name: "none_adapter_with_empty_inst_auth", adapterScheme: provider.AuthNone, instAuthKind: "", wantFail: ""},
 		{name: "none_adapter_with_none_inst_auth", adapterScheme: provider.AuthNone, instAuthKind: "none", wantFail: ""},
 		{name: "none_adapter_with_api_key_inst_auth_rejected", adapterScheme: provider.AuthNone, instAuthKind: "api_key", wantFail: provider.FailUnsupported},
-		{name: "google_access_token_adapter_with_matching_inst_auth", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindGoogleAccessToken, Scopes: []string{provider.GoogleScopeCloudPlatform}}, instAuthKind: "google_access_token", wantFail: ""},
+		{name: "google_access_token_adapter_with_matching_inst_auth_and_explicit_scope", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindGoogleAccessToken}, instAuthKind: "google_access_token", instScopes: []string{"https://www.googleapis.com/auth/synthetic.test"}, wantFail: ""},
+		{name: "google_access_token_adapter_without_scopes_rejected_invalid_request", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindGoogleAccessToken}, instAuthKind: "google_access_token", wantFail: provider.FailInvalidRequest},
 		{name: "google_access_token_adapter_with_api_key_rejected", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindGoogleAccessToken}, instAuthKind: "api_key", wantFail: provider.FailUnsupported},
 		{name: "google_id_token_adapter_rejected_unsupported", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindGoogleIDToken}, instAuthKind: "google_id_token", wantFail: provider.FailUnsupported},
 		{name: "azure_entra_adapter_rejected_unsupported", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindAzureEntra}, instAuthKind: "azure_entra", wantFail: provider.FailUnsupported},
@@ -2026,6 +2028,7 @@ func TestRuntime_InstanceAuthSupportMatrix(t *testing.T) {
 			inst.Auth = runtime.InstanceAuth{
 				Kind:       tc.instAuthKind,
 				SecretName: "systemone.instance.inst-uuid-1",
+				Scopes:     tc.instScopes,
 			}
 
 			var credSrc runtime.CredentialSource
@@ -2465,6 +2468,7 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 	const (
 		canaryAPIKey = "AIzaSy-fake-key-CANARY-matrix"
 		canaryToken  = "fake-adc-token-CANARY-matrix"
+		testScope    = "https://www.googleapis.com/auth/synthetic.test"
 	)
 
 	binSpec := `{
@@ -2523,8 +2527,7 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 			HeaderName: "x-goog-api-key",
 		},
 		"google_access_token": {
-			Kind:   provider.AuthKindGoogleAccessToken,
-			Scopes: []string{provider.GoogleScopeCloudPlatform},
+			Kind: provider.AuthKindGoogleAccessToken,
 		},
 	}
 
@@ -2586,7 +2589,7 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 		assert.Empty(t, wireCalls[0].quotaProject, "quota_project must never be sent on api_key requests")
 	})
 
-	t.Run("google_access_token_with_quota_project_selects_bearer_and_defaults_scopes", func(t *testing.T) {
+	t.Run("google_access_token_with_quota_project_selects_bearer_and_explicit_provenance", func(t *testing.T) {
 		resetCounters()
 		inst := runtime.Instance{
 			ID:       "inst-2",
@@ -2595,7 +2598,7 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 			Adapter:  "multi-auth-gemini",
 			Model:    "gemini-decision-1",
 			Endpoint: srv.URL,
-			Auth:     runtime.InstanceAuth{Kind: "google_access_token"},
+			Auth:     runtime.InstanceAuth{Kind: "google_access_token", Scopes: []string{testScope}},
 			Options:  map[string]string{provider.OptionQuotaProject: "paid-gemini-proj-42"},
 			Enabled:  true,
 		}
@@ -2604,14 +2607,16 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 		assert.True(t, dec.Bool)
 		assert.Equal(t, 0, credCalls)
 		assert.Equal(t, 1, tokenCalls)
-		assert.Equal(t, []string{provider.GoogleScopeCloudPlatform}, gotScopes)
+		assert.Equal(t, []string{testScope}, gotScopes)
+		require.NotNil(t, dec.Eval.Auth)
+		assert.Equal(t, "explicit: paid-gemini-proj-42", dec.Eval.Auth.QuotaProject)
 		require.Len(t, wireCalls, 1)
 		assert.Equal(t, "Bearer "+canaryToken, wireCalls[0].authHeader)
 		assert.Equal(t, "paid-gemini-proj-42", wireCalls[0].quotaProject)
 		assert.Empty(t, wireCalls[0].googKey)
 	})
 
-	t.Run("google_access_token_without_quota_project_omits_header", func(t *testing.T) {
+	t.Run("google_access_token_without_quota_project_omits_header_and_records_implicit", func(t *testing.T) {
 		resetCounters()
 		inst := runtime.Instance{
 			ID:       "inst-3",
@@ -2620,7 +2625,7 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 			Adapter:  "multi-auth-gemini",
 			Model:    "gemini-decision-1",
 			Endpoint: srv.URL,
-			Auth:     runtime.InstanceAuth{Kind: "google_access_token", Scopes: []string{provider.GoogleScopeCloudPlatform}},
+			Auth:     runtime.InstanceAuth{Kind: "google_access_token", Scopes: []string{testScope}},
 			Enabled:  true,
 		}
 		dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("hi"), runtime.EvalOptions{Instance: &inst})
@@ -2628,10 +2633,34 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 		assert.True(t, dec.Bool)
 		assert.Equal(t, 0, credCalls)
 		assert.Equal(t, 1, tokenCalls)
+		require.NotNil(t, dec.Eval.Auth)
+		assert.Equal(t, provider.QuotaProjectImplicit, dec.Eval.Auth.QuotaProject)
 		require.Len(t, wireCalls, 1)
 		assert.Equal(t, "Bearer "+canaryToken, wireCalls[0].authHeader)
 		assert.Empty(t, wireCalls[0].quotaProject)
 		assert.Empty(t, wireCalls[0].googKey)
+	})
+
+	t.Run("google_access_token_without_scopes_fails_pre_call_invalid_request", func(t *testing.T) {
+		resetCounters()
+		inst := runtime.Instance{
+			ID:       "inst-no-scopes",
+			Name:     "gem-adc-no-scopes",
+			Revision: 1,
+			Adapter:  "multi-auth-gemini",
+			Model:    "gemini-decision-1",
+			Endpoint: srv.URL,
+			Auth:     runtime.InstanceAuth{Kind: "google_access_token"},
+			Enabled:  true,
+		}
+		_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("hi"), runtime.EvalOptions{Instance: &inst})
+		require.Error(t, err)
+		eval, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassFailed, eval.Class)
+		assert.Equal(t, string(provider.FailInvalidRequest), eval.Reason)
+		assert.Empty(t, eval.Attempts)
+		assert.Empty(t, wireCalls)
 	})
 
 	for _, badKind := range []string{"bearer", "none", "google_id_token", "azure_entra", "custom_kind"} {
@@ -2669,7 +2698,7 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 			Adapter:  "multi-auth-gemini",
 			Model:    "gemini-decision-1",
 			Endpoint: srv.URL,
-			Auth:     runtime.InstanceAuth{Kind: "google_access_token"},
+			Auth:     runtime.InstanceAuth{Kind: "google_access_token", Scopes: []string{testScope}},
 			Options:  map[string]string{provider.OptionQuotaProject: "INVALID_PROJECT!"},
 			Enabled:  true,
 		}
@@ -2739,8 +2768,7 @@ func TestRuntime_TransportCacheKeyIncludesQuotaProjectAndExcludesToken(t *testin
 	base.name = "adc-cache-test"
 	base.caps.SupportedAuth = map[string]provider.AuthScheme{
 		"google_access_token": {
-			Kind:   provider.AuthKindGoogleAccessToken,
-			Scopes: []string{provider.GoogleScopeCloudPlatform},
+			Kind: provider.AuthKindGoogleAccessToken,
 		},
 	}
 
@@ -2776,7 +2804,7 @@ func TestRuntime_TransportCacheKeyIncludesQuotaProjectAndExcludesToken(t *testin
 			Endpoint: srv.URL,
 			Auth: runtime.InstanceAuth{
 				Kind:   "google_access_token",
-				Scopes: []string{provider.GoogleScopeCloudPlatform},
+				Scopes: []string{"https://www.googleapis.com/auth/synthetic.test"},
 			},
 			Options: opts,
 			Enabled: true,

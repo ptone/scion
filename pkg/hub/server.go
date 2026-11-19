@@ -3030,6 +3030,7 @@ type Server struct {
 	systemOneRuntime     *systemoneruntime.Runtime
 	systemOneRegistry    *systemoneprovider.Registry
 	systemOneRuntimeOpts []systemoneruntime.Option
+	systemOneADCCache    *hubSystemOneADCCache
 
 	// Shared process-wide rule engine and CEL dialect (rule_engine.go; Stage 1 §7.0).
 	rules        *ruleengine.Engine
