@@ -93,6 +93,7 @@ var (
 	_ trigger.Core               = serverTriggerCore{}
 	_ trigger.FireAdmitter       = serverTriggerCore{}
 	_ trigger.SourceAuthorizer   = serverTriggerCore{}
+	_ trigger.SourceEnricher     = serverTriggerCore{}
 	_ trigger.PostEvaluationHook = serverTriggerCore{}
 )
 
