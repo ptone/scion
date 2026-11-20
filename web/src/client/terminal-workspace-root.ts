@@ -18,12 +18,16 @@ import type { TerminalAgentMetadata } from './terminal-metadata.js';
 import type { ScionHeader } from '../components/shared/header.js';
 import type { ScionTerminalPane } from '../components/terminal/terminal-pane.js';
 import {
-  TERMINAL_SESSION_COUNT_EVENT,
   TERMINAL_DRAG_MIME,
+  TERMINAL_DROPDOWN_SELECT_EVENT,
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
   TERMINAL_PANE_DIALOG_OPEN_EVENT,
-  type TerminalSessionCountDetail,
+  publishTerminalWorkspaceSnapshot,
+  type TerminalDropdownSelectDetail,
   type TerminalPaletteNewAgentDetail,
+  type TerminalSessionDot,
+  type TerminalSessionDotColour,
+  type TerminalSessionSummary,
 } from './terminal-workspace-events.js';
 import { enterAppFrame, exitAppFrame } from '../components/shared/app-frame.js';
 import type { PaletteCandidate } from './palette-types.js';
@@ -115,13 +119,10 @@ export function isInactiveEntry(entry: RailEntryStatus): boolean {
 }
 
 /** The colour of a rail row's status dot. */
-export type ConnectionDotColour = 'green' | 'amber' | 'red' | 'grey' | 'neutral';
+export type ConnectionDotColour = TerminalSessionDotColour;
 
 /** A status dot's colour and its short meaning, shown as tooltip and spoken text. */
-export interface ConnectionDot {
-  colour: ConnectionDotColour;
-  meaning: string;
-}
+export type ConnectionDot = TerminalSessionDot;
 
 /**
  * The status dot for a rail row. The rail styles the dot from the colour
@@ -453,6 +454,7 @@ export class TerminalWorkspaceRoot {
       this.placeMenu
     );
     window.addEventListener(TEST_INFRA_STATUS_EVENT, this.handleTestInfraStatus);
+    window.addEventListener(TERMINAL_DROPDOWN_SELECT_EVENT, this.handleDropdownSelect);
     this.renderTestHubBanner();
     if (!getTestInfraStatus()) void loadTestInfraStatus();
 
@@ -784,6 +786,7 @@ export class TerminalWorkspaceRoot {
    */
   dispose(): void {
     window.removeEventListener(TEST_INFRA_STATUS_EVENT, this.handleTestInfraStatus);
+    window.removeEventListener(TERMINAL_DROPDOWN_SELECT_EVENT, this.handleDropdownSelect);
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     document.removeEventListener('focusin', this.handleGlobalFocusIn);
     this.element.removeEventListener(TERMINAL_PANE_DIALOG_OPEN_EVENT, this.handlePaneDialogOpen);
@@ -869,6 +872,7 @@ export class TerminalWorkspaceRoot {
       inRailOrPane = true;
       for (const [key, pane] of this.panes) {
         if (pane === node) {
+          const prevFocused = this.lastFocusedPaneSessionKey;
           this.lastFocusedPaneSessionKey = key;
           if (
             this.railFocusAgentId !== null &&
@@ -882,6 +886,9 @@ export class TerminalWorkspaceRoot {
             this.entries.get(key)?.state.agentId !== this.paletteFocusAgentId
           ) {
             this.paletteFocusAgentId = null;
+          }
+          if (prevFocused !== key) {
+            this.publishWorkspaceSnapshot();
           }
           return;
         }
@@ -1363,7 +1370,7 @@ export class TerminalWorkspaceRoot {
 
     // Visibility
     this.refreshPaneVisibility();
-    this.publishCount();
+    this.publishWorkspaceSnapshot(entries);
     this.focusPaletteTarget();
     this.focusRailTarget();
   }
@@ -2096,12 +2103,70 @@ export class TerminalWorkspaceRoot {
     }
   }
 
-  private publishCount(): void {
-    window.dispatchEvent(
-      new CustomEvent<TerminalSessionCountDetail>(TERMINAL_SESSION_COUNT_EVENT, {
-        detail: { count: this.entries.size },
-      })
-    );
+  /**
+   * Handles a selection from the header's Terminals dropdown: places an
+   * existing rail session into the next free multi-pane slot (matching a rail
+   * click) and moves keyboard focus into that agent's pane once visible.
+   */
+  private readonly handleDropdownSelect = (event: Event): void => {
+    const agentId = (event as CustomEvent<TerminalDropdownSelectDetail>).detail?.agentId;
+    if (!agentId) return;
+    const key = this.findSessionKeyByAgentId(agentId);
+    if (key) {
+      this.placeInNextFreeSlot(key);
+    }
+    this.railFocusAgentId = agentId;
+    this.focusRailTarget();
+  };
+
+  /**
+   * Resolves the current focused agent inside the terminal workspace:
+   * - when zoomed: the zoomed pane's agent;
+   * - when a single pane is effectively shown (single preset or narrow viewport):
+   *   that single visible slot's agent;
+   * - in a multi-pane grid: `lastFocusedPaneSessionKey`'s agent when that key is
+   *   currently in the visible slots, or null when no visible pane has focus.
+   */
+  private getFocusedAgentId(): string | null {
+    const zoomedKey = this.layoutManager.getZoomed();
+    if (zoomedKey) {
+      return this.entries.get(zoomedKey)?.state.agentId ?? null;
+    }
+    const state = this.layoutManager.getState();
+    if (this.isSinglePaneView()) {
+      const activeSlots = this.getActivePresetSlots(state.active);
+      const firstOccupied = activeSlots.find((s) => s !== null) ?? null;
+      return firstOccupied ? (this.entries.get(firstOccupied)?.state.agentId ?? null) : null;
+    }
+    const visibleSlots = this.layoutManager.getVisibleSlots();
+    if (this.lastFocusedPaneSessionKey && visibleSlots.includes(this.lastFocusedPaneSessionKey)) {
+      return this.entries.get(this.lastFocusedPaneSessionKey)?.state.agentId ?? null;
+    }
+    return null;
+  }
+
+  private publishWorkspaceSnapshot(sortedEntries?: readonly RailEntry[]): void {
+    let entries: readonly RailEntry[];
+    if (sortedEntries) {
+      entries = sortedEntries;
+    } else {
+      const copy = [...this.entries.values()];
+      this.sortEntries(copy);
+      entries = copy;
+    }
+    const sessions: TerminalSessionSummary[] = entries.map((entry) => {
+      const agent = entry.metadata.agent ?? entry.state.agent;
+      return {
+        agentId: entry.state.agentId,
+        name: agent?.name || entry.state.agentId,
+        dot: connectionDot(entry, !this.shownKeys.has(entry.state.key)),
+      };
+    });
+    publishTerminalWorkspaceSnapshot({
+      count: this.entries.size,
+      sessions,
+      focusedAgentId: this.getFocusedAgentId(),
+    });
   }
 
   // ── URL layout sync (#1715) ─────────────────────────────────────────────

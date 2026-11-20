@@ -45,7 +45,12 @@ import type { Project, User } from '../../shared/types.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { apiFetch } from '../../client/api.js';
-import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
+import {
+  TERMINAL_SESSION_COUNT_EVENT,
+  getTerminalWorkspaceSnapshot,
+  type TerminalSessionCountDetail,
+  type TerminalSessionSummary,
+} from '../../client/terminal-workspace-events.js';
 import { TRAY_COUNT_EVENT, type TrayCountDetail } from '../../client/tray-count-events.js';
 import {
   CHAT_UNREAD_COUNT_EVENT,
@@ -122,6 +127,18 @@ const rememberedModePaths = {
   chat: '/chat',
 };
 
+type HeaderTerminalsMenuMod = typeof import('./header-terminals-menu.js');
+let cachedTerminalsMenuMod: HeaderTerminalsMenuMod | null = null;
+let terminalsMenuModPromise: Promise<HeaderTerminalsMenuMod> | null = null;
+
+/** Single-flight lazy loader for the wide Terminals dropdown menu helper. */
+export function preloadHeaderTerminalsMenu(): Promise<HeaderTerminalsMenuMod> {
+  return (terminalsMenuModPromise ??= import('./header-terminals-menu.js').then((m) => {
+    cachedTerminalsMenuMod = m;
+    return m;
+  }));
+}
+
 @customElement('scion-header')
 export class ScionHeader extends LitElement {
   /**
@@ -153,6 +170,23 @@ export class ScionHeader extends LitElement {
 
   @state()
   private terminalSessionCount = 0;
+
+  @state()
+  private terminalSessions: readonly TerminalSessionSummary[] = [];
+
+  @state()
+  private terminalFocusedAgentId: string | null = null;
+
+  @state()
+  private terminalsMenuMounted = false;
+
+  @state()
+  private terminalsMenuOpen = false;
+
+  @state()
+  private terminalsMenuMod: HeaderTerminalsMenuMod | null = cachedTerminalsMenuMod;
+
+  private unsubscribeTerminalsMenu: (() => void) | null = null;
 
   /** Whether a graph view on screen offers the "Jump to agent" palette. */
   @state()
@@ -348,6 +382,29 @@ export class ScionHeader extends LitElement {
       font-weight: 500;
     }
 
+    .terminals-split,
+    .terminals-split > sl-tooltip,
+    .terminals-dropdown {
+      display: inline-flex;
+      align-items: stretch;
+    }
+    .terminals-split > sl-tooltip > button {
+      border-radius: 0.375rem 0 0 0.375rem;
+      padding-right: 0.625rem;
+    }
+    .mode-switch button.terminals-menu-trigger {
+      padding: 0.5rem 0.4375rem;
+      border-radius: 0 0.375rem 0.375rem 0;
+      border-left: 1px solid var(--scion-border, #e2e8f0);
+      gap: 0;
+    }
+    .mode-switch button.terminals-menu-trigger.active {
+      border-left-color: rgba(255, 255, 255, 0.28);
+    }
+    .mode-switch button.terminals-menu-trigger sl-icon {
+      font-size: 0.75rem;
+    }
+
     /* ------------------------------------------------------------------ */
     /* Chat unread badge: overlays the top-right of the mode icon. It is    */
     /* absolutely positioned, so it never adds height to the 60px header,   */
@@ -438,7 +495,8 @@ export class ScionHeader extends LitElement {
        (32px) desktop sizing above does not meet the minimum. Desktop keeps
        the compact sizing to match the other header icon buttons. */
     @media (hover: none) and (pointer: coarse) {
-      .palette-button {
+      .palette-button,
+      .mode-switch button.terminals-menu-trigger {
         min-width: 44px;
         min-height: 44px;
       }
@@ -841,7 +899,7 @@ export class ScionHeader extends LitElement {
       </div>
 
       <!-- Wide center column: segmented mode switch with labels (>1100px) -->
-      <div class="wide-center">${this.renderModeSwitch()}</div>
+      <div class="wide-center">${this.renderModeSwitch(true)}</div>
 
       <div class="header-right">
         ${this.renderPaletteButton()}
@@ -910,7 +968,7 @@ export class ScionHeader extends LitElement {
 
         <!-- Compact layout (<=1100px): mode segments/dropdown + user dropdown -->
         <div class="compact-right">
-          <div class="compact-mode-segments">${this.renderModeSwitch()}</div>
+          <div class="compact-mode-segments">${this.renderModeSwitch(false)}</div>
           <div class="compact-mode-dropdown">${this.renderModeDropdown()}</div>
           ${this.user
             ? this.renderUserDropdown()
@@ -995,10 +1053,11 @@ export class ScionHeader extends LitElement {
 
   /**
    * Inline segmented control for switching between Console / Chat /
-   * Terminals modes. Used in the wide center column (with labels) and in
-   * the compact tier (icon-only via CSS).
+   * Terminals modes. Used in the wide center column (with labels and the
+   * Terminals chevron split-button) and in the compact tier (icon-only via
+   * CSS, without the chevron).
    */
-  private renderModeSwitch(): TemplateResult {
+  private renderModeSwitch(withTerminalsDropdown = false): TemplateResult {
     const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
 
     const isChat = this.isChatView();
@@ -1008,11 +1067,29 @@ export class ScionHeader extends LitElement {
     const chatHint = this.modeShortcutHint('chat');
     const terminalsHint = this.modeShortcutHint('terminals');
 
+    const terminalsButton = html`
+      <sl-tooltip content=${withHint(terminalsLabel, terminalsHint)}>
+        <button
+          class=${isTerminal ? 'active' : ''}
+          data-mode="terminals"
+          @click=${(): void => {
+            void this.handleModeSwitch('terminals');
+          }}
+          aria-label=${terminalsLabel}
+          aria-keyshortcuts=${terminalsHint?.aria ?? nothing}
+        >
+          <sl-icon name="terminal"></sl-icon>
+          <span class="mode-label">Terminals</span>
+        </button>
+      </sl-tooltip>
+    `;
+
     return html`
       <div class="mode-switch" role="group" aria-label="Switch view">
         <sl-tooltip content=${withHint('Console', dashboardHint)}>
           <button
             class=${!isChat && !isTerminal ? 'active' : ''}
+            data-mode="dashboard"
             @click=${(): void => {
               void this.handleModeSwitch('dashboard');
             }}
@@ -1044,21 +1121,73 @@ export class ScionHeader extends LitElement {
               </sl-tooltip>
             `
           : ''}
-        <sl-tooltip content=${withHint(terminalsLabel, terminalsHint)}>
-          <button
-            class=${isTerminal ? 'active' : ''}
-            @click=${(): void => {
-              void this.handleModeSwitch('terminals');
-            }}
-            aria-label=${terminalsLabel}
-            aria-keyshortcuts=${terminalsHint?.aria ?? nothing}
-          >
-            <sl-icon name="terminal"></sl-icon>
-            <span class="mode-label">Terminals</span>
-          </button>
-        </sl-tooltip>
+        ${withTerminalsDropdown
+          ? html`
+              <div class="terminals-split">
+                ${terminalsButton} ${this.renderTerminalsDropdown(isTerminal)}
+              </div>
+            `
+          : terminalsButton}
       </div>
     `;
+  }
+
+  private renderTerminalsDropdown(isTerminal: boolean): TemplateResult {
+    const mod = this.terminalsMenuMounted ? this.terminalsMenuMod : null;
+    if (mod) {
+      return mod.renderMountedTerminalsDropdown({
+        isTerminal,
+        open: this.terminalsMenuOpen,
+        currentPath: this.currentPath,
+        userId: this.user?.id ?? '',
+        sessions: this.terminalSessions,
+        focusedAgentId: this.terminalFocusedAgentId,
+        root: this.shadowRoot,
+        setOpen: (open: boolean): void => {
+          this.terminalsMenuOpen = open;
+        },
+      });
+    }
+    return html`<button
+      type="button"
+      class="terminals-menu-trigger ${isTerminal ? 'active' : ''}"
+      title="Open terminals menu"
+      aria-label="Open terminals menu"
+      aria-haspopup="menu"
+      aria-expanded="false"
+      @click=${(): void => {
+        void this.openTerminalsMenu('none');
+      }}
+      @keydown=${(e: KeyboardEvent): void => {
+        const k = e.key;
+        const focus =
+          k === 'Enter' || k === ' ' || k === 'ArrowDown' || k === 'Home'
+            ? 'first'
+            : k === 'ArrowUp' || k === 'End'
+              ? 'last'
+              : null;
+        if (!focus) return;
+        e.preventDefault();
+        void this.openTerminalsMenu(focus);
+      }}
+    >
+      <sl-icon name="chevron-down" aria-hidden="true"></sl-icon>
+    </button>`;
+  }
+
+  private async openTerminalsMenu(focusTarget: 'none' | 'first' | 'last'): Promise<void> {
+    const mod = this.terminalsMenuMod ?? (await preloadHeaderTerminalsMenu());
+    if (!this.isConnected) return;
+    this.terminalsMenuMod = mod;
+    mod.ensureTerminalsMenuStyles(this.shadowRoot);
+    this.unsubscribeTerminalsMenu ??= mod.subscribeCurrentAgentChanges(
+      this.handleCurrentAgentChanged
+    );
+    this.terminalsMenuMounted = true;
+    this.terminalsMenuOpen = true;
+    await this.updateComplete;
+    mod.syncTerminalsTriggerAria(this.shadowRoot);
+    mod.openMountedTerminalsDropdown(this.shadowRoot, focusTarget);
   }
 
   // =========================================================================
@@ -1456,6 +1585,10 @@ export class ScionHeader extends LitElement {
       root.setAttribute('data-theme', 'light');
       root.classList.remove('sl-theme-dark');
     }
+    const terminalSnap = getTerminalWorkspaceSnapshot();
+    this.terminalSessionCount = terminalSnap.count;
+    this.terminalSessions = terminalSnap.sessions;
+    this.terminalFocusedAgentId = terminalSnap.focusedAgentId;
     window.addEventListener(
       TERMINAL_SESSION_COUNT_EVENT,
       this.handleTerminalSessionCount as EventListener
@@ -1482,6 +1615,8 @@ export class ScionHeader extends LitElement {
       TERMINAL_SESSION_COUNT_EVENT,
       this.handleTerminalSessionCount as EventListener
     );
+    this.unsubscribeTerminalsMenu?.();
+    this.unsubscribeTerminalsMenu = null;
     window.removeEventListener(
       GRAPH_PALETTE_AVAILABILITY_EVENT,
       this.handleGraphPaletteAvailability
@@ -1510,6 +1645,9 @@ export class ScionHeader extends LitElement {
 
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('currentPath')) this.rememberModePath();
+    if (this.terminalsMenuMounted) {
+      queueMicrotask(() => this.terminalsMenuMod?.syncTerminalsTriggerAria(this.shadowRoot));
+    }
   }
 
   /**
@@ -1531,8 +1669,26 @@ export class ScionHeader extends LitElement {
   // Event handlers
   // =========================================================================
 
-  private readonly handleTerminalSessionCount = (event: CustomEvent<{ count?: number }>): void => {
-    this.terminalSessionCount = Math.max(0, event.detail?.count ?? 0);
+  private readonly handleTerminalSessionCount = (
+    event: CustomEvent<Partial<TerminalSessionCountDetail>>
+  ): void => {
+    const detail = event.detail;
+    const count = Math.max(0, detail?.count ?? 0);
+    this.terminalSessionCount = count;
+    if (detail && Array.isArray(detail.sessions)) {
+      this.terminalSessions = detail.sessions;
+    } else if (count === 0) {
+      this.terminalSessions = [];
+    }
+    if (detail && 'focusedAgentId' in detail) {
+      this.terminalFocusedAgentId = detail.focusedAgentId ?? null;
+    } else if (count === 0) {
+      this.terminalFocusedAgentId = null;
+    }
+  };
+
+  private readonly handleCurrentAgentChanged = (): void => {
+    this.requestUpdate();
   };
 
   private readonly handleGraphPaletteAvailability = (): void => {
