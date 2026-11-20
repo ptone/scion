@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/spf13/cobra"
 )
 
@@ -116,6 +117,16 @@ func writeDecisionsShow(out io.Writer, resp *hubclient.AgentDecisionShowResponse
 				_, _ = fmt.Fprintf(out, "      %s\n", desc)
 			}
 		}
+		if v.Other != nil {
+			lbl := collapseSingleLine(v.Other.Label)
+			if lbl == "" {
+				lbl = messages.DefaultOtherLabel
+			}
+			_, _ = fmt.Fprintf(out, "    - %s: %s (other)\n", messages.ChoiceIDOther, lbl)
+			if desc := collapseSingleLine(v.Other.Description); desc != "" {
+				_, _ = fmt.Fprintf(out, "      %s\n", desc)
+			}
+		}
 		if len(v.Answers) == 0 {
 			_, _ = fmt.Fprintln(out, "  Answers:      none")
 			continue
@@ -138,6 +149,8 @@ func writeDecisionsShow(out io.Writer, resp *hubclient.AgentDecisionShowResponse
 			}
 			if a.Outcome == "dismiss" && strings.TrimSpace(a.DismissReason) != "" {
 				line += fmt.Sprintf(": %s", collapseSingleLine(a.DismissReason))
+			} else if text := collapseSingleLine(a.OtherText); text != "" {
+				line += fmt.Sprintf(": %s", text)
 			}
 			_, _ = fmt.Fprintln(out, line)
 		}
