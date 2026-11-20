@@ -76,7 +76,7 @@ resume, ensure its state and handoff are durable and use `scion suspend <name>` 
 same creator/supervisor authority) to stop the container while keeping the harness session
 resumable. Suspension releases the active broker and project capacity slot without closing
 open human questions; human silence is not closure. `scion stop` ends the session (the next
-`start` begins a fresh session) and is justified only for short, time-boxed terminal or
+`scion resume` begins a fresh session) and is justified only for short, time-boxed terminal or
 incident inspection when resume is unsupported or unwanted; do not leave agents stopped
 indefinitely.
 
