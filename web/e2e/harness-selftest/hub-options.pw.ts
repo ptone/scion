@@ -248,6 +248,30 @@ test('without runtimeBroker the server runs no broker', async () => {
   expect(start.env.SCION_SERVER_RUNTIMEBROKER_HOST).toBeUndefined();
 });
 
+test('decisionDismissMinAge forwards --test-decision-dismiss-min-age and requires testIdentities', async () => {
+  await expect(
+    startHub({
+      testLogin: false,
+      testIdentities: false,
+      decisionDismissMinAge: '10s',
+      build: false,
+      binary,
+      stateFile,
+    })
+  ).rejects.toThrow(/decisionDismissMinAge needs testIdentities/);
+
+  await startHub({
+    testLogin: false,
+    testIdentities: true,
+    decisionDismissMinAge: '10s',
+    build: false,
+    binary,
+    stateFile,
+  });
+  const start = invocations()[1];
+  expect(start.argv).toContain('--test-decision-dismiss-min-age=10s');
+});
+
 for (const key of [
   'HOME',
   'SCION_CLI_MODE',
