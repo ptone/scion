@@ -307,6 +307,11 @@ const (
 	// scans and enqueues eligible idle/completed/harness_error agents.
 	LockAgentIdleSuspend AdvisoryLockKey = 0x5C100030
 
+	// LockAuditRecordCleanup guards the hourly periodic cleanup of mutation
+	// audit records older than server.hub.audit_retention_days
+	// ("audit-record-cleanup", ptone/scion#2232).
+	LockAuditRecordCleanup AdvisoryLockKey = 0x5C100031
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid
