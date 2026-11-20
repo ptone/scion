@@ -57,6 +57,7 @@ type ListAgentDecisionsOptions struct {
 type DecisionAnswerView struct {
 	ChoiceID             string    `json:"choiceId"`
 	Label                string    `json:"label"`
+	OtherText            string    `json:"otherText,omitempty"`
 	AnsweredByUserID     string    `json:"answeredByUserId,omitempty"`
 	AnsweredByName       string    `json:"answeredByName,omitempty"`
 	AnsweredByEmail      string    `json:"answeredByEmail,omitempty"`
@@ -69,7 +70,14 @@ type DecisionAnswerView struct {
 	ResponseMessageID    string    `json:"responseMessageId"`
 	BatchID              string    `json:"batchId,omitempty"`
 	MatchedDefault       bool      `json:"matchedDefault,omitempty"`
+	PreviousChoiceLabel  string    `json:"previousChoiceLabel,omitempty"`
 	At                   time.Time `json:"at"`
+}
+
+// DecisionRefView names a decision version by row ID and version number.
+type DecisionRefView struct {
+	RowID   string `json:"rowId"`
+	Version int    `json:"version"`
 }
 
 // DecisionReplacedByView names the version that replaced a decision.
@@ -110,6 +118,7 @@ type DecisionView struct {
 	Question        string                  `json:"question"`
 	DefaultChoiceID string                  `json:"defaultChoiceId,omitempty"`
 	Choices         []messages.Choice       `json:"choices"`
+	Other           *messages.OtherOption   `json:"other,omitempty"`
 	ReplacedBy      *DecisionReplacedByView `json:"replacedBy,omitempty"`
 	Withdrawn       *DecisionWithdrawnView  `json:"withdrawn,omitempty"`
 	Dismissed       *DecisionDismissedView  `json:"dismissed,omitempty"`
@@ -124,6 +133,9 @@ type AgentDecisionListItem struct {
 	Version         int                    `json:"version"`
 	Status          string                 `json:"status"`
 	Question        string                 `json:"question"`
+	Choices         []messages.Choice      `json:"choices"`
+	DefaultChoiceID string                 `json:"defaultChoiceId,omitempty"`
+	Other           *messages.OtherOption  `json:"other,omitempty"`
 	ConversationID  string                 `json:"conversationId"`
 	PromptMessageID string                 `json:"promptMessageId"`
 	CreatedAt       time.Time              `json:"createdAt"`
@@ -152,6 +164,7 @@ type AgentDecisionVersionView struct {
 	PromptMessageID string                  `json:"promptMessageId"`
 	Choices         []messages.Choice       `json:"choices"`
 	DefaultChoiceID string                  `json:"defaultChoiceId,omitempty"`
+	Other           *messages.OtherOption   `json:"other,omitempty"`
 	ReplacedBy      *DecisionReplacedByView `json:"replacedBy,omitempty"`
 	Withdrawn       *DecisionWithdrawnView  `json:"withdrawn,omitempty"`
 	Dismissed       *DecisionDismissedView  `json:"dismissed,omitempty"`
