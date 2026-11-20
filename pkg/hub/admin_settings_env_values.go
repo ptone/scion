@@ -206,13 +206,26 @@ func hideNeverShownServerKeys(srv *config.V1ServerConfig) {
 		return
 	}
 	if srv.Hub != nil {
-		srv.Hub.HubClass = ""
-		srv.Hub.TestIdentities = nil
-		srv.Hub.GCPProjectID = ""
-		srv.Hub.InternalURL = ""
-		if c := srv.Hub.Conduit; c != nil {
-			c.PeerSecret = ""
+		hubCopy := *srv.Hub
+		hubCopy.HubClass = ""
+		hubCopy.TestIdentities = nil
+		hubCopy.GCPProjectID = ""
+		hubCopy.InternalURL = ""
+		if c := hubCopy.Conduit; c != nil {
+			cCopy := *c
+			cCopy.PeerSecret = ""
+			hubCopy.Conduit = &cCopy
 		}
+		if so := hubCopy.SystemOne; so != nil {
+			soCopy := *so
+			soCopy.SecretNames = nil
+			if soCopy.MaxEvalTime == "" {
+				hubCopy.SystemOne = nil
+			} else {
+				hubCopy.SystemOne = &soCopy
+			}
+		}
+		srv.Hub = &hubCopy
 	}
 	hideNeverAPIWritableProxyKeys(srv)
 	srv.KeyringFile = ""
