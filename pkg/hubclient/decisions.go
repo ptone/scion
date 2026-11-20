@@ -69,7 +69,14 @@ type DecisionAnswerView struct {
 	ResponseMessageID    string    `json:"responseMessageId"`
 	BatchID              string    `json:"batchId,omitempty"`
 	MatchedDefault       bool      `json:"matchedDefault,omitempty"`
+	PreviousChoiceLabel  string    `json:"previousChoiceLabel,omitempty"`
 	At                   time.Time `json:"at"`
+}
+
+// DecisionRefView names a decision version by row ID and version number.
+type DecisionRefView struct {
+	RowID   string `json:"rowId"`
+	Version int    `json:"version"`
 }
 
 // DecisionReplacedByView names the version that replaced a decision.
@@ -124,6 +131,8 @@ type AgentDecisionListItem struct {
 	Version         int                    `json:"version"`
 	Status          string                 `json:"status"`
 	Question        string                 `json:"question"`
+	Choices         []messages.Choice      `json:"choices"`
+	DefaultChoiceID string                 `json:"defaultChoiceId,omitempty"`
 	ConversationID  string                 `json:"conversationId"`
 	PromptMessageID string                 `json:"promptMessageId"`
 	CreatedAt       time.Time              `json:"createdAt"`
