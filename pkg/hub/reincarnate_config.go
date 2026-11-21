@@ -160,6 +160,7 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 		CreatorName:            old.CreatorName,
 		AgentRole:              old.AgentRole,
 		AgentRoleGrandfathered: old.AgentRoleGrandfathered,
+		GitHubTokenPreference:  createInputs.GitHubTokenPreference,
 		GitClone:               old.GitClone,
 		Workspace:              old.Workspace,
 		WorkspaceStoragePath:   old.WorkspaceStoragePath,
@@ -594,8 +595,9 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig) (*store.
 		HarnessAuth:   old.HarnessAuth,
 		Profile:       old.Profile,
 		ThinkingLevel: old.ThinkingLevel,
-		Branch:        old.Branch,
-		Workspace:     old.Workspace,
+		Branch:                old.Branch,
+		Workspace:             old.Workspace,
+		GitHubTokenPreference: old.GitHubTokenPreference,
 	}, warnings
 }
 
