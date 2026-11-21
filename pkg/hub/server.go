@@ -658,6 +658,11 @@ type ServerConfig struct {
 	// when positive. When zero, New resolves it from StartupServerSettings
 	// (falling back to config.SystemOneDefaultMaxEvalTime = 3s).
 	SystemOneMaxEvalTime time.Duration
+
+	// DefaultMessageMode (server.hub.default_message_mode) is the message
+	// mode of a new agent when neither the create request, its template nor
+	// its parent agent sets one. Empty means store.MessageModeProject.
+	DefaultMessageMode string
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.

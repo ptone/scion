@@ -1845,6 +1845,9 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.SystemOne.Validate(); err != nil {
 		return err
 	}
+	if err := config.ValidateDefaultMessageMode(cfg.Hub.DefaultMessageMode); err != nil {
+		return err
+	}
 	if err := validateLongLivedRequestSettings(cfg); err != nil {
 		return err
 	}
@@ -2984,6 +2987,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		PerfTrace:                    cfg.Hub.PerfTrace,
 		CSPReportRawSamples:          cfg.Hub.CSPReportRawSamples,
 		MembershipSweepReportOnly:    cfg.Hub.MembershipSweepReportOnly,
+		DefaultMessageMode:           cfg.Hub.DefaultMessageMode,
 		LaunchTimeout:                cfg.Hub.LaunchTimeout,
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
