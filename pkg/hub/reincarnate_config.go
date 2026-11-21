@@ -160,6 +160,7 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 		CreatorName:            old.CreatorName,
 		AgentRole:              old.AgentRole,
 		AgentRoleGrandfathered: old.AgentRoleGrandfathered,
+		GitHubTokenPreference:  createInputs.GitHubTokenPreference,
 		GitClone:               old.GitClone,
 		Workspace:              old.Workspace,
 		WorkspaceStoragePath:   old.WorkspaceStoragePath,
@@ -589,13 +590,14 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig) (*store.
 		// NOT trusted as "definitely never wanted no-auth"; fresh.AgentRole
 		// and buildFreshAppliedConfig's own HarnessAuth=="none" check still
 		// apply independently below.
-		NoAuth:        old.NoAuth,
-		HarnessConfig: old.HarnessConfig,
-		HarnessAuth:   old.HarnessAuth,
-		Profile:       old.Profile,
-		ThinkingLevel: old.ThinkingLevel,
-		Branch:        old.Branch,
-		Workspace:     old.Workspace,
+		NoAuth:                old.NoAuth,
+		HarnessConfig:         old.HarnessConfig,
+		HarnessAuth:           old.HarnessAuth,
+		Profile:               old.Profile,
+		ThinkingLevel:         old.ThinkingLevel,
+		Branch:                old.Branch,
+		Workspace:             old.Workspace,
+		GitHubTokenPreference: old.GitHubTokenPreference,
 	}, warnings
 }
 

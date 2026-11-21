@@ -1690,6 +1690,7 @@ func (s *Server) createAgentInProject(
 	var effectiveRole AgentRole
 	var parentRole AgentRole     // empty for user-created agents; set in agent-caller branch
 	var parentMessageMode string // parent's message_mode for inheritance (D10)
+	var parentGitHubTokenPref string
 	requestedRole := AgentRole(req.AgentRole)
 
 	// Read project max agent role from annotations (default: full)
@@ -1719,6 +1720,17 @@ func (s *Server) createAgentInProject(
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		// Agent caller: read parent agent's stored role for no-escalation ceiling.
 		parentRole, parentMessageMode = s.callerAgentRoleCeiling(ctx, agentIdent.ID())
+		parentUsesInst, err := s.agentHasInstallationGitHubTokenPreference(ctx, agentIdent.ID())
+		if err != nil {
+			slog.Warn("Agent create refused: failed to verify parent GitHub token preference",
+				"parent_agent_id", agentIdent.ID(), "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Could not verify parent agent GitHub token preference; retry", nil)
+			return
+		}
+		if parentUsesInst {
+			parentGitHubTokenPref = DispatchAgentGitHubTokenInstallation
+		}
 
 		// Log the parent role for audit trail
 		slog.Info("Agent creating sub-agent",
@@ -2199,6 +2211,12 @@ func (s *Server) createAgentInProject(
 	// default) happens later, in deriveAgentConfig, along with the rest of
 	// create's config-resolution pipeline — not here.
 	agent.AppliedConfig = s.buildAppliedConfig(req, creatorName, effectiveRole)
+	if parentGitHubTokenPref == DispatchAgentGitHubTokenInstallation {
+		agent.AppliedConfig.GitHubTokenPreference = DispatchAgentGitHubTokenInstallation
+		if agent.AppliedConfig.CreateInputs != nil {
+			agent.AppliedConfig.CreateInputs.GitHubTokenPreference = DispatchAgentGitHubTokenInstallation
+		}
+	}
 
 	// Resolve message_mode (D10 spawn defaults):
 	//   1. Explicit req.MessageMode from CLI flag → use it (after validation).
@@ -2630,6 +2648,13 @@ func (s *Server) createAgentInProject(
 		MutationType:      mutationTypeAgentDelegation,
 		CanDelegateResult: "allow",
 		CanDelegateReason: delegateDecision.Reason,
+	}
+	if agent.AppliedConfig != nil && agent.AppliedConfig.GitHubTokenPreference != "" {
+		if summaryBytes, mErr := json.Marshal(map[string]string{
+			"github_token_preference": agent.AppliedConfig.GitHubTokenPreference,
+		}); mErr == nil {
+			createAudit.AfterSummary = string(summaryBytes)
+		}
 	}
 	var subscription *store.NotificationSubscription
 	if req.Notify {
