@@ -695,6 +695,9 @@ var startupCheckedFileBlocks = []struct {
 	{[]string{"server", "hub", "port_proxy"}, func(gc *config.GlobalConfig) error { return gc.Hub.PortProxy.Validate() }},
 	{[]string{"server", "hub", "sse"}, func(gc *config.GlobalConfig) error { return gc.Hub.SSE.Validate() }},
 	{[]string{"server", "hub", "system_one"}, func(gc *config.GlobalConfig) error { return gc.Hub.SystemOne.Validate() }},
+	{[]string{"server", "hub", "default_message_mode"}, func(gc *config.GlobalConfig) error {
+		return config.ValidateDefaultMessageMode(gc.Hub.DefaultMessageMode)
+	}},
 	{[]string{"server", "hub", "platform_request_timeout"}, func(gc *config.GlobalConfig) error {
 		return config.ValidatePlatformRequestTimeout(gc.Hub.PlatformRequestTimeout)
 	}},
