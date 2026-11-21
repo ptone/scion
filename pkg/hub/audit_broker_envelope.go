@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -71,11 +72,22 @@ func convertedBrokerAction(eventType BrokerAuthEventType) (auditevent.BrokerActi
 	return "", false
 }
 
+// Reserved headroom kept free on the shared async audit writer when
+// enqueuing unauthenticated broker/auth_failure envelopes. Leaving 75% of
+// the default 2048-slot / 2 MiB queue reserved ensures auth_failure floods
+// or a stalled drain under auth_failure traffic cannot starve
+// authorization/decide or broker lifecycle audit records.
+const (
+	brokerAuthFailureReserveSlots = (asyncwrite.DefaultCapacity * 3) / 4       // 1536 of 2048
+	brokerAuthFailureReserveBytes = (asyncwrite.DefaultMaxQueuedBytes * 3) / 4 // 1.5 MiB of 2 MiB
+)
+
 // wireBrokerAuditEnvelopes gives the server's LogAuditLogger a SlogSink
 // over the shared async audit writer's handler (the writer
-// initDecisionAuditLog creates unconditionally). It must run after that
-// writer exists and before brokers and boundary services are wired. A
-// custom AuditLogger (SetAuditLogger) is left unchanged.
+// initDecisionAuditLog creates unconditionally), plus a reserved-headroom
+// SlogSink for unauthenticated broker/auth_failure envelopes. It must run
+// after that writer exists and before brokers and boundary services are
+// wired. A custom AuditLogger (SetAuditLogger) is left unchanged.
 func (s *Server) wireBrokerAuditEnvelopes() error {
 	logger, ok := s.auditLogger.(*LogAuditLogger)
 	if !ok || logger == nil || s.auditWriterHandler == nil {
@@ -86,6 +98,14 @@ func (s *Server) wireBrokerAuditEnvelopes() error {
 		return err
 	}
 	logger.setBrokerEnvelopeSink(sink)
+	if ah, ok := s.auditWriterHandler.(*logging.AsyncHandler); ok {
+		authFailureHandler := ah.WithReserve(brokerAuthFailureReserveSlots, brokerAuthFailureReserveBytes)
+		authFailureSink, err := auditevent.NewSlogSink(slog.New(authFailureHandler))
+		if err != nil {
+			return err
+		}
+		logger.setBrokerAuthFailureEnvelopeSink(authFailureSink)
+	}
 	return nil
 }
 
@@ -95,6 +115,13 @@ func (l *LogAuditLogger) setBrokerEnvelopeSink(sink auditevent.Sink) {
 	l.brokerEnvelopes = sink
 }
 
+// setBrokerAuthFailureEnvelopeSink installs the reserved-headroom sink for
+// unauthenticated broker/auth_failure events. It is called once during
+// server construction, before requests are served.
+func (l *LogAuditLogger) setBrokerAuthFailureEnvelopeSink(sink auditevent.Sink) {
+	l.brokerAuthFailureEnvelopes = sink
+}
+
 // emitBrokerEnvelope builds and emits the envelope for one converted
 // event. It returns the sink's dispatch error, if any; callers ignore it,
 // as they ignore every LogBrokerAuthEvent result.
@@ -102,7 +129,11 @@ func (l *LogAuditLogger) emitBrokerEnvelope(ctx context.Context, action auditeve
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if l.brokerEnvelopes == nil {
+	sink := l.brokerEnvelopes
+	if action == auditevent.BrokerActionAuthFailure && l.brokerAuthFailureEnvelopes != nil {
+		sink = l.brokerAuthFailureEnvelopes
+	}
+	if sink == nil {
 		l.warnBrokerAuditDrop(ctx, action, brokerAuditDropNoSink, event.FailureCode)
 		return nil
 	}
@@ -121,7 +152,7 @@ func (l *LogAuditLogger) emitBrokerEnvelope(ctx context.Context, action auditeve
 		l.warnBrokerAuditDrop(ctx, action, reason, input.FailureCode)
 		return nil
 	}
-	return l.brokerEnvelopes.Emit(ctx, envelope)
+	return sink.Emit(ctx, envelope)
 }
 
 // brokerEnvelopeInput maps a legacy event to typed builder input. It reads
