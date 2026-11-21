@@ -484,7 +484,11 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		NoAuth: effectiveNoAuth,
 	}, creatorName, childRole)
 	effectiveGitHubToken := hc.GitHubToken
-	if s.parentAgentUsesInstallationGitHubToken(ctx, hc.Authority) {
+	parentUsesInst, err := s.parentAgentUsesInstallationGitHubToken(ctx, hc.Authority)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", errAgentCreatorUnreadable, hc.Authority.PrincipalID, err)
+	}
+	if parentUsesInst {
 		effectiveGitHubToken = DispatchAgentGitHubTokenInstallation
 	}
 	if effectiveGitHubToken != "" {

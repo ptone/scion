@@ -1272,6 +1272,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// it enables repository clone/pull in clone-per-agent workspaces.
 		// Without this, NoAuth blanket-suppresses all secrets including
 		// GITHUB_TOKEN, causing git clone failures (#1165).
+		// Defense in depth: deliverGitHubToken also strips non-installation GitHub tokens downstream.
 		if !usesInstallationGitHubToken(agent) && agent.ProjectID != "" && d.secretBackend != nil {
 			projectValue := d.noAuthCreateGitToken(ctx, agent, secret.ScopeProject, agent.ProjectID)
 
@@ -1357,6 +1358,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	// whether user PATs / GH_* aliases are dropped in favor of the GitHub App
 	// installation token (GitHubTokenPreference == "installation") or keep the
 	// default user-preferred precedence.
+	// Defense in depth: the noAuth fetch above is already skipped for installation-only agents.
 	if usesInstallationGitHubToken(agent) {
 		req.noAuthProjectToken = ""
 	}
@@ -3587,6 +3589,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// (over any existing value), and none is sent as a resolved secret.
 	var gitToken noAuthGitToken
 	if noAuth {
+		// Defense in depth: deliverGitHubToken also strips non-installation GitHub tokens downstream.
 		if !usesInstallationGitHubToken(agent) {
 			gitToken = pickNoAuthGitTokenFrom(resolvedSecrets)
 			applyNoAuthGitToken(resolvedEnv, &envClassifications, gitToken)
@@ -3754,6 +3757,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	var appToken string
 	resolvedSecrets, _, appToken = d.deliverGitHubToken(ctx, agent, resolvedEnv, &envClassifications, resolvedSecrets, nil, caller)
 	projectToken := gitToken.projectBound()
+	// Defense in depth: the noAuth fetch above is already skipped for installation-only agents.
 	if usesInstallationGitHubToken(agent) {
 		projectToken = ""
 	}
