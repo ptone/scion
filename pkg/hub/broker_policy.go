@@ -213,13 +213,29 @@ func writeBrokerPolicyErrorCtx(ctx context.Context, w http.ResponseWriter, r *ht
 	return true
 }
 
+// logBrokerPolicyDenial logs a non-HTTP broker policy refusal (such as message
+// wake or scheduled dispatch) with reason broker_policy (design ptone/scion#7829 §4.7.7).
+func logBrokerPolicyDenial(ctx context.Context, op string, b *store.RuntimeBroker) {
+	res := Resource{Type: "broker"}
+	if b != nil && b.ID != "" {
+		res = brokerResource(b)
+	}
+	var identity Identity
+	if ctx != nil {
+		identity = GetIdentityFromContext(ctx)
+	}
+	logAuthzDenial(nil, identity, res, Action(op), brokerPolicyDenialReason)
+}
+
 // brokerPolicyDMError maps a *brokerPolicyError to a non-retryable 403
-// AgentDMError for the message wake path (ptone/scion#7829 §4.3.D).
-func brokerPolicyDMError(err error) *AgentDMError {
+// AgentDMError for the message wake path (ptone/scion#7829 §4.3.D) and logs
+// the policy denial (§4.7.7).
+func brokerPolicyDMError(ctx context.Context, err error) *AgentDMError {
 	var bpe *brokerPolicyError
 	if !errors.As(err, &bpe) {
 		return nil
 	}
+	logBrokerPolicyDenial(ctx, bpe.Operation, bpe.Broker)
 	return &AgentDMError{
 		Code:       ErrCodeBrokerPolicyAdminManagedOnly,
 		Message:    bpe.Error(),
@@ -250,7 +266,6 @@ func (s *Server) checkBrokerPolicyForStart(ctx context.Context, agent *store.Age
 		}
 	}
 	return nil
->>>>>>> 105e6c1 (feat(hub): enforce admin-managed broker policy on placement, moves, and start path (ptone/scion#7829))
 }
 
 // authorizeBrokerRegistrationPolicy enforces the admin-managed broker policy

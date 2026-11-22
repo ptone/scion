@@ -2468,16 +2468,17 @@ func (s *Server) selectProjectRuntimeBrokerInternal(ctx context.Context, project
 	switch len(dispatchable) {
 	case 0:
 		if len(availableBrokers) > 0 {
-			// Online brokers exist, but none the caller may use. If at least one
-			// candidate would have been usable without broker_policy.admin_managed_only,
-			// surface the policy refusal with eligible count (0) and remedy.
+			// Online brokers exist, but none the caller may use. When every
+			// online candidate was rejected only by broker_policy.admin_managed_only
+			// (design §4.3.C), surface the policy refusal with eligible count (0)
+			// and remedy. Mixed cases keep the generic permission message.
 			var policyRejected []store.RuntimeBroker
 			for i := range availableBrokers {
 				if s.brokerRejectedOnlyByPolicy(ctx, &availableBrokers[i], project) {
 					policyRejected = append(policyRejected, availableBrokers[i])
 				}
 			}
-			if len(policyRejected) > 0 {
+			if len(policyRejected) == len(availableBrokers) {
 				var single *store.RuntimeBroker
 				if len(policyRejected) == 1 {
 					single = &policyRejected[0]
@@ -2550,14 +2551,16 @@ func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeB
 // image on broker (the harness-config image operations with broker_id). It
 // writes no HTTP response.
 //
-// Dispatch authority is checked first: a user or dev caller holding
-// broker.dispatch on the broker passes. A user or dev caller whose
-// credential is not an interactive session or dev credential
-// (sessionCredentialAllowed) is then refused, so the broker's auto-provide
-// setting never admits a user access token or any other non-session
-// credential. Every other caller is decided by canDispatchToBroker, the
-// shared-broker rule agent creation uses. Agent creation itself keeps
-// canUseBrokerForProject.
+// When broker_policy.admin_managed_only is active, non-managed brokers are
+// refused first (before the broker.dispatch arm, with no super-admin
+// exemption; design ptone/scion#7829 §4.3.C). Dispatch authority is checked
+// next: a user or dev caller holding broker.dispatch on the broker passes. A
+// user or dev caller whose credential is not an interactive session or dev
+// credential (sessionCredentialAllowed) is then refused, so the broker's
+// auto-provide setting never admits a user access token or any other
+// non-session credential. Every other caller is decided by
+// canDispatchToBroker, the shared-broker rule agent creation uses. Agent
+// creation itself keeps canUseBrokerForProject.
 func (s *Server) canRunBrokerImageOps(ctx context.Context, broker *store.RuntimeBroker) bool {
 	identity := GetIdentityFromContext(ctx)
 	if isNilIdentity(identity) || broker == nil {

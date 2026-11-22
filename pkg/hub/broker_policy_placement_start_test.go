@@ -311,6 +311,60 @@ func TestBrokerPolicy_Placement_SelectProjectRuntimeBroker(t *testing.T) {
 		assert.Equal(t, brokerPolicyOpDispatch, details["operation"])
 		assert.Equal(t, float64(0), details["eligibleBrokers"])
 	})
+
+	t.Run("mixed unmanaged and unauthorized managed keeps permission message", func(t *testing.T) {
+		project := &store.Project{ID: api.NewUUID(), Name: "Sel Mixed", Slug: "sel-mixed-" + api.NewUUID()[:8]}
+		require.NoError(t, s.CreateProject(ctx, project))
+		otherOwner := makeP4User(t, s, "p4-sel-other", store.UserRoleMember)
+		_ = makeP4Broker(t, s, project.ID, "sel-mixed-unm", owner.ID, false, false)
+		// Approved broker owned by another user, linked without owner consent
+		// (LinkedBy == "") so owner has no permission to dispatch to it even with policy off.
+		managedNoAccess := &store.RuntimeBroker{
+			ID:            uuid.New().String(),
+			Name:          "sel-mixed-managed-no-access",
+			Slug:          "sel-mixed-managed-no-access",
+			Status:        store.BrokerStatusOnline,
+			LastHeartbeat: time.Now(),
+			CreatedBy:     otherOwner.ID,
+			AdminManaged:  true,
+			Created:       time.Now(),
+			Updated:       time.Now(),
+		}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, managedNoAccess))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID:  project.ID,
+			BrokerID:   managedNoAccess.ID,
+			BrokerName: managedNoAccess.Name,
+			Status:     store.BrokerStatusOnline,
+			LinkedBy:   "",
+		}))
+
+		setBrokerPolicyStateP4(t, srv, s, true, true)
+		rec := httptest.NewRecorder()
+		resolvedID, err := srv.resolveRuntimeBroker(ownerCtx, rec, "", project)
+		assert.Error(t, err)
+		assert.Empty(t, resolvedID)
+		assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+		code, msg, _ := decodePolicyError(t, rec)
+		assert.NotEqual(t, ErrCodeBrokerPolicyAdminManagedOnly, code)
+		assert.Equal(t, "No runtime brokers available for this project that you have permission to use", msg)
+	})
+
+	t.Run("scheduled dispatch returns clean single policy message", func(t *testing.T) {
+		project := &store.Project{ID: api.NewUUID(), Name: "Sel Sched", Slug: "sel-sched-" + api.NewUUID()[:8]}
+		require.NoError(t, s.CreateProject(ctx, project))
+		unmanaged := makeP4Broker(t, s, project.ID, "sel-sched-unm", owner.ID, false, false)
+
+		setBrokerPolicyStateP4(t, srv, s, true, true)
+		id, err := srv.resolveScheduledRuntimeBroker(ownerCtx, project)
+		require.Error(t, err)
+		assert.Empty(t, id)
+		assert.Contains(t, err.Error(), brokerPolicySettingKey)
+		assert.Contains(t, err.Error(), "0 eligible")
+		assert.Contains(t, err.Error(), unmanaged.Name)
+		assert.NotContains(t, err.Error(), ".;")
+		assert.NotContains(t, err.Error(), "a schedule cannot choose a runtime broker")
+	})
 }
 
 func TestBrokerPolicy_Placement_MoveRefusal(t *testing.T) {
@@ -656,4 +710,106 @@ func TestBrokerPolicy_WakeDM_RefusedAndNonRetryable(t *testing.T) {
 	require.NotNil(t, resOK)
 	assert.Equal(t, WakeResumed, resOK.Outcome)
 	assert.Len(t, disp.getStartCalls(), 1)
+}
+
+func TestBrokerPolicy_InPlaceReincarnate_RefusedBeforeStop(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	ctx := context.Background()
+
+	owner := makeP4User(t, f.s, "p4-reinc-owner", store.UserRoleMember)
+	broker := makeP4Broker(t, f.s, a.ProjectID, "p4-reinc-unmanaged", owner.ID, false, false)
+	broker.Capabilities = &store.BrokerCapabilities{Reprovision: true, AgentMove: true}
+	require.NoError(t, f.s.UpdateRuntimeBroker(ctx, broker))
+
+	a.RuntimeBrokerID = broker.ID
+	a.Phase = string(state.PhaseRunning)
+	a.AppliedConfig = &store.AgentAppliedConfig{
+		GitClone: &api.GitCloneConfig{URL: "https://github.com/example/repo.git"},
+	}
+	require.NoError(t, f.s.UpdateAgent(ctx, a))
+
+	startCalls := 0
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		startCalls++
+		return nil
+	}
+
+	setBrokerPolicyStateP4(t, f.srv, f.s, true, true)
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reincarnate", map[string]any{})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	code, msg, details := decodePolicyError(t, rec)
+	assert.Equal(t, ErrCodeBrokerPolicyAdminManagedOnly, code)
+	assert.Contains(t, msg, brokerPolicySettingKey)
+	assert.Equal(t, brokerPolicyOpStart, details["operation"])
+	assert.Equal(t, broker.ID, details["brokerId"])
+
+	assert.Equal(t, int32(0), d.stops.Load(), "refused in-place reincarnate must not dispatch stop")
+	assert.Equal(t, 0, startCalls, "refused in-place reincarnate must not dispatch start")
+
+	got := getAgent(t, f.s, a.ID)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase, "agent must remain running")
+	assert.Equal(t, store.ReincarnationStateNone, got.ReincarnationState, "no reincarnation record may be created")
+}
+
+func TestBrokerPolicy_CreateOnExistingSuspended_Refused(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	ctx := context.Background()
+
+	owner := makeP4User(t, f.s, "p4-existing-owner", store.UserRoleMember)
+	broker := makeP4Broker(t, f.s, a.ProjectID, "p4-existing-unmanaged", owner.ID, false, false)
+	a.RuntimeBrokerID = broker.ID
+	a.Phase = string(state.PhaseSuspended)
+	require.NoError(t, f.s.UpdateAgent(ctx, a))
+
+	startCalls := 0
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		startCalls++
+		return nil
+	}
+
+	setBrokerPolicyStateP4(t, f.srv, f.s, true, true)
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", map[string]any{
+		"name":      a.Name,
+		"projectId": a.ProjectID,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	code, msg, details := decodePolicyError(t, rec)
+	assert.Equal(t, ErrCodeBrokerPolicyAdminManagedOnly, code)
+	assert.Contains(t, msg, brokerPolicySettingKey)
+	assert.Equal(t, brokerPolicyOpStart, details["operation"])
+	assert.Equal(t, broker.ID, details["brokerId"])
+	assert.Equal(t, 0, startCalls, "refused create-on-existing must not dispatch start")
+}
+
+func TestBrokerPolicy_HarnessConfigImageOp_HTTP403(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := makeP4User(t, s, "p4-img-owner", store.UserRoleMember)
+	superAdmin := makeP4User(t, s, "p4-img-admin", store.UserRoleAdmin)
+	unmanaged := makeP4Broker(t, s, "", "p4-img-unmanaged", owner.ID, false, false)
+
+	srv.brokerClient = &HybridBrokerClient{}
+	hc := &store.HarnessConfig{
+		ID:     api.NewUUID(),
+		Slug:   "p4-img-hc",
+		Name:   "p4-img-hc",
+		Config: &store.HarnessConfigData{Image: "my-image:latest"},
+	}
+
+	setBrokerPolicyStateP4(t, srv, s, true, true)
+
+	adminCtx := contextWithIdentity(ctx, NewAuthenticatedUser(superAdmin.ID, superAdmin.Email, superAdmin.DisplayName, superAdmin.Role, "web"))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/pull-image?broker_id="+unmanaged.ID, nil).WithContext(adminCtx)
+	rec := httptest.NewRecorder()
+	srv.handleHarnessConfigPullImage(rec, req, hc)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	code, msg, details := decodePolicyError(t, rec)
+	assert.Equal(t, ErrCodeBrokerPolicyAdminManagedOnly, code)
+	assert.Contains(t, msg, brokerPolicySettingKey)
+	assert.Equal(t, brokerPolicyOpDispatch, details["operation"])
+	assert.Equal(t, unmanaged.ID, details["brokerId"])
 }

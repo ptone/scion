@@ -167,7 +167,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// Admin-managed broker policy pre-check (ptone/scion#7829 §4.3.D):
 		// refused wake leaves the agent suspended with a non-retryable 403.
 		if err := s.checkBrokerPolicyForStart(ctx, agent); err != nil {
-			if dmErr := brokerPolicyDMError(err); dmErr != nil {
+			if dmErr := brokerPolicyDMError(ctx, err); dmErr != nil {
 				return nil, dmErr
 			}
 			return nil, &AgentDMError{
@@ -332,7 +332,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			return nil
 		}})
 		if err != nil {
-			if dmErr := brokerPolicyDMError(err); dmErr != nil {
+			if dmErr := brokerPolicyDMError(launchCtx, err); dmErr != nil {
 				return nil, dmErr
 			}
 			var quotaErr *startQuotaError
