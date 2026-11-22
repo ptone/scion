@@ -497,6 +497,16 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		}
 		return err
 	}
+	// Admin-managed broker policy pre-check (ptone/scion#7829 §4.3.D), with
+	// the same rollback semantics as checkPinnedPlacement above: undo any
+	// capacity hold and release any existing start claim before returning.
+	if err := s.checkBrokerPolicyForStart(ctx, agent); err != nil {
+		opts.Dispatch.rollback(ctx)
+		if opts.Existing != nil {
+			opts.Existing.finish(startReleased)
+		}
+		return err
+	}
 	// The effective resting phase (ptone/scion#4669): an error row that
 	// remembers a created or provisioning phase a failed asynchronous start
 	// began from is still a provisioned agent that never ran. Read before
