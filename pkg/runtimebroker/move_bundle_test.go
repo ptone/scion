@@ -191,6 +191,22 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 		assert.Empty(t, resp.Over)
 		assert.Empty(t, resp.Workspace.Over)
 	})
+
+	t.Run("AgentHomeAbs defaults to /home/scion and respects scion-agent.json user", func(t *testing.T) {
+		// Empty/missing scion-agent.json defaults UnixUsername to "scion" -> /home/scion.
+		cfgDefault := buildMoveBundleHomeRunConfig(t.TempDir(), nil)
+		assert.Equal(t, "scion", cfgDefault.UnixUsername)
+
+		// Explicit user in scion-agent.json is preserved (e.g. "devuser" -> /home/devuser).
+		agentDir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{"user":"devuser"}`), 0o600))
+		cfgCustom := buildMoveBundleHomeRunConfig(agentDir, nil)
+		assert.Equal(t, "devuser", cfgCustom.UnixUsername)
+
+		// Excluder recognizes an absolute in-container secret symlink target under /home/devuser.
+		ex := moveBundleHomeExcluder(agentDir, []string{"/home/devuser/.config/my-secret.pem"})
+		assert.True(t, ex.Exclude(".config/my-secret.pem", false))
+	})
 }
 
 // TestMoveBundle_T6_ExportImportJobModelAndTransport covers design §9 T6:

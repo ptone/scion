@@ -277,6 +277,11 @@ func buildMoveBundleHomeRunConfig(agentDir string, extraSecretTargets []string) 
 			}
 		}
 	}
+	if cfg.UnixUsername == "" {
+		// Default Scion container user when scion-agent.json omits "user"
+		// (util.GetHomeDir("") would return "/home" rather than "/home/scion").
+		cfg.UnixUsername = "scion"
+	}
 	for _, target := range extraSecretTargets {
 		if target == "" {
 			continue
