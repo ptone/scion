@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -395,8 +396,13 @@ func MoveBundlesRoot(hubID string) string {
 	return hubNamespaced(hubID, "move-bundles")
 }
 
+// validMoveReincarnationIDRE allow-lists single path-safe reincarnation IDs
+// (including UUIDs). Leading dots, path separators, backslashes, whitespace,
+// and NUL bytes are all rejected.
+var validMoveReincarnationIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
 func validateMoveReincarnationID(reincarnationID string) error {
-	if reincarnationID == "" || strings.Contains(reincarnationID, "/") || strings.Contains(reincarnationID, "..") {
+	if !validMoveReincarnationIDRE.MatchString(reincarnationID) || strings.Contains(reincarnationID, "..") {
 		return fmt.Errorf("%w: invalid reincarnation ID", ErrInvalidPath)
 	}
 	return nil

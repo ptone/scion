@@ -405,12 +405,19 @@ func TestMoveBundlePaths(t *testing.T) {
 		t.Errorf("MoveBundleManifestPath(un-namespaced) = %q, err=%v", got, err)
 	}
 
-	for _, badRID := range []string{"", "a/b", "../x", "..", "rid/.."} {
+	if got, err := MoveBundlePath("hub-1", "550e8400-e29b-41d4-a716-446655440000"); err != nil || got != "hubs/hub-1/move-bundles/550e8400-e29b-41d4-a716-446655440000" {
+		t.Errorf("MoveBundlePath(UUID) = %q, err=%v", got, err)
+	}
+
+	for _, badRID := range []string{"", ".", "..", ".hidden", "a/b", `a\b`, "../x", "rid/..", "a..b", "rid with space"} {
 		if _, err := MoveBundlePath("hub-1", badRID); err == nil {
 			t.Errorf("MoveBundlePath(hub-1, %q) = nil error, want error", badRID)
 		}
 		if _, err := MoveBundleManifestPath("hub-1", badRID); err == nil {
 			t.Errorf("MoveBundleManifestPath(hub-1, %q) = nil error, want error", badRID)
+		}
+		if _, err := MoveBundlePartPath("hub-1", badRID, MoveBundleRootWorkspace, 0); err == nil {
+			t.Errorf("MoveBundlePartPath(hub-1, %q, workspace, 0) = nil error, want error", badRID)
 		}
 	}
 
