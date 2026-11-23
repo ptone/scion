@@ -20,6 +20,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -379,4 +380,43 @@ func WorkspaceStoragePath(hubID, projectID, agentID string) string {
 func WorkspaceStorageURI(hubID, bucket, projectID, agentID string) string {
 	path := WorkspaceStoragePath(hubID, projectID, agentID)
 	return "gs://" + bucket + "/" + path + "/"
+}
+
+// Move-bundle root names under a reincarnation's staging prefix.
+const (
+	MoveBundleRootWorkspace = "workspace"
+	MoveBundleRootHome      = "home"
+)
+
+// MoveBundlesRoot returns the storage directory holding all move-bundle
+// staging prefixes for hubID (without a trailing slash; pass to DirPrefix
+// for prefix listing or deletion).
+func MoveBundlesRoot(hubID string) string {
+	return hubNamespaced(hubID, "move-bundles")
+}
+
+// MoveBundlePath returns the storage directory for a single reincarnation's
+// move bundle (without a trailing slash; pass to DirPrefix for DeletePrefix).
+func MoveBundlePath(hubID, reincarnationID string) string {
+	return hubNamespaced(hubID, "move-bundles/"+reincarnationID)
+}
+
+// MoveBundleManifestPath returns the object key for a move bundle's manifest.
+func MoveBundleManifestPath(hubID, reincarnationID string) string {
+	return MoveBundlePath(hubID, reincarnationID) + "/manifest.json"
+}
+
+// MoveBundlePartPath returns the object key for one compressed tar part of a
+// move bundle root ("workspace" or "home") at zero-based partIndex.
+func MoveBundlePartPath(hubID, reincarnationID, root string, partIndex int) (string, error) {
+	if reincarnationID == "" || strings.Contains(reincarnationID, "/") || strings.Contains(reincarnationID, "..") {
+		return "", fmt.Errorf("%w: invalid reincarnation ID", ErrInvalidPath)
+	}
+	if root != MoveBundleRootWorkspace && root != MoveBundleRootHome {
+		return "", fmt.Errorf("%w: invalid move bundle root %q", ErrInvalidPath, root)
+	}
+	if partIndex < 0 {
+		return "", fmt.Errorf("%w: negative part index %d", ErrInvalidPath, partIndex)
+	}
+	return fmt.Sprintf("%s/%s/part-%05d.tgz", MoveBundlePath(hubID, reincarnationID), root, partIndex), nil
 }

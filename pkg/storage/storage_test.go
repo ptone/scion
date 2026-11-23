@@ -364,10 +364,84 @@ func TestResourceRootPaths(t *testing.T) {
 			WorkspaceStoragePath(hubID, "p-1", "a-1"),
 			HarnessConfigStoragePath(hubID, "global", "", "h1"),
 			SkillStoragePath(hubID, "global", "", "s1"),
+			MoveBundlePath(hubID, "reinc-1"),
 		} {
 			if under(p, roots) {
 				t.Errorf("non-template path %q is under the template roots %v", p, roots)
 			}
 		}
+	}
+}
+
+func TestMoveBundlePaths(t *testing.T) {
+	if got, want := MoveBundlesRoot(""), "move-bundles"; got != want {
+		t.Errorf("MoveBundlesRoot(\"\") = %q, want %q", got, want)
+	}
+	if got, want := MoveBundlesRoot("hub-1"), "hubs/hub-1/move-bundles"; got != want {
+		t.Errorf("MoveBundlesRoot(hub-1) = %q, want %q", got, want)
+	}
+	if got, want := DirPrefix(MoveBundlesRoot("hub-1")), "hubs/hub-1/move-bundles/"; got != want {
+		t.Errorf("DirPrefix(MoveBundlesRoot) = %q, want %q", got, want)
+	}
+
+	if got, want := MoveBundlePath("", "rid-1"), "move-bundles/rid-1"; got != want {
+		t.Errorf("MoveBundlePath(\"\", rid-1) = %q, want %q", got, want)
+	}
+	if got, want := MoveBundlePath("hub-1", "rid-1"), "hubs/hub-1/move-bundles/rid-1"; got != want {
+		t.Errorf("MoveBundlePath(hub-1, rid-1) = %q, want %q", got, want)
+	}
+	if got, want := DirPrefix(MoveBundlePath("hub-1", "rid-1")), "hubs/hub-1/move-bundles/rid-1/"; got != want {
+		t.Errorf("DirPrefix(MoveBundlePath) = %q, want %q", got, want)
+	}
+
+	if got, want := MoveBundleManifestPath("hub-1", "rid-1"), "hubs/hub-1/move-bundles/rid-1/manifest.json"; got != want {
+		t.Errorf("MoveBundleManifestPath() = %q, want %q", got, want)
+	}
+	if got, want := MoveBundleManifestPath("", "rid-1"), "move-bundles/rid-1/manifest.json"; got != want {
+		t.Errorf("MoveBundleManifestPath(un-namespaced) = %q, want %q", got, want)
+	}
+
+	// Valid part paths
+	validCases := []struct {
+		hubID, rid, root string
+		index            int
+		want             string
+	}{
+		{"hub-1", "rid-1", MoveBundleRootWorkspace, 0, "hubs/hub-1/move-bundles/rid-1/workspace/part-00000.tgz"},
+		{"hub-1", "rid-1", MoveBundleRootWorkspace, 42, "hubs/hub-1/move-bundles/rid-1/workspace/part-00042.tgz"},
+		{"hub-1", "rid-1", MoveBundleRootHome, 12345, "hubs/hub-1/move-bundles/rid-1/home/part-12345.tgz"},
+		{"", "rid-1", MoveBundleRootHome, 0, "move-bundles/rid-1/home/part-00000.tgz"},
+	}
+	for _, tc := range validCases {
+		got, err := MoveBundlePartPath(tc.hubID, tc.rid, tc.root, tc.index)
+		if err != nil {
+			t.Errorf("MoveBundlePartPath(%q, %q, %q, %d) unexpected err: %v", tc.hubID, tc.rid, tc.root, tc.index, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("MoveBundlePartPath(%q, %q, %q, %d) = %q, want %q", tc.hubID, tc.rid, tc.root, tc.index, got, tc.want)
+		}
+	}
+
+	// Invalid part paths
+	invalidCases := []struct {
+		name             string
+		hubID, rid, root string
+		index            int
+	}{
+		{"invalid root", "hub-1", "rid-1", "other", 0},
+		{"empty root", "hub-1", "rid-1", "", 0},
+		{"uppercase root", "hub-1", "rid-1", "Workspace", 0},
+		{"negative index", "hub-1", "rid-1", MoveBundleRootWorkspace, -1},
+		{"empty rid", "hub-1", "", MoveBundleRootWorkspace, 0},
+		{"slash in rid", "hub-1", "a/b", MoveBundleRootWorkspace, 0},
+		{"dotdot in rid", "hub-1", "../x", MoveBundleRootWorkspace, 0},
+	}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := MoveBundlePartPath(tc.hubID, tc.rid, tc.root, tc.index); err == nil {
+				t.Errorf("MoveBundlePartPath(%q, %q, %q, %d) = nil error, want error", tc.hubID, tc.rid, tc.root, tc.index)
+			}
+		})
 	}
 }
