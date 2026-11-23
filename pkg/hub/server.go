@@ -327,6 +327,10 @@ type ServerConfig struct {
 	// file (zero fields use defaults; out-of-range values are replaced by
 	// defaults with a warning). Hot-reloaded through ApplySnapshot.
 	StartClaim StartClaimSettings
+	// MoveBundle holds Hub-configured bounds and timeouts for cross-broker
+	// bundle moves (server.reincarnate.move_bundle, design §3.7). Zero fields
+	// fall back to the design §3.7 defaults.
+	MoveBundle config.MoveBundleConfig
 	// MissingAgentGrace is how long a running agent must be continuously
 	// absent from its runtime broker's complete heartbeat inventory before
 	// the Hub marks it phase=error with exit reason container_missing (an

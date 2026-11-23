@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -118,17 +119,19 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 	}
 	allowed := func(*store.RuntimeBroker) bool { return true }
 	v, ref := evaluateMoveEligibility(moveEligibilityInput{
-		Agent:              a,
-		Src:                src,
-		Dst:                dst,
-		WorkspaceModeError: gate.workspaceModeErr,
-		CloneMode:          gate.cloneMode,
-		Profile:            mv.Profile,
-		SelfMove:           mv.SelfMove,
-		Force:              mv.Force,
-		EmptyPerAgent:      project.IsEmptyPerAgent(),
-		WorkspaceMode:      string(project.SharingMode()),
-		GitRemote:          project.GitRemote,
+		Agent:                   a,
+		Src:                     src,
+		Dst:                     dst,
+		WorkspaceModeError:      gate.workspaceModeErr,
+		CloneMode:               gate.cloneMode,
+		Profile:                 mv.Profile,
+		SelfMove:                mv.SelfMove,
+		Force:                   mv.Force,
+		EmptyPerAgent:           project.IsEmptyPerAgent(),
+		WorkspaceMode:           string(project.SharingMode()),
+		GitRemote:               project.GitRemote,
+		BundleExperimentEnabled: s.experimentEnabled(experiments.AgentMoveBundle),
+		BundleStorageError:      moveBundleStorageCheck(s.GetStorage()),
 		Probes: moveProbes{
 			Reachable:        func(b *store.RuntimeBroker) bool { return s.brokerRecordReachable(ctx, b) },
 			PolicyRefused:    func(b *store.RuntimeBroker) bool { return s.brokerPolicyRefuses(b) },
@@ -139,6 +142,7 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 			},
 			Capacity:     func(*store.RuntimeBroker) string { return "" },
 			HostSARecord: s.hostSARecordMoveProbe(ctx, a.AppliedConfig),
+			BundleSource: s.moveBundleSourceProbe(ctx),
 		},
 	})
 	if ref != nil {
