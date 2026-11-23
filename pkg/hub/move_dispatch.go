@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 
 	agentpkg "github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -203,6 +204,33 @@ func (d *HTTPAgentDispatcher) prepareMoveBundleCall(ctx context.Context, agent *
 		return ctx, nil, "", projectDispatchInfo{}, fmt.Errorf("resolve project dispatch info: %w", err)
 	}
 	return ctx, mbClient, endpoint, info, nil
+}
+
+// ResolveMoveBundleSecretFileTargets returns the deduplicated, sorted list of
+// file-type resolved secret targets for agent across all applicable scopes.
+// Always returns a non-nil slice on success (an explicit empty slice when no
+// file-type secrets apply) so callers can pass it directly to
+// DispatchMoveBundlePrecheck and DispatchMoveBundleExport.
+func (d *HTTPAgentDispatcher) ResolveMoveBundleSecretFileTargets(ctx context.Context, agent *store.Agent) ([]string, error) {
+	if d.secretBackend == nil || agent == nil {
+		return []string{}, nil
+	}
+	resolved, _, err := d.resolveSecrets(ctx, agent)
+	if err != nil {
+		return nil, fmt.Errorf("resolve file-type secret targets: %w", err)
+	}
+	seen := make(map[string]struct{})
+	targets := make([]string, 0)
+	for _, sec := range resolved {
+		if sec.Type == store.SecretTypeFile && sec.Target != "" {
+			if _, dup := seen[sec.Target]; !dup {
+				seen[sec.Target] = struct{}{}
+				targets = append(targets, sec.Target)
+			}
+		}
+	}
+	sort.Strings(targets)
+	return targets, nil
 }
 
 // DispatchMoveBundlePrecheck implements agentMoveDispatcher.

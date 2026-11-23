@@ -418,16 +418,19 @@ func TestResolveMoveBundleSecretFileTargets_ForwardedOnPrecheckAndExport(t *test
 	_, s := testServer(t)
 	ctx := context.Background()
 
-	// Configure local secret backend with a hub-scoped file secret and an env secret.
+	// Configure local secret backend with project-scoped file and env secrets.
+	proj := &store.Project{ID: tid("sec-proj"), Slug: "sec-proj", Name: "Sec Proj", Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(ctx, proj))
+
 	hubID := "test-hub-secret-targets"
 	secBackend := secret.NewLocalBackend(s, hubID, "test-secret-key-0123456789abcdef")
 	_, _, err := secBackend.Set(ctx, &secret.SetSecretInput{
-		Name:       "HUB_CERT",
+		Name:       "PROJ_CERT",
 		Value:      "pem-data",
 		SecretType: store.SecretTypeFile,
 		Target:     "~/.config/corp/cert.pem",
-		Scope:      secret.ScopeHub,
-		ScopeID:    hubID,
+		Scope:      secret.ScopeProject,
+		ScopeID:    proj.ID,
 	})
 	require.NoError(t, err)
 	_, _, err = secBackend.Set(ctx, &secret.SetSecretInput{
@@ -435,8 +438,8 @@ func TestResolveMoveBundleSecretFileTargets_ForwardedOnPrecheckAndExport(t *test
 		Value:      "secret-val",
 		SecretType: store.SecretTypeEnvironment,
 		Target:     "API_KEY",
-		Scope:      secret.ScopeHub,
-		ScopeID:    hubID,
+		Scope:      secret.ScopeProject,
+		ScopeID:    proj.ID,
 	})
 	require.NoError(t, err)
 
@@ -476,8 +479,6 @@ func TestResolveMoveBundleSecretFileTargets_ForwardedOnPrecheckAndExport(t *test
 		},
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	proj := &store.Project{ID: tid("sec-proj"), Slug: "sec-proj", Name: "Sec Proj", Created: time.Now(), Updated: time.Now()}
-	require.NoError(t, s.CreateProject(ctx, proj))
 	agent := &store.Agent{ID: tid("sec-agent"), Slug: "sec-agent", Name: "sec-agent", ProjectID: proj.ID, RuntimeBrokerID: broker.ID}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -489,11 +490,11 @@ func TestResolveMoveBundleSecretFileTargets_ForwardedOnPrecheckAndExport(t *test
 	assert.Equal(t, []string{"~/.config/corp/cert.pem"}, targets)
 
 	limits := config.DefaultMoveBundleConfig().ExportLimits()
-	_, err = disp.DispatchMoveBundlePrecheck(ctx, agent, limits)
+	_, err = disp.DispatchMoveBundlePrecheck(ctx, agent, limits, targets)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"~/.config/corp/cert.pem"}, gotPrecheckTargets)
 
-	_, err = disp.DispatchMoveBundleExport(ctx, agent, "rid-sec-1", limits)
+	_, err = disp.DispatchMoveBundleExport(ctx, agent, "rid-sec-1", limits, targets)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"~/.config/corp/cert.pem"}, gotExportTargets)
 }

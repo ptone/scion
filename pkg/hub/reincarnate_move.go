@@ -1164,9 +1164,23 @@ func (s *Server) moveBundleImportLimits() api.MoveBundleLimits {
 	return s.config.MoveBundle.ImportLimits()
 }
 
+// moveBundleSecretFileTargets resolves the file-type secret targets for agent
+// using the server's dispatcher (if it exposes ResolveMoveBundleSecretFileTargets).
+// Returns a non-nil empty slice when none apply. Part D reuses this helper for
+// DispatchMoveBundleExport.
+func (s *Server) moveBundleSecretFileTargets(ctx context.Context, agent *store.Agent) ([]string, error) {
+	type secretTargetResolver interface {
+		ResolveMoveBundleSecretFileTargets(ctx context.Context, agent *store.Agent) ([]string, error)
+	}
+	if r, ok := s.GetDispatcher().(secretTargetResolver); ok {
+		return r.ResolveMoveBundleSecretFileTargets(ctx, agent)
+	}
+	return []string{}, nil
+}
+
 // moveBundleSourceProbe returns the moveProbes.BundleSource callback that
 // calls DispatchMoveBundlePrecheck on the source broker using the Hub's
-// configured move-bundle limits.
+// configured move-bundle limits and hub-resolved file-type secret targets.
 func (s *Server) moveBundleSourceProbe(ctx context.Context) func(src *store.RuntimeBroker, agent *store.Agent) (*api.MoveBundlePrecheckResponse, error) {
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
@@ -1178,7 +1192,12 @@ func (s *Server) moveBundleSourceProbe(ctx context.Context) func(src *store.Runt
 	}
 	limits := s.moveBundleExportLimits()
 	return func(src *store.RuntimeBroker, agent *store.Agent) (*api.MoveBundlePrecheckResponse, error) {
-		return md.DispatchMoveBundlePrecheck(ctx, withBroker(agent, src.ID), limits)
+		srcAgent := withBroker(agent, src.ID)
+		secretTargets, err := s.moveBundleSecretFileTargets(ctx, srcAgent)
+		if err != nil {
+			return nil, err
+		}
+		return md.DispatchMoveBundlePrecheck(ctx, srcAgent, limits, secretTargets)
 	}
 }
 
