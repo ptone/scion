@@ -24,6 +24,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // Target-side staging, commit, and imported marker logic for move-bundle
@@ -135,13 +137,24 @@ func commitMoveBundleWorkspace(workspaceDir, stageName string) error {
 	}
 	sort.Strings(names)
 
+	// First pass: reject workspace identity entries (e.g. root ".scion") and
+	// verify no top-level name already exists in workspaceDir before renaming
+	// anything, so a conflict never leaves partial writes behind.
 	for _, name := range names {
+		if transfer.IsWorkspaceIdentityName(name) {
+			return fmt.Errorf("workspace commit refused: entry %q is a reserved workspace identity name", name)
+		}
 		dst := wsBase + "/" + name
 		if _, err := root.Lstat(dst); err == nil {
 			return fmt.Errorf("workspace commit conflict: entry %q already exists", name)
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("stat workspace target %q: %w", name, err)
 		}
+	}
+
+	// Second pass: rename every validated top-level entry into workspaceDir.
+	for _, name := range names {
+		dst := wsBase + "/" + name
 		if err := root.Rename(stageName+"/"+name, dst); err != nil {
 			return fmt.Errorf("rename workspace entry %q: %w", name, err)
 		}

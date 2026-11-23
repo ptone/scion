@@ -3351,6 +3351,12 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// retainedPurgeRefusal), since that start may be of a restored agent.
 	if !purgeRetained {
 		s.cancelLocalLaunchForRun(launchKey{ProjectID: projectID, Slug: id}, hubAgentID, runID)
+		if reg := s.moveBundleJobs.Load(); reg != nil {
+			if err := reg.cancelAndWaitForAgent(ctx, projectID, id); err != nil {
+				s.agentLifecycleLog.Warn("Agent delete: timed out waiting for in-flight move-bundle job to stop",
+					"agent_id", id, "project_id", projectID, "error", err)
+			}
+		}
 	}
 
 	s.agentLifecycleLog.Debug("Agent delete: resolving target",

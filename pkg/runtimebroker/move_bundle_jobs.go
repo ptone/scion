@@ -202,3 +202,38 @@ func (r *moveBundleJobRegistry) cancelAll() {
 		}
 	}
 }
+
+// cancelAndWaitForAgent cancels any running move-bundle job (export or import)
+// for (projectID, agentSlug) and waits for each to finish before returning,
+// respecting ctx cancellation. A delete with empty projectID cancels matching
+// jobs regardless of projectID (and vice versa).
+func (r *moveBundleJobRegistry) cancelAndWaitForAgent(ctx context.Context, projectID, agentSlug string) error {
+	r.mu.Lock()
+	var dones []chan struct{}
+	for k, j := range r.jobs {
+		if k.Agent.AgentSlug != agentSlug {
+			continue
+		}
+		if projectID != "" && k.Agent.ProjectID != "" && k.Agent.ProjectID != projectID {
+			continue
+		}
+		j.mu.Lock()
+		if j.state == api.MoveBundleJobStateRunning {
+			if j.cancel != nil {
+				j.cancel()
+			}
+			dones = append(dones, j.done)
+		}
+		j.mu.Unlock()
+	}
+	r.mu.Unlock()
+
+	for _, done := range dones {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}

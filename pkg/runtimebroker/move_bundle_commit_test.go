@@ -28,19 +28,60 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer/bundle"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestMoveBundle_T7_CommitSemanticsAndMarker covers design §9 T7:
-//   - workspace commit into empty dir; conflict on existing name fails closed
-//   - home merge where provision-rendered files win (kept, source skipped and counted)
-//   - imported marker (.scion-move-bundle-<rid>) prevents repeat import (409)
-//   - crash mid-commit leaves only .bundle-* siblings which marker-guarded delete removes
-//   - ProvisionOnly with WorkspaceSource="move-bundle" leaves workspace empty, renders home, writes move marker
+func buildTestBundleParts(t *testing.T, rid, wsContent, homeContent string) (bundle.Manifest, string, map[string][]byte) {
+	t.Helper()
+	_, srcAgentDir, srcWS, srcHome := newMoveBundleTestAgentDir(t, "src-builder")
+	writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
+	require.NoError(t, os.WriteFile(filepath.Join(srcWS, "x.txt"), []byte(wsContent), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcHome, "y.txt"), []byte(homeContent), 0o644))
+
+	partsData := map[string][]byte{}
+	wsRoot, err := os.OpenRoot(srcWS)
+	require.NoError(t, err)
+	wsRM, err := bundle.Write(context.Background(), wsRoot, t.TempDir(), bundle.WorkspaceExcluder(), bundle.DefaultWorkspaceLimits(),
+		partSinkFunc(func(_ context.Context, idx int, r io.ReadSeeker, _ int64, _ string) error {
+			b, err := io.ReadAll(r)
+			partsData[fmt.Sprintf("workspace/%d", idx)] = b
+			return err
+		}))
+	require.NoError(t, err)
+	_ = wsRoot.Close()
+
+	homeEx, err := loadMoveBundleHomeExcluder(srcAgentDir, nil)
+	require.NoError(t, err)
+	homeRoot, err := os.OpenRoot(srcHome)
+	require.NoError(t, err)
+	homeRM, err := bundle.Write(context.Background(), homeRoot, t.TempDir(), homeEx, bundle.DefaultHomeLimits(),
+		partSinkFunc(func(_ context.Context, idx int, r io.ReadSeeker, _ int64, _ string) error {
+			b, err := io.ReadAll(r)
+			partsData[fmt.Sprintf("home/%d", idx)] = b
+			return err
+		}))
+	require.NoError(t, err)
+	_ = homeRoot.Close()
+
+	manifest := bundle.Manifest{
+		Version:         bundle.ManifestVersion,
+		ReincarnationID: rid,
+		Roots: map[string]bundle.RootManifest{
+			bundle.RootWorkspace: wsRM,
+			bundle.RootHome:      homeRM,
+		},
+	}
+	_, manifestHash, err := bundle.CanonicalManifest(manifest)
+	require.NoError(t, err)
+	return manifest, manifestHash, partsData
+}
+
+// TestMoveBundle_T7_CommitSemanticsAndMarker covers design §9 T7, R3, S2, S4.
 func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
-	t.Run("workspace commit into empty dir and fail on existing name", func(t *testing.T) {
+	t.Run("workspace commit into empty dir, all-or-nothing conflict check (R3), and identity name refusal (S2)", func(t *testing.T) {
 		_, _, wsDir, _ := newMoveBundleTestAgentDir(t, "dev")
 		stageName, err := newMoveBundleStageName(filepath.Base(wsDir))
 		require.NoError(t, err)
@@ -57,29 +98,43 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "beta", string(gotB))
 
-		// Second commit with colliding top-level name must fail closed without overwriting.
+		// R3: stage has "00-new.txt" (sorts first) and "a.txt" (collides).
+		// Neither may be moved into wsDir.
 		stage2, err := newMoveBundleStageName(filepath.Base(wsDir))
 		require.NoError(t, err)
 		stage2Path := filepath.Join(filepath.Dir(wsDir), stage2)
 		require.NoError(t, os.MkdirAll(stage2Path, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(stage2Path, "00-new.txt"), []byte("partial"), 0o644))
 		require.NoError(t, os.WriteFile(filepath.Join(stage2Path, "a.txt"), []byte("overwrite"), 0o644))
 
 		err = commitMoveBundleWorkspace(wsDir, stage2)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "already exists")
-		stillA, err := os.ReadFile(filepath.Join(wsDir, "a.txt"))
+		_, statErr := os.Stat(filepath.Join(wsDir, "00-new.txt"))
+		assert.True(t, os.IsNotExist(statErr), "conflict on a later entry must not leave earlier entries partially committed")
+
+		// S2: stage containing root ".scion" (workspace identity name) must be refused before any rename.
+		_, _, emptyWS, _ := newMoveBundleTestAgentDir(t, "dev-id")
+		stage3, err := newMoveBundleStageName(filepath.Base(emptyWS))
 		require.NoError(t, err)
-		assert.Equal(t, "alpha", string(stillA))
+		stage3Path := filepath.Join(filepath.Dir(emptyWS), stage3)
+		require.NoError(t, os.MkdirAll(filepath.Join(stage3Path, ".scion"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(stage3Path, "00-ok.txt"), []byte("ok"), 0o644))
+
+		err = commitMoveBundleWorkspace(emptyWS, stage3)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reserved workspace identity")
+		entries, err := os.ReadDir(emptyWS)
+		require.NoError(t, err)
+		assert.Empty(t, entries, "refused identity entry must leave workspace untouched")
 	})
 
 	t.Run("home merge where provision wins and skips are counted", func(t *testing.T) {
 		_, _, _, homeDir := newMoveBundleTestAgentDir(t, "dev")
-		// Provision-rendered files in homeDir:
 		require.NoError(t, os.MkdirAll(filepath.Join(homeDir, ".scion"), 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(homeDir, ".scion", "agent-info.json"), []byte(`{"target":true}`), 0o644))
 		require.NoError(t, os.WriteFile(filepath.Join(homeDir, ".gitconfig"), []byte("[user]\n\tname = target\n"), 0o644))
 
-		// Staged home from source broker:
 		stageName, err := newMoveBundleStageName(filepath.Base(homeDir))
 		require.NoError(t, err)
 		stagePath := filepath.Join(filepath.Dir(homeDir), stageName)
@@ -93,7 +148,6 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(2), skipped, "agent-info.json and .gitconfig must be skipped")
 
-		// Provision-rendered files kept intact.
 		gotInfo, err := os.ReadFile(filepath.Join(homeDir, ".scion", "agent-info.json"))
 		require.NoError(t, err)
 		assert.Equal(t, `{"target":true}`, string(gotInfo))
@@ -101,7 +155,6 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, string(gotGit), "target")
 
-		// Source-only files merged into home.
 		gotHist, err := os.ReadFile(filepath.Join(homeDir, ".scion", "history.log"))
 		require.NoError(t, err)
 		assert.Equal(t, "from-source\n", string(gotHist))
@@ -110,45 +163,34 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 		assert.Equal(t, "agent notes", string(gotNotes))
 	})
 
-	t.Run("imported marker prevents repeat import with 409", func(t *testing.T) {
-		_, _, srcWS, srcHome := newMoveBundleTestAgentDir(t, "dev")
-		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "x.txt"), []byte("x"), 0o644))
-		require.NoError(t, os.WriteFile(filepath.Join(srcHome, "y.txt"), []byte("y"), 0o644))
+	t.Run("import requires matching move marker (R3)", func(t *testing.T) {
+		manifest, manifestHash, _ := buildTestBundleParts(t, "rid-expect", "x", "y")
+		dstProject, dstAgentDir, _, _ := newMoveBundleTestAgentDir(t, "dev")
+		dstSrv := newTestServer(t)
 
-		partsData := map[string][]byte{}
-		wsRoot, err := os.OpenRoot(srcWS)
-		require.NoError(t, err)
-		wsRM, err := bundle.Write(context.Background(), wsRoot, t.TempDir(), bundle.WorkspaceExcluder(), bundle.DefaultWorkspaceLimits(),
-			partSinkFunc(func(_ context.Context, idx int, r io.ReadSeeker, _ int64, _ string) error {
-				b, err := io.ReadAll(r)
-				partsData[fmt.Sprintf("workspace/%d", idx)] = b
-				return err
-			}))
-		require.NoError(t, err)
-		_ = wsRoot.Close()
-
-		homeRoot, err := os.OpenRoot(srcHome)
-		require.NoError(t, err)
-		homeRM, err := bundle.Write(context.Background(), homeRoot, t.TempDir(), moveBundleHomeExcluder("", nil), bundle.DefaultHomeLimits(),
-			partSinkFunc(func(_ context.Context, idx int, r io.ReadSeeker, _ int64, _ string) error {
-				b, err := io.ReadAll(r)
-				partsData[fmt.Sprintf("home/%d", idx)] = b
-				return err
-			}))
-		require.NoError(t, err)
-		_ = homeRoot.Close()
-
-		manifest := bundle.Manifest{
-			Version:         bundle.ManifestVersion,
-			ReincarnationID: "rid-marker",
-			Roots: map[string]bundle.RootManifest{
-				bundle.RootWorkspace: wsRM,
-				bundle.RootHome:      homeRM,
-			},
+		impReq := api.MoveBundleImportRequest{
+			ReincarnationID: "rid-expect",
+			ProjectID:       "p1",
+			ProjectPath:     dstProject,
+			Manifest:        manifest,
+			ManifestHash:    manifestHash,
+			Limits:          api.DefaultMoveBundleLimits(),
 		}
-		_, manifestHash, err := bundle.CanonicalManifest(manifest)
-		require.NoError(t, err)
 
+		// No move marker at all -> 409 move_marker_mismatch.
+		rec := doMoveBundleReq(t, dstSrv, http.MethodPost, "/api/v1/agents/dev/move-bundle/import?projectId=p1", impReq)
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), api.BrokerErrCodeMoveMarkerMismatch)
+
+		// Move marker for a different rid -> 409 move_marker_mismatch.
+		writeTestMoveMarker(t, dstAgentDir, "rid-other")
+		rec2 := doMoveBundleReq(t, dstSrv, http.MethodPost, "/api/v1/agents/dev/move-bundle/import?projectId=p1", impReq)
+		assert.Equal(t, http.StatusConflict, rec2.Code, rec2.Body.String())
+		assert.Contains(t, rec2.Body.String(), api.BrokerErrCodeMoveMarkerMismatch)
+	})
+
+	t.Run("imported marker prevents repeat import with 409", func(t *testing.T) {
+		manifest, manifestHash, partsData := buildTestBundleParts(t, "rid-marker", "x", "y")
 		objSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := strings.TrimPrefix(r.URL.Path, "/")
 			w.WriteHeader(http.StatusOK)
@@ -157,6 +199,7 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 		defer objSrv.Close()
 
 		dstProject, dstAgentDir, _, _ := newMoveBundleTestAgentDir(t, "dev")
+		writeTestMoveMarker(t, dstAgentDir, "rid-marker")
 		dstSrv := newTestServer(t)
 		dstSrv.moveBundle = moveBundleSettings{
 			client: objSrv.Client(),
@@ -182,13 +225,13 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 			ProjectPath:     dstProject,
 			Manifest:        manifest,
 			ManifestHash:    manifestHash,
+			Limits:          api.DefaultMoveBundleLimits(),
 		}
 		rec := doMoveBundleReq(t, dstSrv, http.MethodPost, "/api/v1/agents/dev/move-bundle/import?projectId=p1", impReq)
 		require.Equal(t, http.StatusAccepted, rec.Code)
 		st := waitForMoveBundleJob(t, dstSrv, "dev", "p1", api.MoveBundleJobKindImport, "rid-marker")
 		require.Equal(t, api.MoveBundleJobStateSucceeded, st.State, "error=%s", st.Error)
 
-		// Verify marker exists on disk.
 		ok, err := hasMoveBundleImportedMarker(dstAgentDir, "rid-marker")
 		require.NoError(t, err)
 		assert.True(t, ok)
@@ -201,44 +244,7 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 	})
 
 	t.Run("crash mid-commit leaves .bundle-* siblings removed by marker-guarded delete", func(t *testing.T) {
-		_, _, srcWS, srcHome := newMoveBundleTestAgentDir(t, "dev")
-		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "w.txt"), []byte("w"), 0o644))
-		require.NoError(t, os.WriteFile(filepath.Join(srcHome, "h.txt"), []byte("h"), 0o644))
-
-		partsData := map[string][]byte{}
-		wsRoot, err := os.OpenRoot(srcWS)
-		require.NoError(t, err)
-		wsRM, err := bundle.Write(context.Background(), wsRoot, t.TempDir(), bundle.WorkspaceExcluder(), bundle.DefaultWorkspaceLimits(),
-			partSinkFunc(func(_ context.Context, idx int, r io.ReadSeeker, _ int64, _ string) error {
-				b, err := io.ReadAll(r)
-				partsData[fmt.Sprintf("workspace/%d", idx)] = b
-				return err
-			}))
-		require.NoError(t, err)
-		_ = wsRoot.Close()
-
-		homeRoot, err := os.OpenRoot(srcHome)
-		require.NoError(t, err)
-		homeRM, err := bundle.Write(context.Background(), homeRoot, t.TempDir(), moveBundleHomeExcluder("", nil), bundle.DefaultHomeLimits(),
-			partSinkFunc(func(_ context.Context, idx int, r io.ReadSeeker, _ int64, _ string) error {
-				b, err := io.ReadAll(r)
-				partsData[fmt.Sprintf("home/%d", idx)] = b
-				return err
-			}))
-		require.NoError(t, err)
-		_ = homeRoot.Close()
-
-		manifest := bundle.Manifest{
-			Version:         bundle.ManifestVersion,
-			ReincarnationID: "rid-crash",
-			Roots: map[string]bundle.RootManifest{
-				bundle.RootWorkspace: wsRM,
-				bundle.RootHome:      homeRM,
-			},
-		}
-		_, manifestHash, err := bundle.CanonicalManifest(manifest)
-		require.NoError(t, err)
-
+		manifest, manifestHash, partsData := buildTestBundleParts(t, "rid-crash", "w", "h")
 		objSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := strings.TrimPrefix(r.URL.Path, "/")
 			w.WriteHeader(http.StatusOK)
@@ -247,8 +253,7 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 		defer objSrv.Close()
 
 		dstProject, dstAgentDir, _, _ := newMoveBundleTestAgentDir(t, "dev")
-		// Simulate the move marker written by fresh-agent-dir provision.
-		require.NoError(t, os.WriteFile(filepath.Join(dstAgentDir, agent.MoveMarkerFile), []byte("rid-crash\n"), 0o600))
+		writeTestMoveMarker(t, dstAgentDir, "rid-crash")
 
 		prevHook := testHookMoveBundleCommit
 		testHookMoveBundleCommit = func(step string) error {
@@ -284,12 +289,12 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 			ProjectPath:     dstProject,
 			Manifest:        manifest,
 			ManifestHash:    manifestHash,
+			Limits:          api.DefaultMoveBundleLimits(),
 		})
 		require.Equal(t, http.StatusAccepted, rec.Code)
 		st := waitForMoveBundleJob(t, dstSrv, "dev", "p1", api.MoveBundleJobKindImport, "rid-crash")
 		assert.Equal(t, api.MoveBundleJobStateFailed, st.State)
 
-		// .bundle-* staging siblings exist inside dstAgentDir and no imported marker was written.
 		entries, err := os.ReadDir(dstAgentDir)
 		require.NoError(t, err)
 		var stageCount int
@@ -303,16 +308,62 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, imported, "imported marker must not be written before both roots commit")
 
-		// Marker-guarded rollback delete removes dstAgentDir including the .bundle-* siblings.
 		_, err = agent.DeleteHubAgentFiles("dev", "dev", dstProject, "", false)
 		require.NoError(t, err)
 		_, err = os.Stat(dstAgentDir)
 		assert.True(t, os.IsNotExist(err), "agentDir and .bundle-* siblings must be removed by rollback delete")
 	})
 
+	t.Run("agent delete cancels in-flight move-bundle import and waits for it to stop (S4)", func(t *testing.T) {
+		manifest, manifestHash, _ := buildTestBundleParts(t, "rid-cancel-del", "w", "h")
+		dstProject, dstAgentDir, _, _ := newMoveBundleTestAgentDir(t, "dev")
+		writeTestMoveMarker(t, dstAgentDir, "rid-cancel-del")
+
+		entered := make(chan struct{}, 2)
+		canceled := make(chan struct{}, 2)
+		dstSrv := newTestServer(t)
+		dstSrv.moveBundle = moveBundleSettings{
+			fetchDownloadURLs: func(ctx context.Context, _, _, _ string, _ *api.MoveBundleDownloadURLsRequest) (*api.MoveBundleDownloadURLsResponse, error) {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				<-ctx.Done()
+				select {
+				case canceled <- struct{}{}:
+				default:
+				}
+				return nil, ctx.Err()
+			},
+		}
+
+		rec := doMoveBundleReq(t, dstSrv, http.MethodPost, "/api/v1/agents/dev/move-bundle/import?projectId=p1", api.MoveBundleImportRequest{
+			ReincarnationID: "rid-cancel-del",
+			ProjectID:       "p1",
+			ProjectPath:     dstProject,
+			Manifest:        manifest,
+			ManifestHash:    manifestHash,
+			Limits:          api.DefaultMoveBundleLimits(),
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code)
+		<-entered
+
+		// Trigger delete on the broker; it must cancel the in-flight import and wait for it to stop.
+		delRec := doMoveBundleReq(t, dstSrv, http.MethodDelete, "/api/v1/agents/dev?deleteFiles=true&projectId=p1", nil)
+		_ = delRec // may be 204 or 404 depending on mock container state; key invariant is job stopped before return.
+
+		select {
+		case <-canceled:
+		default:
+			t.Fatal("delete returned before canceling the in-flight move-bundle job")
+		}
+		stRec := doMoveBundleReq(t, dstSrv, http.MethodGet, "/api/v1/agents/dev/move-bundle/import/rid-cancel-del?projectId=p1", nil)
+		require.Equal(t, http.StatusOK, stRec.Code)
+		assert.Contains(t, stRec.Body.String(), `"state":"failed"`, "in-flight job must have finished before delete returned")
+	})
+
 	t.Run("ProvisionOnly validation for WorkspaceSource=move-bundle", func(t *testing.T) {
 		srv := newTestServer(t)
-		// WorkspaceSource="move-bundle" without fresh-agent-dir + moveReincarnationId -> 400.
 		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 			Name:            "dev",
 			ProvisionOnly:   true,
@@ -320,7 +371,6 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 		})
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 
-		// Unsupported workspaceSource -> 400.
 		rec2 := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 			Name:                       "dev",
 			ProvisionOnly:              true,

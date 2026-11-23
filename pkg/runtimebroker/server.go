@@ -351,7 +351,7 @@ type Server struct {
 	// client, Hub URL fetchers, scratch dir and timing (tests only; zero
 	// values mean the defaults).
 	moveBundle     moveBundleSettings
-	moveBundleJobs *moveBundleJobRegistry
+	moveBundleJobs atomic.Pointer[moveBundleJobRegistry]
 	moveBundleOnce sync.Once
 
 	version string
@@ -1885,8 +1885,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.saDiscovery().stop()
 
 	// Cancel any in-flight move-bundle export/import jobs.
-	if s.moveBundleJobs != nil {
-		s.moveBundleJobs.cancelAll()
+	if reg := s.moveBundleJobs.Load(); reg != nil {
+		reg.cancelAll()
 	}
 
 	// Close the resolution cache: wait, within a bound, for background

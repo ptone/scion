@@ -500,15 +500,15 @@ var placementGuardClassification = map[string]placementGuardOp{
 	"DispatchAgentDeleteRecreated": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 		return d.DispatchAgentDeleteRecreated(ctx, a, "reincarnation-1")
 	}},
-	"DispatchAgentProvisionForBundleMove": {missingRowRefusedEarly: true, call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
+	"DispatchAgentProvisionForBundleMove": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 		return d.DispatchAgentProvisionForBundleMove(ctx, a, "reincarnation-1")
 	}},
 	"DispatchMoveBundlePrecheck": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
-		_, err := d.DispatchMoveBundlePrecheck(ctx, a, api.MoveBundleLimits{})
+		_, err := d.DispatchMoveBundlePrecheck(ctx, a, api.DefaultMoveBundleLimits(), nil)
 		return err
 	}},
 	"DispatchMoveBundleExport": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
-		_, err := d.DispatchMoveBundleExport(ctx, a, "reincarnation-1", api.MoveBundleLimits{})
+		_, err := d.DispatchMoveBundleExport(ctx, a, "reincarnation-1", api.DefaultMoveBundleLimits(), nil)
 		return err
 	}},
 	"DispatchMoveBundleExportStatus": {call: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
@@ -564,7 +564,7 @@ func TestPlacementGuard_EveryBrokerReachingOp(t *testing.T) {
 
 	// Runtime Broker rows of this test, both advertising AgentMove so the
 	// move legs reach their guard.
-	caps := &store.BrokerCapabilities{Reprovision: true, Sync: true, AgentMove: true}
+	caps := &store.BrokerCapabilities{Reprovision: true, Sync: true, AgentMove: true, AgentMoveBundle: true}
 	legacy := &store.RuntimeBroker{ID: tid("guard-legacy"), Name: "guard-legacy", Slug: "guard-legacy",
 		Status: store.BrokerStatusOnline, Endpoint: "http://guard-legacy.invalid", Capabilities: caps}
 	require.NoError(t, f.s.CreateRuntimeBroker(ctx, legacy))
