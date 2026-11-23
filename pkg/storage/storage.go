@@ -115,6 +115,13 @@ type GenerationDeleter interface {
 	DeleteIfGeneration(ctx context.Context, objectPath string, generation int64) error
 }
 
+// ContentLengthRange bounds the allowed byte length of a signed PUT upload.
+// When Min == Max, the object store enforces an exact body size.
+type ContentLengthRange struct {
+	Min int64
+	Max int64
+}
+
 // SignedURLOptions configures signed URL generation.
 type SignedURLOptions struct {
 	// Method is the HTTP method (GET, PUT).
@@ -125,6 +132,10 @@ type SignedURLOptions struct {
 	ContentType string
 	// ContentMD5 is the expected MD5 hash (for PUT).
 	ContentMD5 string
+	// ContentLengthRange, when set on a PUT URL, binds the upload body size
+	// via a signed header (x-goog-content-length-range on GCS) and returns
+	// that header in SignedURL.Headers.
+	ContentLengthRange *ContentLengthRange
 	// ResponseContentType, when set on a GET URL, overrides the
 	// Content-Type the object store answers with. Providers that cannot
 	// override response headers ignore it.

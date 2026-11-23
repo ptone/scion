@@ -710,6 +710,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.CodeSpanMentions:             testAdminPolicyDeny,
 	experiments.ExecContainers:               testAdminPolicyDeny,
 	experiments.SuspendScreen:                testAdminPolicyDeny,
+	experiments.AgentMoveBundle:              testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
