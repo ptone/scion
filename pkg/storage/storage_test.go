@@ -360,11 +360,15 @@ func TestResourceRootPaths(t *testing.T) {
 				t.Errorf("template path %q is not under %v", p, roots)
 			}
 		}
+		mbPath, err := MoveBundlePath(hubID, "reinc-1")
+		if err != nil {
+			t.Fatalf("MoveBundlePath: %v", err)
+		}
 		for _, p := range []string{
 			WorkspaceStoragePath(hubID, "p-1", "a-1"),
 			HarnessConfigStoragePath(hubID, "global", "", "h1"),
 			SkillStoragePath(hubID, "global", "", "s1"),
-			MoveBundlePath(hubID, "reinc-1"),
+			mbPath,
 		} {
 			if under(p, roots) {
 				t.Errorf("non-template path %q is under the template roots %v", p, roots)
@@ -384,21 +388,30 @@ func TestMoveBundlePaths(t *testing.T) {
 		t.Errorf("DirPrefix(MoveBundlesRoot) = %q, want %q", got, want)
 	}
 
-	if got, want := MoveBundlePath("", "rid-1"), "move-bundles/rid-1"; got != want {
-		t.Errorf("MoveBundlePath(\"\", rid-1) = %q, want %q", got, want)
+	if got, err := MoveBundlePath("", "rid-1"); err != nil || got != "move-bundles/rid-1" {
+		t.Errorf("MoveBundlePath(\"\", rid-1) = %q, err=%v; want move-bundles/rid-1", got, err)
 	}
-	if got, want := MoveBundlePath("hub-1", "rid-1"), "hubs/hub-1/move-bundles/rid-1"; got != want {
-		t.Errorf("MoveBundlePath(hub-1, rid-1) = %q, want %q", got, want)
+	if got, err := MoveBundlePath("hub-1", "rid-1"); err != nil || got != "hubs/hub-1/move-bundles/rid-1" {
+		t.Errorf("MoveBundlePath(hub-1, rid-1) = %q, err=%v; want hubs/hub-1/move-bundles/rid-1", got, err)
 	}
-	if got, want := DirPrefix(MoveBundlePath("hub-1", "rid-1")), "hubs/hub-1/move-bundles/rid-1/"; got != want {
-		t.Errorf("DirPrefix(MoveBundlePath) = %q, want %q", got, want)
+	if got, _ := MoveBundlePath("hub-1", "rid-1"); DirPrefix(got) != "hubs/hub-1/move-bundles/rid-1/" {
+		t.Errorf("DirPrefix(MoveBundlePath) = %q, want hubs/hub-1/move-bundles/rid-1/", DirPrefix(got))
 	}
 
-	if got, want := MoveBundleManifestPath("hub-1", "rid-1"), "hubs/hub-1/move-bundles/rid-1/manifest.json"; got != want {
-		t.Errorf("MoveBundleManifestPath() = %q, want %q", got, want)
+	if got, err := MoveBundleManifestPath("hub-1", "rid-1"); err != nil || got != "hubs/hub-1/move-bundles/rid-1/manifest.json" {
+		t.Errorf("MoveBundleManifestPath() = %q, err=%v", got, err)
 	}
-	if got, want := MoveBundleManifestPath("", "rid-1"), "move-bundles/rid-1/manifest.json"; got != want {
-		t.Errorf("MoveBundleManifestPath(un-namespaced) = %q, want %q", got, want)
+	if got, err := MoveBundleManifestPath("", "rid-1"); err != nil || got != "move-bundles/rid-1/manifest.json" {
+		t.Errorf("MoveBundleManifestPath(un-namespaced) = %q, err=%v", got, err)
+	}
+
+	for _, badRID := range []string{"", "a/b", "../x", "..", "rid/.."} {
+		if _, err := MoveBundlePath("hub-1", badRID); err == nil {
+			t.Errorf("MoveBundlePath(hub-1, %q) = nil error, want error", badRID)
+		}
+		if _, err := MoveBundleManifestPath("hub-1", badRID); err == nil {
+			t.Errorf("MoveBundleManifestPath(hub-1, %q) = nil error, want error", badRID)
+		}
 	}
 
 	// Valid part paths

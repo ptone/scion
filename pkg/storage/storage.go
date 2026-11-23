@@ -395,22 +395,39 @@ func MoveBundlesRoot(hubID string) string {
 	return hubNamespaced(hubID, "move-bundles")
 }
 
+func validateMoveReincarnationID(reincarnationID string) error {
+	if reincarnationID == "" || strings.Contains(reincarnationID, "/") || strings.Contains(reincarnationID, "..") {
+		return fmt.Errorf("%w: invalid reincarnation ID", ErrInvalidPath)
+	}
+	return nil
+}
+
 // MoveBundlePath returns the storage directory for a single reincarnation's
 // move bundle (without a trailing slash; pass to DirPrefix for DeletePrefix).
-func MoveBundlePath(hubID, reincarnationID string) string {
-	return hubNamespaced(hubID, "move-bundles/"+reincarnationID)
+// It validates reincarnationID so a malformed or empty ID can never widen a
+// prefix delete to all of move-bundles/.
+func MoveBundlePath(hubID, reincarnationID string) (string, error) {
+	if err := validateMoveReincarnationID(reincarnationID); err != nil {
+		return "", err
+	}
+	return hubNamespaced(hubID, "move-bundles/"+reincarnationID), nil
 }
 
 // MoveBundleManifestPath returns the object key for a move bundle's manifest.
-func MoveBundleManifestPath(hubID, reincarnationID string) string {
-	return MoveBundlePath(hubID, reincarnationID) + "/manifest.json"
+func MoveBundleManifestPath(hubID, reincarnationID string) (string, error) {
+	base, err := MoveBundlePath(hubID, reincarnationID)
+	if err != nil {
+		return "", err
+	}
+	return base + "/manifest.json", nil
 }
 
 // MoveBundlePartPath returns the object key for one compressed tar part of a
 // move bundle root ("workspace" or "home") at zero-based partIndex.
 func MoveBundlePartPath(hubID, reincarnationID, root string, partIndex int) (string, error) {
-	if reincarnationID == "" || strings.Contains(reincarnationID, "/") || strings.Contains(reincarnationID, "..") {
-		return "", fmt.Errorf("%w: invalid reincarnation ID", ErrInvalidPath)
+	base, err := MoveBundlePath(hubID, reincarnationID)
+	if err != nil {
+		return "", err
 	}
 	if root != MoveBundleRootWorkspace && root != MoveBundleRootHome {
 		return "", fmt.Errorf("%w: invalid move bundle root %q", ErrInvalidPath, root)
@@ -418,5 +435,5 @@ func MoveBundlePartPath(hubID, reincarnationID, root string, partIndex int) (str
 	if partIndex < 0 {
 		return "", fmt.Errorf("%w: negative part index %d", ErrInvalidPath, partIndex)
 	}
-	return fmt.Sprintf("%s/%s/part-%05d.tgz", MoveBundlePath(hubID, reincarnationID), root, partIndex), nil
+	return fmt.Sprintf("%s/%s/part-%05d.tgz", base, root, partIndex), nil
 }
