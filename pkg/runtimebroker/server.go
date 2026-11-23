@@ -347,6 +347,13 @@ type Server struct {
 	// defaults, see signedDownloadSettings).
 	signedDownload signedDownloadSettings
 
+	// moveBundle overrides the move-bundle export/import endpoints' object
+	// client, Hub URL fetchers, scratch dir and timing (tests only; zero
+	// values mean the defaults).
+	moveBundle     moveBundleSettings
+	moveBundleJobs *moveBundleJobRegistry
+	moveBundleOnce sync.Once
+
 	version string
 
 	// Workspace transfer and project delete steps, like workspaceDownload:
@@ -1876,6 +1883,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// Stop the heartbeat service account report's background discovery.
 	s.saDiscovery().stop()
+
+	// Cancel any in-flight move-bundle export/import jobs.
+	if s.moveBundleJobs != nil {
+		s.moveBundleJobs.cancelAll()
+	}
 
 	// Close the resolution cache: wait, within a bound, for background
 	// refreshes still running, then write any entries still waiting for
