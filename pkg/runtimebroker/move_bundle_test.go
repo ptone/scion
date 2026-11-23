@@ -192,20 +192,115 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 		assert.Empty(t, resp.Workspace.Over)
 	})
 
-	t.Run("AgentHomeAbs defaults to /home/scion and respects scion-agent.json user", func(t *testing.T) {
-		// Empty/missing scion-agent.json defaults UnixUsername to "scion" -> /home/scion.
-		cfgDefault := buildMoveBundleHomeRunConfig(t.TempDir(), nil)
-		assert.Equal(t, "scion", cfgDefault.UnixUsername)
+	t.Run("AgentHomeAbs uses persisted user or empty fail-closed when unknown", func(t *testing.T) {
+		// Missing/empty user in scion-agent.json must NOT guess: AgentHomeAbs is "" (fail closed).
+		cfgUnknown := buildMoveBundleHomeRunConfig(t.TempDir(), nil)
+		assert.Equal(t, "", cfgUnknown.UnixUsername)
+		assert.Equal(t, "", moveBundleAgentHomeAbs(cfgUnknown.UnixUsername))
 
-		// Explicit user in scion-agent.json is preserved (e.g. "devuser" -> /home/devuser).
+		// Explicit user in scion-agent.json resolves to /home/<user> (or /root).
 		agentDir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{"user":"devuser"}`), 0o600))
 		cfgCustom := buildMoveBundleHomeRunConfig(agentDir, nil)
 		assert.Equal(t, "devuser", cfgCustom.UnixUsername)
+		assert.Equal(t, "/home/devuser", moveBundleAgentHomeAbs(cfgCustom.UnixUsername))
 
-		// Excluder recognizes an absolute in-container secret symlink target under /home/devuser.
+		// Excluder recognizes an absolute in-container secret target under /home/devuser.
 		ex := moveBundleHomeExcluder(agentDir, []string{"/home/devuser/.config/my-secret.pem"})
 		assert.True(t, ex.Exclude(".config/my-secret.pem", false))
+	})
+
+	t.Run("absolute in-home symlinked secret is not bundled", func(t *testing.T) {
+		// Reproduces the symlinked-dotfiles scenario: .config -> /home/scion/dotfiles/config
+		// with dotfiles/config/gcloud/credentials.db. Export must NOT bundle credentials.db.
+		srcProject, srcAgentDir, srcWS, srcHome := newMoveBundleTestAgentDir(t, "dev-symlink")
+		require.NoError(t, os.WriteFile(filepath.Join(srcAgentDir, "scion-agent.json"), []byte(`{"user":"scion"}`), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "w.txt"), []byte("w"), 0o644))
+		require.NoError(t, os.MkdirAll(filepath.Join(srcHome, "dotfiles", "config", "gcloud"), 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(srcHome, "dotfiles", "config", "gcloud", "credentials.db"), []byte("super-secret-gcloud-db"), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(srcHome, "dotfiles", "config", "app.conf"), []byte("portable=true\n"), 0o644))
+		require.NoError(t, os.Symlink("/home/scion/dotfiles/config", filepath.Join(srcHome, ".config")))
+
+		var storeMu sync.Mutex
+		objects := map[string][]byte{}
+		objSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			key := strings.TrimPrefix(r.URL.Path, "/")
+			switch r.Method {
+			case http.MethodPut:
+				data, _ := io.ReadAll(r.Body)
+				storeMu.Lock()
+				objects[key] = data
+				storeMu.Unlock()
+				w.WriteHeader(http.StatusOK)
+			case http.MethodGet:
+				storeMu.Lock()
+				data := objects[key]
+				storeMu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(data)
+			}
+		}))
+		defer objSrv.Close()
+
+		srcSrv := newTestServer(t)
+		srcSrv.moveBundle = moveBundleSettings{
+			client: objSrv.Client(),
+			fetchUploadURL: func(_ context.Context, _, _, rid string, req *api.MoveBundleUploadURLRequest) (*api.MoveBundleUploadURLResponse, error) {
+				return &api.MoveBundleUploadURLResponse{
+					URL:     fmt.Sprintf("%s/%s/%s/part-%05d.tgz", objSrv.URL, rid, req.Root, req.PartIndex),
+					Method:  http.MethodPut,
+					Expires: time.Now().Add(15 * time.Minute),
+				}, nil
+			},
+		}
+
+		rec := doMoveBundleReq(t, srcSrv, http.MethodPost, "/api/v1/agents/dev-symlink/move-bundle/export?projectId=p1", api.MoveBundleExportRequest{
+			ReincarnationID: "rid-symlink-sec",
+			ProjectID:       "p1",
+			ProjectPath:     srcProject,
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		st := waitForMoveBundleJob(t, srcSrv, "dev-symlink", "p1", api.MoveBundleJobKindExport, "rid-symlink-sec")
+		require.Equal(t, api.MoveBundleJobStateSucceeded, st.State, "error=%s", st.Error)
+
+		// Extract home into a fresh directory and verify credentials.db is absent while app.conf survived.
+		dstProject, _, _, dstHome := newMoveBundleTestAgentDir(t, "dev-symlink")
+		_, manifestHash, err := bundle.CanonicalManifest(*st.Manifest)
+		require.NoError(t, err)
+		dstSrv := newTestServer(t)
+		dstSrv.moveBundle = moveBundleSettings{
+			client: objSrv.Client(),
+			fetchDownloadURLs: func(_ context.Context, _, _, rid string, _ *api.MoveBundleDownloadURLsRequest) (*api.MoveBundleDownloadURLsResponse, error) {
+				var parts []api.MoveBundleDownloadPartURL
+				for rootName, rm := range st.Manifest.Roots {
+					for _, p := range rm.Parts {
+						parts = append(parts, api.MoveBundleDownloadPartURL{
+							Root:    rootName,
+							Index:   p.Index,
+							URL:     fmt.Sprintf("%s/%s/%s/part-%05d.tgz", objSrv.URL, rid, rootName, p.Index),
+							Expires: time.Now().Add(15 * time.Minute),
+						})
+					}
+				}
+				return &api.MoveBundleDownloadURLsResponse{Parts: parts, ExpiresInSeconds: 900}, nil
+			},
+		}
+		impRec := doMoveBundleReq(t, dstSrv, http.MethodPost, "/api/v1/agents/dev-symlink/move-bundle/import?projectId=p1", api.MoveBundleImportRequest{
+			ReincarnationID: "rid-symlink-sec",
+			ProjectID:       "p1",
+			ProjectPath:     dstProject,
+			Manifest:        *st.Manifest,
+			ManifestHash:    manifestHash,
+		})
+		require.Equal(t, http.StatusAccepted, impRec.Code, impRec.Body.String())
+		impSt := waitForMoveBundleJob(t, dstSrv, "dev-symlink", "p1", api.MoveBundleJobKindImport, "rid-symlink-sec")
+		require.Equal(t, api.MoveBundleJobStateSucceeded, impSt.State, "error=%s", impSt.Error)
+
+		_, err = os.Stat(filepath.Join(dstHome, "dotfiles", "config", "gcloud", "credentials.db"))
+		assert.True(t, os.IsNotExist(err), "absolute in-home symlinked secret credentials.db must NOT be bundled")
+		gotConf, err := os.ReadFile(filepath.Join(dstHome, "dotfiles", "config", "app.conf"))
+		require.NoError(t, err)
+		assert.Equal(t, "portable=true\n", string(gotConf))
 	})
 }
 

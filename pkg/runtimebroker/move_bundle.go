@@ -277,11 +277,6 @@ func buildMoveBundleHomeRunConfig(agentDir string, extraSecretTargets []string) 
 			}
 		}
 	}
-	if cfg.UnixUsername == "" {
-		// Default Scion container user when scion-agent.json omits "user"
-		// (util.GetHomeDir("") would return "/home" rather than "/home/scion").
-		cfg.UnixUsername = "scion"
-	}
 	for _, target := range extraSecretTargets {
 		if target == "" {
 			continue
@@ -302,17 +297,29 @@ func buildMoveBundleHomeRunConfig(agentDir string, extraSecretTargets []string) 
 	return cfg
 }
 
+// moveBundleAgentHomeAbs returns the agent's in-container home path when
+// unixUsername is known from the agent's persisted config, or "" otherwise
+// so bundle.HomeExcluder fails closed instead of guessing (note:
+// util.GetHomeDir("") returns "/home", which must never be passed).
+func moveBundleAgentHomeAbs(unixUsername string) string {
+	if unixUsername == "" {
+		return ""
+	}
+	return util.GetHomeDir(unixUsername)
+}
+
 // moveBundleHomeExcluder returns the $HOME excluder combining the shared
 // runtime.PortableHomeExcludes list (reconstructed from the agent's persisted
 // config and hub-supplied secret file targets) with the D6 identity-credential
 // and cache exclusion lists in pkg/transfer/bundle, runtime.IsHomeTempName,
-// and the agent's container home directory path.
+// and the agent's in-container home directory path (empty when unknown so
+// absolute in-home symlink resolution fails closed).
 func moveBundleHomeExcluder(agentDir string, extraSecretTargets []string) bundle.Excluder {
 	runCfg := buildMoveBundleHomeRunConfig(agentDir, extraSecretTargets)
 	return bundle.HomeExcluder(bundle.HomeExcluderOptions{
 		ExtraLiterals: scionrt.PortableHomeExcludes(runCfg),
 		TempNamePred:  scionrt.IsHomeTempName,
-		AgentHomeAbs:  util.GetHomeDir(runCfg.UnixUsername),
+		AgentHomeAbs:  moveBundleAgentHomeAbs(runCfg.UnixUsername),
 	})
 }
 
