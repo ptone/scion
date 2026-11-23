@@ -50,6 +50,7 @@ const (
 // Default limits from design §3.7.
 const (
 	DefaultPartSize            int64 = 64 << 20 // 64 MiB compressed per part
+	MinManifestPartSize        int64 = 1 << 20  // 1 MiB floor when rm.PartSize != lim.PartSize
 	DefaultWorkspaceMaxBytes   int64 = 4 << 30  // 4 GiB uncompressed
 	DefaultWorkspaceMaxEntries int64 = 250_000
 	DefaultHomeMaxBytes        int64 = 1 << 30 // 1 GiB uncompressed
@@ -405,4 +406,14 @@ func resolvePathInRoot(root *os.Root, baseDir, target string) (string, error) {
 // pathDepth returns the 1-based depth of a validated slash-separated relative path.
 func pathDepth(relPath string) int {
 	return strings.Count(relPath, "/") + 1
+}
+
+// maxPathBytesBudget returns the total path+link-target byte budget shared by
+// Write, Estimate, and Extract so precheck, export, and import agree.
+func maxPathBytesBudget(lim Limits) int64 {
+	return max(lim.MaxEntries*256, int64(lim.MaxPathLen))
+}
+
+func entryPathBytesLen(relPath, linkTarget string) int64 {
+	return int64(len(relPath)) + int64(len(linkTarget))
 }

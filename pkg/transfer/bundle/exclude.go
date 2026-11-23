@@ -15,6 +15,7 @@
 package bundle
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path"
@@ -42,7 +43,7 @@ func (f ExcluderFunc) Exclude(relPath string, isDir bool) bool {
 // rootResolvableExcluder is implemented by path-based excluders so Write and
 // Estimate can rebase exclusion entries through any in-root symlinked ancestor
 // directories (failing closed with *ErrUnportableHome on unresolvable ancestor
-// symlinks) and collect hard-linked excluded file identities before walking.
+// symlinks) and collect hard-linked excluded secret file identities before walking.
 type rootResolvableExcluder interface {
 	resolveInRoot(root *os.Root) (Excluder, excludedInodeSet, error)
 }
@@ -54,6 +55,8 @@ func resolveExcluderInRoot(root *os.Root, ex Excluder) (Excluder, excludedInodeS
 	return ex, excludedInodeSet{}, nil
 }
 
+const homeHarnessOutputsRel = ".scion/harness/outputs"
+
 // HomeBaselineExcludes are the static Scion-managed secret and runtime-state
 // paths always excluded from a portable $HOME bundle (design §3.4 items 1–2),
 // even when HomeExcluder is called with zero options. Kept in sync with
@@ -63,7 +66,7 @@ var HomeBaselineExcludes = []string{
 	".scion/scion-token.tmp",
 	".scion/secrets.json",
 	".scion/harness/secrets",
-	".scion/harness/outputs",
+	homeHarnessOutputsRel,
 	".scion-home-reset-id",
 }
 
@@ -91,7 +94,10 @@ var HomeCacheExcludes = []string{
 type HomeExcluderOptions struct {
 	// ExtraLiterals are additional home-relative literal paths (such as
 	// runtime.PortableHomeExcludes(cfg) for per-agent resolved secrets and auth
-	// files), matched literally as exact path or subtree prefix (never globs).
+	// files), canonicalised via path.Clean (stripping leading "./" and trailing
+	// "/") and matched literally as exact path or subtree prefix (never globs).
+	// Absolute paths or ".." traversal entries cause Write and Estimate to fail
+	// closed with an error.
 	ExtraLiterals []string
 	// TempNamePred, when non-nil, matches temporary filenames by basename
 	// (such as runtime.IsHomeTempName).
@@ -126,33 +132,63 @@ func WorkspaceExcluder() Excluder {
 //     be resolved inside the root (absolute outside AgentHomeAbs, relative
 //     escaping, loop, or too many hops), Write and Estimate fail closed with
 //     *ErrUnportableHome.
-//   - On Unix, hard-linked regular files matching excluded files (and regular
-//     files under excluded directories, up to maxExcludedHardlinkScanEntries)
-//     are also skipped and counted as Excluded.
+//   - On Unix, hard-linked regular files matching excluded secret files (and
+//     regular files under excluded credential directories, up to
+//     maxExcludedHardlinkScanEntries) are skipped and counted as Excluded;
+//     caches and .scion/harness/outputs are excluded lexically only so user
+//     files hard-linked into caches (e.g. uv venvs) are preserved.
 func HomeExcluder(opts HomeExcluderOptions) Excluder {
-	prefixes := make([]string, 0, len(HomeBaselineExcludes)+len(opts.ExtraLiterals)+len(HomeIdentityCredentialExcludes)+len(HomeCacheExcludes))
-	prefixes = append(prefixes, HomeBaselineExcludes...)
-	for _, lit := range opts.ExtraLiterals {
-		lit = strings.TrimSpace(lit)
-		if lit == "" {
-			continue
-		}
-		prefixes = append(prefixes, lit)
-	}
+	// Put credential directories first so the hardlink scan prioritises them.
+	secretPrefixes := make([]string, 0, len(HomeIdentityCredentialExcludes)+len(HomeBaselineExcludes)+len(opts.ExtraLiterals))
+	nonSecretPrefixes := make([]string, 0, 1+len(HomeCacheExcludes))
+
 	for _, pat := range HomeIdentityCredentialExcludes {
 		if p := normalizePrefixPattern(pat); p != "" {
-			prefixes = append(prefixes, p)
+			secretPrefixes = append(secretPrefixes, p)
 		}
+	}
+	for _, p := range HomeBaselineExcludes {
+		if p == homeHarnessOutputsRel {
+			nonSecretPrefixes = append(nonSecretPrefixes, p)
+			continue
+		}
+		secretPrefixes = append(secretPrefixes, p)
+	}
+	var initErr error
+	for _, raw := range opts.ExtraLiterals {
+		c, err := canonicalizeExtraLiteral(raw)
+		if err != nil {
+			if initErr == nil {
+				initErr = err
+			}
+			continue
+		}
+		if c == "" {
+			continue
+		}
+		if c == homeHarnessOutputsRel {
+			nonSecretPrefixes = append(nonSecretPrefixes, c)
+			continue
+		}
+		secretPrefixes = append(secretPrefixes, c)
 	}
 	for _, pat := range HomeCacheExcludes {
 		if p := normalizePrefixPattern(pat); p != "" {
-			prefixes = append(prefixes, p)
+			nonSecretPrefixes = append(nonSecretPrefixes, p)
 		}
 	}
+
+	allPrefixes := make([]string, 0, len(secretPrefixes)+len(nonSecretPrefixes))
+	allPrefixes = append(allPrefixes, secretPrefixes...)
+	allPrefixes = append(allPrefixes, nonSecretPrefixes...)
+
 	return &prefixExcluder{
-		prefixes:     prefixes,
-		tempNamePred: opts.TempNamePred,
-		agentHomeAbs: cleanAbsHome(opts.AgentHomeAbs),
+		prefixes:          allPrefixes,
+		secretPrefixes:    secretPrefixes,
+		nonSecretPrefixes: nonSecretPrefixes,
+		tempNamePred:      opts.TempNamePred,
+		agentHomeAbs:      cleanAbsHome(opts.AgentHomeAbs),
+		initErr:           initErr,
 	}
 }
 
@@ -171,7 +207,10 @@ func PatternExcluder(patterns []string) Excluder {
 			prefixes = append(prefixes, p)
 		}
 	}
-	return &prefixExcluder{prefixes: prefixes}
+	return &prefixExcluder{
+		prefixes:          prefixes,
+		nonSecretPrefixes: prefixes,
+	}
 }
 
 func normalizePrefixPattern(pat string) string {
@@ -183,6 +222,27 @@ func normalizePrefixPattern(pat string) string {
 		return prefix
 	}
 	return pat
+}
+
+func canonicalizeExtraLiteral(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", nil
+	}
+	if strings.ContainsRune(s, 0) || strings.Contains(s, `\`) {
+		return "", fmt.Errorf("invalid home exclude literal %q: contains NUL or backslash", raw)
+	}
+	if path.IsAbs(s) || filepath.IsAbs(s) {
+		return "", fmt.Errorf("invalid home exclude literal %q: must be relative", raw)
+	}
+	c := path.Clean(s)
+	if c == "." || c == ".." || strings.HasPrefix(c, "../") {
+		return "", fmt.Errorf("invalid home exclude literal %q: escapes or names root", raw)
+	}
+	if err := transfer.ValidateRelPath(c); err != nil {
+		return "", fmt.Errorf("invalid home exclude literal %q: %w", raw, err)
+	}
+	return c, nil
 }
 
 func cleanAbsHome(homeAbs string) string {
@@ -198,9 +258,12 @@ func cleanAbsHome(homeAbs string) string {
 }
 
 type prefixExcluder struct {
-	prefixes     []string
-	tempNamePred func(base string) bool
-	agentHomeAbs string
+	prefixes          []string
+	secretPrefixes    []string
+	nonSecretPrefixes []string
+	tempNamePred      func(base string) bool
+	agentHomeAbs      string
+	initErr           error
 }
 
 func (e *prefixExcluder) Exclude(relPath string, _ bool) bool {
@@ -217,35 +280,70 @@ func (e *prefixExcluder) Exclude(relPath string, _ bool) bool {
 
 // resolveInRoot expands each exclusion prefix through symlinks (failing closed
 // with *ErrUnportableHome if an ancestor symlink cannot be resolved inside
-// root) and collects the hard-linked excluded inode set on Unix.
+// root) and collects the hard-linked excluded secret inode set on Unix (from
+// secret prefixes only, never from caches or .scion/harness/outputs).
 func (e *prefixExcluder) resolveInRoot(root *os.Root) (Excluder, excludedInodeSet, error) {
-	seen := make(map[string]struct{}, len(e.prefixes))
-	resolved := make([]string, 0, len(e.prefixes))
-	add := func(p string) {
-		if p == "" {
-			return
-		}
-		if _, dup := seen[p]; dup {
-			return
-		}
-		seen[p] = struct{}{}
-		resolved = append(resolved, p)
+	if e.initErr != nil {
+		return nil, excludedInodeSet{}, e.initErr
 	}
-	for _, p := range e.prefixes {
-		add(p)
-		phys, err := resolveExclusionPathInRoot(root, p, e.agentHomeAbs)
-		if err != nil {
-			return nil, excludedInodeSet{}, err
+	resolveList := func(in []string) ([]string, error) {
+		seen := make(map[string]struct{}, len(in))
+		out := make([]string, 0, len(in))
+		add := func(p string) {
+			if p == "" {
+				return
+			}
+			if _, dup := seen[p]; dup {
+				return
+			}
+			seen[p] = struct{}{}
+			out = append(out, p)
 		}
-		if phys != "" {
-			add(phys)
+		for _, p := range in {
+			add(p)
+			phys, err := resolveExclusionPathInRoot(root, p, e.agentHomeAbs)
+			if err != nil {
+				return nil, err
+			}
+			if phys != "" {
+				add(phys)
+			}
+		}
+		return out, nil
+	}
+
+	resolvedSecrets, err := resolveList(e.secretPrefixes)
+	if err != nil {
+		return nil, excludedInodeSet{}, err
+	}
+	resolvedNonSecrets, err := resolveList(e.nonSecretPrefixes)
+	if err != nil {
+		return nil, excludedInodeSet{}, err
+	}
+
+	inodes, err := collectExcludedInodes(root, resolvedSecrets)
+	if err != nil {
+		return nil, excludedInodeSet{}, err
+	}
+
+	all := make([]string, 0, len(resolvedSecrets)+len(resolvedNonSecrets))
+	seenAll := make(map[string]struct{}, len(resolvedSecrets)+len(resolvedNonSecrets))
+	for _, list := range [][]string{resolvedSecrets, resolvedNonSecrets} {
+		for _, p := range list {
+			if _, dup := seenAll[p]; dup {
+				continue
+			}
+			seenAll[p] = struct{}{}
+			all = append(all, p)
 		}
 	}
-	inodes := collectExcludedInodes(root, resolved)
+
 	return &prefixExcluder{
-		prefixes:     resolved,
-		tempNamePred: e.tempNamePred,
-		agentHomeAbs: e.agentHomeAbs,
+		prefixes:          all,
+		secretPrefixes:    resolvedSecrets,
+		nonSecretPrefixes: resolvedNonSecrets,
+		tempNamePred:      e.tempNamePred,
+		agentHomeAbs:      e.agentHomeAbs,
 	}, inodes, nil
 }
 

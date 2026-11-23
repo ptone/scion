@@ -603,8 +603,10 @@ func TestT2_UnixHomeExclusions_FailClosedUnresolvableAncestor(t *testing.T) {
 	})
 }
 
-// TestT2_UnixExcludedHardlinkSkipped verifies hard links to excluded files (and
-// files inside excluded directories) are skipped and counted as Excluded.
+// TestT2_UnixExcludedHardlinkSkipped verifies hard links to excluded secret
+// files (and files inside excluded credential directories) are skipped and
+// counted as Excluded, while user files hard-linked into excluded caches (e.g.
+// uv venvs) or .scion/harness/outputs survive the round trip.
 func TestT2_UnixExcludedHardlinkSkipped(t *testing.T) {
 	ctx := context.Background()
 	srcDir := t.TempDir()
@@ -628,6 +630,24 @@ func TestT2_UnixExcludedHardlinkSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Link(filepath.Join(srcDir, ".scion", "harness", "secrets", "KEY"), filepath.Join(srcDir, "leaked-harness-key")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-secret cache hardlink (uv venv pattern): cache is excluded lexically,
+	// but the user file hard-linked into .cache MUST survive!
+	if err := os.MkdirAll(filepath.Join(srcDir, ".cache", "uv", "archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, ".cache", "uv", "archive", "mod.py"), []byte("print('ok')"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(srcDir, ".local", "share", "uv", "tools", "ruff", "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(
+		filepath.Join(srcDir, ".cache", "uv", "archive", "mod.py"),
+		filepath.Join(srcDir, ".local", "share", "uv", "tools", "ruff", "lib", "mod.py"),
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -659,13 +679,55 @@ func TestT2_UnixExcludedHardlinkSkipped(t *testing.T) {
 		t.Fatalf("Extract: %v", err)
 	}
 
-	for _, leaked := range []string{"leaked-kubeconfig", "leaked-harness-key"} {
-		if _, err := os.Stat(filepath.Join(dstDir, leaked)); !os.IsNotExist(err) {
-			t.Errorf("hardlink to excluded secret %q was NOT skipped (stat err=%v)", leaked, err)
+	for _, leaked := range []string{"leaked-kubeconfig", "leaked-harness-key", ".cache/uv/archive/mod.py"} {
+		if _, err := os.Stat(filepath.Join(dstDir, filepath.FromSlash(leaked))); !os.IsNotExist(err) {
+			t.Errorf("excluded path %q was NOT excluded (stat err=%v)", leaked, err)
 		}
+	}
+	if got, err := os.ReadFile(filepath.Join(dstDir, ".local", "share", "uv", "tools", "ruff", "lib", "mod.py")); err != nil || string(got) != "print('ok')" {
+		t.Errorf("cache-hardlinked uv tool file = %q, err=%v; want preserved", got, err)
 	}
 	if got, err := os.ReadFile(filepath.Join(dstDir, "normal.txt")); err != nil || string(got) != "ok" {
 		t.Errorf("normal.txt = %q, err=%v", got, err)
+	}
+}
+
+// TestT2_UnixCredentialHardlinkBudgetFailClosed verifies that exhausting
+// maxExcludedHardlinkScanEntries under a credential directory fails closed with
+// *ErrUnportableHome from both Write and Estimate.
+func TestT2_UnixCredentialHardlinkBudgetFailClosed(t *testing.T) {
+	orig := maxExcludedHardlinkScanEntries
+	maxExcludedHardlinkScanEntries = 8
+	t.Cleanup(func() { maxExcludedHardlinkScanEntries = orig })
+
+	ctx := context.Background()
+	srcDir := t.TempDir()
+	credDir := filepath.Join(srcDir, ".config", "gcloud", "legacy_credentials")
+	if err := os.MkdirAll(credDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 10 {
+		if err := os.WriteFile(filepath.Join(credDir, fmt.Sprintf("cred-%02d.json", i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srcRoot, _ := os.OpenRoot(srcDir)
+	defer func() { _ = srcRoot.Close() }()
+
+	ex := HomeExcluder(HomeExcluderOptions{AgentHomeAbs: "/home/scion"})
+	lim := DefaultHomeLimits()
+	var uh *ErrUnportableHome
+
+	if _, err := Estimate(ctx, srcRoot, ex, lim); !errors.As(err, &uh) {
+		t.Errorf("Estimate err = %v, want *ErrUnportableHome", err)
+	}
+	store := newMemStore()
+	if _, err := Write(ctx, srcRoot, t.TempDir(), ex, lim, store); !errors.As(err, &uh) {
+		t.Errorf("Write err = %v, want *ErrUnportableHome", err)
+	}
+	if store.putCalls.Load() != 0 {
+		t.Errorf("expected 0 Put calls on hardlink budget exhaustion, got %d", store.putCalls.Load())
 	}
 }
 

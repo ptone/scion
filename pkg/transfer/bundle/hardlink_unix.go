@@ -25,10 +25,11 @@ import (
 )
 
 // maxExcludedHardlinkScanEntries caps the total number of directory entries
-// inspected under excluded directory prefixes when collecting hard-linked
-// excluded regular files. This keeps precheck and export bounded even when
-// large cache trees (such as .cache or go/pkg/mod/cache) are excluded.
-const maxExcludedHardlinkScanEntries = 4096
+// inspected under excluded credential directory prefixes when collecting
+// hard-linked excluded regular files. If the budget is exhausted while
+// scanning a credential directory, collectExcludedInodes fails closed with
+// *ErrUnportableHome rather than silently skipping remaining credentials.
+var maxExcludedHardlinkScanEntries = 4096
 
 type fileIdentity struct {
 	dev uint64
@@ -48,14 +49,16 @@ func fileIdentityIfHardlinked(info fs.FileInfo) (fileIdentity, bool) {
 	return fileIdentity{dev: uint64(st.Dev), ino: uint64(st.Ino)}, true
 }
 
-// collectExcludedInodes stats each excluded prefix inside root (and walks
-// excluded directory prefixes up to maxExcludedHardlinkScanEntries total
-// entries without following symlinks), recording the (dev, ino) of any regular
-// file with nlink > 1 so hard links to excluded secrets at non-excluded paths
-// are also excluded during the walk.
-func collectExcludedInodes(root *os.Root, prefixes []string) excludedInodeSet {
-	if root == nil || len(prefixes) == 0 {
-		return nil
+// collectExcludedInodes stats each excluded credential prefix inside root (and
+// walks excluded credential directory prefixes up to
+// maxExcludedHardlinkScanEntries total entries without following symlinks),
+// recording the (dev, ino) of any regular file with nlink > 1 so hard links to
+// excluded secrets at non-excluded paths are also excluded during the walk.
+// If the scan budget is exhausted under a credential directory prefix, it
+// fails closed with *ErrUnportableHome.
+func collectExcludedInodes(root *os.Root, secretPrefixes []string) (excludedInodeSet, error) {
+	if root == nil || len(secretPrefixes) == 0 {
+		return nil, nil
 	}
 	var set excludedInodeSet
 	record := func(info fs.FileInfo) {
@@ -70,23 +73,23 @@ func collectExcludedInodes(root *os.Root, prefixes []string) excludedInodeSet {
 	}
 
 	remaining := maxExcludedHardlinkScanEntries
-	var walkDir func(rel string)
-	walkDir = func(rel string) {
-		if remaining <= 0 {
-			return
-		}
+	var walkDir func(rootPrefix, rel string) error
+	walkDir = func(rootPrefix, rel string) error {
 		f, err := root.OpenFile(filepath.FromSlash(rel)+string(filepath.Separator), os.O_RDONLY, 0)
 		if err != nil {
-			return
+			return nil
 		}
 		entries, err := f.ReadDir(-1)
 		_ = f.Close()
 		if err != nil {
-			return
+			return nil
 		}
 		for _, e := range entries {
 			if remaining <= 0 {
-				return
+				return &ErrUnportableHome{
+					Path:   rootPrefix,
+					Reason: "excluded credential directory exceeds hardlink scan budget",
+				}
 			}
 			remaining--
 			mt := e.Type()
@@ -95,7 +98,9 @@ func collectExcludedInodes(root *os.Root, prefixes []string) excludedInodeSet {
 			}
 			child := path.Join(rel, e.Name())
 			if e.IsDir() {
-				walkDir(child)
+				if err := walkDir(rootPrefix, child); err != nil {
+					return err
+				}
 				continue
 			}
 			if mt.IsRegular() {
@@ -104,9 +109,10 @@ func collectExcludedInodes(root *os.Root, prefixes []string) excludedInodeSet {
 				}
 			}
 		}
+		return nil
 	}
 
-	for _, p := range prefixes {
+	for _, p := range secretPrefixes {
 		if p == "" {
 			continue
 		}
@@ -117,10 +123,12 @@ func collectExcludedInodes(root *os.Root, prefixes []string) excludedInodeSet {
 		if fi.Mode().IsRegular() {
 			record(fi)
 		} else if fi.IsDir() {
-			walkDir(p)
+			if err := walkDir(p, p); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return set
+	return set, nil
 }
 
 func (s excludedInodeSet) contains(d fs.DirEntry) bool {

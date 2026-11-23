@@ -23,8 +23,8 @@ import (
 
 type excludedInodeSet struct{}
 
-func collectExcludedInodes(_ *os.Root, _ []string) excludedInodeSet {
-	return excludedInodeSet{}
+func collectExcludedInodes(_ *os.Root, _ []string) (excludedInodeSet, error) {
+	return excludedInodeSet{}, nil
 }
 
 func (excludedInodeSet) contains(_ fs.DirEntry) bool {

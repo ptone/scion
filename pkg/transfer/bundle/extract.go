@@ -79,6 +79,9 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 	if rm.PartSize > lim.PartSize {
 		return &ErrLimitExceeded{Field: "part_size", Got: rm.PartSize, Max: lim.PartSize}
 	}
+	if rm.PartSize < MinManifestPartSize && rm.PartSize != lim.PartSize {
+		return fmt.Errorf("%w: manifest partSize %d below minimum %d", ErrInvalidManifest, rm.PartSize, MinManifestPartSize)
+	}
 	if maxParts := MaxPartsFor(lim.MaxBytes, rm.PartSize); len(rm.Parts) > maxParts {
 		return &ErrLimitExceeded{Field: "parts", Got: int64(len(rm.Parts)), Max: int64(maxParts)}
 	}
@@ -111,7 +114,7 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 	seen := make(map[string]struct{})
 	// Bound total path bytes held in seen, symlinks, and dirMeta so a small
 	// compressed archive with many long paths cannot exhaust reader memory.
-	maxPathBytes := max(lim.MaxEntries*256, int64(lim.MaxPathLen))
+	maxPathBytes := maxPathBytesBudget(lim)
 	var (
 		entries    int64
 		totalBytes int64
@@ -157,10 +160,11 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 		if entries+1 > lim.MaxEntries {
 			return &ErrLimitExceeded{Field: "entries", Got: entries + 1, Max: lim.MaxEntries}
 		}
-		entryPathBytes := int64(len(name))
+		linkTarget := ""
 		if hdr.Typeflag == tar.TypeSymlink {
-			entryPathBytes += int64(len(hdr.Linkname))
+			linkTarget = hdr.Linkname
 		}
+		entryPathBytes := entryPathBytesLen(name, linkTarget)
 		if pathBytes+entryPathBytes > maxPathBytes {
 			return &ErrLimitExceeded{Field: "pathBytes", Got: pathBytes + entryPathBytes, Max: maxPathBytes}
 		}
@@ -391,6 +395,9 @@ func newVerifiedPartReader(ctx context.Context, scratchDir string, parts []Part,
 }
 
 func (r *verifiedPartReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
 	for {
 		if r.curFile == nil {
 			if r.nextIdx >= len(r.parts) {

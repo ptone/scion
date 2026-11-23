@@ -66,6 +66,7 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 	var (
 		entries    int64
 		totalBytes int64
+		pathBytes  int64
 		skipped    SkipCounts
 	)
 	copyBuf := make([]byte, 32*1024)
@@ -74,7 +75,7 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		kind, linkTarget, err := classifyEntry(root, rel, d, ex, excludedInodes, entries, lim, &skipped)
+		kind, linkTarget, err := classifyEntry(root, rel, d, ex, excludedInodes, entries, pathBytes, lim, &skipped)
 		if err != nil {
 			return err
 		}
@@ -94,6 +95,7 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 				return fmt.Errorf("write symlink header %s: %w", rel, err)
 			}
 			entries++
+			pathBytes += entryPathBytesLen(rel, linkTarget)
 			return nil
 
 		case entryDir:
@@ -113,6 +115,7 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 				return fmt.Errorf("write dir header %s: %w", rel, err)
 			}
 			entries++
+			pathBytes += entryPathBytesLen(rel, "")
 			return nil
 
 		case entryReg:
@@ -152,6 +155,7 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 			}
 			entries++
 			totalBytes += size
+			pathBytes += entryPathBytesLen(rel, "")
 			return nil
 		}
 		return nil
@@ -198,20 +202,28 @@ func Estimate(ctx context.Context, root *os.Root, ex Excluder, lim Limits) (Esti
 		return EstimateResult{}, err
 	}
 
-	var res EstimateResult
+	var (
+		res       EstimateResult
+		pathBytes int64
+	)
 	err = transfer.WalkRoot(root, func(rel string, d fs.DirEntry) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		kind, _, err := classifyEntry(root, rel, d, ex, excludedInodes, res.Entries, lim, &res.Skipped)
+		kind, linkTarget, err := classifyEntry(root, rel, d, ex, excludedInodes, res.Entries, pathBytes, lim, &res.Skipped)
 		if err != nil {
 			return err
 		}
 		switch kind {
 		case entrySkip:
 			return nil
-		case entrySymlink, entryDir:
+		case entrySymlink:
 			res.Entries++
+			pathBytes += entryPathBytesLen(rel, linkTarget)
+			return nil
+		case entryDir:
+			res.Entries++
+			pathBytes += entryPathBytesLen(rel, "")
 			return nil
 		case entryReg:
 			info, err := d.Info()
@@ -223,6 +235,7 @@ func Estimate(ctx context.Context, root *os.Root, ex Excluder, lim Limits) (Esti
 			}
 			res.Entries++
 			res.Bytes += info.Size()
+			pathBytes += entryPathBytesLen(rel, "")
 			return nil
 		}
 		return nil
@@ -244,9 +257,9 @@ const (
 
 // classifyEntry applies exclusion, hardlink-to-excluded-file skipping,
 // special-file skipping, symlink chain containment validation, and
-// path/depth/entry-count limits to one walked entry. Both Write and Estimate
-// use it so their rules stay identical.
-func classifyEntry(root *os.Root, rel string, d fs.DirEntry, ex Excluder, excludedInodes excludedInodeSet, currentEntries int64, lim Limits, skipped *SkipCounts) (entryKind, string, error) {
+// path/depth/entry-count/pathBytes limits to one walked entry. Both Write and
+// Estimate use it so their rules stay identical.
+func classifyEntry(root *os.Root, rel string, d fs.DirEntry, ex Excluder, excludedInodes excludedInodeSet, currentEntries, currentPathBytes int64, lim Limits, skipped *SkipCounts) (entryKind, string, error) {
 	if ex != nil && ex.Exclude(rel, d.IsDir()) {
 		skipped.Excluded++
 		if d.IsDir() {
@@ -277,7 +290,7 @@ func classifyEntry(root *os.Root, rel string, d fs.DirEntry, ex Excluder, exclud
 			skipped.EscapingSymlinks++
 			return entrySkip, "", nil
 		}
-		if err := checkPathAndEntryLimits(rel, currentEntries, lim); err != nil {
+		if err := checkPathAndEntryLimits(rel, target, currentEntries, currentPathBytes, lim); err != nil {
 			return entrySkip, "", err
 		}
 		return entrySymlink, target, nil
@@ -288,7 +301,7 @@ func classifyEntry(root *os.Root, rel string, d fs.DirEntry, ex Excluder, exclud
 		return entrySkip, "", nil
 	}
 
-	if err := checkPathAndEntryLimits(rel, currentEntries, lim); err != nil {
+	if err := checkPathAndEntryLimits(rel, "", currentEntries, currentPathBytes, lim); err != nil {
 		return entrySkip, "", err
 	}
 
@@ -303,7 +316,7 @@ func classifyEntry(root *os.Root, rel string, d fs.DirEntry, ex Excluder, exclud
 	return entryReg, "", nil
 }
 
-func checkPathAndEntryLimits(rel string, currentEntries int64, lim Limits) error {
+func checkPathAndEntryLimits(rel, linkTarget string, currentEntries, currentPathBytes int64, lim Limits) error {
 	if err := transfer.ValidateRelPath(rel); err != nil {
 		return &ErrUnportablePath{Path: rel, Err: err}
 	}
@@ -315,6 +328,11 @@ func checkPathAndEntryLimits(rel string, currentEntries int64, lim Limits) error
 	}
 	if currentEntries+1 > lim.MaxEntries {
 		return &ErrLimitExceeded{Field: "entries", Got: currentEntries + 1, Max: lim.MaxEntries}
+	}
+	maxPB := maxPathBytesBudget(lim)
+	nextPB := currentPathBytes + entryPathBytesLen(rel, linkTarget)
+	if nextPB > maxPB {
+		return &ErrLimitExceeded{Field: "pathBytes", Got: nextPB, Max: maxPB}
 	}
 	return nil
 }

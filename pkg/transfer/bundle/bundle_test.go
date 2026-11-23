@@ -110,7 +110,7 @@ func buildRawTarGz(t *testing.T, writeFn func(tw *tar.Writer)) (RootManifest, *m
 	store.parts[0] = raw
 	rm := RootManifest{
 		Parts:    []Part{{Index: 0, Size: int64(len(raw)), Hash: transfer.HashBytes(raw)}},
-		PartSize: max(int64(len(raw)), 1024),
+		PartSize: max(int64(len(raw)), MinManifestPartSize),
 	}
 	return rm, store
 }
@@ -473,9 +473,11 @@ func TestT3_ReaderRefusals(t *testing.T) {
 			_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: "a.txt", Size: 5, Mode: 0o644})
 			_, _ = tw.Write([]byte("hello"))
 		})
-		// Set rm.PartSize to part 0's exact size so part 0 passes the non-final
-		// part size check and Extract reaches VerifyAllConsumed().
+		// Set rm.PartSize to part 0's exact size and match lim.PartSize so part 0
+		// passes the up-front part size & floor checks and reaches VerifyAllConsumed().
 		rm.PartSize = rm.Parts[0].Size
+		trailLim := lim
+		trailLim.PartSize = rm.PartSize
 		extra := []byte("trailing")
 		store.parts[1] = extra
 		rm.Parts = append(rm.Parts, Part{
@@ -487,7 +489,7 @@ func TestT3_ReaderRefusals(t *testing.T) {
 		dstRoot, _ := os.OpenRoot(t.TempDir())
 		defer func() { _ = dstRoot.Close() }()
 		scratch := t.TempDir()
-		err := Extract(ctx, dstRoot, scratch, rm, lim, store)
+		err := Extract(ctx, dstRoot, scratch, rm, trailLim, store)
 		if !errors.Is(err, ErrInvalidManifest) {
 			t.Fatalf("got err = %v, want ErrInvalidManifest", err)
 		}
@@ -522,7 +524,7 @@ func TestT3_ReaderRefusals(t *testing.T) {
 				store.parts[0] = raw
 				rm := RootManifest{
 					Parts:    []Part{{Index: 0, Size: int64(len(raw)), Hash: transfer.HashBytes(raw)}},
-					PartSize: max(int64(len(raw)), 1024),
+					PartSize: max(int64(len(raw)), MinManifestPartSize),
 				}
 				dstRoot, _ := os.OpenRoot(t.TempDir())
 				defer func() { _ = dstRoot.Close() }()
@@ -727,6 +729,7 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 		defer func() { _ = dstRoot.Close() }()
 		scratch := t.TempDir()
 		lim := Limits{MaxBytes: 64 << 10, MaxEntries: 100, MaxDepth: 10, MaxPathLen: 256, PartSize: 64 << 10}
+		rm.PartSize = lim.PartSize
 
 		err := Extract(ctx, dstRoot, scratch, rm, lim, store)
 		var le *ErrLimitExceeded
@@ -743,6 +746,7 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 				_, _ = tw.Write([]byte("1"))
 			}
 		})
+		rmEntries.PartSize = 64 << 10
 		dstRoot, _ := os.OpenRoot(t.TempDir())
 		defer func() { _ = dstRoot.Close() }()
 		err := Extract(ctx, dstRoot, t.TempDir(), rmEntries, Limits{MaxBytes: 1000, MaxEntries: 2, MaxDepth: 10, MaxPathLen: 100, PartSize: 64 << 10}, storeEntries)
@@ -755,6 +759,7 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 			_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: "a/b/c.txt", Size: 1, Mode: 0o644})
 			_, _ = tw.Write([]byte("1"))
 		})
+		rmDepth.PartSize = 64 << 10
 		dstRoot2, _ := os.OpenRoot(t.TempDir())
 		defer func() { _ = dstRoot2.Close() }()
 		err = Extract(ctx, dstRoot2, t.TempDir(), rmDepth, Limits{MaxBytes: 1000, MaxEntries: 10, MaxDepth: 2, MaxPathLen: 100, PartSize: 64 << 10}, storeDepth)
@@ -766,6 +771,7 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 			_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: strings.Repeat("p", 30), Size: 1, Mode: 0o644})
 			_, _ = tw.Write([]byte("1"))
 		})
+		rmLen.PartSize = 64 << 10
 		dstRoot3, _ := os.OpenRoot(t.TempDir())
 		defer func() { _ = dstRoot3.Close() }()
 		err = Extract(ctx, dstRoot3, t.TempDir(), rmLen, Limits{MaxBytes: 1000, MaxEntries: 10, MaxDepth: 10, MaxPathLen: 10, PartSize: 64 << 10}, storeLen)
@@ -845,6 +851,21 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 		if len(store3.getCounts) != 0 {
 			t.Fatalf("expected 0 PartSource.Get calls on short non-final part, got %v", store3.getCounts)
 		}
+
+		// 4. Forged tiny manifest PartSize (< MinManifestPartSize and != lim.PartSize) refused before any Get call.
+		store4 := newMemStore()
+		dstRoot4, _ := os.OpenRoot(t.TempDir())
+		defer func() { _ = dstRoot4.Close() }()
+		err = Extract(ctx, dstRoot4, t.TempDir(), RootManifest{
+			Parts:    []Part{{Index: 0, Size: 1, Hash: dummyHash}},
+			PartSize: 1,
+		}, DefaultWorkspaceLimits(), store4)
+		if !errors.Is(err, ErrInvalidManifest) {
+			t.Fatalf("forged tiny manifest PartSize err = %v, want ErrInvalidManifest", err)
+		}
+		if len(store4.getCounts) != 0 {
+			t.Fatalf("expected 0 PartSource.Get calls on tiny manifest PartSize, got %v", store4.getCounts)
+		}
 	})
 
 	t.Run("reader pathBytes memory budget", func(t *testing.T) {
@@ -858,6 +879,7 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 				_, _ = tw.Write([]byte("1"))
 			}
 		})
+		rmPB.PartSize = 64 << 10
 		dstRoot, _ := os.OpenRoot(t.TempDir())
 		defer func() { _ = dstRoot.Close() }()
 		err := Extract(ctx, dstRoot, t.TempDir(), rmPB, Limits{
@@ -872,6 +894,101 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 			t.Fatalf("reader pathBytes err = %v, want ErrLimitExceeded(pathBytes)", err)
 		}
 	})
+
+	t.Run("writer and estimate pathBytes budget parity", func(t *testing.T) {
+		// Repro: 12 nested 200-char dirs with MaxEntries=12 (budget = max(12*256, 4096) = 4096;
+		// cumulative path length across 12 nested 200-char dirs is ~15600 > 4096).
+		srcDir := t.TempDir()
+		cur := srcDir
+		seg := strings.Repeat("d", 200)
+		for range 12 {
+			cur = filepath.Join(cur, seg)
+			if err := os.Mkdir(cur, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		srcRoot, _ := os.OpenRoot(srcDir)
+		defer func() { _ = srcRoot.Close() }()
+		lim := Limits{
+			MaxBytes:   1 << 20,
+			MaxEntries: 12,
+			MaxDepth:   64,
+			MaxPathLen: 4096,
+			PartSize:   64 << 10,
+		}
+		var le *ErrLimitExceeded
+		if _, err := Estimate(ctx, srcRoot, nil, lim); !errors.As(err, &le) || le.Field != "pathBytes" {
+			t.Fatalf("Estimate pathBytes err = %v, want ErrLimitExceeded(pathBytes)", err)
+		}
+		store := newMemStore()
+		if _, err := Write(ctx, srcRoot, t.TempDir(), nil, lim, store); !errors.As(err, &le) || le.Field != "pathBytes" {
+			t.Fatalf("Write pathBytes err = %v, want ErrLimitExceeded(pathBytes)", err)
+		}
+		if store.putCalls.Load() != 0 {
+			t.Fatalf("expected 0 Put calls on writer pathBytes abort, got %d", store.putCalls.Load())
+		}
+	})
+}
+
+// TestT2_HomeExclusions_ExtraLiteralCanonicalization verifies ExtraLiterals
+// canonicalises trailing "/" and leading "./", and fails closed on invalid
+// absolute or ".." entries.
+func TestT2_HomeExclusions_ExtraLiteralCanonicalization(t *testing.T) {
+	ctx := context.Background()
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	scratch := t.TempDir()
+
+	for rel, content := range map[string]string{
+		".config/app/secret": "APP_SECRET",
+		".ssh/id":            "SSH_KEY",
+		"keep.txt":           "ok",
+	} {
+		full := filepath.Join(srcDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srcRoot, _ := os.OpenRoot(srcDir)
+	defer func() { _ = srcRoot.Close() }()
+	dstRoot, _ := os.OpenRoot(dstDir)
+	defer func() { _ = dstRoot.Close() }()
+
+	ex := HomeExcluder(HomeExcluderOptions{
+		ExtraLiterals: []string{".config/app/", "./.ssh/id"},
+	})
+	lim := DefaultHomeLimits()
+	store := newMemStore()
+	rm, err := Write(ctx, srcRoot, scratch, ex, lim, store)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := Extract(ctx, dstRoot, scratch, rm, lim, store); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	for _, excluded := range []string{".config/app/secret", ".ssh/id"} {
+		if _, err := os.Stat(filepath.Join(dstDir, filepath.FromSlash(excluded))); !os.IsNotExist(err) {
+			t.Errorf("canonicalised extra literal %q was NOT excluded (stat err=%v)", excluded, err)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(dstDir, "keep.txt")); err != nil || string(got) != "ok" {
+		t.Errorf("keep.txt = %q, err=%v", got, err)
+	}
+
+	// Invalid literals must fail closed from both Write and Estimate.
+	for _, bad := range []string{"/abs/secret", "../escape", ".", "..", `a\b`} {
+		badEx := HomeExcluder(HomeExcluderOptions{ExtraLiterals: []string{bad}})
+		if _, err := Estimate(ctx, srcRoot, badEx, lim); err == nil {
+			t.Errorf("Estimate(%q) = nil, want error", bad)
+		}
+		if _, err := Write(ctx, srcRoot, t.TempDir(), badEx, lim, newMemStore()); err == nil {
+			t.Errorf("Write(%q) = nil, want error", bad)
+		}
+	}
 }
 
 // TestT1_ModTimePreserved verifies regular-file and directory mtimes survive
@@ -998,13 +1115,20 @@ func TestT5_PartSplittingAndCleanup(t *testing.T) {
 	assertDirEmpty(t, scratch)
 
 	// Verify Extract succeeds when Hub config increased lim.PartSize between
-	// export and import (rm.PartSize < lim.PartSize).
+	// export and import (MinManifestPartSize <= rm.PartSize < lim.PartSize).
 	dstDirLarger := t.TempDir()
 	dstRootLarger, _ := os.OpenRoot(dstDirLarger)
 	defer func() { _ = dstRootLarger.Close() }()
-	largerLim := lim
-	largerLim.PartSize = 4096
-	if err := Extract(ctx, dstRootLarger, scratch, rm, largerLim, store); err != nil {
+	exportLim := lim
+	exportLim.PartSize = MinManifestPartSize
+	storeLarger := newMemStore()
+	rmLarger, err := Write(ctx, srcRoot, scratch, nil, exportLim, storeLarger)
+	if err != nil {
+		t.Fatalf("Write at MinManifestPartSize: %v", err)
+	}
+	importLim := exportLim
+	importLim.PartSize = 2 * MinManifestPartSize
+	if err := Extract(ctx, dstRootLarger, scratch, rmLarger, importLim, storeLarger); err != nil {
 		t.Fatalf("Extract with larger lim.PartSize: %v", err)
 	}
 	assertDirEmpty(t, scratch)
