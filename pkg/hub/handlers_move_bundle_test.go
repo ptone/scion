@@ -248,7 +248,7 @@ func TestMoveBundleUploadURL_AuthzMatrix(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 
 	// Index beyond maxParts -> 400.
-	lim := f.srv.moveBundleExportLimits().WorkspaceLimits()
+	lim := f.srv.MoveBundleExportLimits().WorkspaceLimits()
 	overIdx := validReq
 	overIdx.PartIndex = lim.MaxParts()
 	rec = f.doAsBroker(http.MethodPost, f.uploadURLPath(f.srcID, f.agent.ID, f.rec.ID), f.srcID, overIdx)

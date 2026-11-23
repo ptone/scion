@@ -1152,15 +1152,15 @@ func (s *Server) hostSARecordMoveProbe(ctx context.Context, ac *store.AgentAppli
 	}
 }
 
-// moveBundleExportLimits returns the Hub-configured api.MoveBundleLimits for
+// MoveBundleExportLimits returns the Hub-configured api.MoveBundleLimits for
 // precheck and export requests (with design §3.7 defaults for unset fields).
-func (s *Server) moveBundleExportLimits() api.MoveBundleLimits {
+func (s *Server) MoveBundleExportLimits() api.MoveBundleLimits {
 	return s.config.MoveBundle.ExportLimits()
 }
 
-// moveBundleImportLimits returns the Hub-configured api.MoveBundleLimits for
+// MoveBundleImportLimits returns the Hub-configured api.MoveBundleLimits for
 // import requests (with design §3.7 defaults for unset fields).
-func (s *Server) moveBundleImportLimits() api.MoveBundleLimits {
+func (s *Server) MoveBundleImportLimits() api.MoveBundleLimits {
 	return s.config.MoveBundle.ImportLimits()
 }
 
@@ -1190,7 +1190,7 @@ func (s *Server) moveBundleSourceProbe(ctx context.Context) func(src *store.Runt
 	if !ok {
 		return nil
 	}
-	limits := s.moveBundleExportLimits()
+	limits := s.MoveBundleExportLimits()
 	return func(src *store.RuntimeBroker, agent *store.Agent) (*api.MoveBundlePrecheckResponse, error) {
 		srcAgent := withBroker(agent, src.ID)
 		secretTargets, err := s.moveBundleSecretFileTargets(ctx, srcAgent)

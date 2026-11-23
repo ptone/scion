@@ -115,7 +115,7 @@ func (s *Server) handleMoveBundleUploadURL(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	limits := s.moveBundleExportLimits()
+	limits := s.MoveBundleExportLimits()
 	var rootLim bundle.Limits
 	switch req.Root {
 	case storage.MoveBundleRootWorkspace:
