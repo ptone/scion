@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer/bundle"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // moveBundleSettings holds test-overridable dependencies and timings for the
@@ -244,7 +245,11 @@ func (s *Server) resolveMoveBundleRuntimeName(r *http.Request, id, projectID str
 // runtime.PortableHomeExcludes list with the D6 identity-credential and cache
 // exclusion lists in pkg/transfer/bundle.
 func moveBundleHomeExcluder() bundle.Excluder {
-	return bundle.HomeExcluder(scionrt.PortableHomeExcludes(scionrt.RunConfig{}), scionrt.IsHomeTempName)
+	return bundle.HomeExcluder(bundle.HomeExcluderOptions{
+		ExtraLiterals: scionrt.PortableHomeExcludes(scionrt.RunConfig{}),
+		TempNamePred:  scionrt.IsHomeTempName,
+		AgentHomeAbs:  util.GetHomeDir(""), // TODO(part-b): pass agent's UnixUsername when available
+	})
 }
 
 func decodeOptionalJSON(r *http.Request, dst any) error {
