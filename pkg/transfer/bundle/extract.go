@@ -27,7 +27,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
@@ -66,6 +68,17 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 	if err := rm.Validate(); err != nil {
 		return err
 	}
+	if maxParts := lim.MaxParts(); len(rm.Parts) > maxParts {
+		return &ErrLimitExceeded{Field: "parts", Got: int64(len(rm.Parts)), Max: int64(maxParts)}
+	}
+	for i, p := range rm.Parts {
+		if p.Size > lim.PartSize {
+			return &ErrLimitExceeded{Field: "part_size", Got: p.Size, Max: lim.PartSize}
+		}
+		if i < len(rm.Parts)-1 && p.Size != lim.PartSize {
+			return fmt.Errorf("%w: non-final part %d has size %d, want %d", ErrPartSizeMismatch, p.Index, p.Size, lim.PartSize)
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -85,7 +98,8 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 	var (
 		entries    int64
 		totalBytes int64
-		dirModes   []deferredDirMode
+		dirMeta    []deferredDirMeta
+		symlinks   []extractedSymlink
 	)
 	copyBuf := make([]byte, 32*1024)
 
@@ -148,12 +162,20 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 			} else {
 				return fmt.Errorf("lstat %s: %w", name, err)
 			}
-			if perm != workPerm {
-				dirModes = append(dirModes, deferredDirMode{osName: osName, perm: perm})
-			} else {
+			needsChmod := perm != workPerm
+			if !needsChmod {
 				if err := staging.Chmod(osName, perm); err != nil { //winsec:not-protection restores portable archive permission bits
 					return fmt.Errorf("chmod dir %s: %w", name, err)
 				}
+			}
+			if needsChmod || !hdr.ModTime.IsZero() {
+				dirMeta = append(dirMeta, deferredDirMeta{
+					osName:     osName,
+					depth:      pathDepth(name),
+					perm:       perm,
+					needsChmod: needsChmod,
+					modTime:    hdr.ModTime,
+				})
 			}
 
 		case tar.TypeReg:
@@ -189,6 +211,11 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 			if err := staging.Chmod(osName, perm); err != nil { //winsec:not-protection restores portable archive permission bits
 				return fmt.Errorf("chmod file %s: %w", name, err)
 			}
+			if !hdr.ModTime.IsZero() {
+				if err := staging.Chtimes(osName, hdr.ModTime, hdr.ModTime); err != nil {
+					return fmt.Errorf("chtimes file %s: %w", name, err)
+				}
+			}
 			totalBytes += n
 
 		case tar.TypeSymlink:
@@ -198,6 +225,7 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 			if err := staging.Symlink(hdr.Linkname, osName); err != nil {
 				return fmt.Errorf("symlink %s: %w", name, err)
 			}
+			symlinks = append(symlinks, extractedSymlink{relPath: name, target: hdr.Linkname})
 
 		default:
 			return fmt.Errorf("%w: %s (type %q)", ErrUnsupportedEntryType, name, hdr.Typeflag)
@@ -223,20 +251,47 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 		return err
 	}
 
-	// Apply deferred read-only directory modes deepest-first.
-	for i := len(dirModes) - 1; i >= 0; i-- {
-		dm := dirModes[i]
-		if err := staging.Chmod(dm.osName, dm.perm); err != nil { //winsec:not-protection restores portable archive permission bits
-			return fmt.Errorf("chmod dir %s: %w", dm.osName, err)
+	// Post-pass over all extracted symlinks to catch multi-hop symlink chains
+	// (including links created before the link they traverse) that resolve
+	// outside staging.
+	for _, s := range symlinks {
+		if err := validateSymlinkInRoot(staging, s.relPath, s.target); err != nil {
+			return fmt.Errorf("%w: %s -> %s", err, s.relPath, s.target)
+		}
+	}
+
+	// Apply deferred directory mtimes and read-only modes deepest-first so
+	// child extraction never clobbers parent mtimes or hits EACCES.
+	sort.Slice(dirMeta, func(i, j int) bool {
+		return dirMeta[i].depth > dirMeta[j].depth
+	})
+	for _, dm := range dirMeta {
+		if !dm.modTime.IsZero() {
+			if err := staging.Chtimes(dm.osName, dm.modTime, dm.modTime); err != nil {
+				return fmt.Errorf("chtimes dir %s: %w", dm.osName, err)
+			}
+		}
+		if dm.needsChmod {
+			if err := staging.Chmod(dm.osName, dm.perm); err != nil { //winsec:not-protection restores portable archive permission bits
+				return fmt.Errorf("chmod dir %s: %w", dm.osName, err)
+			}
 		}
 	}
 
 	return nil
 }
 
-type deferredDirMode struct {
-	osName string
-	perm   fs.FileMode
+type deferredDirMeta struct {
+	osName     string
+	depth      int
+	perm       fs.FileMode
+	needsChmod bool
+	modTime    time.Time
+}
+
+type extractedSymlink struct {
+	relPath string
+	target  string
 }
 
 // ensureParentDirs verifies that every ancestor component of rel inside staging

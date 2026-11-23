@@ -171,7 +171,7 @@ func TestT2_UnixSkipCounts(t *testing.T) {
 	}
 	defer func() { _ = ln.Close() }()
 
-	// Escaping symlinks (absolute + relative escaping root)
+	// Escaping symlinks (absolute + relative escaping root + multi-hop chain)
 	if err := os.Symlink("/scion-staging/secret", filepath.Join(srcDir, "abs-secret")); err != nil {
 		t.Fatal(err)
 	}
@@ -181,6 +181,16 @@ func TestT2_UnixSkipCounts(t *testing.T) {
 	if err := os.Symlink("../../outside", filepath.Join(srcDir, "sub", "rel-escape")); err != nil {
 		t.Fatal(err)
 	}
+	// Symlink chain: a/b -> .. (stays at root, kept), c -> a/b/../x (physically ../x, skipped!)
+	if err := os.MkdirAll(filepath.Join(srcDir, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("..", filepath.Join(srcDir, "a", "b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("a/b/../x", filepath.Join(srcDir, "c")); err != nil {
+		t.Fatal(err)
+	}
 
 	srcRoot, err := os.OpenRoot(srcDir)
 	if err != nil {
@@ -188,10 +198,19 @@ func TestT2_UnixSkipCounts(t *testing.T) {
 	}
 	defer func() { _ = srcRoot.Close() }()
 
+	lim := DefaultWorkspaceLimits()
+	est, err := Estimate(ctx, srcRoot, nil, lim)
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+
 	store := newMemStore()
-	rm, err := Write(ctx, srcRoot, scratch, nil, DefaultWorkspaceLimits(), store)
+	rm, err := Write(ctx, srcRoot, scratch, nil, lim, store)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
+	}
+	if est.Entries != rm.Entries || est.Bytes != rm.Bytes || est.Skipped != rm.Skipped {
+		t.Fatalf("Estimate %+v != Write %+v", est, rm)
 	}
 	if rm.Skipped.FIFOs != 1 {
 		t.Errorf("Skipped.FIFOs = %d, want 1", rm.Skipped.FIFOs)
@@ -199,8 +218,8 @@ func TestT2_UnixSkipCounts(t *testing.T) {
 	if rm.Skipped.Sockets != 1 {
 		t.Errorf("Skipped.Sockets = %d, want 1", rm.Skipped.Sockets)
 	}
-	if rm.Skipped.EscapingSymlinks != 2 {
-		t.Errorf("Skipped.EscapingSymlinks = %d, want 2", rm.Skipped.EscapingSymlinks)
+	if rm.Skipped.EscapingSymlinks != 3 {
+		t.Errorf("Skipped.EscapingSymlinks = %d, want 3", rm.Skipped.EscapingSymlinks)
 	}
 }
 
@@ -231,4 +250,57 @@ func TestT3_UnixSymlinkedParentRefused(t *testing.T) {
 		t.Fatalf("evil.txt was written through symlink parent!")
 	}
 	assertDirEmpty(t, scratch)
+}
+
+// TestT3_UnixSymlinkChainRefused verifies that multi-hop symlink chains
+// escaping the root are refused regardless of entry order in the archive.
+func TestT3_UnixSymlinkChainRefused(t *testing.T) {
+	ctx := context.Background()
+	lim := DefaultWorkspaceLimits()
+
+	cases := []struct {
+		name  string
+		write func(tw *tar.Writer)
+	}{
+		{
+			name: "target symlink before escaping chain link",
+			write: func(tw *tar.Writer) {
+				_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "a/", Mode: 0o755})
+				_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: "a/b", Linkname: "..", Mode: 0o777})
+				_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: "c", Linkname: "a/b/../x", Mode: 0o777})
+			},
+		},
+		{
+			name: "escaping chain link before target symlink",
+			write: func(tw *tar.Writer) {
+				_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: "c", Linkname: "a/b/../x", Mode: 0o777})
+				_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "a/", Mode: 0o755})
+				_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: "a/b", Linkname: "..", Mode: 0o777})
+			},
+		},
+		{
+			name: "symlink loop refused",
+			write: func(tw *tar.Writer) {
+				_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: "x", Linkname: "y", Mode: 0o777})
+				_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: "y", Linkname: "x", Mode: 0o777})
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rm, store := buildRawTarGz(t, tc.write)
+			dstRoot, err := os.OpenRoot(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = dstRoot.Close() }()
+			scratch := t.TempDir()
+			err = Extract(ctx, dstRoot, scratch, rm, lim, store)
+			if !errors.Is(err, ErrEscapingSymlink) {
+				t.Fatalf("got err = %v, want ErrEscapingSymlink", err)
+			}
+			assertDirEmpty(t, scratch)
+		})
+	}
 }

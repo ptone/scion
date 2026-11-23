@@ -85,34 +85,49 @@ func WorkspaceExcluder() Excluder {
 }
 
 // HomeExcluder returns the excluder for a $HOME root: the union of
-// HomeBaselineExcludes, any caller-supplied extraPatterns (such as
+// HomeBaselineExcludes, any caller-supplied extraLiterals (such as
 // runtime.PortableHomeExcludes(cfg) for per-agent resolved secrets and auth
-// files), HomeIdentityCredentialExcludes, HomeCacheExcludes, and Scion guarded
-// writer temp filenames (design §3.4 "Exclusions" items 1–4).
-func HomeExcluder(extraPatterns []string) Excluder {
-	patterns := make([]string, 0, len(HomeBaselineExcludes)+len(extraPatterns)+len(HomeIdentityCredentialExcludes)+len(HomeCacheExcludes))
-	patterns = append(patterns, HomeBaselineExcludes...)
-	patterns = append(patterns, extraPatterns...)
-	patterns = append(patterns, HomeIdentityCredentialExcludes...)
-	patterns = append(patterns, HomeCacheExcludes...)
-	patEx := PatternExcluder(patterns)
+// files — matched literally as exact path or subtree prefix, never as globs),
+// HomeIdentityCredentialExcludes, HomeCacheExcludes, and Scion guarded writer
+// temp filenames (design §3.4 "Exclusions" items 1–4).
+func HomeExcluder(extraLiterals []string) Excluder {
+	staticPatterns := make([]string, 0, len(HomeBaselineExcludes)+len(HomeIdentityCredentialExcludes)+len(HomeCacheExcludes))
+	staticPatterns = append(staticPatterns, HomeBaselineExcludes...)
+	staticPatterns = append(staticPatterns, HomeIdentityCredentialExcludes...)
+	staticPatterns = append(staticPatterns, HomeCacheExcludes...)
+	staticEx := PatternExcluder(staticPatterns)
+
+	literals := make([]string, 0, len(extraLiterals))
+	for _, lit := range extraLiterals {
+		lit = strings.TrimSpace(lit)
+		if lit == "" {
+			continue
+		}
+		literals = append(literals, lit)
+	}
+
 	return ExcluderFunc(func(relPath string, isDir bool) bool {
 		if homeTempNameRE.MatchString(path.Base(relPath)) {
 			return true
 		}
-		return patEx.Exclude(relPath, isDir)
+		for _, lit := range literals {
+			if relPath == lit || strings.HasPrefix(relPath, lit+"/") {
+				return true
+			}
+		}
+		return staticEx.Exclude(relPath, isDir)
 	})
 }
 
 // PatternExcluder builds an Excluder from slash-separated relative patterns.
 //
-// Supported forms:
+// Supported forms (no glob metacharacter parsing, so paths containing
+// brackets or wildcards such as ".config/app[1]/token" match literally and
+// never fail open):
 //   - "prefix/**" matches "prefix" itself and any descendant "prefix/...".
-//   - "**/suffix" matches any path whose basename or trailing path equals suffix.
-//   - Plain paths without glob metacharacters ("a/b") match "a/b" and any
-//     descendant "a/b/..." (matching runtime.homeRelExcluded semantics).
-//   - Simple path.Match globs (containing *, ?, or [) match the full relative
-//     path, or the basename if the pattern contains no "/".
+//   - "**/suffix" matches any path equal to suffix or ending in "/suffix".
+//   - Any other pattern is matched literally as an exact path or subtree
+//     prefix ("a/b" matches "a/b" and "a/b/...").
 func PatternExcluder(patterns []string) Excluder {
 	cleaned := make([]string, 0, len(patterns))
 	for _, p := range patterns {
@@ -139,17 +154,6 @@ func matchExcludePattern(pat, relPath string) bool {
 	if suffix, ok := strings.CutPrefix(pat, "**/"); ok {
 		return relPath == suffix || strings.HasSuffix(relPath, "/"+suffix)
 	}
-	if strings.ContainsAny(pat, "*?[") {
-		if !strings.Contains(pat, "/") {
-			if matched, _ := path.Match(pat, path.Base(relPath)); matched {
-				return true
-			}
-		}
-		if matched, _ := path.Match(pat, relPath); matched {
-			return true
-		}
-		return false
-	}
-	// Plain relative path: matches exact path or any descendant.
+	// Literal relative path: matches exact path or any descendant.
 	return relPath == pat || strings.HasPrefix(relPath, pat+"/")
 }

@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
@@ -277,9 +278,11 @@ func TestT2_HomeExclusions(t *testing.T) {
 	scratch := t.TempDir()
 
 	excludedFiles := []string{
-		// Item 1 (caller-supplied per-config resolved secrets/auth)
+		// Item 1 (caller-supplied per-config resolved secrets/auth, incl. glob metacharacters)
 		".config/my-secret.json",
 		".claude/.credentials.json",
+		".config/app[1]/token",
+		".config/app[broken/secret",
 		// Item 2 (baseline Scion secrets/tokens/reset marker/temp names)
 		".scion/scion-token",
 		".scion/scion-token.tmp",
@@ -331,7 +334,12 @@ func TestT2_HomeExclusions(t *testing.T) {
 	}
 	defer func() { _ = dstRoot.Close() }()
 
-	ex := HomeExcluder([]string{".config/my-secret.json", ".claude/.credentials.json"})
+	ex := HomeExcluder([]string{
+		".config/my-secret.json",
+		".claude/.credentials.json",
+		".config/app[1]/token",
+		".config/app[broken/secret",
+	})
 	store := newMemStore()
 	lim := DefaultHomeLimits()
 
@@ -685,6 +693,120 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 			t.Fatalf("reader path_len err = %v, want ErrLimitExceeded(path_len)", err)
 		}
 	})
+
+	t.Run("reader part count and part size limits before download", func(t *testing.T) {
+		dummyHash := transfer.HashBytes([]byte("x"))
+
+		// 1. Oversized part (> lim.PartSize) refused before any Get call.
+		lim := Limits{MaxBytes: 4096, MaxEntries: 100, MaxDepth: 10, MaxPathLen: 256, PartSize: 1024}
+		store := newMemStore()
+		rmOversize := RootManifest{
+			Parts: []Part{{Index: 0, Size: 2048, Hash: dummyHash}},
+		}
+		dstRoot, _ := os.OpenRoot(t.TempDir())
+		defer func() { _ = dstRoot.Close() }()
+		err := Extract(ctx, dstRoot, t.TempDir(), rmOversize, lim, store)
+		var le *ErrLimitExceeded
+		if !errors.As(err, &le) || le.Field != "part_size" {
+			t.Fatalf("oversized part err = %v, want ErrLimitExceeded(part_size)", err)
+		}
+		if len(store.getCounts) != 0 {
+			t.Fatalf("expected 0 PartSource.Get calls on oversized part, got %v", store.getCounts)
+		}
+
+		// 2. Too many parts (> lim.MaxParts()) refused before any Get call.
+		maxParts := lim.MaxParts()
+		tooMany := make([]Part, maxParts+1)
+		for i := range tooMany {
+			tooMany[i] = Part{Index: i, Size: lim.PartSize, Hash: dummyHash}
+		}
+		store2 := newMemStore()
+		dstRoot2, _ := os.OpenRoot(t.TempDir())
+		defer func() { _ = dstRoot2.Close() }()
+		err = Extract(ctx, dstRoot2, t.TempDir(), RootManifest{Parts: tooMany}, lim, store2)
+		if !errors.As(err, &le) || le.Field != "parts" {
+			t.Fatalf("too many parts err = %v, want ErrLimitExceeded(parts)", err)
+		}
+		if len(store2.getCounts) != 0 {
+			t.Fatalf("expected 0 PartSource.Get calls on too many parts, got %v", store2.getCounts)
+		}
+
+		// 3. Non-final part smaller than lim.PartSize refused before any Get call.
+		store3 := newMemStore()
+		dstRoot3, _ := os.OpenRoot(t.TempDir())
+		defer func() { _ = dstRoot3.Close() }()
+		rmShortNonFinal := RootManifest{
+			Parts: []Part{
+				{Index: 0, Size: 512, Hash: dummyHash},
+				{Index: 1, Size: 100, Hash: dummyHash},
+			},
+		}
+		err = Extract(ctx, dstRoot3, t.TempDir(), rmShortNonFinal, lim, store3)
+		if !errors.Is(err, ErrPartSizeMismatch) {
+			t.Fatalf("short non-final part err = %v, want ErrPartSizeMismatch", err)
+		}
+		if len(store3.getCounts) != 0 {
+			t.Fatalf("expected 0 PartSource.Get calls on short non-final part, got %v", store3.getCounts)
+		}
+	})
+}
+
+// TestT1_ModTimePreserved verifies regular-file and directory mtimes survive
+// round-trip extraction (preserving git's stat cache).
+func TestT1_ModTimePreserved(t *testing.T) {
+	ctx := context.Background()
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	scratch := t.TempDir()
+
+	dirTime := time.Date(2024, 3, 15, 10, 20, 30, 0, time.UTC)
+	fileTime := time.Date(2023, 11, 5, 8, 9, 10, 0, time.UTC)
+
+	subDir := filepath.Join(srcDir, "pkg", "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(subDir, "data.txt")
+	if err := os.WriteFile(filePath, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filePath, fileTime, fileTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(subDir, dirTime, dirTime); err != nil {
+		t.Fatal(err)
+	}
+
+	srcRoot, _ := os.OpenRoot(srcDir)
+	defer func() { _ = srcRoot.Close() }()
+	dstRoot, _ := os.OpenRoot(dstDir)
+	defer func() { _ = dstRoot.Close() }()
+
+	store := newMemStore()
+	lim := DefaultWorkspaceLimits()
+	rm, err := Write(ctx, srcRoot, scratch, nil, lim, store)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := Extract(ctx, dstRoot, scratch, rm, lim, store); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+
+	gotFileInfo, err := os.Stat(filepath.Join(dstDir, "pkg", "sub", "data.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotFileInfo.ModTime().UTC().Truncate(time.Second).Equal(fileTime) {
+		t.Errorf("file mtime = %v, want %v", gotFileInfo.ModTime().UTC(), fileTime)
+	}
+
+	gotDirInfo, err := os.Stat(filepath.Join(dstDir, "pkg", "sub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotDirInfo.ModTime().UTC().Truncate(time.Second).Equal(dirTime) {
+		t.Errorf("dir mtime = %v, want %v", gotDirInfo.ModTime().UTC(), dirTime)
+	}
 }
 
 // TestT5_PartSplittingAndCleanup verifies exact part boundaries, streaming of a

@@ -29,6 +29,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -262,10 +264,12 @@ func CanonicalManifest(m Manifest) ([]byte, string, error) {
 	return b, transfer.HashBytes(b), nil
 }
 
-// validateSymlinkTarget reports whether target is a safe relative symlink
-// target for an entry at slash-separated relPath inside a bundle root.
-// Absolute targets, targets with NUL or backslashes, and targets that resolve
-// outside the root return ErrEscapingSymlink.
+const maxSymlinkHops = 40
+
+// validateSymlinkTarget reports whether target is a lexically safe relative
+// symlink target for an entry at slash-separated relPath inside a bundle root.
+// Absolute targets, targets with NUL or backslashes, and targets that lexically
+// resolve outside the root return ErrEscapingSymlink.
 func validateSymlinkTarget(relPath, target string) error {
 	if target == "" || strings.ContainsRune(target, 0) || strings.Contains(target, `\`) {
 		return ErrEscapingSymlink
@@ -277,6 +281,70 @@ func validateSymlinkTarget(relPath, target string) error {
 	resolved := path.Clean(path.Join(entryDir, target))
 	if resolved == ".." || strings.HasPrefix(resolved, "../") || path.IsAbs(resolved) {
 		return ErrEscapingSymlink
+	}
+	return nil
+}
+
+// validateSymlinkInRoot checks both lexical containment and physical symlink
+// chain containment inside root: walking target component-by-component from
+// relPath's parent directory, any intermediate or final symlink is expanded
+// (up to maxSymlinkHops) and must never step above root or point to an
+// absolute/invalid target.
+func validateSymlinkInRoot(root *os.Root, relPath, target string) error {
+	if err := validateSymlinkTarget(relPath, target); err != nil {
+		return err
+	}
+	var cur []string
+	if dir := path.Dir(relPath); dir != "." && dir != "" {
+		cur = strings.Split(dir, "/")
+	}
+	queue := strings.Split(target, "/")
+	hops := 0
+
+	for len(queue) > 0 {
+		comp := queue[0]
+		queue = queue[1:]
+
+		switch comp {
+		case "", ".":
+			continue
+		case "..":
+			if len(cur) == 0 {
+				return ErrEscapingSymlink
+			}
+			cur = cur[:len(cur)-1]
+			continue
+		}
+
+		cur = append(cur, comp)
+		cand := strings.Join(cur, "/")
+		fi, err := root.Lstat(filepath.FromSlash(cand))
+		if err != nil {
+			// A missing target (dangling internal symlink) or non-directory
+			// intermediate component cannot redirect via a symlink; continue
+			// checking any remaining ".." lexically.
+			continue
+		}
+		if fi.Mode()&fs.ModeSymlink == 0 {
+			continue
+		}
+
+		hops++
+		if hops > maxSymlinkHops {
+			return ErrEscapingSymlink
+		}
+		linkTarget, err := root.Readlink(filepath.FromSlash(cand))
+		if err != nil {
+			return ErrEscapingSymlink
+		}
+		if linkTarget == "" || strings.ContainsRune(linkTarget, 0) || strings.Contains(linkTarget, `\`) ||
+			path.IsAbs(linkTarget) || filepath.IsAbs(linkTarget) {
+			return ErrEscapingSymlink
+		}
+		// Resolve linkTarget relative to cand's parent directory.
+		cur = cur[:len(cur)-1]
+		next := strings.Split(linkTarget, "/")
+		queue = append(next, queue...)
 	}
 	return nil
 }

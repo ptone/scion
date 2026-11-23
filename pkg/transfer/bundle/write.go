@@ -69,45 +69,19 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if ex != nil && ex.Exclude(rel, d.IsDir()) {
-			skipped.Excluded++
-			if d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
+		kind, linkTarget, err := classifyEntry(root, rel, d, ex, entries, lim, &skipped)
+		if err != nil {
+			return err
 		}
+		switch kind {
+		case entrySkip:
+			return nil
 
-		modeType := d.Type()
-		switch {
-		case modeType&fs.ModeSocket != 0:
-			skipped.Sockets++
-			return nil
-		case modeType&fs.ModeNamedPipe != 0:
-			skipped.FIFOs++
-			return nil
-		case modeType&(fs.ModeDevice|fs.ModeCharDevice) != 0:
-			skipped.Devices++
-			return nil
-		}
-
-		// Handle symlinks before limit accounting so escaping symlinks are
-		// skipped and counted rather than counted as entries.
-		if modeType&fs.ModeSymlink != 0 {
-			target, err := root.Readlink(filepath.FromSlash(rel))
-			if err != nil {
-				return fmt.Errorf("readlink %s: %w", rel, err)
-			}
-			if err := validateSymlinkTarget(rel, target); err != nil {
-				skipped.EscapingSymlinks++
-				return nil
-			}
-			if err := checkPathAndEntryLimits(rel, entries, lim); err != nil {
-				return err
-			}
+		case entrySymlink:
 			hdr := &tar.Header{
 				Typeflag: tar.TypeSymlink,
 				Name:     rel,
-				Linkname: target,
+				Linkname: linkTarget,
 				Mode:     0o777,
 				Format:   tar.FormatPAX,
 			}
@@ -116,13 +90,8 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 			}
 			entries++
 			return nil
-		}
 
-		if err := checkPathAndEntryLimits(rel, entries, lim); err != nil {
-			return err
-		}
-
-		if d.IsDir() {
+		case entryDir:
 			info, err := d.Info()
 			if err != nil {
 				return fmt.Errorf("stat dir %s: %w", rel, err)
@@ -140,50 +109,46 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 			}
 			entries++
 			return nil
-		}
 
-		if !modeType.IsRegular() {
-			// Any other non-regular type (e.g. ModeIrregular) is skipped.
-			skipped.Devices++
+		case entryReg:
+			f, info, err := transfer.OpenRegularFile(root, filepath.FromSlash(rel))
+			if err != nil {
+				return fmt.Errorf("open regular file %s: %w", rel, err)
+			}
+			size := info.Size()
+			if totalBytes+size > lim.MaxBytes {
+				_ = f.Close()
+				return &ErrLimitExceeded{Field: "bytes", Got: totalBytes + size, Max: lim.MaxBytes}
+			}
+
+			perm := info.Mode().Perm() & 0o777
+			hdr := &tar.Header{
+				Typeflag: tar.TypeReg,
+				Name:     rel,
+				Size:     size,
+				Mode:     int64(perm),
+				ModTime:  info.ModTime().UTC(),
+				Format:   tar.FormatPAX,
+			}
+			if err := tw.WriteHeader(hdr); err != nil {
+				_ = f.Close()
+				return fmt.Errorf("write file header %s: %w", rel, err)
+			}
+			n, err := io.CopyBuffer(tw, io.LimitReader(f, size), copyBuf)
+			closeErr := f.Close()
+			if err != nil {
+				return fmt.Errorf("copy file %s: %w", rel, err)
+			}
+			if n != size {
+				return fmt.Errorf("short read on %s: copied %d of %d bytes", rel, n, size)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("close file %s: %w", rel, closeErr)
+			}
+			entries++
+			totalBytes += size
 			return nil
 		}
-
-		f, info, err := transfer.OpenRegularFile(root, filepath.FromSlash(rel))
-		if err != nil {
-			return fmt.Errorf("open regular file %s: %w", rel, err)
-		}
-		size := info.Size()
-		if totalBytes+size > lim.MaxBytes {
-			_ = f.Close()
-			return &ErrLimitExceeded{Field: "bytes", Got: totalBytes + size, Max: lim.MaxBytes}
-		}
-
-		perm := info.Mode().Perm() & 0o777
-		hdr := &tar.Header{
-			Typeflag: tar.TypeReg,
-			Name:     rel,
-			Size:     size,
-			Mode:     int64(perm),
-			ModTime:  info.ModTime().UTC(),
-			Format:   tar.FormatPAX,
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			_ = f.Close()
-			return fmt.Errorf("write file header %s: %w", rel, err)
-		}
-		n, err := io.CopyBuffer(tw, io.LimitReader(f, size), copyBuf)
-		closeErr := f.Close()
-		if err != nil {
-			return fmt.Errorf("copy file %s: %w", rel, err)
-		}
-		if n != size {
-			return fmt.Errorf("short read on %s: copied %d of %d bytes", rel, n, size)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close file %s: %w", rel, closeErr)
-		}
-		entries++
-		totalBytes += size
 		return nil
 	})
 	if walkErr != nil {
@@ -227,72 +192,98 @@ func Estimate(ctx context.Context, root *os.Root, ex Excluder, lim Limits) (Esti
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if ex != nil && ex.Exclude(rel, d.IsDir()) {
-			res.Skipped.Excluded++
-			if d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-
-		modeType := d.Type()
-		switch {
-		case modeType&fs.ModeSocket != 0:
-			res.Skipped.Sockets++
-			return nil
-		case modeType&fs.ModeNamedPipe != 0:
-			res.Skipped.FIFOs++
-			return nil
-		case modeType&(fs.ModeDevice|fs.ModeCharDevice) != 0:
-			res.Skipped.Devices++
-			return nil
-		}
-
-		if modeType&fs.ModeSymlink != 0 {
-			target, err := root.Readlink(filepath.FromSlash(rel))
-			if err != nil {
-				return fmt.Errorf("readlink %s: %w", rel, err)
-			}
-			if err := validateSymlinkTarget(rel, target); err != nil {
-				res.Skipped.EscapingSymlinks++
-				return nil
-			}
-			if err := checkPathAndEntryLimits(rel, res.Entries, lim); err != nil {
-				return err
-			}
-			res.Entries++
-			return nil
-		}
-
-		if err := checkPathAndEntryLimits(rel, res.Entries, lim); err != nil {
+		kind, _, err := classifyEntry(root, rel, d, ex, res.Entries, lim, &res.Skipped)
+		if err != nil {
 			return err
 		}
-
-		if d.IsDir() {
+		switch kind {
+		case entrySkip:
+			return nil
+		case entrySymlink, entryDir:
 			res.Entries++
 			return nil
-		}
-
-		if !modeType.IsRegular() {
-			res.Skipped.Devices++
+		case entryReg:
+			info, err := d.Info()
+			if err != nil {
+				return fmt.Errorf("stat %s: %w", rel, err)
+			}
+			if res.Bytes+info.Size() > lim.MaxBytes {
+				return &ErrLimitExceeded{Field: "bytes", Got: res.Bytes + info.Size(), Max: lim.MaxBytes}
+			}
+			res.Entries++
+			res.Bytes += info.Size()
 			return nil
 		}
-
-		info, err := d.Info()
-		if err != nil {
-			return fmt.Errorf("stat %s: %w", rel, err)
-		}
-		if res.Bytes+info.Size() > lim.MaxBytes {
-			return &ErrLimitExceeded{Field: "bytes", Got: res.Bytes + info.Size(), Max: lim.MaxBytes}
-		}
-		res.Entries++
-		res.Bytes += info.Size()
 		return nil
 	})
 	if err != nil {
 		return EstimateResult{}, err
 	}
 	return res, nil
+}
+
+type entryKind int
+
+const (
+	entrySkip entryKind = iota
+	entryDir
+	entryReg
+	entrySymlink
+)
+
+// classifyEntry applies exclusion, special-file skipping, symlink chain
+// containment validation, and path/depth/entry-count limits to one walked
+// entry. Both Write and Estimate use it so their rules stay identical.
+func classifyEntry(root *os.Root, rel string, d fs.DirEntry, ex Excluder, currentEntries int64, lim Limits, skipped *SkipCounts) (entryKind, string, error) {
+	if ex != nil && ex.Exclude(rel, d.IsDir()) {
+		skipped.Excluded++
+		if d.IsDir() {
+			return entrySkip, "", fs.SkipDir
+		}
+		return entrySkip, "", nil
+	}
+
+	modeType := d.Type()
+	switch {
+	case modeType&fs.ModeSocket != 0:
+		skipped.Sockets++
+		return entrySkip, "", nil
+	case modeType&fs.ModeNamedPipe != 0:
+		skipped.FIFOs++
+		return entrySkip, "", nil
+	case modeType&(fs.ModeDevice|fs.ModeCharDevice) != 0:
+		skipped.Devices++
+		return entrySkip, "", nil
+	}
+
+	if modeType&fs.ModeSymlink != 0 {
+		target, err := root.Readlink(filepath.FromSlash(rel))
+		if err != nil {
+			return entrySkip, "", fmt.Errorf("readlink %s: %w", rel, err)
+		}
+		if err := validateSymlinkInRoot(root, rel, target); err != nil {
+			skipped.EscapingSymlinks++
+			return entrySkip, "", nil
+		}
+		if err := checkPathAndEntryLimits(rel, currentEntries, lim); err != nil {
+			return entrySkip, "", err
+		}
+		return entrySymlink, target, nil
+	}
+
+	if err := checkPathAndEntryLimits(rel, currentEntries, lim); err != nil {
+		return entrySkip, "", err
+	}
+
+	if d.IsDir() {
+		return entryDir, "", nil
+	}
+	if !modeType.IsRegular() {
+		// Any other non-regular type (e.g. ModeIrregular) is skipped.
+		skipped.Devices++
+		return entrySkip, "", nil
+	}
+	return entryReg, "", nil
 }
 
 func checkPathAndEntryLimits(rel string, currentEntries int64, lim Limits) error {
