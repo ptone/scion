@@ -1788,6 +1788,10 @@ type RemoteCreateAgentRequest struct {
 	// runtimebroker.CreateAgentRequest.MoveReincarnationID: a forced move's
 	// reincarnation ID, sent with the fresh-agent-dir expectation.
 	MoveReincarnationID string `json:"moveReincarnationId,omitempty"`
+	// WorkspaceSource mirrors
+	// runtimebroker.CreateAgentRequest.WorkspaceSource: "move-bundle" on a
+	// bundle move's target provision leaves the workspace directory empty.
+	WorkspaceSource string `json:"workspaceSource,omitempty"`
 	// ResetHome and ResetHomeID mirror runtimebroker.CreateAgentRequest's
 	// home reset fields: set only on a reprovision that resets the agent's
 	// home (ptone/scion#7757).
