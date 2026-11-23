@@ -244,7 +244,7 @@ func (s *Server) resolveMoveBundleRuntimeName(r *http.Request, id, projectID str
 // runtime.PortableHomeExcludes list with the D6 identity-credential and cache
 // exclusion lists in pkg/transfer/bundle.
 func moveBundleHomeExcluder() bundle.Excluder {
-	return bundle.HomeExcluder(scionrt.PortableHomeExcludes(scionrt.RunConfig{}))
+	return bundle.HomeExcluder(scionrt.PortableHomeExcludes(scionrt.RunConfig{}), scionrt.IsHomeTempName)
 }
 
 func decodeOptionalJSON(r *http.Request, dst any) error {
