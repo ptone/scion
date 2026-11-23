@@ -370,10 +370,12 @@ func TestT2_UnixHomeExclusionsThroughSymlinkedAncestor(t *testing.T) {
 	}
 	defer func() { _ = dstRoot.Close() }()
 
-	ex := HomeExcluder([]string{
-		".config/my-app/token.json",
-		".scion/harness/secrets",
-	}, nil)
+	ex := HomeExcluder(HomeExcluderOptions{
+		ExtraLiterals: []string{
+			".config/my-app/token.json",
+			".scion/harness/secrets",
+		},
+	})
 	lim := DefaultHomeLimits()
 
 	est, err := Estimate(ctx, srcRoot, ex, lim)
@@ -461,4 +463,230 @@ func TestT4_UnixWriterMaxPartsEnforced(t *testing.T) {
 		t.Fatalf("sink.Put called %d times, exceeds MaxParts()=%d", got, lim.MaxParts())
 	}
 	assertDirEmpty(t, scratch)
+}
+
+// TestT2_UnixHomeExclusions_AbsoluteInHomeAncestor reproduces Round 3 R1:
+// .config -> /home/scion/dotfiles/config (an absolute symlink pointing back
+// into AgentHomeAbs) must rebase and exclude dotfiles/config/gcloud/credentials.db.
+func TestT2_UnixHomeExclusions_AbsoluteInHomeAncestor(t *testing.T) {
+	ctx := context.Background()
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	scratch := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(srcDir, "dotfiles", "config", "gcloud", "configurations"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "dotfiles", "config", "gcloud", "credentials.db"), []byte("ABS_SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "dotfiles", "config", "gcloud", "configurations", "config_default"), []byte("keep-cfg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/home/scion/dotfiles/config", filepath.Join(srcDir, ".config")); err != nil {
+		t.Fatal(err)
+	}
+
+	srcRoot, _ := os.OpenRoot(srcDir)
+	defer func() { _ = srcRoot.Close() }()
+	dstRoot, _ := os.OpenRoot(dstDir)
+	defer func() { _ = dstRoot.Close() }()
+
+	ex := HomeExcluder(HomeExcluderOptions{AgentHomeAbs: "/home/scion"})
+	lim := DefaultHomeLimits()
+
+	est, err := Estimate(ctx, srcRoot, ex, lim)
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	store := newMemStore()
+	rm, err := Write(ctx, srcRoot, scratch, ex, lim, store)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if est.Entries != rm.Entries || est.Bytes != rm.Bytes || est.Skipped != rm.Skipped {
+		t.Fatalf("Estimate %+v != Write %+v", est, rm)
+	}
+	if err := Extract(ctx, dstRoot, scratch, rm, lim, store); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dstDir, "dotfiles", "config", "gcloud", "credentials.db")); !os.IsNotExist(err) {
+		t.Fatalf("secret leaked via absolute in-home ancestor symlink (stat err=%v)", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dstDir, "dotfiles", "config", "gcloud", "configurations", "config_default")); err != nil || string(got) != "keep-cfg" {
+		t.Fatalf("non-excluded file = %q, err=%v", got, err)
+	}
+}
+
+// TestT2_UnixHomeExclusions_FailClosedUnresolvableAncestor verifies that
+// unresolvable ancestor symlinks on any exclusion entry fail closed with
+// *ErrUnportableHome from both Write and Estimate, while an outside-home leaf
+// symlink (e.g. K8s /scion-staging/...) stays excluded without failing.
+func TestT2_UnixHomeExclusions_FailClosedUnresolvableAncestor(t *testing.T) {
+	ctx := context.Background()
+	lim := DefaultHomeLimits()
+
+	cases := []struct {
+		name         string
+		linkRel      string
+		linkTarget   string
+		agentHomeAbs string
+		wantPath     string
+	}{
+		{
+			name:         "absolute symlink outside home",
+			linkRel:      ".config",
+			linkTarget:   "/etc/dotfiles",
+			agentHomeAbs: "/home/scion",
+			wantPath:     ".config",
+		},
+		{
+			name:         "absolute symlink with empty AgentHomeAbs",
+			linkRel:      ".config",
+			linkTarget:   "/home/scion/dotfiles",
+			agentHomeAbs: "",
+			wantPath:     ".config",
+		},
+		{
+			name:         "relative escaping ancestor symlink",
+			linkRel:      ".config",
+			linkTarget:   "../../outside",
+			agentHomeAbs: "/home/scion",
+			wantPath:     ".config",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srcDir := t.TempDir()
+			if err := os.Symlink(tc.linkTarget, filepath.Join(srcDir, tc.linkRel)); err != nil {
+				t.Fatal(err)
+			}
+			srcRoot, _ := os.OpenRoot(srcDir)
+			defer func() { _ = srcRoot.Close() }()
+
+			ex := HomeExcluder(HomeExcluderOptions{AgentHomeAbs: tc.agentHomeAbs})
+			var uh *ErrUnportableHome
+
+			if _, err := Estimate(ctx, srcRoot, ex, lim); !errors.As(err, &uh) || uh.Path != tc.wantPath {
+				t.Errorf("Estimate err = %v, want ErrUnportableHome(Path=%q)", err, tc.wantPath)
+			}
+			store := newMemStore()
+			if _, err := Write(ctx, srcRoot, t.TempDir(), ex, lim, store); !errors.As(err, &uh) || uh.Path != tc.wantPath {
+				t.Errorf("Write err = %v, want ErrUnportableHome(Path=%q)", err, tc.wantPath)
+			}
+			if store.putCalls.Load() != 0 {
+				t.Errorf("expected 0 Put calls on ErrUnportableHome, got %d", store.putCalls.Load())
+			}
+		})
+	}
+
+	t.Run("outside-home leaf secret symlink does not fail", func(t *testing.T) {
+		srcDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(srcDir, ".kube"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("/scion-staging/kubeconfig", filepath.Join(srcDir, ".kube", "config")); err != nil {
+			t.Fatal(err)
+		}
+		srcRoot, _ := os.OpenRoot(srcDir)
+		defer func() { _ = srcRoot.Close() }()
+
+		ex := HomeExcluder(HomeExcluderOptions{AgentHomeAbs: "/home/scion"})
+		if _, err := Estimate(ctx, srcRoot, ex, lim); err != nil {
+			t.Fatalf("Estimate leaf secret symlink: %v", err)
+		}
+		if _, err := Write(ctx, srcRoot, t.TempDir(), ex, lim, newMemStore()); err != nil {
+			t.Fatalf("Write leaf secret symlink: %v", err)
+		}
+	})
+}
+
+// TestT2_UnixExcludedHardlinkSkipped verifies hard links to excluded files (and
+// files inside excluded directories) are skipped and counted as Excluded.
+func TestT2_UnixExcludedHardlinkSkipped(t *testing.T) {
+	ctx := context.Background()
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	scratch := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(srcDir, ".kube"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, ".kube", "config"), []byte("KUBE_SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(srcDir, ".kube", "config"), filepath.Join(srcDir, "leaked-kubeconfig")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(srcDir, ".scion", "harness", "secrets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, ".scion", "harness", "secrets", "KEY"), []byte("HARNESS_KEY"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(srcDir, ".scion", "harness", "secrets", "KEY"), filepath.Join(srcDir, "leaked-harness-key")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(srcDir, "normal.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srcRoot, _ := os.OpenRoot(srcDir)
+	defer func() { _ = srcRoot.Close() }()
+	dstRoot, _ := os.OpenRoot(dstDir)
+	defer func() { _ = dstRoot.Close() }()
+
+	ex := HomeExcluder(HomeExcluderOptions{AgentHomeAbs: "/home/scion"})
+	lim := DefaultHomeLimits()
+
+	est, err := Estimate(ctx, srcRoot, ex, lim)
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	store := newMemStore()
+	rm, err := Write(ctx, srcRoot, scratch, ex, lim, store)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if est.Entries != rm.Entries || est.Bytes != rm.Bytes || est.Skipped != rm.Skipped {
+		t.Fatalf("Estimate %+v != Write %+v", est, rm)
+	}
+	if err := Extract(ctx, dstRoot, scratch, rm, lim, store); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+
+	for _, leaked := range []string{"leaked-kubeconfig", "leaked-harness-key"} {
+		if _, err := os.Stat(filepath.Join(dstDir, leaked)); !os.IsNotExist(err) {
+			t.Errorf("hardlink to excluded secret %q was NOT skipped (stat err=%v)", leaked, err)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(dstDir, "normal.txt")); err != nil || string(got) != "ok" {
+		t.Errorf("normal.txt = %q, err=%v", got, err)
+	}
+}
+
+// TestT2_UnixUnportablePathError verifies that a filename failing
+// ValidateRelPath (such as one containing a backslash) returns *ErrUnportablePath
+// from both Write and Estimate.
+func TestT2_UnixUnportablePathError(t *testing.T) {
+	ctx := context.Background()
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, `bad\name.txt`), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcRoot, _ := os.OpenRoot(srcDir)
+	defer func() { _ = srcRoot.Close() }()
+
+	lim := DefaultWorkspaceLimits()
+	var up *ErrUnportablePath
+	if _, err := Estimate(ctx, srcRoot, nil, lim); !errors.As(err, &up) || up.Path != `bad\name.txt` {
+		t.Errorf("Estimate err = %v, want ErrUnportablePath(bad\\name.txt)", err)
+	}
+	if _, err := Write(ctx, srcRoot, t.TempDir(), nil, lim, newMemStore()); !errors.As(err, &up) || up.Path != `bad\name.txt` {
+		t.Errorf("Write err = %v, want ErrUnportablePath(bad\\name.txt)", err)
+	}
 }

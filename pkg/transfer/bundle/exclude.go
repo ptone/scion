@@ -15,8 +15,10 @@
 package bundle
 
 import (
+	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -39,17 +41,30 @@ func (f ExcluderFunc) Exclude(relPath string, isDir bool) bool {
 
 // rootResolvableExcluder is implemented by path-based excluders so Write and
 // Estimate can rebase exclusion entries through any in-root symlinked ancestor
-// directories before walking, preventing excluded secrets from being bundled
-// under their physical path.
+// directories (failing closed with *ErrUnportableHome on unresolvable ancestor
+// symlinks) and collect hard-linked excluded file identities before walking.
 type rootResolvableExcluder interface {
-	resolveInRoot(root *os.Root) Excluder
+	resolveInRoot(root *os.Root) (Excluder, excludedInodeSet, error)
 }
 
-func resolveExcluderInRoot(root *os.Root, ex Excluder) Excluder {
+func resolveExcluderInRoot(root *os.Root, ex Excluder) (Excluder, excludedInodeSet, error) {
 	if r, ok := ex.(rootResolvableExcluder); ok {
 		return r.resolveInRoot(root)
 	}
-	return ex
+	return ex, excludedInodeSet{}, nil
+}
+
+// HomeBaselineExcludes are the static Scion-managed secret and runtime-state
+// paths always excluded from a portable $HOME bundle (design §3.4 items 1–2),
+// even when HomeExcluder is called with zero options. Kept in sync with
+// runtime.PortableHomeExcludes by a parity test in pkg/runtime.
+var HomeBaselineExcludes = []string{
+	".scion/scion-token",
+	".scion/scion-token.tmp",
+	".scion/secrets.json",
+	".scion/harness/secrets",
+	".scion/harness/outputs",
+	".scion-home-reset-id",
 }
 
 // HomeIdentityCredentialExcludes are identity-bound credentials minted for the
@@ -72,6 +87,22 @@ var HomeCacheExcludes = []string{
 	"go/pkg/mod/cache/**",
 }
 
+// HomeExcluderOptions configures HomeExcluder.
+type HomeExcluderOptions struct {
+	// ExtraLiterals are additional home-relative literal paths (such as
+	// runtime.PortableHomeExcludes(cfg) for per-agent resolved secrets and auth
+	// files), matched literally as exact path or subtree prefix (never globs).
+	ExtraLiterals []string
+	// TempNamePred, when non-nil, matches temporary filenames by basename
+	// (such as runtime.IsHomeTempName).
+	TempNamePred func(base string) bool
+	// AgentHomeAbs is the agent's in-container absolute $HOME path (e.g.
+	// "/home/scion"). When non-empty, an absolute symlink target under
+	// AgentHomeAbs encountered while resolving an exclusion entry is rebased to
+	// a root-relative path and resolution continues.
+	AgentHomeAbs string
+}
+
 // WorkspaceExcluder returns the excluder for a workspace root: root `.scion`
 // and `.scion/**` only (case-insensitive on the root element, matching
 // transfer.ExcludeWorkspaceObject). `.git/**` and nested `a/.scion` are kept.
@@ -82,21 +113,26 @@ func WorkspaceExcluder() Excluder {
 	})
 }
 
-// HomeExcluder returns the excluder for a $HOME root: the union of
-// caller-supplied extraLiterals (such as runtime.PortableHomeExcludes(cfg) for
-// Scion-managed secrets, hub token, reset marker, and per-agent resolved
-// secrets/auth — matched literally as exact path or subtree prefix, never as
-// globs), an optional tempNamePred (such as runtime.IsHomeTempName) matched
-// against each entry's basename, HomeIdentityCredentialExcludes, and
-// HomeCacheExcludes (design §3.4 "Exclusions" items 1–4).
+// HomeExcluder returns the excluder for a $HOME root: always including the
+// built-in static baseline (HomeBaselineExcludes, HomeIdentityCredentialExcludes,
+// HomeCacheExcludes) plus any caller-supplied ExtraLiterals and TempNamePred
+// (design §3.4 "Exclusions" items 1–4).
 //
-// When passed to Write or Estimate, every exclusion entry is also resolved
-// through in-root symlinks before the walk so an excluded secret under a
-// symlinked directory (e.g. ".config/gcloud -> ../dotfiles/gcloud") is also
-// excluded at its physical path.
-func HomeExcluder(extraLiterals []string, tempNamePred func(base string) bool) Excluder {
-	prefixes := make([]string, 0, len(extraLiterals)+len(HomeIdentityCredentialExcludes)+len(HomeCacheExcludes))
-	for _, lit := range extraLiterals {
+// When passed to Write or Estimate, every exclusion entry is resolved through
+// symlinks before the walk:
+//   - Relative links and absolute links under opts.AgentHomeAbs are rebased to
+//     their physical root-relative path and added to the exclusion set.
+//   - If an ancestor component of any exclusion entry is a symlink that cannot
+//     be resolved inside the root (absolute outside AgentHomeAbs, relative
+//     escaping, loop, or too many hops), Write and Estimate fail closed with
+//     *ErrUnportableHome.
+//   - On Unix, hard-linked regular files matching excluded files (and regular
+//     files under excluded directories, up to maxExcludedHardlinkScanEntries)
+//     are also skipped and counted as Excluded.
+func HomeExcluder(opts HomeExcluderOptions) Excluder {
+	prefixes := make([]string, 0, len(HomeBaselineExcludes)+len(opts.ExtraLiterals)+len(HomeIdentityCredentialExcludes)+len(HomeCacheExcludes))
+	prefixes = append(prefixes, HomeBaselineExcludes...)
+	for _, lit := range opts.ExtraLiterals {
 		lit = strings.TrimSpace(lit)
 		if lit == "" {
 			continue
@@ -115,7 +151,8 @@ func HomeExcluder(extraLiterals []string, tempNamePred func(base string) bool) E
 	}
 	return &prefixExcluder{
 		prefixes:     prefixes,
-		tempNamePred: tempNamePred,
+		tempNamePred: opts.TempNamePred,
+		agentHomeAbs: cleanAbsHome(opts.AgentHomeAbs),
 	}
 }
 
@@ -148,9 +185,22 @@ func normalizePrefixPattern(pat string) string {
 	return pat
 }
 
+func cleanAbsHome(homeAbs string) string {
+	homeAbs = strings.TrimSpace(homeAbs)
+	if homeAbs == "" {
+		return ""
+	}
+	homeAbs = path.Clean(homeAbs)
+	if !strings.HasPrefix(homeAbs, "/") || homeAbs == "/" {
+		return ""
+	}
+	return homeAbs
+}
+
 type prefixExcluder struct {
 	prefixes     []string
 	tempNamePred func(base string) bool
+	agentHomeAbs string
 }
 
 func (e *prefixExcluder) Exclude(relPath string, _ bool) bool {
@@ -165,10 +215,10 @@ func (e *prefixExcluder) Exclude(relPath string, _ bool) bool {
 	return false
 }
 
-// resolveInRoot expands each exclusion prefix through any in-root symlinks
-// (ancestor directories or final symlink targets) so that excluded entries are
-// omitted at both their logical and physical paths.
-func (e *prefixExcluder) resolveInRoot(root *os.Root) Excluder {
+// resolveInRoot expands each exclusion prefix through symlinks (failing closed
+// with *ErrUnportableHome if an ancestor symlink cannot be resolved inside
+// root) and collects the hard-linked excluded inode set on Unix.
+func (e *prefixExcluder) resolveInRoot(root *os.Root) (Excluder, excludedInodeSet, error) {
 	seen := make(map[string]struct{}, len(e.prefixes))
 	resolved := make([]string, 0, len(e.prefixes))
 	add := func(p string) {
@@ -183,12 +233,130 @@ func (e *prefixExcluder) resolveInRoot(root *os.Root) Excluder {
 	}
 	for _, p := range e.prefixes {
 		add(p)
-		if phys, err := resolvePathInRoot(root, ".", p); err == nil && phys != "" {
+		phys, err := resolveExclusionPathInRoot(root, p, e.agentHomeAbs)
+		if err != nil {
+			return nil, excludedInodeSet{}, err
+		}
+		if phys != "" {
 			add(phys)
 		}
 	}
+	inodes := collectExcludedInodes(root, resolved)
 	return &prefixExcluder{
 		prefixes:     resolved,
 		tempNamePred: e.tempNamePred,
+		agentHomeAbs: e.agentHomeAbs,
+	}, inodes, nil
+}
+
+// resolveExclusionPathInRoot resolves exPath component by component through
+// root, rebasing absolute symlink targets under agentHomeAbs to root-relative
+// paths. If any ancestor component is a symlink that cannot be resolved inside
+// root (absolute outside agentHomeAbs, relative escaping, loop, or too many
+// hops), it returns *ErrUnportableHome. A leaf symlink pointing outside the
+// root (such as a K8s NFS-home /scion-staging/... secret link) cannot expose a
+// physical copy inside root, so it returns ("", nil) and remains excluded by
+// its lexical path.
+func resolveExclusionPathInRoot(root *os.Root, exPath, agentHomeAbs string) (string, error) {
+	var cur []string
+	queue := strings.Split(exPath, "/")
+	hops := 0
+	lastSymlink := ""
+	inAncestor := false
+
+	for len(queue) > 0 {
+		comp := queue[0]
+		queue = queue[1:]
+
+		switch comp {
+		case "", ".":
+			continue
+		case "..":
+			if len(cur) == 0 {
+				if inAncestor {
+					return "", &ErrUnportableHome{
+						Path:   lastSymlink,
+						Reason: "symlink escapes home root",
+					}
+				}
+				return "", nil
+			}
+			cur = cur[:len(cur)-1]
+			continue
+		}
+
+		cur = append(cur, comp)
+		cand := strings.Join(cur, "/")
+		fi, err := root.Lstat(filepath.FromSlash(cand))
+		if err != nil {
+			continue
+		}
+		if fi.Mode()&fs.ModeSymlink == 0 {
+			continue
+		}
+
+		isAncestor := len(queue) > 0
+		if isAncestor {
+			inAncestor = true
+		}
+		lastSymlink = cand
+
+		hops++
+		if hops > maxSymlinkHops {
+			if inAncestor {
+				return "", &ErrUnportableHome{
+					Path:   cand,
+					Reason: "symlink loop or too many hops",
+				}
+			}
+			return "", nil
+		}
+
+		linkTarget, err := root.Readlink(filepath.FromSlash(cand))
+		if err != nil {
+			if inAncestor {
+				return "", &ErrUnportableHome{
+					Path:   cand,
+					Reason: "cannot read symlink",
+				}
+			}
+			return "", nil
+		}
+		if linkTarget == "" || strings.ContainsRune(linkTarget, 0) || strings.Contains(linkTarget, `\`) {
+			if inAncestor {
+				return "", &ErrUnportableHome{
+					Path:   cand,
+					Reason: "invalid symlink target",
+				}
+			}
+			return "", nil
+		}
+
+		if path.IsAbs(linkTarget) || filepath.IsAbs(linkTarget) {
+			if agentHomeAbs != "" {
+				cleanTarget := path.Clean(linkTarget)
+				if cleanTarget == agentHomeAbs {
+					cur = nil
+					continue
+				}
+				if rebased, ok := strings.CutPrefix(cleanTarget, agentHomeAbs+"/"); ok {
+					cur = nil
+					queue = append(strings.Split(rebased, "/"), queue...)
+					continue
+				}
+			}
+			if inAncestor {
+				return "", &ErrUnportableHome{
+					Path:   cand,
+					Reason: "absolute symlink outside home",
+				}
+			}
+			return "", nil
+		}
+
+		// Relative symlink target: resolve relative to cand's parent directory.
+		cur = cur[:len(cur)-1]
+		queue = append(strings.Split(linkTarget, "/"), queue...)
 	}
+	return strings.Join(cur, "/"), nil
 }

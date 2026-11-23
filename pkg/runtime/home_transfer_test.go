@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer/bundle"
 )
 
 // homeTransferParityConfigs covers the staged-file classification: file
@@ -162,5 +163,17 @@ func TestCloudRunHomeCopyExcluded_TempNames(t *testing.T) {
 		if got := cloudRunHomeCopyExcluded(rel, ex); got != want {
 			t.Errorf("cloudRunHomeCopyExcluded(%q) = %v, want %v", rel, got, want)
 		}
+	}
+}
+
+// TestPortableHomeExcludes_ParityWithBundleBaseline pins bundle.HomeBaselineExcludes
+// to the static baseline of runtime.PortableHomeExcludes so the two cannot drift.
+func TestPortableHomeExcludes_ParityWithBundleBaseline(t *testing.T) {
+	rtBase := slices.Clone(PortableHomeExcludes(RunConfig{UnixUsername: "scion"}))
+	bundleBase := slices.Clone(bundle.HomeBaselineExcludes)
+	slices.Sort(rtBase)
+	slices.Sort(bundleBase)
+	if !slices.Equal(rtBase, bundleBase) {
+		t.Errorf("bundle.HomeBaselineExcludes %v != PortableHomeExcludes baseline %v", bundleBase, rtBase)
 	}
 }

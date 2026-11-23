@@ -335,21 +335,18 @@ func TestT2_HomeExclusions(t *testing.T) {
 	}
 	defer func() { _ = dstRoot.Close() }()
 
-	// Simulate the broker passing runtime.PortableHomeExcludes(cfg) and
-	// runtime.IsHomeTempName into HomeExcluder.
-	ex := HomeExcluder([]string{
-		".config/my-secret.json",
-		".claude/.credentials.json",
-		".config/app[1]/token",
-		".config/app[broken/secret",
-		".scion/scion-token",
-		".scion/scion-token.tmp",
-		".scion/secrets.json",
-		".scion/harness/secrets",
-		".scion/harness/outputs",
-		".scion-home-reset-id",
-	}, func(base string) bool {
-		return strings.HasPrefix(base, ".") && strings.Contains(base, ".tmp-")
+	// TestT2_HomeExclusions verifies HomeExcluder with caller extras + temp pred,
+	// while relying on the built-in static HomeBaselineExcludes for Scion secrets.
+	ex := HomeExcluder(HomeExcluderOptions{
+		ExtraLiterals: []string{
+			".config/my-secret.json",
+			".claude/.credentials.json",
+			".config/app[1]/token",
+			".config/app[broken/secret",
+		},
+		TempNamePred: func(base string) bool {
+			return strings.HasPrefix(base, ".") && strings.Contains(base, ".tmp-")
+		},
 	})
 	store := newMemStore()
 	lim := DefaultHomeLimits()
@@ -495,6 +492,48 @@ func TestT3_ReaderRefusals(t *testing.T) {
 			t.Fatalf("got err = %v, want ErrInvalidManifest", err)
 		}
 		assertDirEmpty(t, scratch)
+	})
+
+	t.Run("trailing data after tar end-of-archive refused", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			tail []byte
+		}{
+			{"1 MiB of Z in same gzip member", bytes.Repeat([]byte("Z"), 1<<20)},
+			{"small non-zero junk after tar EOF", []byte("junk")},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var buf bytes.Buffer
+				gw := gzip.NewWriter(&buf)
+				tw := tar.NewWriter(gw)
+				_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: "a.txt", Size: 5, Mode: 0o644})
+				_, _ = tw.Write([]byte("hello"))
+				if err := tw.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := gw.Write(tc.tail); err != nil {
+					t.Fatal(err)
+				}
+				if err := gw.Close(); err != nil {
+					t.Fatal(err)
+				}
+				raw := buf.Bytes()
+				store := newMemStore()
+				store.parts[0] = raw
+				rm := RootManifest{
+					Parts:    []Part{{Index: 0, Size: int64(len(raw)), Hash: transfer.HashBytes(raw)}},
+					PartSize: max(int64(len(raw)), 1024),
+				}
+				dstRoot, _ := os.OpenRoot(t.TempDir())
+				defer func() { _ = dstRoot.Close() }()
+				scratch := t.TempDir()
+				err := Extract(ctx, dstRoot, scratch, rm, lim, store)
+				if !errors.Is(err, ErrInvalidManifest) {
+					t.Fatalf("got err = %v, want ErrInvalidManifest", err)
+				}
+				assertDirEmpty(t, scratch)
+			})
+		}
 	})
 
 	cases := []struct {
@@ -805,6 +844,32 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 		}
 		if len(store3.getCounts) != 0 {
 			t.Fatalf("expected 0 PartSource.Get calls on short non-final part, got %v", store3.getCounts)
+		}
+	})
+
+	t.Run("reader pathBytes memory budget", func(t *testing.T) {
+		// MaxEntries=4 -> budget = max(4*256, MaxPathLen=500) = 1024 bytes.
+		// Three 400-byte multi-segment paths (each segment <= 100 chars) = 1200 bytes > 1024.
+		seg := strings.Repeat("d", 100)
+		rmPB, storePB := buildRawTarGz(t, func(tw *tar.Writer) {
+			for _, prefix := range []string{"a", "b", "c"} {
+				name := seg + "/" + seg + "/" + seg + "/" + prefix + strings.Repeat("x", 96)
+				_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: name, Size: 1, Mode: 0o644})
+				_, _ = tw.Write([]byte("1"))
+			}
+		})
+		dstRoot, _ := os.OpenRoot(t.TempDir())
+		defer func() { _ = dstRoot.Close() }()
+		err := Extract(ctx, dstRoot, t.TempDir(), rmPB, Limits{
+			MaxBytes:   1000,
+			MaxEntries: 4,
+			MaxDepth:   10,
+			MaxPathLen: 500,
+			PartSize:   64 << 10,
+		}, storePB)
+		var le *ErrLimitExceeded
+		if !errors.As(err, &le) || le.Field != "pathBytes" {
+			t.Fatalf("reader pathBytes err = %v, want ErrLimitExceeded(pathBytes)", err)
 		}
 	})
 }

@@ -109,9 +109,13 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 	tr := tar.NewReader(gz)
 
 	seen := make(map[string]struct{})
+	// Bound total path bytes held in seen, symlinks, and dirMeta so a small
+	// compressed archive with many long paths cannot exhaust reader memory.
+	maxPathBytes := max(lim.MaxEntries*256, int64(lim.MaxPathLen))
 	var (
 		entries    int64
 		totalBytes int64
+		pathBytes  int64
 		dirMeta    []deferredDirMeta
 		symlinks   []extractedSymlink
 	)
@@ -153,7 +157,15 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 		if entries+1 > lim.MaxEntries {
 			return &ErrLimitExceeded{Field: "entries", Got: entries + 1, Max: lim.MaxEntries}
 		}
+		entryPathBytes := int64(len(name))
+		if hdr.Typeflag == tar.TypeSymlink {
+			entryPathBytes += int64(len(hdr.Linkname))
+		}
+		if pathBytes+entryPathBytes > maxPathBytes {
+			return &ErrLimitExceeded{Field: "pathBytes", Got: pathBytes + entryPathBytes, Max: maxPathBytes}
+		}
 		entries++
+		pathBytes += entryPathBytes
 
 		if err := ensureParentDirs(staging, name); err != nil {
 			return err
@@ -246,14 +258,25 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 		}
 	}
 
-	// Drain any remaining gzip padding/trailer so gzip verifies CRC32/ISIZE
-	// and catches truncated streams, while enforcing a tiny bound so trailing
-	// garbage cannot exhaust memory or bypass limits.
-	if _, err := io.Copy(io.Discard, io.LimitReader(gz, 1024)); err != nil {
+	// Read the gzip stream to EOF through a 10 KiB bound (sufficient for tar
+	// record padding) so gzip.Reader actually reaches and verifies the CRC32
+	// and ISIZE trailer. Reject excess trailing bytes or any non-zero byte
+	// after the tar end-of-archive marker.
+	const maxTarTrailingZeros = 10 * 1024
+	tail, err := io.ReadAll(io.LimitReader(gz, maxTarTrailingZeros+1))
+	if err != nil {
 		if errors.Is(err, io.ErrUnexpectedEOF) {
 			return fmt.Errorf("%w: %v", ErrTruncatedStream, err)
 		}
 		return fmt.Errorf("verify gzip trailer: %w", err)
+	}
+	if len(tail) > maxTarTrailingZeros {
+		return fmt.Errorf("%w: excess trailing data after tar end-of-archive", ErrInvalidManifest)
+	}
+	for _, b := range tail {
+		if b != 0 {
+			return fmt.Errorf("%w: non-zero trailing data after tar end-of-archive", ErrInvalidManifest)
+		}
 	}
 	if err := gz.Close(); err != nil {
 		if errors.Is(err, io.ErrUnexpectedEOF) {

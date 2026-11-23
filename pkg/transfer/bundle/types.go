@@ -97,9 +97,12 @@ type Part struct {
 
 // SkipCounts records entries omitted while building a root archive.
 type SkipCounts struct {
-	Sockets          int64 `json:"sockets,omitempty"`
-	FIFOs            int64 `json:"fifos,omitempty"`
-	Devices          int64 `json:"devices,omitempty"`
+	Sockets int64 `json:"sockets,omitempty"`
+	FIFOs   int64 `json:"fifos,omitempty"`
+	Devices int64 `json:"devices,omitempty"`
+	// EscapingSymlinks counts skipped symlinks whose targets are absolute,
+	// escape the root (including multi-hop chains), or exceed maxSymlinkHops
+	// (such as symlink loops).
 	EscapingSymlinks int64 `json:"escapingSymlinks,omitempty"`
 	Excluded         int64 `json:"excluded,omitempty"`
 }
@@ -181,6 +184,36 @@ type ErrLimitExceeded struct {
 
 func (e *ErrLimitExceeded) Error() string {
 	return fmt.Sprintf("bundle exceeds limit: %s %d > %d", e.Field, e.Got, e.Max)
+}
+
+// ErrUnportableHome is returned by Write and Estimate when an exclusion entry
+// has an ancestor symlink that cannot be resolved inside the root (for example,
+// an absolute symlink pointing outside AgentHomeAbs, a relative symlink
+// escaping the root, or a symlink loop). Failing closed prevents excluded
+// secrets from being bundled under an unresolved physical path.
+type ErrUnportableHome struct {
+	Path   string
+	Reason string
+}
+
+func (e *ErrUnportableHome) Error() string {
+	return fmt.Sprintf("unportable home: %s (%s)", e.Path, e.Reason)
+}
+
+// ErrUnportablePath is returned by Write and Estimate when a source entry has
+// a filename that fails transfer.ValidateRelPath (for example, a filename
+// containing a backslash on Unix).
+type ErrUnportablePath struct {
+	Path string
+	Err  error
+}
+
+func (e *ErrUnportablePath) Error() string {
+	return fmt.Sprintf("unportable path %q: %v", e.Path, e.Err)
+}
+
+func (e *ErrUnportablePath) Unwrap() error {
+	return e.Err
 }
 
 // PartSink receives each completed compressed part from Write.

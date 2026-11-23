@@ -52,7 +52,10 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 		return RootManifest{}, err
 	}
 
-	ex = resolveExcluderInRoot(root, ex)
+	ex, excludedInodes, err := resolveExcluderInRoot(root, ex)
+	if err != nil {
+		return RootManifest{}, err
+	}
 
 	splitter := newPartSplitter(ctx, scratchDir, lim.PartSize, lim.MaxParts(), sink)
 	defer splitter.Abort()
@@ -71,7 +74,7 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		kind, linkTarget, err := classifyEntry(root, rel, d, ex, entries, lim, &skipped)
+		kind, linkTarget, err := classifyEntry(root, rel, d, ex, excludedInodes, entries, lim, &skipped)
 		if err != nil {
 			return err
 		}
@@ -190,14 +193,17 @@ func Estimate(ctx context.Context, root *os.Root, ex Excluder, lim Limits) (Esti
 		return EstimateResult{}, err
 	}
 
-	ex = resolveExcluderInRoot(root, ex)
+	ex, excludedInodes, err := resolveExcluderInRoot(root, ex)
+	if err != nil {
+		return EstimateResult{}, err
+	}
 
 	var res EstimateResult
-	err := transfer.WalkRoot(root, func(rel string, d fs.DirEntry) error {
+	err = transfer.WalkRoot(root, func(rel string, d fs.DirEntry) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		kind, _, err := classifyEntry(root, rel, d, ex, res.Entries, lim, &res.Skipped)
+		kind, _, err := classifyEntry(root, rel, d, ex, excludedInodes, res.Entries, lim, &res.Skipped)
 		if err != nil {
 			return err
 		}
@@ -236,10 +242,11 @@ const (
 	entrySymlink
 )
 
-// classifyEntry applies exclusion, special-file skipping, symlink chain
-// containment validation, and path/depth/entry-count limits to one walked
-// entry. Both Write and Estimate use it so their rules stay identical.
-func classifyEntry(root *os.Root, rel string, d fs.DirEntry, ex Excluder, currentEntries int64, lim Limits, skipped *SkipCounts) (entryKind, string, error) {
+// classifyEntry applies exclusion, hardlink-to-excluded-file skipping,
+// special-file skipping, symlink chain containment validation, and
+// path/depth/entry-count limits to one walked entry. Both Write and Estimate
+// use it so their rules stay identical.
+func classifyEntry(root *os.Root, rel string, d fs.DirEntry, ex Excluder, excludedInodes excludedInodeSet, currentEntries int64, lim Limits, skipped *SkipCounts) (entryKind, string, error) {
 	if ex != nil && ex.Exclude(rel, d.IsDir()) {
 		skipped.Excluded++
 		if d.IsDir() {
@@ -276,6 +283,11 @@ func classifyEntry(root *os.Root, rel string, d fs.DirEntry, ex Excluder, curren
 		return entrySymlink, target, nil
 	}
 
+	if modeType.IsRegular() && excludedInodes.contains(d) {
+		skipped.Excluded++
+		return entrySkip, "", nil
+	}
+
 	if err := checkPathAndEntryLimits(rel, currentEntries, lim); err != nil {
 		return entrySkip, "", err
 	}
@@ -293,7 +305,7 @@ func classifyEntry(root *os.Root, rel string, d fs.DirEntry, ex Excluder, curren
 
 func checkPathAndEntryLimits(rel string, currentEntries int64, lim Limits) error {
 	if err := transfer.ValidateRelPath(rel); err != nil {
-		return fmt.Errorf("invalid path %q: %w", rel, err)
+		return &ErrUnportablePath{Path: rel, Err: err}
 	}
 	if len(rel) > lim.MaxPathLen {
 		return &ErrLimitExceeded{Field: "path_len", Got: int64(len(rel)), Max: int64(lim.MaxPathLen)}
