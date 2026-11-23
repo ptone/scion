@@ -1500,6 +1500,10 @@ export class ScionAgentTreeView extends LitElement {
     const dim = related !== null && !related.has(agent.id);
     const descendants = hiddenCounts.get(agent.id) ?? 0;
     const collapsed = this.collapsedIds.has(agent.id);
+    // The card link is not draggable (ptone/scion#6542): a press that moves a
+    // few pixels before release would otherwise start a native link drag and
+    // the click, which opens the agent page, never fires. The graph is a
+    // pan surface, so a press-and-nudge on a card is common.
     // The <button> (collapse chip) must NOT be nested inside the <a> (node
     // link) — interactive content cannot be nested per the HTML spec and
     // causes accessibility and browser-behaviour problems. Instead, both are
@@ -1519,6 +1523,7 @@ export class ScionAgentTreeView extends LitElement {
             : ''}"
           data-agent-id=${agent.id}
           href="/agents/${agent.id}"
+          draggable="false"
           style="border-left-color: ${color}"
           title=${`${agent.name}${agent.template ? ` — ${agent.template}` : ''}${isRoot && creator ? `\ncreated by ${creator}` : ''}`}
         >
