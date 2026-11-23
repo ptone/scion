@@ -393,6 +393,8 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		printMoveVerdict(os.Stdout, resp.MoveVerdict)
 		if reincarnateForce && resp.MoveVerdict.TransferMode == moveTransferModeExport {
 			fmt.Println("--force was not needed: the workspace is carried through the shared NFS export.")
+		} else if reincarnateForce && resp.MoveVerdict.TransferMode == moveTransferModeBundle {
+			fmt.Println("--force was not needed: the workspace and home are copied through hub storage.")
 		}
 	}
 	printReincarnationPlan(resp.Plan)
@@ -602,6 +604,7 @@ const (
 	moveCheckResultWaived         = "waived"
 	moveCheckWorkspaceRecreatable = "workspace_recreatable"
 	moveTransferModeExport        = "export"
+	moveTransferModeBundle        = "bundle"
 	moveTransferModeRecreate      = "recreate"
 )
 
@@ -678,6 +681,13 @@ func printMoveVerdict(w io.Writer, v *hubclient.MoveVerdict) {
 	case "":
 	case moveTransferModeExport:
 		_, _ = fmt.Fprintf(w, "  %-28s %s\n", "Transfer mode:", "export (the workspace is carried through the shared NFS export)")
+	case moveTransferModeBundle:
+		desc := "bundle (workspace and home are copied through hub storage)"
+		if v.BundleEstimate != nil {
+			total := v.BundleEstimate.WorkspaceBytes + v.BundleEstimate.HomeBytes
+			desc = fmt.Sprintf("bundle (workspace and home are copied through hub storage (~%s))", formatMoveBundleSize(total))
+		}
+		_, _ = fmt.Fprintf(w, "  %-28s %s\n", "Transfer mode:", desc)
 	case moveTransferModeRecreate:
 		_, _ = fmt.Fprintf(w, "  %-28s %s\n", "Transfer mode:", "recreate (the workspace is recreated on the target)")
 	default:
@@ -685,7 +695,7 @@ func printMoveVerdict(w io.Writer, v *hubclient.MoveVerdict) {
 	}
 	for _, c := range v.Checks {
 		result := c.Result
-		if result == moveCheckResultWaived {
+		if result == moveCheckResultWaived && v.TransferMode != moveTransferModeBundle {
 			result = "waived (--force)"
 		}
 		msg := c.Message
@@ -704,6 +714,27 @@ func printMoveVerdict(w io.Writer, v *hubclient.MoveVerdict) {
 	printMoveConsequences(w, v.Consequences)
 	if v.TransferMode == moveTransferModeRecreate {
 		_, _ = fmt.Fprintln(w, "Uncommitted and unpushed work in the agent's workspace will not survive this move.")
+	}
+	if !v.Eligible && v.BundleUnavailable != "" {
+		_, _ = fmt.Fprintf(w, "bundle transfer unavailable: %s\n", v.BundleUnavailable)
+	}
+}
+
+func formatMoveBundleSize(b int64) string {
+	const (
+		kib = 1024
+		mib = 1024 * kib
+		gib = 1024 * mib
+	)
+	switch {
+	case b >= gib:
+		return fmt.Sprintf("%.1f GiB", float64(b)/float64(gib))
+	case b >= mib:
+		return fmt.Sprintf("%.1f MiB", float64(b)/float64(mib))
+	case b >= kib:
+		return fmt.Sprintf("%.1f KiB", float64(b)/float64(kib))
+	default:
+		return fmt.Sprintf("%d B", b)
 	}
 }
 
