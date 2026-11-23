@@ -51,6 +51,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer/bundle"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"github.com/knadh/koanf/v2"
@@ -617,6 +618,13 @@ type reincarnateTestDispatcher struct {
 	moveProvisionFailsBeforeF4 bool
 	moveProvisionIDs           []string
 	recreatedDeleteIDs         []string
+
+	// Move-bundle hooks for Part D worker tests (T11).
+	moveBundlePrecheckFn     func(ctx context.Context, agent *store.Agent, limits api.MoveBundleLimits) (*api.MoveBundlePrecheckResponse, error)
+	moveBundleExportFn       func(ctx context.Context, agent *store.Agent, rid string, limits api.MoveBundleLimits) (*api.MoveBundleJobStatus, error)
+	moveBundleExportStatusFn func(ctx context.Context, agent *store.Agent, rid string) (*api.MoveBundleJobStatus, error)
+	moveBundleImportFn       func(ctx context.Context, agent *store.Agent, rid string, manifest bundle.Manifest, manifestHash string, limits api.MoveBundleLimits) (*api.MoveBundleJobStatus, error)
+	moveBundleImportStatusFn func(ctx context.Context, agent *store.Agent, rid string) (*api.MoveBundleJobStatus, error)
 
 	startBrokers []string
 	// runStore, when set, makes DispatchAgentStart mint and record a run
@@ -5342,6 +5350,61 @@ func (d *reincarnateTestDispatcher) DispatchAgentDeleteRecreated(_ context.Conte
 	}
 	return nil
 }
+
+func (d *reincarnateTestDispatcher) DispatchAgentProvisionForBundleMove(ctx context.Context, agent *store.Agent, moveID string) error {
+	return d.DispatchAgentProvisionForMove(ctx, agent, "fresh-agent-dir", moveID)
+}
+
+func (d *reincarnateTestDispatcher) DispatchMoveBundlePrecheck(ctx context.Context, agent *store.Agent, limits api.MoveBundleLimits) (*api.MoveBundlePrecheckResponse, error) {
+	d.mu.Lock()
+	fn := d.moveBundlePrecheckFn
+	d.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, agent, limits)
+	}
+	return &api.MoveBundlePrecheckResponse{Durable: true}, nil
+}
+
+func (d *reincarnateTestDispatcher) DispatchMoveBundleExport(ctx context.Context, agent *store.Agent, rid string, limits api.MoveBundleLimits) (*api.MoveBundleJobStatus, error) {
+	d.mu.Lock()
+	fn := d.moveBundleExportFn
+	d.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, agent, rid, limits)
+	}
+	return &api.MoveBundleJobStatus{ReincarnationID: rid, Kind: api.MoveBundleJobKindExport, State: api.MoveBundleJobStateRunning}, nil
+}
+
+func (d *reincarnateTestDispatcher) DispatchMoveBundleExportStatus(ctx context.Context, agent *store.Agent, rid string) (*api.MoveBundleJobStatus, error) {
+	d.mu.Lock()
+	fn := d.moveBundleExportStatusFn
+	d.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, agent, rid)
+	}
+	return &api.MoveBundleJobStatus{ReincarnationID: rid, Kind: api.MoveBundleJobKindExport, State: api.MoveBundleJobStateSucceeded}, nil
+}
+
+func (d *reincarnateTestDispatcher) DispatchMoveBundleImport(ctx context.Context, agent *store.Agent, rid string, manifest bundle.Manifest, manifestHash string, limits api.MoveBundleLimits) (*api.MoveBundleJobStatus, error) {
+	d.mu.Lock()
+	fn := d.moveBundleImportFn
+	d.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, agent, rid, manifest, manifestHash, limits)
+	}
+	return &api.MoveBundleJobStatus{ReincarnationID: rid, Kind: api.MoveBundleJobKindImport, State: api.MoveBundleJobStateRunning}, nil
+}
+
+func (d *reincarnateTestDispatcher) DispatchMoveBundleImportStatus(ctx context.Context, agent *store.Agent, rid string) (*api.MoveBundleJobStatus, error) {
+	d.mu.Lock()
+	fn := d.moveBundleImportStatusFn
+	d.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, agent, rid)
+	}
+	return &api.MoveBundleJobStatus{ReincarnationID: rid, Kind: api.MoveBundleJobKindImport, State: api.MoveBundleJobStateSucceeded}, nil
+}
+
 func (d *reincarnateTestDispatcher) recreatedDeletes() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
