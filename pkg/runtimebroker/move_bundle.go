@@ -1060,7 +1060,7 @@ func formatMoveBundleError(prefix string, err error) string {
 	}
 	var limErr *bundle.ErrLimitExceeded
 	if errors.As(err, &limErr) {
-		return "bundle exceeds limit: " + limErr.Error()
+		return limErr.Error()
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return prefix + ": timed out"

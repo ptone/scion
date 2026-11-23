@@ -467,7 +467,9 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 
 		homeRoot, err := os.OpenRoot(srcHome)
 		require.NoError(t, err)
-		homeRM, err := bundle.Write(context.Background(), homeRoot, t.TempDir(), moveBundleHomeExcluder(), bundle.DefaultHomeLimits(),
+		homeRM, err := bundle.Write(context.Background(), homeRoot, t.TempDir(), moveBundleHomeExcluder(), bundle.Limits{
+			MaxBytes: 1 << 20, MaxEntries: 100, MaxDepth: 16, MaxPathLen: 256, PartSize: 64,
+		},
 			partSinkFunc(func(_ context.Context, idx int, r io.ReadSeeker, _ int64, _ string) error {
 				b, err := io.ReadAll(r)
 				if err != nil {
