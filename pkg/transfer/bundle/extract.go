@@ -36,6 +36,10 @@ import (
 
 // ExtractFromManifest validates m (refusing unknown manifest versions) and
 // extracts the named root ("workspace" or "home") into staging.
+//
+// On any error, staging may contain partially extracted files or an escaping
+// symlink detected during the post-pass; the caller must discard the staging
+// directory and never commit it.
 func ExtractFromManifest(ctx context.Context, staging *os.Root, scratchDir string, m Manifest, rootName string, lim Limits, src PartSource) error {
 	if err := m.Validate(); err != nil {
 		return err
@@ -53,8 +57,12 @@ func ExtractFromManifest(ctx context.Context, staging *os.Root, scratchDir strin
 // staging; empty defaults to os.TempDir) and its exact byte length and SHA-256
 // digest are verified against rm before any byte reaches gunzip. All
 // filesystem writes go through staging (*os.Root). Limits (bytes, entries,
-// depth, path length) are counted independently of rm to defend against forged
-// manifests and decompression bombs.
+// depth, path length, part count, and part size) are counted independently of
+// rm to defend against forged manifests and decompression bombs.
+//
+// On any error, staging may contain partially extracted files or an escaping
+// symlink detected during the post-pass; the caller must discard the staging
+// directory and never commit it.
 func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootManifest, lim Limits, src PartSource) error {
 	if staging == nil {
 		return errors.New("bundle extract: staging root is nil")
@@ -68,15 +76,18 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 	if err := rm.Validate(); err != nil {
 		return err
 	}
-	if maxParts := lim.MaxParts(); len(rm.Parts) > maxParts {
+	if rm.PartSize > lim.PartSize {
+		return &ErrLimitExceeded{Field: "part_size", Got: rm.PartSize, Max: lim.PartSize}
+	}
+	if maxParts := MaxPartsFor(lim.MaxBytes, rm.PartSize); len(rm.Parts) > maxParts {
 		return &ErrLimitExceeded{Field: "parts", Got: int64(len(rm.Parts)), Max: int64(maxParts)}
 	}
 	for i, p := range rm.Parts {
-		if p.Size > lim.PartSize {
-			return &ErrLimitExceeded{Field: "part_size", Got: p.Size, Max: lim.PartSize}
+		if p.Size > rm.PartSize {
+			return &ErrLimitExceeded{Field: "part_size", Got: p.Size, Max: rm.PartSize}
 		}
-		if i < len(rm.Parts)-1 && p.Size != lim.PartSize {
-			return fmt.Errorf("%w: non-final part %d has size %d, want %d", ErrPartSizeMismatch, p.Index, p.Size, lim.PartSize)
+		if i < len(rm.Parts)-1 && p.Size != rm.PartSize {
+			return fmt.Errorf("%w: non-final part %d has size %d, want %d", ErrPartSizeMismatch, p.Index, p.Size, rm.PartSize)
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -90,6 +101,9 @@ func Extract(ctx context.Context, staging *os.Root, scratchDir string, rm RootMa
 	if err != nil {
 		return fmt.Errorf("open gzip stream: %w", err)
 	}
+	// A bundle root is strictly one gzip member; disallow concatenated
+	// multistream members so trailing parts/bytes are caught by VerifyAllConsumed.
+	gz.Multistream(false)
 	defer func() { _ = gz.Close() }()
 
 	tr := tar.NewReader(gz)

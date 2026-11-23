@@ -20,9 +20,11 @@ import (
 	"archive/tar"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -303,4 +305,160 @@ func TestT3_UnixSymlinkChainRefused(t *testing.T) {
 			assertDirEmpty(t, scratch)
 		})
 	}
+}
+
+// TestT2_UnixHomeExclusionsThroughSymlinkedAncestor verifies that excluded
+// secrets are never bundled under their physical path when an ancestor
+// directory is an in-root symlink (covering D6 lists, caller literals, and
+// .scion/harness).
+func TestT2_UnixHomeExclusionsThroughSymlinkedAncestor(t *testing.T) {
+	ctx := context.Background()
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	scratch := t.TempDir()
+
+	// 1. D6 credential under symlinked .config/gcloud -> ../dotfiles/gcloud
+	if err := os.MkdirAll(filepath.Join(srcDir, "dotfiles", "gcloud", "configurations"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "dotfiles", "gcloud", "credentials.db"), []byte("GCLOUD_SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "dotfiles", "gcloud", "configurations", "config_default"), []byte("keep-gcloud-cfg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(srcDir, ".config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../dotfiles/gcloud", filepath.Join(srcDir, ".config", "gcloud")); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Caller literal secret under symlinked .config/my-app -> ../real-secrets
+	if err := os.MkdirAll(filepath.Join(srcDir, "real-secrets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "real-secrets", "token.json"), []byte("CALLER_SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../real-secrets", filepath.Join(srcDir, ".config", "my-app")); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. .scion/harness/secrets under symlinked .scion/harness -> ../real-harness
+	if err := os.MkdirAll(filepath.Join(srcDir, "real-harness", "secrets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "real-harness", "secrets", "API_KEY"), []byte("HARNESS_SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(srcDir, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../real-harness", filepath.Join(srcDir, ".scion", "harness")); err != nil {
+		t.Fatal(err)
+	}
+
+	srcRoot, err := os.OpenRoot(srcDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srcRoot.Close() }()
+	dstRoot, err := os.OpenRoot(dstDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dstRoot.Close() }()
+
+	ex := HomeExcluder([]string{
+		".config/my-app/token.json",
+		".scion/harness/secrets",
+	}, nil)
+	lim := DefaultHomeLimits()
+
+	est, err := Estimate(ctx, srcRoot, ex, lim)
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+
+	store := newMemStore()
+	rm, err := Write(ctx, srcRoot, scratch, ex, lim, store)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if est.Entries != rm.Entries || est.Bytes != rm.Bytes || est.Skipped != rm.Skipped {
+		t.Fatalf("Estimate %+v != Write %+v", est, rm)
+	}
+
+	if err := Extract(ctx, dstRoot, scratch, rm, lim, store); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+
+	// None of the excluded secrets may exist at either their logical or physical paths.
+	for _, secretPath := range []string{
+		".config/gcloud/credentials.db",
+		"dotfiles/gcloud/credentials.db",
+		".config/my-app/token.json",
+		"real-secrets/token.json",
+		".scion/harness/secrets/API_KEY",
+		"real-harness/secrets/API_KEY",
+	} {
+		if _, err := os.Stat(filepath.Join(dstDir, filepath.FromSlash(secretPath))); !os.IsNotExist(err) {
+			t.Errorf("secret %q leaked to target (stat err=%v)", secretPath, err)
+		}
+	}
+
+	// Non-excluded sibling file inside the symlinked dir is preserved.
+	if got, err := os.ReadFile(filepath.Join(dstDir, ".config", "gcloud", "configurations", "config_default")); err != nil || string(got) != "keep-gcloud-cfg" {
+		t.Errorf("non-excluded gcloud config = %q, err=%v", got, err)
+	}
+}
+
+// TestT4_UnixWriterMaxPartsEnforced verifies Write aborts with
+// ErrLimitExceeded(parts) when compressed tar metadata (many symlinks with
+// long incompressible targets) exceeds lim.MaxParts(), with no Put beyond the limit.
+func TestT4_UnixWriterMaxPartsEnforced(t *testing.T) {
+	ctx := context.Background()
+	srcDir := t.TempDir()
+	scratch := t.TempDir()
+
+	// Create 500 symlinks with 200-char incompressible relative targets.
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	var x uint32 = 0x9e3779b9
+	for i := range 500 {
+		var sb strings.Builder
+		sb.Grow(200)
+		for range 200 {
+			x = x*1664525 + 1013904223
+			sb.WriteByte(alphabet[int(x>>24)%len(alphabet)])
+		}
+		if err := os.Symlink(sb.String(), filepath.Join(srcDir, fmt.Sprintf("l%04d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srcRoot, err := os.OpenRoot(srcDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srcRoot.Close() }()
+
+	lim := Limits{
+		MaxBytes:   1024,
+		MaxEntries: 1000,
+		MaxDepth:   16,
+		MaxPathLen: 256,
+		PartSize:   1024,
+	}
+	store := newMemStore()
+
+	_, err = Write(ctx, srcRoot, scratch, nil, lim, store)
+	var le *ErrLimitExceeded
+	if !errors.As(err, &le) || le.Field != "parts" {
+		t.Fatalf("got err = %v, want ErrLimitExceeded(parts)", err)
+	}
+	if got := store.putCalls.Load(); got > int64(lim.MaxParts()) {
+		t.Fatalf("sink.Put called %d times, exceeds MaxParts()=%d", got, lim.MaxParts())
+	}
+	assertDirEmpty(t, scratch)
 }

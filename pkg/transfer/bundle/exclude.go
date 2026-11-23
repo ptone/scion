@@ -15,8 +15,8 @@
 package bundle
 
 import (
+	"os"
 	"path"
-	"regexp"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -37,16 +37,19 @@ func (f ExcluderFunc) Exclude(relPath string, isDir bool) bool {
 	return f(relPath, isDir)
 }
 
-// HomeBaselineExcludes are the static Scion-managed secret and runtime-state
-// paths always excluded from a portable $HOME bundle (design §3.4 items 1–2),
-// even when no per-agent RunConfig extras are supplied.
-var HomeBaselineExcludes = []string{
-	".scion/scion-token",
-	".scion/scion-token.tmp",
-	".scion/secrets.json",
-	".scion/harness/secrets",
-	".scion/harness/outputs",
-	".scion-home-reset-id",
+// rootResolvableExcluder is implemented by path-based excluders so Write and
+// Estimate can rebase exclusion entries through any in-root symlinked ancestor
+// directories before walking, preventing excluded secrets from being bundled
+// under their physical path.
+type rootResolvableExcluder interface {
+	resolveInRoot(root *os.Root) Excluder
+}
+
+func resolveExcluderInRoot(root *os.Root, ex Excluder) Excluder {
+	if r, ok := ex.(rootResolvableExcluder); ok {
+		return r.resolveInRoot(root)
+	}
+	return ex
 }
 
 // HomeIdentityCredentialExcludes are identity-bound credentials minted for the
@@ -69,11 +72,6 @@ var HomeCacheExcludes = []string{
 	"go/pkg/mod/cache/**",
 }
 
-// homeTempNameRE matches temporary files left behind by Scion's guarded
-// writers (agenthome's ".<name>.tmp-<16 hex>" and dirfd's
-// ".<name>.tmp-<pid>-<nanoseconds>"), mirroring runtime.IsHomeTempName.
-var homeTempNameRE = regexp.MustCompile(`^\..+\.tmp-([0-9a-f]{16}|[0-9]+-[0-9]+)$`)
-
 // WorkspaceExcluder returns the excluder for a workspace root: root `.scion`
 // and `.scion/**` only (case-insensitive on the root element, matching
 // transfer.ExcludeWorkspaceObject). `.git/**` and nested `a/.scion` are kept.
@@ -85,38 +83,40 @@ func WorkspaceExcluder() Excluder {
 }
 
 // HomeExcluder returns the excluder for a $HOME root: the union of
-// HomeBaselineExcludes, any caller-supplied extraLiterals (such as
-// runtime.PortableHomeExcludes(cfg) for per-agent resolved secrets and auth
-// files — matched literally as exact path or subtree prefix, never as globs),
-// HomeIdentityCredentialExcludes, HomeCacheExcludes, and Scion guarded writer
-// temp filenames (design §3.4 "Exclusions" items 1–4).
-func HomeExcluder(extraLiterals []string) Excluder {
-	staticPatterns := make([]string, 0, len(HomeBaselineExcludes)+len(HomeIdentityCredentialExcludes)+len(HomeCacheExcludes))
-	staticPatterns = append(staticPatterns, HomeBaselineExcludes...)
-	staticPatterns = append(staticPatterns, HomeIdentityCredentialExcludes...)
-	staticPatterns = append(staticPatterns, HomeCacheExcludes...)
-	staticEx := PatternExcluder(staticPatterns)
-
-	literals := make([]string, 0, len(extraLiterals))
+// caller-supplied extraLiterals (such as runtime.PortableHomeExcludes(cfg) for
+// Scion-managed secrets, hub token, reset marker, and per-agent resolved
+// secrets/auth — matched literally as exact path or subtree prefix, never as
+// globs), an optional tempNamePred (such as runtime.IsHomeTempName) matched
+// against each entry's basename, HomeIdentityCredentialExcludes, and
+// HomeCacheExcludes (design §3.4 "Exclusions" items 1–4).
+//
+// When passed to Write or Estimate, every exclusion entry is also resolved
+// through in-root symlinks before the walk so an excluded secret under a
+// symlinked directory (e.g. ".config/gcloud -> ../dotfiles/gcloud") is also
+// excluded at its physical path.
+func HomeExcluder(extraLiterals []string, tempNamePred func(base string) bool) Excluder {
+	prefixes := make([]string, 0, len(extraLiterals)+len(HomeIdentityCredentialExcludes)+len(HomeCacheExcludes))
 	for _, lit := range extraLiterals {
 		lit = strings.TrimSpace(lit)
 		if lit == "" {
 			continue
 		}
-		literals = append(literals, lit)
+		prefixes = append(prefixes, lit)
 	}
-
-	return ExcluderFunc(func(relPath string, isDir bool) bool {
-		if homeTempNameRE.MatchString(path.Base(relPath)) {
-			return true
+	for _, pat := range HomeIdentityCredentialExcludes {
+		if p := normalizePrefixPattern(pat); p != "" {
+			prefixes = append(prefixes, p)
 		}
-		for _, lit := range literals {
-			if relPath == lit || strings.HasPrefix(relPath, lit+"/") {
-				return true
-			}
+	}
+	for _, pat := range HomeCacheExcludes {
+		if p := normalizePrefixPattern(pat); p != "" {
+			prefixes = append(prefixes, p)
 		}
-		return staticEx.Exclude(relPath, isDir)
-	})
+	}
+	return &prefixExcluder{
+		prefixes:     prefixes,
+		tempNamePred: tempNamePred,
+	}
 }
 
 // PatternExcluder builds an Excluder from slash-separated relative patterns.
@@ -125,35 +125,70 @@ func HomeExcluder(extraLiterals []string) Excluder {
 // brackets or wildcards such as ".config/app[1]/token" match literally and
 // never fail open):
 //   - "prefix/**" matches "prefix" itself and any descendant "prefix/...".
-//   - "**/suffix" matches any path equal to suffix or ending in "/suffix".
 //   - Any other pattern is matched literally as an exact path or subtree
 //     prefix ("a/b" matches "a/b" and "a/b/...").
 func PatternExcluder(patterns []string) Excluder {
-	cleaned := make([]string, 0, len(patterns))
-	for _, p := range patterns {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
+	prefixes := make([]string, 0, len(patterns))
+	for _, pat := range patterns {
+		if p := normalizePrefixPattern(pat); p != "" {
+			prefixes = append(prefixes, p)
 		}
-		cleaned = append(cleaned, p)
 	}
-	return ExcluderFunc(func(relPath string, _ bool) bool {
-		for _, pat := range cleaned {
-			if matchExcludePattern(pat, relPath) {
-				return true
-			}
-		}
-		return false
-	})
+	return &prefixExcluder{prefixes: prefixes}
 }
 
-func matchExcludePattern(pat, relPath string) bool {
+func normalizePrefixPattern(pat string) string {
+	pat = strings.TrimSpace(pat)
+	if pat == "" {
+		return ""
+	}
 	if prefix, ok := strings.CutSuffix(pat, "/**"); ok {
-		return relPath == prefix || strings.HasPrefix(relPath, prefix+"/")
+		return prefix
 	}
-	if suffix, ok := strings.CutPrefix(pat, "**/"); ok {
-		return relPath == suffix || strings.HasSuffix(relPath, "/"+suffix)
+	return pat
+}
+
+type prefixExcluder struct {
+	prefixes     []string
+	tempNamePred func(base string) bool
+}
+
+func (e *prefixExcluder) Exclude(relPath string, _ bool) bool {
+	if e.tempNamePred != nil && e.tempNamePred(path.Base(relPath)) {
+		return true
 	}
-	// Literal relative path: matches exact path or any descendant.
-	return relPath == pat || strings.HasPrefix(relPath, pat+"/")
+	for _, p := range e.prefixes {
+		if relPath == p || strings.HasPrefix(relPath, p+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveInRoot expands each exclusion prefix through any in-root symlinks
+// (ancestor directories or final symlink targets) so that excluded entries are
+// omitted at both their logical and physical paths.
+func (e *prefixExcluder) resolveInRoot(root *os.Root) Excluder {
+	seen := make(map[string]struct{}, len(e.prefixes))
+	resolved := make([]string, 0, len(e.prefixes))
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, dup := seen[p]; dup {
+			return
+		}
+		seen[p] = struct{}{}
+		resolved = append(resolved, p)
+	}
+	for _, p := range e.prefixes {
+		add(p)
+		if phys, err := resolvePathInRoot(root, ".", p); err == nil && phys != "" {
+			add(phys)
+		}
+	}
+	return &prefixExcluder{
+		prefixes:     resolved,
+		tempNamePred: e.tempNamePred,
+	}
 }

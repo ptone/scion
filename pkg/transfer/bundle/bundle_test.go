@@ -109,7 +109,8 @@ func buildRawTarGz(t *testing.T, writeFn func(tw *tar.Writer)) (RootManifest, *m
 	store := newMemStore()
 	store.parts[0] = raw
 	rm := RootManifest{
-		Parts: []Part{{Index: 0, Size: int64(len(raw)), Hash: transfer.HashBytes(raw)}},
+		Parts:    []Part{{Index: 0, Size: int64(len(raw)), Hash: transfer.HashBytes(raw)}},
+		PartSize: max(int64(len(raw)), 1024),
 	}
 	return rm, store
 }
@@ -334,11 +335,21 @@ func TestT2_HomeExclusions(t *testing.T) {
 	}
 	defer func() { _ = dstRoot.Close() }()
 
+	// Simulate the broker passing runtime.PortableHomeExcludes(cfg) and
+	// runtime.IsHomeTempName into HomeExcluder.
 	ex := HomeExcluder([]string{
 		".config/my-secret.json",
 		".claude/.credentials.json",
 		".config/app[1]/token",
 		".config/app[broken/secret",
+		".scion/scion-token",
+		".scion/scion-token.tmp",
+		".scion/secrets.json",
+		".scion/harness/secrets",
+		".scion/harness/outputs",
+		".scion-home-reset-id",
+	}, func(base string) bool {
+		return strings.HasPrefix(base, ".") && strings.Contains(base, ".tmp-")
 	})
 	store := newMemStore()
 	lim := DefaultHomeLimits()
@@ -379,7 +390,10 @@ func TestT3_ReaderRefusals(t *testing.T) {
 				Version:         ver,
 				ReincarnationID: "rid-1",
 				Roots: map[string]RootManifest{
-					RootWorkspace: {Parts: []Part{{Index: 0, Size: 10, Hash: transfer.HashBytes([]byte("0123456789"))}}},
+					RootWorkspace: {
+						Parts:    []Part{{Index: 0, Size: 10, Hash: transfer.HashBytes([]byte("0123456789"))}},
+						PartSize: DefaultPartSize,
+					},
 				},
 			}
 			if err := m.Validate(); !errors.Is(err, ErrUnsupportedVersion) {
@@ -408,6 +422,7 @@ func TestT3_ReaderRefusals(t *testing.T) {
 				Size:  int64(len(notGzip)),
 				Hash:  transfer.HashBytes([]byte("different content")),
 			}},
+			PartSize: DefaultPartSize,
 		}
 		dstRoot, _ := os.OpenRoot(t.TempDir())
 		defer func() { _ = dstRoot.Close() }()
@@ -452,6 +467,32 @@ func TestT3_ReaderRefusals(t *testing.T) {
 		err := Extract(ctx, dstRoot, scratch, rm, lim, store)
 		if err == nil {
 			t.Fatalf("expected error on truncated gzip stream, got nil")
+		}
+		assertDirEmpty(t, scratch)
+	})
+
+	t.Run("extra trailing hash-valid part refused", func(t *testing.T) {
+		rm, store := buildRawTarGz(t, func(tw *tar.Writer) {
+			_ = tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: "a.txt", Size: 5, Mode: 0o644})
+			_, _ = tw.Write([]byte("hello"))
+		})
+		// Set rm.PartSize to part 0's exact size so part 0 passes the non-final
+		// part size check and Extract reaches VerifyAllConsumed().
+		rm.PartSize = rm.Parts[0].Size
+		extra := []byte("trailing")
+		store.parts[1] = extra
+		rm.Parts = append(rm.Parts, Part{
+			Index: 1,
+			Size:  int64(len(extra)),
+			Hash:  transfer.HashBytes(extra),
+		})
+
+		dstRoot, _ := os.OpenRoot(t.TempDir())
+		defer func() { _ = dstRoot.Close() }()
+		scratch := t.TempDir()
+		err := Extract(ctx, dstRoot, scratch, rm, lim, store)
+		if !errors.Is(err, ErrInvalidManifest) {
+			t.Fatalf("got err = %v, want ErrInvalidManifest", err)
 		}
 		assertDirEmpty(t, scratch)
 	})
@@ -701,7 +742,8 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 		lim := Limits{MaxBytes: 4096, MaxEntries: 100, MaxDepth: 10, MaxPathLen: 256, PartSize: 1024}
 		store := newMemStore()
 		rmOversize := RootManifest{
-			Parts: []Part{{Index: 0, Size: 2048, Hash: dummyHash}},
+			Parts:    []Part{{Index: 0, Size: 2048, Hash: dummyHash}},
+			PartSize: 1024,
 		}
 		dstRoot, _ := os.OpenRoot(t.TempDir())
 		defer func() { _ = dstRoot.Close() }()
@@ -714,7 +756,22 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 			t.Fatalf("expected 0 PartSource.Get calls on oversized part, got %v", store.getCounts)
 		}
 
-		// 2. Too many parts (> lim.MaxParts()) refused before any Get call.
+		// 1b. Manifest PartSize > lim.PartSize refused before any Get call.
+		store1b := newMemStore()
+		dstRoot1b, _ := os.OpenRoot(t.TempDir())
+		defer func() { _ = dstRoot1b.Close() }()
+		err = Extract(ctx, dstRoot1b, t.TempDir(), RootManifest{
+			Parts:    []Part{{Index: 0, Size: 512, Hash: dummyHash}},
+			PartSize: 2048,
+		}, lim, store1b)
+		if !errors.As(err, &le) || le.Field != "part_size" {
+			t.Fatalf("manifest PartSize > lim.PartSize err = %v, want ErrLimitExceeded(part_size)", err)
+		}
+		if len(store1b.getCounts) != 0 {
+			t.Fatalf("expected 0 PartSource.Get calls on oversized manifest partSize, got %v", store1b.getCounts)
+		}
+
+		// 2. Too many parts (> MaxPartsFor(lim.MaxBytes, rm.PartSize)) refused before any Get call.
 		maxParts := lim.MaxParts()
 		tooMany := make([]Part, maxParts+1)
 		for i := range tooMany {
@@ -723,7 +780,7 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 		store2 := newMemStore()
 		dstRoot2, _ := os.OpenRoot(t.TempDir())
 		defer func() { _ = dstRoot2.Close() }()
-		err = Extract(ctx, dstRoot2, t.TempDir(), RootManifest{Parts: tooMany}, lim, store2)
+		err = Extract(ctx, dstRoot2, t.TempDir(), RootManifest{Parts: tooMany, PartSize: lim.PartSize}, lim, store2)
 		if !errors.As(err, &le) || le.Field != "parts" {
 			t.Fatalf("too many parts err = %v, want ErrLimitExceeded(parts)", err)
 		}
@@ -731,7 +788,7 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 			t.Fatalf("expected 0 PartSource.Get calls on too many parts, got %v", store2.getCounts)
 		}
 
-		// 3. Non-final part smaller than lim.PartSize refused before any Get call.
+		// 3. Non-final part smaller than rm.PartSize refused before any Get call.
 		store3 := newMemStore()
 		dstRoot3, _ := os.OpenRoot(t.TempDir())
 		defer func() { _ = dstRoot3.Close() }()
@@ -740,6 +797,7 @@ func TestT4_Limits_WriterAndReader(t *testing.T) {
 				{Index: 0, Size: 512, Hash: dummyHash},
 				{Index: 1, Size: 100, Hash: dummyHash},
 			},
+			PartSize: lim.PartSize,
 		}
 		err = Extract(ctx, dstRoot3, t.TempDir(), rmShortNonFinal, lim, store3)
 		if !errors.Is(err, ErrPartSizeMismatch) {
@@ -874,6 +932,18 @@ func TestT5_PartSplittingAndCleanup(t *testing.T) {
 	}
 	assertDirEmpty(t, scratch)
 
+	// Verify Extract succeeds when Hub config increased lim.PartSize between
+	// export and import (rm.PartSize < lim.PartSize).
+	dstDirLarger := t.TempDir()
+	dstRootLarger, _ := os.OpenRoot(dstDirLarger)
+	defer func() { _ = dstRootLarger.Close() }()
+	largerLim := lim
+	largerLim.PartSize = 4096
+	if err := Extract(ctx, dstRootLarger, scratch, rm, largerLim, store); err != nil {
+		t.Fatalf("Extract with larger lim.PartSize: %v", err)
+	}
+	assertDirEmpty(t, scratch)
+
 	gotRand, err := os.ReadFile(filepath.Join(dstDir, "random.bin"))
 	if err != nil || !bytes.Equal(gotRand, payload) {
 		t.Fatalf("random.bin round-trip mismatch (err=%v)", err)
@@ -898,9 +968,10 @@ func TestCanonicalManifestAndMaxParts(t *testing.T) {
 		ReincarnationID: "rid-123",
 		Roots: map[string]RootManifest{
 			RootWorkspace: {
-				Parts:   []Part{{Index: 0, Size: 12, Hash: transfer.HashBytes([]byte("0123456789ab"))}},
-				Entries: 1,
-				Bytes:   5,
+				Parts:    []Part{{Index: 0, Size: 12, Hash: transfer.HashBytes([]byte("0123456789ab"))}},
+				PartSize: DefaultPartSize,
+				Entries:  1,
+				Bytes:    5,
 			},
 		},
 	}

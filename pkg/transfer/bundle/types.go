@@ -81,10 +81,11 @@ type Manifest struct {
 // RootManifest describes the ordered compressed parts and statistics for one
 // bundled root ("workspace" or "home").
 type RootManifest struct {
-	Parts   []Part     `json:"parts"`
-	Entries int64      `json:"entries"`
-	Bytes   int64      `json:"bytes"`
-	Skipped SkipCounts `json:"skipped"`
+	Parts    []Part     `json:"parts"`
+	PartSize int64      `json:"partSize"`
+	Entries  int64      `json:"entries"`
+	Bytes    int64      `json:"bytes"`
+	Skipped  SkipCounts `json:"skipped"`
 }
 
 // Part describes one compressed slice of a root's tar.gz stream.
@@ -155,13 +156,19 @@ func (l Limits) Validate() error {
 	return nil
 }
 
+// MaxPartsFor returns the maximum number of parts allowed for the given
+// maxBytes and partSize, per design §3.7: ceil(maxBytes / partSize) + 8.
+func MaxPartsFor(maxBytes, partSize int64) int {
+	if partSize <= 0 || maxBytes <= 0 {
+		return 0
+	}
+	return int((maxBytes+partSize-1)/partSize) + 8
+}
+
 // MaxParts returns the maximum number of parts allowed for these limits,
 // per design §3.7: ceil(MaxBytes / PartSize) + 8.
 func (l Limits) MaxParts() int {
-	if l.PartSize <= 0 || l.MaxBytes <= 0 {
-		return 0
-	}
-	return int((l.MaxBytes+l.PartSize-1)/l.PartSize) + 8
+	return MaxPartsFor(l.MaxBytes, l.PartSize)
 }
 
 // ErrLimitExceeded is returned when writing, estimating, or extracting a bundle
@@ -215,11 +222,14 @@ func (m Manifest) Validate() error {
 	return nil
 }
 
-// Validate checks that a RootManifest has contiguous zero-based parts with
-// positive sizes and valid sha256 content hashes.
+// Validate checks that a RootManifest has a positive PartSize and contiguous
+// zero-based parts with positive sizes and valid sha256 content hashes.
 func (rm RootManifest) Validate() error {
 	if len(rm.Parts) == 0 {
 		return fmt.Errorf("%w: root has no parts", ErrInvalidManifest)
+	}
+	if rm.PartSize <= 0 {
+		return fmt.Errorf("%w: non-positive partSize %d", ErrInvalidManifest, rm.PartSize)
 	}
 	if rm.Entries < 0 || rm.Bytes < 0 {
 		return fmt.Errorf("%w: negative counts", ErrInvalidManifest)
@@ -294,9 +304,19 @@ func validateSymlinkInRoot(root *os.Root, relPath, target string) error {
 	if err := validateSymlinkTarget(relPath, target); err != nil {
 		return err
 	}
+	_, err := resolvePathInRoot(root, path.Dir(relPath), target)
+	return err
+}
+
+// resolvePathInRoot resolves target relative to baseDir inside root component
+// by component, following any in-root symlinks up to maxSymlinkHops. It
+// returns the resolved slash-separated path relative to root ("" for the root
+// directory itself), or ErrEscapingSymlink if any link escapes root, is
+// absolute/invalid, or exceeds maxSymlinkHops.
+func resolvePathInRoot(root *os.Root, baseDir, target string) (string, error) {
 	var cur []string
-	if dir := path.Dir(relPath); dir != "." && dir != "" {
-		cur = strings.Split(dir, "/")
+	if baseDir != "." && baseDir != "" {
+		cur = strings.Split(baseDir, "/")
 	}
 	queue := strings.Split(target, "/")
 	hops := 0
@@ -310,7 +330,7 @@ func validateSymlinkInRoot(root *os.Root, relPath, target string) error {
 			continue
 		case "..":
 			if len(cur) == 0 {
-				return ErrEscapingSymlink
+				return "", ErrEscapingSymlink
 			}
 			cur = cur[:len(cur)-1]
 			continue
@@ -331,22 +351,22 @@ func validateSymlinkInRoot(root *os.Root, relPath, target string) error {
 
 		hops++
 		if hops > maxSymlinkHops {
-			return ErrEscapingSymlink
+			return "", ErrEscapingSymlink
 		}
 		linkTarget, err := root.Readlink(filepath.FromSlash(cand))
 		if err != nil {
-			return ErrEscapingSymlink
+			return "", ErrEscapingSymlink
 		}
 		if linkTarget == "" || strings.ContainsRune(linkTarget, 0) || strings.Contains(linkTarget, `\`) ||
 			path.IsAbs(linkTarget) || filepath.IsAbs(linkTarget) {
-			return ErrEscapingSymlink
+			return "", ErrEscapingSymlink
 		}
 		// Resolve linkTarget relative to cand's parent directory.
 		cur = cur[:len(cur)-1]
 		next := strings.Split(linkTarget, "/")
 		queue = append(next, queue...)
 	}
-	return nil
+	return strings.Join(cur, "/"), nil
 }
 
 // pathDepth returns the 1-based depth of a validated slash-separated relative path.

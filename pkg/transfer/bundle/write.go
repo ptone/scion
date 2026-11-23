@@ -52,7 +52,9 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 		return RootManifest{}, err
 	}
 
-	splitter := newPartSplitter(ctx, scratchDir, lim.PartSize, sink)
+	ex = resolveExcluderInRoot(root, ex)
+
+	splitter := newPartSplitter(ctx, scratchDir, lim.PartSize, lim.MaxParts(), sink)
 	defer splitter.Abort()
 
 	gw := gzip.NewWriter(splitter)
@@ -166,10 +168,11 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 	}
 
 	return RootManifest{
-		Parts:   splitter.parts,
-		Entries: entries,
-		Bytes:   totalBytes,
-		Skipped: skipped,
+		Parts:    splitter.parts,
+		PartSize: lim.PartSize,
+		Entries:  entries,
+		Bytes:    totalBytes,
+		Skipped:  skipped,
 	}, nil
 }
 
@@ -186,6 +189,8 @@ func Estimate(ctx context.Context, root *os.Root, ex Excluder, lim Limits) (Esti
 	if err := ctx.Err(); err != nil {
 		return EstimateResult{}, err
 	}
+
+	ex = resolveExcluderInRoot(root, ex)
 
 	var res EstimateResult
 	err := transfer.WalkRoot(root, func(rel string, d fs.DirEntry) error {
@@ -309,6 +314,7 @@ type partSplitter struct {
 	ctx        context.Context
 	scratchDir string
 	partSize   int64
+	maxParts   int
 	sink       PartSink
 
 	index   int
@@ -319,17 +325,21 @@ type partSplitter struct {
 	written int64
 }
 
-func newPartSplitter(ctx context.Context, scratchDir string, partSize int64, sink PartSink) *partSplitter {
+func newPartSplitter(ctx context.Context, scratchDir string, partSize int64, maxParts int, sink PartSink) *partSplitter {
 	return &partSplitter{
 		ctx:        ctx,
 		scratchDir: scratchDir,
 		partSize:   partSize,
+		maxParts:   maxParts,
 		sink:       sink,
 		hasher:     sha256.New(),
 	}
 }
 
 func (s *partSplitter) openPart() error {
+	if s.index >= s.maxParts {
+		return &ErrLimitExceeded{Field: "parts", Got: int64(s.index + 1), Max: int64(s.maxParts)}
+	}
 	f, err := os.CreateTemp(s.scratchDir, "scion-bundle-write-*")
 	if err != nil {
 		return fmt.Errorf("create temp part file: %w", err)
