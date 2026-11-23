@@ -129,7 +129,7 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 
 		homeRoot, err := os.OpenRoot(srcHome)
 		require.NoError(t, err)
-		homeRM, err := bundle.Write(context.Background(), homeRoot, t.TempDir(), moveBundleHomeExcluder(), bundle.DefaultHomeLimits(),
+		homeRM, err := bundle.Write(context.Background(), homeRoot, t.TempDir(), moveBundleHomeExcluder("", nil), bundle.DefaultHomeLimits(),
 			partSinkFunc(func(_ context.Context, idx int, r io.ReadSeeker, _ int64, _ string) error {
 				b, err := io.ReadAll(r)
 				partsData[fmt.Sprintf("home/%d", idx)] = b
@@ -219,7 +219,7 @@ func TestMoveBundle_T7_CommitSemanticsAndMarker(t *testing.T) {
 
 		homeRoot, err := os.OpenRoot(srcHome)
 		require.NoError(t, err)
-		homeRM, err := bundle.Write(context.Background(), homeRoot, t.TempDir(), moveBundleHomeExcluder(), bundle.DefaultHomeLimits(),
+		homeRM, err := bundle.Write(context.Background(), homeRoot, t.TempDir(), moveBundleHomeExcluder("", nil), bundle.DefaultHomeLimits(),
 			partSinkFunc(func(_ context.Context, idx int, r io.ReadSeeker, _ int64, _ string) error {
 				b, err := io.ReadAll(r)
 				partsData[fmt.Sprintf("home/%d", idx)] = b

@@ -241,14 +241,73 @@ func (s *Server) resolveMoveBundleRuntimeName(r *http.Request, id, projectID str
 	return ""
 }
 
+// knownHarnessAuthFileTargets are the standard container-home auth file paths
+// harnesses project via ResolvedAuth.Files. Including them in the reconstructed
+// RunConfig guarantees they are excluded by runtime.PortableHomeExcludes even
+// when the agent is stopped and no live RunConfig is in memory.
+var knownHarnessAuthFileTargets = []string{
+	"~/.claude/.credentials.json",
+	"~/.gemini/oauth_creds.json",
+	"~/.codex/auth.json",
+	"~/.config/gcp/adc.json",
+	"~/.config/gcloud/application_default_credentials.json",
+}
+
+// buildMoveBundleHomeRunConfig reconstructs the runtime.RunConfig fields that
+// runtime.PortableHomeExcludes inspects (UnixUsername, file-type
+// ResolvedSecrets, and ResolvedAuth.Files) from the agent's persisted
+// <agentDir>/scion-agent.json plus any hub-supplied secret file targets.
+func buildMoveBundleHomeRunConfig(agentDir string, extraSecretTargets []string) scionrt.RunConfig {
+	var cfg scionrt.RunConfig
+	if root, err := os.OpenRoot(agentDir); err == nil {
+		defer func() { _ = root.Close() }()
+		if data, readErr := root.ReadFile("scion-agent.json"); readErr == nil {
+			var scionCfg api.ScionConfig
+			if json.Unmarshal(data, &scionCfg) == nil {
+				cfg.UnixUsername = scionCfg.User
+				for _, sec := range scionCfg.Secrets {
+					if sec.Type == "file" && sec.Target != "" {
+						cfg.ResolvedSecrets = append(cfg.ResolvedSecrets, api.ResolvedSecret{
+							Name:   sec.Key,
+							Type:   "file",
+							Target: sec.Target,
+						})
+					}
+				}
+			}
+		}
+	}
+	for _, target := range extraSecretTargets {
+		if target == "" {
+			continue
+		}
+		cfg.ResolvedSecrets = append(cfg.ResolvedSecrets, api.ResolvedSecret{
+			Type:   "file",
+			Target: target,
+		})
+	}
+	authFiles := make([]api.FileMapping, 0, len(knownHarnessAuthFileTargets))
+	for _, target := range knownHarnessAuthFileTargets {
+		authFiles = append(authFiles, api.FileMapping{
+			SourcePath:    "staged",
+			ContainerPath: target,
+		})
+	}
+	cfg.ResolvedAuth = &api.ResolvedAuth{Files: authFiles}
+	return cfg
+}
+
 // moveBundleHomeExcluder returns the $HOME excluder combining the shared
-// runtime.PortableHomeExcludes list with the D6 identity-credential and cache
-// exclusion lists in pkg/transfer/bundle.
-func moveBundleHomeExcluder() bundle.Excluder {
+// runtime.PortableHomeExcludes list (reconstructed from the agent's persisted
+// config and hub-supplied secret file targets) with the D6 identity-credential
+// and cache exclusion lists in pkg/transfer/bundle, runtime.IsHomeTempName,
+// and the agent's container home directory path.
+func moveBundleHomeExcluder(agentDir string, extraSecretTargets []string) bundle.Excluder {
+	runCfg := buildMoveBundleHomeRunConfig(agentDir, extraSecretTargets)
 	return bundle.HomeExcluder(bundle.HomeExcluderOptions{
-		ExtraLiterals: scionrt.PortableHomeExcludes(scionrt.RunConfig{}),
+		ExtraLiterals: scionrt.PortableHomeExcludes(runCfg),
 		TempNamePred:  scionrt.IsHomeTempName,
-		AgentHomeAbs:  util.GetHomeDir(""), // TODO(part-b): pass agent's UnixUsername when available
+		AgentHomeAbs:  util.GetHomeDir(runCfg.UnixUsername),
 	})
 }
 
@@ -334,7 +393,7 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	homeEst, homeErr := estimateMoveBundleRoot(r.Context(), dirs.homeDir, moveBundleHomeExcluder(), req.Limits.HomeLimits())
+	homeEst, homeErr := estimateMoveBundleRoot(r.Context(), dirs.homeDir, moveBundleHomeExcluder(dirs.agentDir, req.SecretFileTargets), req.Limits.HomeLimits())
 	if homeErr != nil {
 		if errors.Is(homeErr, fs.ErrNotExist) {
 			NotFound(w, "Agent home")
@@ -481,7 +540,7 @@ func (s *Server) runMoveBundleExport(
 		lim  bundle.Limits
 	}{
 		{bundle.RootWorkspace, dirs.workspaceDir, bundle.WorkspaceExcluder(), req.Limits.WorkspaceLimits()},
-		{bundle.RootHome, dirs.homeDir, moveBundleHomeExcluder(), req.Limits.HomeLimits()},
+		{bundle.RootHome, dirs.homeDir, moveBundleHomeExcluder(dirs.agentDir, req.SecretFileTargets), req.Limits.HomeLimits()},
 	}
 
 	results := make(chan rootResult, len(roots))

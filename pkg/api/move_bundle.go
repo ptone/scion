@@ -166,10 +166,11 @@ func (l MoveBundleLimits) PartStallTimeout() time.Duration {
 // MoveBundlePrecheckRequest is the request body for
 // POST /api/v1/agents/{id}/move-bundle/precheck (hub → source broker).
 type MoveBundlePrecheckRequest struct {
-	ProjectID   string           `json:"projectId,omitempty"`
-	ProjectPath string           `json:"projectPath,omitempty"`
-	ProjectSlug string           `json:"projectSlug,omitempty"`
-	Limits      MoveBundleLimits `json:"limits,omitempty"`
+	ProjectID         string           `json:"projectId,omitempty"`
+	ProjectPath       string           `json:"projectPath,omitempty"`
+	ProjectSlug       string           `json:"projectSlug,omitempty"`
+	SecretFileTargets []string         `json:"secretFileTargets,omitempty"`
+	Limits            MoveBundleLimits `json:"limits,omitempty"`
 }
 
 // MoveBundleRootEstimate is the stat-only size/entry estimate for one root.
@@ -199,11 +200,12 @@ type MoveBundleExportRequest struct {
 	ReincarnationID string `json:"reincarnationId"`
 	// AgentID is the hub's agent UUID, used by the broker when requesting
 	// signed upload URLs from the hub.
-	AgentID     string           `json:"agentId,omitempty"`
-	ProjectID   string           `json:"projectId,omitempty"`
-	ProjectPath string           `json:"projectPath,omitempty"`
-	ProjectSlug string           `json:"projectSlug,omitempty"`
-	Limits      MoveBundleLimits `json:"limits,omitempty"`
+	AgentID           string           `json:"agentId,omitempty"`
+	ProjectID         string           `json:"projectId,omitempty"`
+	ProjectPath       string           `json:"projectPath,omitempty"`
+	ProjectSlug       string           `json:"projectSlug,omitempty"`
+	SecretFileTargets []string         `json:"secretFileTargets,omitempty"`
+	Limits            MoveBundleLimits `json:"limits,omitempty"`
 }
 
 // MoveBundleImportRequest is the request body for

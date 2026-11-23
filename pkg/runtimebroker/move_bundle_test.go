@@ -203,11 +203,21 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 //   - signed-URL refresh at expires-60s and on 401/403
 func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 	t.Run("roundtrip export and import plus idempotent POST and 404 after restart", func(t *testing.T) {
-		srcProject, _, srcWS, srcHome := newMoveBundleTestAgentDir(t, "dev")
+		srcProject, srcAgentDir, srcWS, srcHome := newMoveBundleTestAgentDir(t, "dev")
 		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "main.go"), []byte("package main\n"), 0o644))
 		require.NoError(t, os.MkdirAll(filepath.Join(srcWS, ".git", "refs"), 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(srcWS, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644))
 		require.NoError(t, os.WriteFile(filepath.Join(srcHome, ".bash_history"), []byte("git status\n"), 0o600))
+		// Persist a file-type secret target in scion-agent.json and place an
+		// injected secret file + harness auth file in home; neither may be bundled.
+		require.NoError(t, os.WriteFile(filepath.Join(srcAgentDir, "scion-agent.json"),
+			[]byte(`{"user":"scion","secrets":[{"key":"my_api_key","type":"file","target":"~/.config/custom-app/secret.key"}]}`), 0o600))
+		require.NoError(t, os.MkdirAll(filepath.Join(srcHome, ".config", "custom-app"), 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(srcHome, ".config", "custom-app", "secret.key"), []byte("injected-secret-value"), 0o600))
+		require.NoError(t, os.MkdirAll(filepath.Join(srcHome, ".config", "hub-secret"), 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(srcHome, ".config", "hub-secret", "token.pem"), []byte("hub-injected-secret"), 0o600))
+		require.NoError(t, os.MkdirAll(filepath.Join(srcHome, ".claude"), 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(srcHome, ".claude", ".credentials.json"), []byte("claude-oauth-token"), 0o600))
 		// D6 excluded identity credential must not be exported.
 		require.NoError(t, os.MkdirAll(filepath.Join(srcHome, ".kube"), 0o700))
 		require.NoError(t, os.WriteFile(filepath.Join(srcHome, ".kube", "config"), []byte("secret-kubeconfig"), 0o600))
@@ -259,11 +269,12 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		}
 
 		exportReq := api.MoveBundleExportRequest{
-			ReincarnationID: "rid-1",
-			AgentID:         "agent-uuid-1",
-			ProjectID:       "proj-1",
-			ProjectPath:     srcProject,
-			Limits:          api.MoveBundleLimits{PartSize: 1024},
+			ReincarnationID:   "rid-1",
+			AgentID:           "agent-uuid-1",
+			ProjectID:         "proj-1",
+			ProjectPath:       srcProject,
+			SecretFileTargets: []string{"~/.config/hub-secret/token.pem"},
+			Limits:            api.MoveBundleLimits{PartSize: 1024},
 		}
 		rec := doMoveBundleReq(t, srcSrv, http.MethodPost, "/api/v1/agents/dev/move-bundle/export?projectId=proj-1", exportReq)
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
@@ -329,9 +340,15 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		gotHist, err := os.ReadFile(filepath.Join(dstHome, ".bash_history"))
 		require.NoError(t, err)
 		assert.Equal(t, "git status\n", string(gotHist))
-		// D6 excluded credential was never copied.
+		// D6 excluded credential, injected secret file target, and harness auth file were never copied.
 		_, err = os.Stat(filepath.Join(dstHome, ".kube", "config"))
 		assert.True(t, os.IsNotExist(err))
+		_, err = os.Stat(filepath.Join(dstHome, ".config", "custom-app", "secret.key"))
+		assert.True(t, os.IsNotExist(err), "injected file-type secret target must be excluded from bundle")
+		_, err = os.Stat(filepath.Join(dstHome, ".config", "hub-secret", "token.pem"))
+		assert.True(t, os.IsNotExist(err), "hub-supplied secret file target must be excluded from bundle")
+		_, err = os.Stat(filepath.Join(dstHome, ".claude", ".credentials.json"))
+		assert.True(t, os.IsNotExist(err), "harness auth file target must be excluded from bundle")
 	})
 
 	t.Run("409 conflict on different rid while running", func(t *testing.T) {
@@ -467,7 +484,7 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 
 		homeRoot, err := os.OpenRoot(srcHome)
 		require.NoError(t, err)
-		homeRM, err := bundle.Write(context.Background(), homeRoot, t.TempDir(), moveBundleHomeExcluder(), bundle.Limits{
+		homeRM, err := bundle.Write(context.Background(), homeRoot, t.TempDir(), moveBundleHomeExcluder("", nil), bundle.Limits{
 			MaxBytes: 1 << 20, MaxEntries: 100, MaxDepth: 16, MaxPathLen: 256, PartSize: 64,
 		},
 			partSinkFunc(func(_ context.Context, idx int, r io.ReadSeeker, _ int64, _ string) error {
