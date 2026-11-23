@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,4 +60,51 @@ func TestProvision_MoveBundleWorkspaceSourceLeavesWorkspaceEmpty(t *testing.T) {
 	homeEntries, err := os.ReadDir(homeDir)
 	require.NoError(t, err)
 	assert.NotEmpty(t, homeEntries, "move-bundle provision must render home normally")
+}
+
+func TestMoveBundleHomeRecord_WriteReadAndExpand(t *testing.T) {
+	dir := t.TempDir()
+
+	// Missing record fails closed.
+	_, err := ReadMoveBundleHomeRecord(dir)
+	assert.ErrorIs(t, err, ErrMoveBundleHomeRecordMissing)
+
+	// Empty UnixUsername cannot build a record.
+	_, err = BuildMoveBundleHomeRecord(runtime.RunConfig{})
+	assert.ErrorIs(t, err, ErrMoveBundleHomeRecordInvalid)
+
+	// Valid record persists resolved UnixUsername, HomeAbs, file secrets, and auth files.
+	cfg := runtime.RunConfig{
+		UnixUsername: "scion",
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "k1", Type: "file", Target: "~/.config/app/key.pem"},
+			{Name: "k2", Type: "file", Target: "/home/scion/.ssh/id_ed25519"},
+			{Name: "k3", Type: "file", Target: "/etc/outside.pem"},
+		},
+		ResolvedAuth: &api.ResolvedAuth{
+			Files: []api.FileMapping{
+				{SourcePath: "/host/a", ContainerPath: "~/.claude/.credentials.json"},
+			},
+		},
+	}
+	require.NoError(t, WriteMoveBundleHomeRecord(dir, cfg))
+
+	rec, err := ReadMoveBundleHomeRecord(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "scion", rec.UnixUsername)
+	assert.Equal(t, "/home/scion", rec.HomeAbs)
+	assert.Contains(t, rec.HomeExcludes, ".config/app/key.pem")
+	assert.Contains(t, rec.HomeExcludes, ".ssh/id_ed25519")
+	assert.Contains(t, rec.HomeExcludes, ".claude/.credentials.json")
+	assert.NotContains(t, rec.HomeExcludes, "etc/outside.pem")
+
+	// ExpandHomeRelTarget works directly against homeAbs (including /root) and rejects /home.
+	rel, ok := ExpandHomeRelTarget("~/.gemini/antigravity-cli/token", "/home/scion")
+	assert.True(t, ok)
+	assert.Equal(t, ".gemini/antigravity-cli/token", rel)
+	rel, ok = ExpandHomeRelTarget("~/.copilot/config.json", "/root")
+	assert.True(t, ok)
+	assert.Equal(t, ".copilot/config.json", rel)
+	_, ok = ExpandHomeRelTarget("~/.kube/config", "/home")
+	assert.False(t, ok, "/home is not a user home")
 }

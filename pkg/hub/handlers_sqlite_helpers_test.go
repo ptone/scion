@@ -620,8 +620,8 @@ type reincarnateTestDispatcher struct {
 	recreatedDeleteIDs         []string
 
 	// Move-bundle hooks for Part D worker tests (T11).
-	moveBundlePrecheckFn     func(ctx context.Context, agent *store.Agent, limits api.MoveBundleLimits) (*api.MoveBundlePrecheckResponse, error)
-	moveBundleExportFn       func(ctx context.Context, agent *store.Agent, rid string, limits api.MoveBundleLimits) (*api.MoveBundleJobStatus, error)
+	moveBundlePrecheckFn     func(ctx context.Context, agent *store.Agent, limits api.MoveBundleLimits, secretFileTargets []string) (*api.MoveBundlePrecheckResponse, error)
+	moveBundleExportFn       func(ctx context.Context, agent *store.Agent, rid string, limits api.MoveBundleLimits, secretFileTargets []string) (*api.MoveBundleJobStatus, error)
 	moveBundleExportStatusFn func(ctx context.Context, agent *store.Agent, rid string) (*api.MoveBundleJobStatus, error)
 	moveBundleImportFn       func(ctx context.Context, agent *store.Agent, rid string, manifest bundle.Manifest, manifestHash string, limits api.MoveBundleLimits) (*api.MoveBundleJobStatus, error)
 	moveBundleImportStatusFn func(ctx context.Context, agent *store.Agent, rid string) (*api.MoveBundleJobStatus, error)
@@ -5355,22 +5355,22 @@ func (d *reincarnateTestDispatcher) DispatchAgentProvisionForBundleMove(ctx cont
 	return d.DispatchAgentProvisionForMove(ctx, agent, "fresh-agent-dir", moveID)
 }
 
-func (d *reincarnateTestDispatcher) DispatchMoveBundlePrecheck(ctx context.Context, agent *store.Agent, limits api.MoveBundleLimits) (*api.MoveBundlePrecheckResponse, error) {
+func (d *reincarnateTestDispatcher) DispatchMoveBundlePrecheck(ctx context.Context, agent *store.Agent, limits api.MoveBundleLimits, secretFileTargets []string) (*api.MoveBundlePrecheckResponse, error) {
 	d.mu.Lock()
 	fn := d.moveBundlePrecheckFn
 	d.mu.Unlock()
 	if fn != nil {
-		return fn(ctx, agent, limits)
+		return fn(ctx, agent, limits, secretFileTargets)
 	}
 	return &api.MoveBundlePrecheckResponse{Durable: true}, nil
 }
 
-func (d *reincarnateTestDispatcher) DispatchMoveBundleExport(ctx context.Context, agent *store.Agent, rid string, limits api.MoveBundleLimits) (*api.MoveBundleJobStatus, error) {
+func (d *reincarnateTestDispatcher) DispatchMoveBundleExport(ctx context.Context, agent *store.Agent, rid string, limits api.MoveBundleLimits, secretFileTargets []string) (*api.MoveBundleJobStatus, error) {
 	d.mu.Lock()
 	fn := d.moveBundleExportFn
 	d.mu.Unlock()
 	if fn != nil {
-		return fn(ctx, agent, rid, limits)
+		return fn(ctx, agent, rid, limits, secretFileTargets)
 	}
 	return &api.MoveBundleJobStatus{ReincarnationID: rid, Kind: api.MoveBundleJobKindExport, State: api.MoveBundleJobStateRunning}, nil
 }

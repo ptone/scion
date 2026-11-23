@@ -30,8 +30,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer/bundle"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,6 +53,19 @@ func newMoveBundleTestAgentDir(t *testing.T, agentSlug string) (string, string, 
 	require.NoError(t, os.MkdirAll(wsDir, 0o755))
 	require.NoError(t, os.MkdirAll(homeDir, 0o755))
 	return scionDir, agentDir, wsDir, homeDir
+}
+
+func writeTestHomeRecord(t *testing.T, agentDir string, cfg scionrt.RunConfig) {
+	t.Helper()
+	if cfg.UnixUsername == "" {
+		cfg.UnixUsername = "scion"
+	}
+	require.NoError(t, agent.WriteMoveBundleHomeRecord(agentDir, cfg))
+}
+
+func writeTestMoveMarker(t *testing.T, agentDir, rid string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, agent.MoveMarkerFile), []byte(rid+"\n"), 0o600))
 }
 
 func doMoveBundleReq(t *testing.T, srv *Server, method, path string, body any) *httptest.ResponseRecorder {
@@ -105,19 +120,33 @@ func TestBrokerCapabilities_AdvertiseAgentMoveBundle(t *testing.T) {
 }
 
 func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
-	projectPath, _, wsDir, homeDir := newMoveBundleTestAgentDir(t, "dev")
+	projectPath, agentDir, wsDir, homeDir := newMoveBundleTestAgentDir(t, "dev")
+	writeTestHomeRecord(t, agentDir, scionrt.RunConfig{UnixUsername: "scion"})
 	require.NoError(t, os.WriteFile(filepath.Join(wsDir, "hello.txt"), []byte("hello world"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(homeDir, "notes.txt"), []byte("my notes"), 0o600))
 	// Excluded secret in home should not be counted.
 	require.NoError(t, os.MkdirAll(filepath.Join(homeDir, ".scion"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(homeDir, ".scion", "secrets.json"), bytes.Repeat([]byte("s"), 4096), 0o600))
 
-	t.Run("docker durable and within limits", func(t *testing.T) {
+	t.Run("incomplete limits rejected with 400 (S1)", func(t *testing.T) {
 		srv := newTestServer(t)
 		srv.moveBundle.durabilityRuntime = "docker"
 		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev/move-bundle/precheck", api.MoveBundlePrecheckRequest{
 			ProjectPath: projectPath,
-			Limits:      api.MoveBundleLimits{WorkspaceMaxBytes: 1 << 20, HomeMaxBytes: 1 << 20},
+			Limits:      api.MoveBundleLimits{WorkspaceMaxBytes: 1 << 20}, // missing other fields
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("docker durable and within limits", func(t *testing.T) {
+		srv := newTestServer(t)
+		srv.moveBundle.durabilityRuntime = "docker"
+		lim := api.DefaultMoveBundleLimits()
+		lim.WorkspaceMaxBytes = 1 << 20
+		lim.HomeMaxBytes = 1 << 20
+		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev/move-bundle/precheck", api.MoveBundlePrecheckRequest{
+			ProjectPath: projectPath,
+			Limits:      lim,
 		})
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		var resp api.MoveBundlePrecheckResponse
@@ -135,6 +164,7 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 			srv.moveBundle.durabilityRuntime = rt
 			rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev/move-bundle/precheck", api.MoveBundlePrecheckRequest{
 				ProjectPath: projectPath,
+				Limits:      api.DefaultMoveBundleLimits(),
 			})
 			require.Equal(t, http.StatusOK, rec.Code)
 			var resp api.MoveBundlePrecheckResponse
@@ -149,6 +179,7 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 			srv.moveBundle.durabilityRuntime = rt
 			rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev/move-bundle/precheck", api.MoveBundlePrecheckRequest{
 				ProjectPath: projectPath,
+				Limits:      api.DefaultMoveBundleLimits(),
 			})
 			require.Equal(t, http.StatusOK, rec.Code)
 			var resp api.MoveBundlePrecheckResponse
@@ -161,9 +192,11 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 	t.Run("over-limit early stop", func(t *testing.T) {
 		srv := newTestServer(t)
 		srv.moveBundle.durabilityRuntime = "docker"
+		lim := api.DefaultMoveBundleLimits()
+		lim.WorkspaceMaxBytes = 5
 		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev/move-bundle/precheck", api.MoveBundlePrecheckRequest{
 			ProjectPath: projectPath,
-			Limits:      api.MoveBundleLimits{WorkspaceMaxBytes: 5},
+			Limits:      lim,
 		})
 		require.Equal(t, http.StatusOK, rec.Code)
 		var resp api.MoveBundlePrecheckResponse
@@ -173,48 +206,89 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 		assert.Equal(t, "workspace.bytes", resp.Over)
 	})
 
-	t.Run("invalid path returns durable=false with clear reason and no over field", func(t *testing.T) {
-		badProj, _, badWS, _ := newMoveBundleTestAgentDir(t, "dev-badpath")
+	t.Run("invalid path returns durable=false with class-only reason and no host path (N2)", func(t *testing.T) {
+		badProj, badAgentDir, badWS, _ := newMoveBundleTestAgentDir(t, "dev-badpath")
+		writeTestHomeRecord(t, badAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
 		require.NoError(t, os.WriteFile(filepath.Join(badWS, `bad\name.txt`), []byte("x"), 0o644))
 
 		srv := newTestServer(t)
 		srv.moveBundle.durabilityRuntime = "docker"
 		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-badpath/move-bundle/precheck", api.MoveBundlePrecheckRequest{
 			ProjectPath: badProj,
+			Limits:      api.DefaultMoveBundleLimits(),
 		})
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		var resp api.MoveBundlePrecheckResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 		assert.False(t, resp.Durable)
-		assert.Contains(t, resp.Reason, "cannot be bundled")
-		assert.Contains(t, resp.Reason, "backslash")
+		assert.Equal(t, "source workspace contains an unsupported path", resp.Reason)
+		assert.NotContains(t, resp.Reason, badWS)
+		assert.NotContains(t, resp.Reason, `bad\name.txt`)
 		assert.Empty(t, resp.Over)
 		assert.Empty(t, resp.Workspace.Over)
 	})
 
-	t.Run("AgentHomeAbs uses persisted user or empty fail-closed when unknown", func(t *testing.T) {
-		// Missing/empty user in scion-agent.json must NOT guess: AgentHomeAbs is "" (fail closed).
-		cfgUnknown := buildMoveBundleHomeRunConfig(t.TempDir(), nil)
-		assert.Equal(t, "", cfgUnknown.UnixUsername)
-		assert.Equal(t, "", moveBundleAgentHomeAbs(cfgUnknown.UnixUsername))
+	t.Run("missing home record fails closed on precheck and export (C1c, C1f)", func(t *testing.T) {
+		noRecProj, _, noRecWS, _ := newMoveBundleTestAgentDir(t, "dev-norecord")
+		require.NoError(t, os.WriteFile(filepath.Join(noRecWS, "a.txt"), []byte("a"), 0o644))
 
-		// Explicit user in scion-agent.json resolves to /home/<user> (or /root).
-		agentDir := t.TempDir()
-		require.NoError(t, os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{"user":"devuser"}`), 0o600))
-		cfgCustom := buildMoveBundleHomeRunConfig(agentDir, nil)
-		assert.Equal(t, "devuser", cfgCustom.UnixUsername)
-		assert.Equal(t, "/home/devuser", moveBundleAgentHomeAbs(cfgCustom.UnixUsername))
+		srv := newTestServer(t)
+		srv.moveBundle.durabilityRuntime = "docker"
+		preRec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-norecord/move-bundle/precheck", api.MoveBundlePrecheckRequest{
+			ProjectPath: noRecProj,
+			Limits:      api.DefaultMoveBundleLimits(),
+		})
+		require.Equal(t, http.StatusOK, preRec.Code, preRec.Body.String())
+		var preResp api.MoveBundlePrecheckResponse
+		require.NoError(t, json.Unmarshal(preRec.Body.Bytes(), &preResp))
+		assert.False(t, preResp.Durable)
+		assert.Equal(t, moveBundleHomeRecordMissingReason, preResp.Reason)
 
-		// Excluder recognizes an absolute in-container secret target under /home/devuser.
-		ex := moveBundleHomeExcluder(agentDir, []string{"/home/devuser/.config/my-secret.pem"})
-		assert.True(t, ex.Exclude(".config/my-secret.pem", false))
+		expRec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-norecord/move-bundle/export?projectId=p1", api.MoveBundleExportRequest{
+			ReincarnationID: "rid-norecord",
+			ProjectID:       "p1",
+			ProjectPath:     noRecProj,
+			Limits:          api.DefaultMoveBundleLimits(),
+		})
+		assert.Equal(t, http.StatusConflict, expRec.Code, expRec.Body.String())
+		assert.Contains(t, expRec.Body.String(), moveBundleHomeRecordMissingReason)
+	})
+
+	t.Run("global project dir uses <agentDir>/workspace (R2)", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		globalDir := filepath.Join(home, ".scion")
+		agentDir := config.GetAgentDir(globalDir, "global-dev", false)
+		wsDir := filepath.Join(agentDir, "workspace")
+		homeDir := config.GetAgentHomePath(globalDir, "global-dev")
+		require.NoError(t, os.MkdirAll(wsDir, 0o755))
+		require.NoError(t, os.MkdirAll(homeDir, 0o755))
+		writeTestHomeRecord(t, agentDir, scionrt.RunConfig{UnixUsername: "scion"})
+		require.NoError(t, os.WriteFile(filepath.Join(wsDir, "from-agent-dir.txt"), []byte("1234567"), 0o644))
+
+		// Plant a stale Case-3 directory at ~/.scion/workspace/<slug> to ensure it is NOT read.
+		staleDir := filepath.Join(globalDir, "workspace", "global-dev")
+		require.NoError(t, os.MkdirAll(staleDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(staleDir, "stale.txt"), bytes.Repeat([]byte("z"), 999), 0o644))
+
+		srv := newTestServer(t)
+		srv.moveBundle.durabilityRuntime = "docker"
+		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/global-dev/move-bundle/precheck", api.MoveBundlePrecheckRequest{
+			ProjectPath: globalDir,
+			Limits:      api.DefaultMoveBundleLimits(),
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp api.MoveBundlePrecheckResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.True(t, resp.Durable)
+		assert.Equal(t, int64(7), resp.Workspace.Bytes, "must walk <agentDir>/workspace, not <globalDir>/workspace/<slug>")
 	})
 
 	t.Run("absolute in-home symlinked secret is not bundled", func(t *testing.T) {
-		// Reproduces the symlinked-dotfiles scenario: .config -> /home/scion/dotfiles/config
-		// with dotfiles/config/gcloud/credentials.db. Export must NOT bundle credentials.db.
 		srcProject, srcAgentDir, srcWS, srcHome := newMoveBundleTestAgentDir(t, "dev-symlink")
-		require.NoError(t, os.WriteFile(filepath.Join(srcAgentDir, "scion-agent.json"), []byte(`{"user":"scion"}`), 0o600))
+		// No "user" in scion-agent.json (the real default); home record supplies UnixUsername/HomeAbs.
+		require.NoError(t, os.WriteFile(filepath.Join(srcAgentDir, "scion-agent.json"), []byte(`{"harness":"claude"}`), 0o600))
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
 		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "w.txt"), []byte("w"), 0o644))
 		require.NoError(t, os.MkdirAll(filepath.Join(srcHome, "dotfiles", "config", "gcloud"), 0o700))
 		require.NoError(t, os.WriteFile(filepath.Join(srcHome, "dotfiles", "config", "gcloud", "credentials.db"), []byte("super-secret-gcloud-db"), 0o600))
@@ -258,13 +332,14 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 			ReincarnationID: "rid-symlink-sec",
 			ProjectID:       "p1",
 			ProjectPath:     srcProject,
+			Limits:          api.DefaultMoveBundleLimits(),
 		})
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 		st := waitForMoveBundleJob(t, srcSrv, "dev-symlink", "p1", api.MoveBundleJobKindExport, "rid-symlink-sec")
 		require.Equal(t, api.MoveBundleJobStateSucceeded, st.State, "error=%s", st.Error)
 
-		// Extract home into a fresh directory and verify credentials.db is absent while app.conf survived.
-		dstProject, _, _, dstHome := newMoveBundleTestAgentDir(t, "dev-symlink")
+		dstProject, dstAgentDir, _, dstHome := newMoveBundleTestAgentDir(t, "dev-symlink")
+		writeTestMoveMarker(t, dstAgentDir, "rid-symlink-sec")
 		_, manifestHash, err := bundle.CanonicalManifest(*st.Manifest)
 		require.NoError(t, err)
 		dstSrv := newTestServer(t)
@@ -291,6 +366,7 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 			ProjectPath:     dstProject,
 			Manifest:        *st.Manifest,
 			ManifestHash:    manifestHash,
+			Limits:          api.DefaultMoveBundleLimits(),
 		})
 		require.Equal(t, http.StatusAccepted, impRec.Code, impRec.Body.String())
 		impSt := waitForMoveBundleJob(t, dstSrv, "dev-symlink", "p1", api.MoveBundleJobKindImport, "rid-symlink-sec")
@@ -304,36 +380,41 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 	})
 }
 
-// TestMoveBundle_T6_ExportImportJobModelAndTransport covers design §9 T6:
-//   - round-trip export + import over httptest object store
-//   - idempotent POST with same rid
-//   - 409 conflict on different rid while running
-//   - timeout -> failed
-//   - 404 for unknown/lost job after restart + GC after TTL
-//   - URL redaction in errors (signed query token never appears)
-//   - signed-URL refresh at expires-60s and on 401/403
+// TestMoveBundle_T6_ExportImportJobModelAndTransport covers design §9 T6 and
+// C1f (scion-agent.json with no "user" + broker-owned record excludes auth,
+// declared file secret, and hub-supplied file secret).
 func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
-	t.Run("roundtrip export and import plus idempotent POST and 404 after restart", func(t *testing.T) {
+	t.Run("roundtrip export and import with no-user scion-agent.json plus idempotent POST and 404 after restart", func(t *testing.T) {
 		srcProject, srcAgentDir, srcWS, srcHome := newMoveBundleTestAgentDir(t, "dev")
 		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "main.go"), []byte("package main\n"), 0o644))
 		require.NoError(t, os.MkdirAll(filepath.Join(srcWS, ".git", "refs"), 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(srcWS, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644))
 		require.NoError(t, os.WriteFile(filepath.Join(srcHome, ".bash_history"), []byte("git status\n"), 0o600))
-		// Persist a file-type secret target in scion-agent.json and place an
-		// injected secret file + harness auth file in home; neither may be bundled.
+
+		// C1f: scion-agent.json intentionally has NO "user" field (the real default).
+		// The broker-owned start record carries the resolved UnixUsername, file secret, and auth file.
 		require.NoError(t, os.WriteFile(filepath.Join(srcAgentDir, "scion-agent.json"),
-			[]byte(`{"user":"scion","secrets":[{"key":"my_api_key","type":"file","target":"~/.config/custom-app/secret.key"}]}`), 0o600))
+			[]byte(`{"harness":"claude","secrets":[{"key":"my_api_key","type":"file","target":"~/.config/custom-app/secret.key"}]}`), 0o600))
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{
+			UnixUsername: "scion",
+			ResolvedSecrets: []api.ResolvedSecret{
+				{Name: "my_api_key", Type: "file", Target: "~/.config/custom-app/secret.key"},
+			},
+			ResolvedAuth: &api.ResolvedAuth{
+				Files: []api.FileMapping{
+					{SourcePath: "/host/claude-creds", ContainerPath: "~/.claude/.credentials.json"},
+				},
+			},
+		})
 		require.NoError(t, os.MkdirAll(filepath.Join(srcHome, ".config", "custom-app"), 0o700))
 		require.NoError(t, os.WriteFile(filepath.Join(srcHome, ".config", "custom-app", "secret.key"), []byte("injected-secret-value"), 0o600))
 		require.NoError(t, os.MkdirAll(filepath.Join(srcHome, ".config", "hub-secret"), 0o700))
 		require.NoError(t, os.WriteFile(filepath.Join(srcHome, ".config", "hub-secret", "token.pem"), []byte("hub-injected-secret"), 0o600))
 		require.NoError(t, os.MkdirAll(filepath.Join(srcHome, ".claude"), 0o700))
 		require.NoError(t, os.WriteFile(filepath.Join(srcHome, ".claude", ".credentials.json"), []byte("claude-oauth-token"), 0o600))
-		// D6 excluded identity credential must not be exported.
 		require.NoError(t, os.MkdirAll(filepath.Join(srcHome, ".kube"), 0o700))
 		require.NoError(t, os.WriteFile(filepath.Join(srcHome, ".kube", "config"), []byte("secret-kubeconfig"), 0o600))
 
-		// Fake object store backed by httptest.
 		var storeMu sync.Mutex
 		objects := map[string][]byte{}
 		objSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -379,13 +460,15 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 			},
 		}
 
+		lim := api.DefaultMoveBundleLimits()
+		lim.PartSize = 1024
 		exportReq := api.MoveBundleExportRequest{
 			ReincarnationID:   "rid-1",
 			AgentID:           "agent-uuid-1",
 			ProjectID:         "proj-1",
 			ProjectPath:       srcProject,
 			SecretFileTargets: []string{"~/.config/hub-secret/token.pem"},
-			Limits:            api.MoveBundleLimits{PartSize: 1024},
+			Limits:            lim,
 		}
 		rec := doMoveBundleReq(t, srcSrv, http.MethodPost, "/api/v1/agents/dev/move-bundle/export?projectId=proj-1", exportReq)
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
@@ -404,7 +487,8 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, rec404.Code)
 
 		// Import onto a target broker.
-		dstProject, _, dstWS, dstHome := newMoveBundleTestAgentDir(t, "dev")
+		dstProject, dstAgentDir, dstWS, dstHome := newMoveBundleTestAgentDir(t, "dev")
+		writeTestMoveMarker(t, dstAgentDir, "rid-1")
 		_, manifestHash, err := bundle.CanonicalManifest(*st.Manifest)
 		require.NoError(t, err)
 
@@ -438,6 +522,7 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 			ProjectPath:     dstProject,
 			Manifest:        *st.Manifest,
 			ManifestHash:    manifestHash,
+			Limits:          lim,
 		}
 		impRec := doMoveBundleReq(t, dstSrv, http.MethodPost, "/api/v1/agents/dev/move-bundle/import?projectId=proj-1", importReq)
 		require.Equal(t, http.StatusAccepted, impRec.Code, impRec.Body.String())
@@ -451,11 +536,11 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		gotHist, err := os.ReadFile(filepath.Join(dstHome, ".bash_history"))
 		require.NoError(t, err)
 		assert.Equal(t, "git status\n", string(gotHist))
-		// D6 excluded credential, injected secret file target, and harness auth file were never copied.
+		// D6 excluded credential, declared file secret, hub-supplied file secret, and harness auth file were never copied.
 		_, err = os.Stat(filepath.Join(dstHome, ".kube", "config"))
 		assert.True(t, os.IsNotExist(err))
 		_, err = os.Stat(filepath.Join(dstHome, ".config", "custom-app", "secret.key"))
-		assert.True(t, os.IsNotExist(err), "injected file-type secret target must be excluded from bundle")
+		assert.True(t, os.IsNotExist(err), "declared file-type secret target must be excluded from bundle")
 		_, err = os.Stat(filepath.Join(dstHome, ".config", "hub-secret", "token.pem"))
 		assert.True(t, os.IsNotExist(err), "hub-supplied secret file target must be excluded from bundle")
 		_, err = os.Stat(filepath.Join(dstHome, ".claude", ".credentials.json"))
@@ -463,7 +548,8 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 	})
 
 	t.Run("409 conflict on different rid while running", func(t *testing.T) {
-		srcProject, _, srcWS, _ := newMoveBundleTestAgentDir(t, "dev")
+		srcProject, srcAgentDir, srcWS, _ := newMoveBundleTestAgentDir(t, "dev")
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
 		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "a.txt"), []byte("data"), 0o644))
 
 		block := make(chan struct{})
@@ -488,6 +574,7 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 			ReincarnationID: "rid-a",
 			ProjectID:       "p1",
 			ProjectPath:     srcProject,
+			Limits:          api.DefaultMoveBundleLimits(),
 		})
 		require.Equal(t, http.StatusAccepted, rec1.Code)
 		<-entered
@@ -497,6 +584,7 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 			ReincarnationID: "rid-b",
 			ProjectID:       "p1",
 			ProjectPath:     srcProject,
+			Limits:          api.DefaultMoveBundleLimits(),
 		})
 		assert.Equal(t, http.StatusConflict, rec2.Code)
 		assert.Contains(t, rec2.Body.String(), api.BrokerErrCodeMoveBundleJobConflict)
@@ -506,7 +594,8 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 	})
 
 	t.Run("job timeout transitions to failed", func(t *testing.T) {
-		srcProject, _, srcWS, _ := newMoveBundleTestAgentDir(t, "dev")
+		srcProject, srcAgentDir, srcWS, _ := newMoveBundleTestAgentDir(t, "dev")
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
 		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "a.txt"), []byte("data"), 0o644))
 
 		srv := newTestServer(t)
@@ -517,11 +606,13 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 			},
 		}
 
+		lim := api.DefaultMoveBundleLimits()
+		lim.TimeoutSeconds = 1
 		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev/move-bundle/export?projectId=p1", api.MoveBundleExportRequest{
 			ReincarnationID: "rid-timeout",
 			ProjectID:       "p1",
 			ProjectPath:     srcProject,
-			Limits:          api.MoveBundleLimits{TimeoutSeconds: 1},
+			Limits:          lim,
 		})
 		require.Equal(t, http.StatusAccepted, rec.Code)
 
@@ -532,10 +623,10 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 
 	t.Run("URL redaction in export and import errors", func(t *testing.T) {
 		const secretToken = "SUPER-SECRET-SIGNED-URL-TOKEN-98765"
-		srcProject, _, srcWS, _ := newMoveBundleTestAgentDir(t, "dev")
+		srcProject, srcAgentDir, srcWS, _ := newMoveBundleTestAgentDir(t, "dev")
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
 		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "a.txt"), []byte("data"), 0o644))
 
-		// Object server returns 403 on PUT.
 		objSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte("SignatureDoesNotMatch " + secretToken))
@@ -559,6 +650,7 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 			ReincarnationID: "rid-redact",
 			ProjectID:       "p1",
 			ProjectPath:     srcProject,
+			Limits:          api.DefaultMoveBundleLimits(),
 		})
 		require.Equal(t, http.StatusAccepted, rec.Code)
 
@@ -570,9 +662,8 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 	})
 
 	t.Run("signed-URL refresh at expires-60s and on 403", func(t *testing.T) {
-		// Create a multi-part bundle (workspace has 2 parts, home has 1 part).
-		_, _, srcWS, srcHome := newMoveBundleTestAgentDir(t, "dev")
-		// Incompressible-ish data so PartSize splits into multiple parts.
+		_, srcAgentDir, srcWS, srcHome := newMoveBundleTestAgentDir(t, "dev")
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
 		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "big.bin"), bytes.Repeat([]byte("abcdefgh12345678"), 256), 0o644))
 		require.NoError(t, os.WriteFile(filepath.Join(srcHome, "h.txt"), []byte("home"), 0o644))
 
@@ -593,19 +684,20 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		_ = wsRoot.Close()
 		require.GreaterOrEqual(t, len(wsRM.Parts), 2, "need at least 2 workspace parts to test URL refresh")
 
+		homeEx, err := loadMoveBundleHomeExcluder(srcAgentDir, nil)
+		require.NoError(t, err)
 		homeRoot, err := os.OpenRoot(srcHome)
 		require.NoError(t, err)
-		homeRM, err := bundle.Write(context.Background(), homeRoot, t.TempDir(), moveBundleHomeExcluder("", nil), bundle.Limits{
+		homeRM, err := bundle.Write(context.Background(), homeRoot, t.TempDir(), homeEx, bundle.Limits{
 			MaxBytes: 1 << 20, MaxEntries: 100, MaxDepth: 16, MaxPathLen: 256, PartSize: 64,
-		},
-			partSinkFunc(func(_ context.Context, idx int, r io.ReadSeeker, _ int64, _ string) error {
-				b, err := io.ReadAll(r)
-				if err != nil {
-					return err
-				}
-				partsData[fmt.Sprintf("home/%d", idx)] = b
-				return nil
-			}))
+		}, partSinkFunc(func(_ context.Context, idx int, r io.ReadSeeker, _ int64, _ string) error {
+			b, err := io.ReadAll(r)
+			if err != nil {
+				return err
+			}
+			partsData[fmt.Sprintf("home/%d", idx)] = b
+			return nil
+		}))
 		require.NoError(t, err)
 		_ = homeRoot.Close()
 
@@ -620,8 +712,6 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		_, manifestHash, err := bundle.CanonicalManifest(manifest)
 		require.NoError(t, err)
 
-		// Generation 1 URLs expire within 30s (< 60s refresh margin) OR return 403 on first hit;
-		// Generation 2 URLs succeed with 15m TTL.
 		var fetchCount atomic.Int32
 		objSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("gen") == "1" {
@@ -639,7 +729,8 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		}))
 		defer objSrv.Close()
 
-		dstProject, _, dstWS, _ := newMoveBundleTestAgentDir(t, "dev")
+		dstProject, dstAgentDir, dstWS, _ := newMoveBundleTestAgentDir(t, "dev")
+		writeTestMoveMarker(t, dstAgentDir, "rid-refresh")
 		dstSrv := newTestServer(t)
 		dstSrv.moveBundle = moveBundleSettings{
 			client: objSrv.Client(),
@@ -647,7 +738,6 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 				gen := fetchCount.Add(1)
 				expSec := int64(900)
 				if gen == 1 {
-					// First generation expires in 30s (< 60s margin) AND returns 403 if used.
 					expSec = 30
 				}
 				var parts []api.MoveBundleDownloadPartURL
@@ -669,13 +759,15 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 			},
 		}
 
+		lim := api.DefaultMoveBundleLimits()
+		lim.PartSize = 64
 		rec := doMoveBundleReq(t, dstSrv, http.MethodPost, "/api/v1/agents/dev/move-bundle/import?projectId=p1", api.MoveBundleImportRequest{
 			ReincarnationID: "rid-refresh",
 			ProjectID:       "p1",
 			ProjectPath:     dstProject,
 			Manifest:        manifest,
 			ManifestHash:    manifestHash,
-			Limits:          api.MoveBundleLimits{PartSize: 64},
+			Limits:          lim,
 		})
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 
@@ -697,12 +789,10 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		require.False(t, conflict)
 		job.markSucceeded(nil, nil, now)
 
-		// Still present at +59m.
 		now = now.Add(59 * time.Minute)
 		_, ok := reg.get(key, "rid-gc")
 		assert.True(t, ok)
 
-		// Swept at +61m.
 		now = now.Add(2 * time.Minute)
 		_, ok = reg.get(key, "rid-gc")
 		assert.False(t, ok)

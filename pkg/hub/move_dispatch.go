@@ -66,11 +66,12 @@ type agentMoveDispatcher interface {
 	// AgentMove and AgentMoveBundle.
 	DispatchAgentProvisionForBundleMove(ctx context.Context, agent *store.Agent, moveReincarnationID string) error
 	// DispatchMoveBundlePrecheck probes source durability and stat-only
-	// workspace/$HOME estimates against hub-supplied limits.
-	DispatchMoveBundlePrecheck(ctx context.Context, agent *store.Agent, limits api.MoveBundleLimits) (*api.MoveBundlePrecheckResponse, error)
+	// workspace/$HOME estimates against hub-supplied limits and hub-resolved
+	// file-secret targets.
+	DispatchMoveBundlePrecheck(ctx context.Context, agent *store.Agent, limits api.MoveBundleLimits, secretFileTargets []string) (*api.MoveBundlePrecheckResponse, error)
 	// DispatchMoveBundleExport starts (or idempotently polls) a bundle export
-	// job on agent.RuntimeBrokerID.
-	DispatchMoveBundleExport(ctx context.Context, agent *store.Agent, reincarnationID string, limits api.MoveBundleLimits) (*api.MoveBundleJobStatus, error)
+	// job on agent.RuntimeBrokerID with hub-resolved file-secret targets.
+	DispatchMoveBundleExport(ctx context.Context, agent *store.Agent, reincarnationID string, limits api.MoveBundleLimits, secretFileTargets []string) (*api.MoveBundleJobStatus, error)
 	// DispatchMoveBundleExportStatus polls a running/finished export job.
 	DispatchMoveBundleExportStatus(ctx context.Context, agent *store.Agent, reincarnationID string) (*api.MoveBundleJobStatus, error)
 	// DispatchMoveBundleImport starts (or idempotently polls) a bundle import
@@ -165,6 +166,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvisionForBundleMove(ctx context.Co
 	if moveReincarnationID == "" {
 		return errors.New("DispatchAgentProvisionForBundleMove: moveReincarnationID is required")
 	}
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
+	}
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 	if err := d.requireMoveBundleCapability(ctx, agent); err != nil {
 		return err
 	}
@@ -191,27 +198,31 @@ func (d *HTTPAgentDispatcher) prepareMoveBundleCall(ctx context.Context, agent *
 	if err != nil {
 		return ctx, nil, "", projectDispatchInfo{}, err
 	}
-	info, _ := d.resolveDispatchProjectInfo(ctx, agent)
+	info, err := d.resolveDispatchProjectInfo(ctx, agent)
+	if err != nil {
+		return ctx, nil, "", projectDispatchInfo{}, fmt.Errorf("resolve project dispatch info: %w", err)
+	}
 	return ctx, mbClient, endpoint, info, nil
 }
 
 // DispatchMoveBundlePrecheck implements agentMoveDispatcher.
-func (d *HTTPAgentDispatcher) DispatchMoveBundlePrecheck(ctx context.Context, agent *store.Agent, limits api.MoveBundleLimits) (*api.MoveBundlePrecheckResponse, error) {
+func (d *HTTPAgentDispatcher) DispatchMoveBundlePrecheck(ctx context.Context, agent *store.Agent, limits api.MoveBundleLimits, secretFileTargets []string) (*api.MoveBundlePrecheckResponse, error) {
 	ctx, mbClient, endpoint, info, err := d.prepareMoveBundleCall(ctx, agent)
 	if err != nil {
 		return nil, err
 	}
 	req := &api.MoveBundlePrecheckRequest{
-		ProjectID:   agent.ProjectID,
-		ProjectPath: info.projectPath,
-		ProjectSlug: info.projectSlug,
-		Limits:      limits,
+		ProjectID:         agent.ProjectID,
+		ProjectPath:       info.projectPath,
+		ProjectSlug:       info.projectSlug,
+		SecretFileTargets: secretFileTargets,
+		Limits:            limits,
 	}
 	return mbClient.PrecheckMoveBundle(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, req)
 }
 
 // DispatchMoveBundleExport implements agentMoveDispatcher.
-func (d *HTTPAgentDispatcher) DispatchMoveBundleExport(ctx context.Context, agent *store.Agent, reincarnationID string, limits api.MoveBundleLimits) (*api.MoveBundleJobStatus, error) {
+func (d *HTTPAgentDispatcher) DispatchMoveBundleExport(ctx context.Context, agent *store.Agent, reincarnationID string, limits api.MoveBundleLimits, secretFileTargets []string) (*api.MoveBundleJobStatus, error) {
 	if reincarnationID == "" {
 		return nil, errors.New("DispatchMoveBundleExport: reincarnationID is required")
 	}
@@ -220,12 +231,13 @@ func (d *HTTPAgentDispatcher) DispatchMoveBundleExport(ctx context.Context, agen
 		return nil, err
 	}
 	req := &api.MoveBundleExportRequest{
-		ReincarnationID: reincarnationID,
-		AgentID:         agent.ID,
-		ProjectID:       agent.ProjectID,
-		ProjectPath:     info.projectPath,
-		ProjectSlug:     info.projectSlug,
-		Limits:          limits,
+		ReincarnationID:   reincarnationID,
+		AgentID:           agent.ID,
+		ProjectID:         agent.ProjectID,
+		ProjectPath:       info.projectPath,
+		ProjectSlug:       info.projectSlug,
+		SecretFileTargets: secretFileTargets,
+		Limits:            limits,
 	}
 	return mbClient.StartMoveBundleExport(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, req)
 }

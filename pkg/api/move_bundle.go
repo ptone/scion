@@ -63,104 +63,92 @@ const (
 
 // MoveBundleLimits carries the hub-configured bounds and timeouts for a
 // cross-broker bundle move (design §3.7). Brokers have no limits of their own
-// and enforce the values sent by the hub. Zero fields take the design §3.7
-// defaults; negative fields are rejected.
+// and require every field to be explicitly populated (> 0) by the hub.
 type MoveBundleLimits struct {
-	WorkspaceMaxBytes   int64 `json:"workspaceMaxBytes,omitempty"`
-	WorkspaceMaxEntries int64 `json:"workspaceMaxEntries,omitempty"`
-	HomeMaxBytes        int64 `json:"homeMaxBytes,omitempty"`
-	HomeMaxEntries      int64 `json:"homeMaxEntries,omitempty"`
-	MaxDepth            int   `json:"maxDepth,omitempty"`
-	MaxPathLen          int   `json:"maxPathLen,omitempty"`
-	PartSize            int64 `json:"partSize,omitempty"`
-	TimeoutSeconds      int   `json:"timeoutSeconds,omitempty"`
-	PartStallSeconds    int   `json:"partStallSeconds,omitempty"`
+	WorkspaceMaxBytes   int64 `json:"workspaceMaxBytes"`
+	WorkspaceMaxEntries int64 `json:"workspaceMaxEntries"`
+	HomeMaxBytes        int64 `json:"homeMaxBytes"`
+	HomeMaxEntries      int64 `json:"homeMaxEntries"`
+	MaxDepth            int   `json:"maxDepth"`
+	MaxPathLen          int   `json:"maxPathLen"`
+	PartSize            int64 `json:"partSize"`
+	TimeoutSeconds      int   `json:"timeoutSeconds"`
+	PartStallSeconds    int   `json:"partStallSeconds"`
 }
 
-// Validate rejects negative limit fields.
+// DefaultMoveBundleLimits returns the design §3.7 default limits for hub
+// config and tests. Brokers never substitute these on incoming requests.
+func DefaultMoveBundleLimits() MoveBundleLimits {
+	return MoveBundleLimits{
+		WorkspaceMaxBytes:   bundle.DefaultWorkspaceMaxBytes,
+		WorkspaceMaxEntries: bundle.DefaultWorkspaceMaxEntries,
+		HomeMaxBytes:        bundle.DefaultHomeMaxBytes,
+		HomeMaxEntries:      bundle.DefaultHomeMaxEntries,
+		MaxDepth:            bundle.DefaultMaxDepth,
+		MaxPathLen:          bundle.DefaultMaxPathLen,
+		PartSize:            bundle.DefaultPartSize,
+		TimeoutSeconds:      int(DefaultMoveBundleTimeout / time.Second),
+		PartStallSeconds:    int(DefaultMoveBundlePartStall / time.Second),
+	}
+}
+
+// Validate requires every limit and timeout field to be strictly positive.
+// Per design §3.7, brokers have no limits of their own and reject incomplete
+// limit payloads with 400.
 func (l MoveBundleLimits) Validate() error {
 	switch {
-	case l.WorkspaceMaxBytes < 0:
-		return fmt.Errorf("move bundle limits: workspaceMaxBytes must be >= 0")
-	case l.WorkspaceMaxEntries < 0:
-		return fmt.Errorf("move bundle limits: workspaceMaxEntries must be >= 0")
-	case l.HomeMaxBytes < 0:
-		return fmt.Errorf("move bundle limits: homeMaxBytes must be >= 0")
-	case l.HomeMaxEntries < 0:
-		return fmt.Errorf("move bundle limits: homeMaxEntries must be >= 0")
-	case l.MaxDepth < 0:
-		return fmt.Errorf("move bundle limits: maxDepth must be >= 0")
-	case l.MaxPathLen < 0:
-		return fmt.Errorf("move bundle limits: maxPathLen must be >= 0")
-	case l.PartSize < 0:
-		return fmt.Errorf("move bundle limits: partSize must be >= 0")
-	case l.TimeoutSeconds < 0:
-		return fmt.Errorf("move bundle limits: timeoutSeconds must be >= 0")
-	case l.PartStallSeconds < 0:
-		return fmt.Errorf("move bundle limits: partStallSeconds must be >= 0")
+	case l.WorkspaceMaxBytes <= 0:
+		return fmt.Errorf("move bundle limits: workspaceMaxBytes must be > 0")
+	case l.WorkspaceMaxEntries <= 0:
+		return fmt.Errorf("move bundle limits: workspaceMaxEntries must be > 0")
+	case l.HomeMaxBytes <= 0:
+		return fmt.Errorf("move bundle limits: homeMaxBytes must be > 0")
+	case l.HomeMaxEntries <= 0:
+		return fmt.Errorf("move bundle limits: homeMaxEntries must be > 0")
+	case l.MaxDepth <= 0:
+		return fmt.Errorf("move bundle limits: maxDepth must be > 0")
+	case l.MaxPathLen <= 0:
+		return fmt.Errorf("move bundle limits: maxPathLen must be > 0")
+	case l.PartSize <= 0:
+		return fmt.Errorf("move bundle limits: partSize must be > 0")
+	case l.TimeoutSeconds <= 0:
+		return fmt.Errorf("move bundle limits: timeoutSeconds must be > 0")
+	case l.PartStallSeconds <= 0:
+		return fmt.Errorf("move bundle limits: partStallSeconds must be > 0")
 	}
 	return nil
 }
 
-// WorkspaceLimits converts the workspace portion of l to bundle.Limits,
-// filling zero fields with design §3.7 defaults.
+// WorkspaceLimits converts the workspace portion of l to bundle.Limits.
 func (l MoveBundleLimits) WorkspaceLimits() bundle.Limits {
-	lim := bundle.DefaultWorkspaceLimits()
-	if l.WorkspaceMaxBytes > 0 {
-		lim.MaxBytes = l.WorkspaceMaxBytes
+	return bundle.Limits{
+		MaxBytes:   l.WorkspaceMaxBytes,
+		MaxEntries: l.WorkspaceMaxEntries,
+		MaxDepth:   l.MaxDepth,
+		MaxPathLen: l.MaxPathLen,
+		PartSize:   l.PartSize,
 	}
-	if l.WorkspaceMaxEntries > 0 {
-		lim.MaxEntries = l.WorkspaceMaxEntries
-	}
-	if l.MaxDepth > 0 {
-		lim.MaxDepth = l.MaxDepth
-	}
-	if l.MaxPathLen > 0 {
-		lim.MaxPathLen = l.MaxPathLen
-	}
-	if l.PartSize > 0 {
-		lim.PartSize = l.PartSize
-	}
-	return lim
 }
 
-// HomeLimits converts the home portion of l to bundle.Limits, filling zero
-// fields with design §3.7 defaults.
+// HomeLimits converts the home portion of l to bundle.Limits.
 func (l MoveBundleLimits) HomeLimits() bundle.Limits {
-	lim := bundle.DefaultHomeLimits()
-	if l.HomeMaxBytes > 0 {
-		lim.MaxBytes = l.HomeMaxBytes
+	return bundle.Limits{
+		MaxBytes:   l.HomeMaxBytes,
+		MaxEntries: l.HomeMaxEntries,
+		MaxDepth:   l.MaxDepth,
+		MaxPathLen: l.MaxPathLen,
+		PartSize:   l.PartSize,
 	}
-	if l.HomeMaxEntries > 0 {
-		lim.MaxEntries = l.HomeMaxEntries
-	}
-	if l.MaxDepth > 0 {
-		lim.MaxDepth = l.MaxDepth
-	}
-	if l.MaxPathLen > 0 {
-		lim.MaxPathLen = l.MaxPathLen
-	}
-	if l.PartSize > 0 {
-		lim.PartSize = l.PartSize
-	}
-	return lim
 }
 
-// Timeout returns the whole-job timeout, defaulting to DefaultMoveBundleTimeout.
+// Timeout returns the whole-job timeout configured in l.
 func (l MoveBundleLimits) Timeout() time.Duration {
-	if l.TimeoutSeconds > 0 {
-		return time.Duration(l.TimeoutSeconds) * time.Second
-	}
-	return DefaultMoveBundleTimeout
+	return time.Duration(l.TimeoutSeconds) * time.Second
 }
 
-// PartStallTimeout returns the per-part no-progress timeout, defaulting to
-// DefaultMoveBundlePartStall.
+// PartStallTimeout returns the per-part no-progress timeout configured in l.
 func (l MoveBundleLimits) PartStallTimeout() time.Duration {
-	if l.PartStallSeconds > 0 {
-		return time.Duration(l.PartStallSeconds) * time.Second
-	}
-	return DefaultMoveBundlePartStall
+	return time.Duration(l.PartStallSeconds) * time.Second
 }
 
 // MoveBundlePrecheckRequest is the request body for

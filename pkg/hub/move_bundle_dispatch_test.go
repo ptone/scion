@@ -79,16 +79,25 @@ func TestDispatchAgentProvisionForBundleMove_CapabilityAndWorkspaceSource(t *tes
 func TestDispatchMoveBundle_HTTPRoundTripsAndCapabilityGuard(t *testing.T) {
 	t.Run("refuses broker without AgentMoveBundle before sending", func(t *testing.T) {
 		d, _, agent := newMoveDispatchFixture(t, &store.BrokerCapabilities{AgentMove: true})
-		_, err := d.DispatchMoveBundlePrecheck(context.Background(), agent, api.MoveBundleLimits{})
+		lim := api.DefaultMoveBundleLimits()
+		_, err := d.DispatchMoveBundlePrecheck(context.Background(), agent, lim, []string{"~/.config/hub/tok"})
 		assert.ErrorIs(t, err, errBrokerLacksAgentMoveBundle)
-		_, err = d.DispatchMoveBundleExport(context.Background(), agent, "rid-1", api.MoveBundleLimits{})
+		_, err = d.DispatchMoveBundleExport(context.Background(), agent, "rid-1", lim, []string{"~/.config/hub/tok"})
 		assert.ErrorIs(t, err, errBrokerLacksAgentMoveBundle)
 		_, err = d.DispatchMoveBundleExportStatus(context.Background(), agent, "rid-1")
 		assert.ErrorIs(t, err, errBrokerLacksAgentMoveBundle)
-		_, err = d.DispatchMoveBundleImport(context.Background(), agent, "rid-1", bundle.Manifest{}, "sha256:abc", api.MoveBundleLimits{})
+		_, err = d.DispatchMoveBundleImport(context.Background(), agent, "rid-1", bundle.Manifest{}, "sha256:abc", lim)
 		assert.ErrorIs(t, err, errBrokerLacksAgentMoveBundle)
 		_, err = d.DispatchMoveBundleImportStatus(context.Background(), agent, "rid-1")
 		assert.ErrorIs(t, err, errBrokerLacksAgentMoveBundle)
+	})
+
+	t.Run("returns resolveDispatchProjectInfo error instead of falling back to global project (R3)", func(t *testing.T) {
+		d, _, agent := newMoveDispatchFixture(t, bundleCaps)
+		agent.ProjectID = "nonexistent-project-id"
+		_, err := d.DispatchMoveBundlePrecheck(context.Background(), agent, api.DefaultMoveBundleLimits(), nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "resolve project dispatch info")
 	})
 
 	t.Run("HTTP client round-trips all five endpoints", func(t *testing.T) {

@@ -36,7 +36,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer/bundle"
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // moveBundleSettings holds test-overridable dependencies and timings for the
@@ -87,9 +86,9 @@ func (st moveBundleSettings) resolved(s *Server) moveBundleSettings {
 func (s *Server) moveBundleRegistry() *moveBundleJobRegistry {
 	s.moveBundleOnce.Do(func() {
 		st := s.moveBundle.resolved(s)
-		s.moveBundleJobs = newMoveBundleJobRegistry(st.now, st.jobTTL)
+		s.moveBundleJobs.Store(newMoveBundleJobRegistry(st.now, st.jobTTL))
 	})
-	return s.moveBundleJobs
+	return s.moveBundleJobs.Load()
 }
 
 func (s *Server) moveBundleScratchBase() string {
@@ -212,10 +211,10 @@ func (s *Server) resolveMoveBundleDirs(agentSlug, projectID, projectPath, projec
 
 	agentDir := config.GetAgentDir(projectDir, agentSlug, false)
 	homeDir := config.GetAgentHomePath(projectDir, agentSlug)
+	// Bundle-eligible agents (clone-per-agent, empty-per-agent, and
+	// WorkspaceSource="move-bundle" target provisions) always place their
+	// workspace at <agentDir>/workspace, including in the global project.
 	workspaceDir := filepath.Join(agentDir, "workspace")
-	if config.IsGlobalProjectDir(projectDir) {
-		workspaceDir = filepath.Join(projectDir, "workspace", agentSlug)
-	}
 	return moveBundleDirs{
 		agentDir:     agentDir,
 		workspaceDir: workspaceDir,
@@ -241,86 +240,63 @@ func (s *Server) resolveMoveBundleRuntimeName(r *http.Request, id, projectID str
 	return ""
 }
 
-// knownHarnessAuthFileTargets are the standard container-home auth file paths
-// harnesses project via ResolvedAuth.Files. Including them in the reconstructed
-// RunConfig guarantees they are excluded by runtime.PortableHomeExcludes even
-// when the agent is stopped and no live RunConfig is in memory.
-var knownHarnessAuthFileTargets = []string{
-	"~/.claude/.credentials.json",
-	"~/.gemini/oauth_creds.json",
-	"~/.codex/auth.json",
-	"~/.config/gcp/adc.json",
-	"~/.config/gcloud/application_default_credentials.json",
-}
+// moveBundleHomeRecordMissingReason is the user-facing refusal reason returned
+// when an agent lacks the broker-owned move-bundle home record written at start.
+const moveBundleHomeRecordMissingReason = "restart the agent once to enable bundle moves"
 
-// buildMoveBundleHomeRunConfig reconstructs the runtime.RunConfig fields that
-// runtime.PortableHomeExcludes inspects (UnixUsername, file-type
-// ResolvedSecrets, and ResolvedAuth.Files) from the agent's persisted
-// <agentDir>/scion-agent.json plus any hub-supplied secret file targets.
-func buildMoveBundleHomeRunConfig(agentDir string, extraSecretTargets []string) scionrt.RunConfig {
-	var cfg scionrt.RunConfig
-	if root, err := os.OpenRoot(agentDir); err == nil {
-		defer func() { _ = root.Close() }()
-		if data, readErr := root.ReadFile("scion-agent.json"); readErr == nil {
-			var scionCfg api.ScionConfig
-			if json.Unmarshal(data, &scionCfg) == nil {
-				cfg.UnixUsername = scionCfg.User
-				for _, sec := range scionCfg.Secrets {
-					if sec.Type == "file" && sec.Target != "" {
-						cfg.ResolvedSecrets = append(cfg.ResolvedSecrets, api.ResolvedSecret{
-							Name:   sec.Key,
-							Type:   "file",
-							Target: sec.Target,
-						})
-					}
-				}
-			}
+// loadMoveBundleHomeExcluder builds the $HOME excluder from the broker-owned
+// start record (<agentDir>/.scion-move-bundle-home.json) unioned with any
+// hub-supplied file-secret targets. It fails closed whenever the record is
+// missing or incomplete, and expands "~/" and absolute targets directly
+// against the record's resolved HomeAbs.
+func loadMoveBundleHomeExcluder(agentDir string, hubSecretTargets []string) (bundle.Excluder, error) {
+	rec, err := agent.ReadMoveBundleHomeRecord(agentDir)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(rec.HomeExcludes)+len(hubSecretTargets))
+	var literals []string
+	add := func(rel string) {
+		rel = strings.TrimSpace(rel)
+		if rel == "" {
+			return
+		}
+		if _, ok := seen[rel]; ok {
+			return
+		}
+		seen[rel] = struct{}{}
+		literals = append(literals, rel)
+	}
+	for _, rel := range rec.HomeExcludes {
+		add(rel)
+	}
+	for _, rel := range scionrt.PortableHomeExcludes(scionrt.RunConfig{UnixUsername: rec.UnixUsername}) {
+		add(rel)
+	}
+	for _, target := range hubSecretTargets {
+		if rel, ok := agent.ExpandHomeRelTarget(target, rec.HomeAbs); ok {
+			add(rel)
 		}
 	}
-	for _, target := range extraSecretTargets {
-		if target == "" {
-			continue
-		}
-		cfg.ResolvedSecrets = append(cfg.ResolvedSecrets, api.ResolvedSecret{
-			Type:   "file",
-			Target: target,
-		})
-	}
-	authFiles := make([]api.FileMapping, 0, len(knownHarnessAuthFileTargets))
-	for _, target := range knownHarnessAuthFileTargets {
-		authFiles = append(authFiles, api.FileMapping{
-			SourcePath:    "staged",
-			ContainerPath: target,
-		})
-	}
-	cfg.ResolvedAuth = &api.ResolvedAuth{Files: authFiles}
-	return cfg
-}
-
-// moveBundleAgentHomeAbs returns the agent's in-container home path when
-// unixUsername is known from the agent's persisted config, or "" otherwise
-// so bundle.HomeExcluder fails closed instead of guessing (note:
-// util.GetHomeDir("") returns "/home", which must never be passed).
-func moveBundleAgentHomeAbs(unixUsername string) string {
-	if unixUsername == "" {
-		return ""
-	}
-	return util.GetHomeDir(unixUsername)
-}
-
-// moveBundleHomeExcluder returns the $HOME excluder combining the shared
-// runtime.PortableHomeExcludes list (reconstructed from the agent's persisted
-// config and hub-supplied secret file targets) with the D6 identity-credential
-// and cache exclusion lists in pkg/transfer/bundle, runtime.IsHomeTempName,
-// and the agent's in-container home directory path (empty when unknown so
-// absolute in-home symlink resolution fails closed).
-func moveBundleHomeExcluder(agentDir string, extraSecretTargets []string) bundle.Excluder {
-	runCfg := buildMoveBundleHomeRunConfig(agentDir, extraSecretTargets)
 	return bundle.HomeExcluder(bundle.HomeExcluderOptions{
-		ExtraLiterals: scionrt.PortableHomeExcludes(runCfg),
+		ExtraLiterals: literals,
 		TempNamePred:  scionrt.IsHomeTempName,
-		AgentHomeAbs:  moveBundleAgentHomeAbs(runCfg.UnixUsername),
-	})
+		AgentHomeAbs:  rec.HomeAbs,
+	}), nil
+}
+
+// precheckUnportableReason maps a bundle.Estimate failure to a class-only
+// user-facing refusal reason containing no host paths and no symlink targets.
+func precheckUnportableReason(rootName string, err error) string {
+	var unportablePath *bundle.ErrUnportablePath
+	if errors.As(err, &unportablePath) {
+		return fmt.Sprintf("source %s contains an unsupported path", rootName)
+	}
+	var unportableHome *bundle.ErrUnportableHome
+	if errors.As(err, &unportableHome) {
+		return fmt.Sprintf("source %s contains an unportable symlink or hardlink", rootName)
+	}
+	return fmt.Sprintf("source %s cannot be bundled", rootName)
 }
 
 func decodeOptionalJSON(r *http.Request, dst any) error {
@@ -378,6 +354,17 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	homeEx, homeExErr := loadMoveBundleHomeExcluder(dirs.agentDir, req.SecretFileTargets)
+	if homeExErr != nil {
+		s.agentLifecycleLog.Warn("Move-bundle precheck: home exclusion record unavailable",
+			"agent_id", id, "error", homeExErr)
+		writeJSON(w, http.StatusOK, api.MoveBundlePrecheckResponse{
+			Durable: false,
+			Reason:  moveBundleHomeRecordMissingReason,
+		})
+		return
+	}
+
 	wsEst, wsErr := estimateMoveBundleRoot(r.Context(), dirs.workspaceDir, bundle.WorkspaceExcluder(), req.Limits.WorkspaceLimits())
 	if wsErr != nil {
 		if errors.Is(wsErr, fs.ErrNotExist) {
@@ -388,9 +375,11 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 			InternalError(w)
 			return
 		}
+		s.agentLifecycleLog.Warn("Move-bundle precheck: workspace cannot be bundled",
+			"agent_id", id, "error", wsErr)
 		writeJSON(w, http.StatusOK, api.MoveBundlePrecheckResponse{
 			Durable: false,
-			Reason:  fmt.Sprintf("source workspace cannot be bundled: %v", wsErr),
+			Reason:  precheckUnportableReason(bundle.RootWorkspace, wsErr),
 		})
 		return
 	}
@@ -405,7 +394,7 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	homeEst, homeErr := estimateMoveBundleRoot(r.Context(), dirs.homeDir, moveBundleHomeExcluder(dirs.agentDir, req.SecretFileTargets), req.Limits.HomeLimits())
+	homeEst, homeErr := estimateMoveBundleRoot(r.Context(), dirs.homeDir, homeEx, req.Limits.HomeLimits())
 	if homeErr != nil {
 		if errors.Is(homeErr, fs.ErrNotExist) {
 			NotFound(w, "Agent home")
@@ -415,9 +404,11 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 			InternalError(w)
 			return
 		}
+		s.agentLifecycleLog.Warn("Move-bundle precheck: home cannot be bundled",
+			"agent_id", id, "error", homeErr)
 		writeJSON(w, http.StatusOK, api.MoveBundlePrecheckResponse{
 			Durable: false,
-			Reason:  fmt.Sprintf("source home cannot be bundled: %v", homeErr),
+			Reason:  precheckUnportableReason(bundle.RootHome, homeErr),
 		})
 		return
 	}
@@ -495,6 +486,14 @@ func (s *Server) handleMoveBundleExportStart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	homeEx, homeExErr := loadMoveBundleHomeExcluder(dirs.agentDir, req.SecretFileTargets)
+	if homeExErr != nil {
+		s.agentLifecycleLog.Warn("Move-bundle export refused: home exclusion record unavailable",
+			"agent_id", id, "error", homeExErr)
+		writeError(w, http.StatusConflict, api.BrokerErrCodeMoveBundleUnsupported, moveBundleHomeRecordMissingReason, nil)
+		return
+	}
+
 	hubConn := s.resolveHubNameForLaunch(r)
 	agentUUID := firstNonEmpty(req.AgentID, r.URL.Query().Get(api.AgentIDQueryParam), id)
 
@@ -512,7 +511,7 @@ func (s *Server) handleMoveBundleExportStart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	go s.runMoveBundleExport(jobCtx, cancel, job, hubConn, agentUUID, dirs, req)
+	go s.runMoveBundleExport(jobCtx, cancel, job, hubConn, agentUUID, dirs, homeEx, req)
 	writeJSON(w, http.StatusAccepted, job.snapshot())
 }
 
@@ -523,6 +522,7 @@ func (s *Server) runMoveBundleExport(
 	hubConn string,
 	agentID string,
 	dirs moveBundleDirs,
+	homeEx bundle.Excluder,
 	req api.MoveBundleExportRequest,
 ) {
 	defer cancel()
@@ -552,7 +552,7 @@ func (s *Server) runMoveBundleExport(
 		lim  bundle.Limits
 	}{
 		{bundle.RootWorkspace, dirs.workspaceDir, bundle.WorkspaceExcluder(), req.Limits.WorkspaceLimits()},
-		{bundle.RootHome, dirs.homeDir, moveBundleHomeExcluder(dirs.agentDir, req.SecretFileTargets), req.Limits.HomeLimits()},
+		{bundle.RootHome, dirs.homeDir, homeEx, req.Limits.HomeLimits()},
 	}
 
 	results := make(chan rootResult, len(roots))
@@ -765,6 +765,22 @@ func (s *Server) handleMoveBundleImportStart(w http.ResponseWriter, r *http.Requ
 	)
 	if err != nil {
 		ValidationError(w, err.Error(), nil)
+		return
+	}
+
+	// Confirm the agent directory was provisioned for this exact move
+	// (fresh-agent-dir writes agent.MoveMarkerFile with req.ReincarnationID).
+	moveMarker, moveMarkerErr := agent.ReadMoveMarker(dirs.agentDir)
+	if moveMarkerErr != nil {
+		if _, statErr := os.Stat(dirs.agentDir); errors.Is(statErr, fs.ErrNotExist) {
+			NotFound(w, "Agent directory")
+			return
+		}
+		writeError(w, http.StatusConflict, api.BrokerErrCodeMoveMarkerMismatch, "agent directory was not provisioned for this move", nil)
+		return
+	}
+	if moveMarker != req.ReincarnationID {
+		writeError(w, http.StatusConflict, api.BrokerErrCodeMoveMarkerMismatch, "agent directory move marker does not match reincarnationId", nil)
 		return
 	}
 
