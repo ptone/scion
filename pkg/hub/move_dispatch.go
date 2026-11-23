@@ -142,6 +142,27 @@ func (d *HTTPAgentDispatcher) requireMoveCapability(ctx context.Context, agent *
 	return nil
 }
 
+// requireMoveFreshTargetCapability loads agent.RuntimeBrokerID and returns
+// errBrokerLacksAgentMove or errBrokerLacksAgentMoveRecreate unless the broker
+// advertises AgentMove and either AgentMoveRecreate or AgentMoveBundle (both
+// implement marker-guarded fresh-target rollback deletes).
+func (d *HTTPAgentDispatcher) requireMoveFreshTargetCapability(ctx context.Context, agent *store.Agent) error {
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
+	}
+	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return fmt.Errorf("load runtime broker %s: %w", agent.RuntimeBrokerID, err)
+	}
+	if broker.Capabilities == nil || !broker.Capabilities.AgentMove {
+		return errBrokerLacksAgentMove
+	}
+	if !broker.Capabilities.AgentMoveRecreate && !broker.Capabilities.AgentMoveBundle {
+		return errBrokerLacksAgentMoveRecreate
+	}
+	return nil
+}
+
 // requireMoveBundleCapability loads agent.RuntimeBrokerID and returns
 // errBrokerLacksAgentMove or errBrokerLacksAgentMoveBundle unless the broker
 // advertises both AgentMove and AgentMoveBundle.
@@ -392,7 +413,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentDeleteRecreated(ctx context.Context, 
 	if err := d.placementBackstop(ctx, agent); err != nil {
 		return err
 	}
-	if err := d.requireMoveCapability(ctx, agent, true); err != nil {
+	if err := d.requireMoveFreshTargetCapability(ctx, agent); err != nil {
 		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
