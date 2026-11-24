@@ -2066,7 +2066,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// directory with the share's modes, so provisioning neither creates nor
 	// clears it.
 	var sharedAgentWorkspace string
-	if !sharedWorkspace && (emptyPerAgent || isClonePerAgentWorkspace(ctx)) {
+	if !sharedWorkspace && (emptyPerAgent || isClonePerAgentWorkspace(ctx) || moveBundle) {
 		sharedAgentWorkspace, err = sharedLayoutAgentWorkspace(ctx, settings, projectDir, agentName, agentDir)
 		if err != nil {
 			return "", "", nil, err
@@ -2286,10 +2286,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		if sharedWorkspace {
 			return "", "", nil, fmt.Errorf("move-bundle workspace cannot be combined with a shared workspace")
 		}
-		if sharedAgentWorkspace == "" {
-			if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
-				return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
-			}
+		if sharedAgentWorkspace != "" {
+			return "", "", nil, fmt.Errorf("move-bundle workspace is not supported on a shared project storage layout")
+		}
+		if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
+			return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
 		}
 	} else if emptyPerAgent {
 		// Empty-per-agent (design #2703): a private, initially empty, non-git

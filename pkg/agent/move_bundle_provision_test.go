@@ -62,6 +62,29 @@ func TestProvision_MoveBundleWorkspaceSourceLeavesWorkspaceEmpty(t *testing.T) {
 	assert.NotEmpty(t, homeEntries, "move-bundle provision must render home normally")
 }
 
+func TestProvision_MoveBundleRefusesSharedLayout(t *testing.T) {
+	sl := newSharedLayoutStarter(t, "kubernetes")
+	mgr := NewManager(&runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+	}).(*AgentManager)
+	opts := api.StartOptions{
+		Name:                "test-agent",
+		ProjectPath:         sl.root,
+		HubProjectID:        sharedRootUUID,
+		BrokerMode:          true,
+		NoAuth:              true,
+		FreshProvision:      true,
+		MoveReincarnationID: "rid-shared-target",
+		WorkspaceSource:     api.WorkspaceSourceMoveBundle,
+		Env: map[string]string{
+			"SCION_PROJECT_ID": sharedRootUUID,
+		},
+	}
+	_, err := mgr.Provision(context.Background(), opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shared project storage layout")
+}
+
 func TestMoveBundleHomeRecord_WriteReadAndExpand(t *testing.T) {
 	dir := t.TempDir()
 

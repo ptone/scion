@@ -1707,6 +1707,8 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 		return s.hostSetupErr
 	}
 
+	s.sweepMoveBundleScratch()
+
 	s.mu.Lock()
 	s.startTime = time.Now()
 	s.servicesStarted = true

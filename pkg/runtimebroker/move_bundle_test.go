@@ -298,6 +298,47 @@ server:
 		})
 		assert.Equal(t, http.StatusConflict, expRec.Code, expRec.Body.String())
 		assert.Contains(t, expRec.Body.String(), api.BrokerErrCodeMoveBundleUnsupported)
+
+		// O2: import also refuses shared-layout targets with 409 move_bundle_unsupported.
+		dummyPart := bundle.Part{Index: 0, Size: 1, Hash: "sha256:" + strings.Repeat("a", 64)}
+		emptyManifest := bundle.Manifest{
+			Version:         bundle.ManifestVersion,
+			ReincarnationID: "rid-shared",
+			Roots: map[string]bundle.RootManifest{
+				bundle.RootWorkspace: {PartSize: 64 << 20, Parts: []bundle.Part{dummyPart}},
+				bundle.RootHome:      {PartSize: 64 << 20, Parts: []bundle.Part{dummyPart}},
+			},
+		}
+		_, emptyHash, err := bundle.CanonicalManifest(emptyManifest)
+		require.NoError(t, err)
+		impRec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-shared/move-bundle/import?projectId="+sharedProjID, api.MoveBundleImportRequest{
+			ReincarnationID: "rid-shared",
+			ProjectID:       sharedProjID,
+			ProjectPath:     sharedRoot,
+			Manifest:        emptyManifest,
+			ManifestHash:    emptyHash,
+			Limits:          api.DefaultMoveBundleLimits(),
+		})
+		assert.Equal(t, http.StatusConflict, impRec.Code, impRec.Body.String())
+		assert.Contains(t, impRec.Body.String(), api.BrokerErrCodeMoveBundleUnsupported)
+	})
+
+	t.Run("worktree workspace refused on precheck (O1)", func(t *testing.T) {
+		wtProj, wtAgentDir, wtWS, _ := newMoveBundleTestAgentDir(t, "dev-wt-pre")
+		writeTestHomeRecord(t, wtAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
+		require.NoError(t, os.WriteFile(filepath.Join(wtWS, ".git"), []byte("gitdir: /host/repo/.git/worktrees/dev-wt-pre\n"), 0o644))
+
+		srv := newTestServer(t)
+		srv.moveBundle.durabilityRuntime = "docker"
+		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-wt-pre/move-bundle/precheck", api.MoveBundlePrecheckRequest{
+			ProjectPath: wtProj,
+			Limits:      api.DefaultMoveBundleLimits(),
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp api.MoveBundlePrecheckResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.False(t, resp.Durable)
+		assert.Equal(t, "worktree workspace is not supported for bundle moves", resp.Reason)
 	})
 
 	t.Run("missing home record fails closed on precheck and export (C1c, C1f)", func(t *testing.T) {
@@ -1083,6 +1124,60 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		var preResp2 api.MoveBundlePrecheckResponse
 		require.NoError(t, json.Unmarshal(preRec2.Body.Bytes(), &preResp2))
 		assert.True(t, preResp2.Durable)
+	})
+
+	t.Run("limit exceeded job error names the root (O3)", func(t *testing.T) {
+		srcProject, srcAgentDir, srcWS, _ := newMoveBundleTestAgentDir(t, "dev-limroot")
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
+		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "over.txt"), []byte("12345678901"), 0o644))
+
+		srv := newTestServer(t)
+		srv.moveBundle = moveBundleSettings{
+			durabilityRuntime: "docker",
+			partBackoff:       []time.Duration{},
+			fetchUploadURL: func(ctx context.Context, _, _, _ string, _ *api.MoveBundleUploadURLRequest) (*api.MoveBundleUploadURLResponse, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+
+		lim := api.DefaultMoveBundleLimits()
+		lim.WorkspaceMaxBytes = 5
+		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-limroot/move-bundle/export?projectId=p1", api.MoveBundleExportRequest{
+			ReincarnationID: "rid-limroot",
+			ProjectID:       "p1",
+			ProjectPath:     srcProject,
+			Limits:          lim,
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+		st := waitForMoveBundleJob(t, srv, "dev-limroot", "p1", api.MoveBundleJobKindExport, "rid-limroot")
+		assert.Equal(t, api.MoveBundleJobStateFailed, st.State)
+		assert.True(t, strings.HasPrefix(st.Error, "bundle exceeds limit: workspace "), "got error=%q", st.Error)
+	})
+
+	t.Run("startup sweeps stale move-bundle scratch directories (O4)", func(t *testing.T) {
+		srv := newTestServer(t)
+		srv.config.Host = "127.0.0.1"
+		stateDir := t.TempDir()
+		srv.stateDir = stateDir
+
+		staleExport := filepath.Join(stateDir, "move-bundle-scratch", "mb-export-stale1")
+		staleImport := filepath.Join(stateDir, "move-bundle-scratch", "mb-import-stale2")
+		require.NoError(t, os.MkdirAll(staleExport, 0o700))
+		require.NoError(t, os.MkdirAll(staleImport, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(staleExport, "part.tgz"), []byte("stale"), 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(staleImport, "part.tgz"), []byte("stale"), 0o600))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		require.NoError(t, srv.StartServices(ctx))
+		defer func() { _ = srv.Shutdown(context.Background()) }()
+
+		_, err := os.Stat(staleExport)
+		assert.True(t, os.IsNotExist(err), "stale export scratch dir must be swept on startup")
+		_, err = os.Stat(staleImport)
+		assert.True(t, os.IsNotExist(err), "stale import scratch dir must be swept on startup")
 	})
 }
 

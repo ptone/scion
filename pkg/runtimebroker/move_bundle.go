@@ -104,6 +104,25 @@ func (s *Server) moveBundleScratchBase() string {
 	return ""
 }
 
+// sweepMoveBundleScratch removes any stale per-job scratch directories left
+// under <stateDir>/move-bundle-scratch/ from a prior broker crash. No
+// move-bundle job survives a broker restart, so nothing there is live.
+func (s *Server) sweepMoveBundleScratch() {
+	if s.stateDir == "" {
+		return
+	}
+	base := filepath.Join(s.stateDir, "move-bundle-scratch")
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if rmErr := os.RemoveAll(filepath.Join(base, entry.Name())); rmErr != nil && s.agentLifecycleLog != nil {
+			s.agentLifecycleLog.Warn("Move-bundle startup scratch sweep failed", "entry", entry.Name(), "error", rmErr)
+		}
+	}
+}
+
 // validMoveBundleRID checks that rid is a single clean path segment suitable
 // for use in URLs and the ".scion-move-bundle-<rid>" marker filename.
 func validMoveBundleRID(rid string) bool {
@@ -425,7 +444,9 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 		firstNonEmpty(req.ProjectSlug, r.URL.Query().Get("projectSlug")),
 	)
 	if err != nil {
-		ValidationError(w, err.Error(), nil)
+		s.agentLifecycleLog.Warn("Move-bundle precheck: failed to resolve agent directories",
+			"agent_id", id, "error", err)
+		ValidationError(w, "cannot resolve agent directories", nil)
 		return
 	}
 	if dirs.SharedWorkspace {
@@ -437,6 +458,13 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 	}
 	if _, statErr := os.Stat(dirs.AgentDir); errors.Is(statErr, fs.ErrNotExist) {
 		NotFound(w, "Agent")
+		return
+	}
+	if isGitWorktreeWorkspace(dirs.WorkspaceDir) {
+		writeJSON(w, http.StatusOK, api.MoveBundlePrecheckResponse{
+			Durable: false,
+			Reason:  "worktree workspace is not supported for bundle moves",
+		})
 		return
 	}
 
@@ -596,7 +624,9 @@ func (s *Server) handleMoveBundleExportStart(w http.ResponseWriter, r *http.Requ
 		firstNonEmpty(req.ProjectSlug, r.URL.Query().Get("projectSlug")),
 	)
 	if err != nil {
-		ValidationError(w, err.Error(), nil)
+		s.agentLifecycleLog.Warn("Move-bundle export: failed to resolve agent directories",
+			"agent_id", id, "error", err)
+		ValidationError(w, "cannot resolve agent directories", nil)
 		return
 	}
 	if dirs.SharedWorkspace {
@@ -670,7 +700,13 @@ func (s *Server) runMoveBundleExport(
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
 
-	roots := []struct {
+	type openRootSpec struct {
+		name string
+		root *os.Root
+		ex   bundle.Excluder
+		lim  bundle.Limits
+	}
+	specs := []struct {
 		name string
 		dir  string
 		ex   bundle.Excluder
@@ -680,37 +716,49 @@ func (s *Server) runMoveBundleExport(
 		{bundle.RootHome, dirs.HomeDir, homeEx, req.Limits.HomeLimits()},
 	}
 
-	results := make(chan rootResult, len(roots))
-	var wg sync.WaitGroup
-	for _, rt := range roots {
-		wg.Add(1)
-		go func(name, dir string, ex bundle.Excluder, lim bundle.Limits) {
-			defer wg.Done()
-			root, openErr := os.OpenRoot(dir)
-			if openErr != nil {
-				results <- rootResult{name: name, err: fmt.Errorf("open %s root: %w", name, openErr)}
-				runCancel()
-				return
-			}
-			defer func() { _ = root.Close() }()
+	// Open both roots before launching any goroutine so a missing root fails
+	// deterministically and never wastes a signed-URL fetch for the other root.
+	opened := make([]openRootSpec, 0, len(specs))
+	defer func() {
+		for _, o := range opened {
+			_ = o.root.Close()
+		}
+	}()
+	for _, sp := range specs {
+		root, openErr := os.OpenRoot(sp.dir)
+		if openErr != nil {
+			wrapped := fmt.Errorf("open %s root: %w", sp.name, openErr)
+			s.agentLifecycleLog.Warn("Move-bundle export job failed",
+				"agent_id", agentID, "reincarnation_id", req.ReincarnationID, "error", wrapped)
+			job.markFailed(formatMoveBundleError("bundle export failed", wrapped), "", st.now())
+			return
+		}
+		opened = append(opened, openRootSpec{name: sp.name, root: root, ex: sp.ex, lim: sp.lim})
+	}
 
+	results := make(chan rootResult, len(opened))
+	var wg sync.WaitGroup
+	for _, rt := range opened {
+		wg.Add(1)
+		go func(spec openRootSpec) {
+			defer wg.Done()
 			sink := &hubSignedPartSink{
 				st:           st,
 				hubConn:      hubConn,
 				agentID:      agentID,
 				rid:          req.ReincarnationID,
-				rootName:     name,
+				rootName:     spec.name,
 				stallTimeout: stallTimeout,
 				job:          job,
 			}
-			rm, writeErr := bundle.Write(runCtx, root, scratchDir, ex, lim, sink)
+			rm, writeErr := bundle.Write(runCtx, spec.root, scratchDir, spec.ex, spec.lim, sink)
 			if writeErr != nil {
-				results <- rootResult{name: name, err: writeErr}
+				results <- rootResult{name: spec.name, err: &moveBundleRootError{root: spec.name, err: writeErr}}
 				runCancel()
 				return
 			}
-			results <- rootResult{name: name, rm: rm}
-		}(rt.name, rt.dir, rt.ex, rt.lim)
+			results <- rootResult{name: spec.name, rm: rm}
+		}(rt)
 	}
 	wg.Wait()
 	close(results)
@@ -898,7 +946,13 @@ func (s *Server) handleMoveBundleImportStart(w http.ResponseWriter, r *http.Requ
 		firstNonEmpty(req.ProjectSlug, r.URL.Query().Get("projectSlug")),
 	)
 	if err != nil {
-		ValidationError(w, err.Error(), nil)
+		s.agentLifecycleLog.Warn("Move-bundle import: failed to resolve agent directories",
+			"agent_id", id, "error", err)
+		ValidationError(w, "cannot resolve agent directories", nil)
+		return
+	}
+	if dirs.SharedWorkspace {
+		writeError(w, http.StatusConflict, api.BrokerErrCodeMoveBundleUnsupported, "shared layout workspace is not yet supported for bundle moves", nil)
 		return
 	}
 
@@ -1060,7 +1114,7 @@ func (s *Server) runMoveBundleImport(
 				job:          job,
 			}
 			if exErr := bundle.ExtractFromManifest(runCtx, stageRoot, scratchDir, req.Manifest, name, lim, src); exErr != nil {
-				errCh <- exErr
+				errCh <- &moveBundleRootError{root: name, err: exErr}
 				runCancel()
 				return
 			}
@@ -1289,6 +1343,19 @@ func (s *hubSignedPartSource) Get(ctx context.Context, p bundle.Part) (io.ReadCl
 	}
 }
 
+type moveBundleRootError struct {
+	root string
+	err  error
+}
+
+func (e *moveBundleRootError) Error() string {
+	return e.root + ": " + e.err.Error()
+}
+
+func (e *moveBundleRootError) Unwrap() error {
+	return e.err
+}
+
 // formatMoveBundleError formats a class-only job failure message while
 // guaranteeing that no signed URL, raw *url.Error, or absolute host path ever
 // reaches the user-visible job status error string (detailed errors are logged
@@ -1300,6 +1367,10 @@ func formatMoveBundleError(prefix string, err error) string {
 	}
 	var limErr *bundle.ErrLimitExceeded
 	if errors.As(err, &limErr) {
+		var rootErr *moveBundleRootError
+		if errors.As(err, &rootErr) && rootErr.root != "" {
+			return strings.Replace(limErr.Error(), "bundle exceeds limit: ", "bundle exceeds limit: "+rootErr.root+" ", 1)
+		}
 		return limErr.Error()
 	}
 	var unportablePath *bundle.ErrUnportablePath
