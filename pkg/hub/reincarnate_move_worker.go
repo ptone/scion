@@ -47,10 +47,11 @@ type reincarnationMove struct {
 	// it, as the request's check did.
 	Force bool
 	// TransferMode is the verdict's transfer mode when the move was
-	// accepted (MoveTransferModeExport or MoveTransferModeRecreate; "" is
-	// read as export, the only mode before forced moves). The re-check
-	// refuses a move whose mode has changed since, and a recreate move
-	// provisions a fresh workspace and rolls back with a files delete.
+	// accepted (MoveTransferModeExport, MoveTransferModeBundle, or
+	// MoveTransferModeRecreate; "" is read as export, the only mode before
+	// forced moves). The re-check refuses a move whose mode has changed since;
+	// recreate and bundle moves (freshTarget) provision a fresh agent
+	// directory and roll back with a marker-guarded files delete.
 	TransferMode string
 }
 
@@ -164,6 +165,10 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 		return nil, fmt.Errorf("move no longer eligible: %s", ref.Message)
 	}
 	if v.TransferMode != mv.transferMode() {
+		if mv.isBundle() && v.BundleUnavailable != "" {
+			return nil, fmt.Errorf("move no longer eligible: the workspace transfer mode changed from %s to %s since the move was accepted (%s)",
+				mv.transferMode(), valueOrUnknown(v.TransferMode), v.BundleUnavailable)
+		}
 		return nil, fmt.Errorf("move no longer eligible: the workspace transfer mode changed from %s to %s since the move was accepted",
 			mv.transferMode(), valueOrUnknown(v.TransferMode))
 	}

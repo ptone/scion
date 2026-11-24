@@ -3147,13 +3147,15 @@ type Server struct {
 	// it on its own Server instance without racing other tests' workers.
 	reincarnationRequesterResolveTimeout time.Duration
 
-	// moveBundlePollInterval and moveBundleTouchInterval control the broker
-	// job-status poll and record-liveness touch cadences for bundle moves
-	// (design §3.5, §3.7). Zero means use defaultMoveBundlePollInterval /
-	// defaultMoveBundleTouchInterval; per-Server so tests can shorten them
-	// without shared mutable state.
-	moveBundlePollInterval  time.Duration
-	moveBundleTouchInterval time.Duration
+	// moveBundlePollInterval, moveBundleTouchInterval, and
+	// moveBundleProgressInterval control the broker job-status poll,
+	// record-liveness touch, and agent progress-message throttle cadences for
+	// bundle moves (design §3.5, §3.7). Zero means use the production
+	// defaults; per-Server so tests can shorten them without shared mutable
+	// state.
+	moveBundlePollInterval     time.Duration
+	moveBundleTouchInterval    time.Duration
+	moveBundleProgressInterval time.Duration
 
 	// conduitAuthorizeActionTestHook, when non-nil, decides each action in
 	// authorizeConduitUserStream instead of authorizeConduitAction. Only

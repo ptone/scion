@@ -789,8 +789,9 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		bundleManifest, bundleManifestHash, casLost, err = s.runMoveBundleExport(ctx, md, agent, reincarnationID, &lastMigratingMsg)
 		if casLost {
 			// Record ownership was lost while polling (e.g. stale sweep);
-			// stop immediately without side effects.
-			releaseCapacityOnExit = false
+			// stop immediately without side effects. Consistent with the
+			// existing !ok step-CAS returns, deferred conditional capacity
+			// release stays enabled since no container is running.
 			return
 		}
 		if err != nil {
@@ -914,7 +915,6 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		if move.isBundle() {
 			casLost, importErr := s.runMoveBundleImport(ctx, md, agent, reincarnationID, bundleManifest, bundleManifestHash, &lastMigratingMsg)
 			if casLost {
-				releaseCapacityOnExit = false
 				return
 			}
 			if importErr != nil {

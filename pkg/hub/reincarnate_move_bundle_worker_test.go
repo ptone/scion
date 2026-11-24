@@ -1028,4 +1028,275 @@ func TestMoveBundleWorker_ModeChangesBetweenPlanAndRecheck(t *testing.T) {
 		assert.Equal(t, 0, bf.disp.stopCalls, "must fail before stop")
 		bf.disp.mu.Unlock()
 	})
+
+	t.Run("forced bundle move over limit preserves bundle reason", func(t *testing.T) {
+		bf := setupBundleMoveWorkerFixture(t)
+		ctx := context.Background()
+
+		// Make recreate eligible as fallback when bundle becomes unavailable.
+		dst, err := bf.s.GetRuntimeBroker(ctx, bf.dst.ID)
+		require.NoError(t, err)
+		dst.Capabilities.AgentMoveRecreate = true
+		require.NoError(t, bf.s.UpdateRuntimeBroker(ctx, dst))
+		proj, err := bf.s.GetProject(ctx, bf.project.ID)
+		require.NoError(t, err)
+		proj.GitRemote = "https://example.com/forced-bundle-repo.git"
+		require.NoError(t, bf.s.UpdateProject(ctx, proj))
+
+		var precheckCalls atomic.Int32
+		bf.disp.mu.Lock()
+		bf.disp.moveBundlePrecheckFn = func(_ context.Context, _ *store.Agent, _ api.MoveBundleLimits, _ []string) (*api.MoveBundlePrecheckResponse, error) {
+			if precheckCalls.Add(1) == 1 {
+				return &api.MoveBundlePrecheckResponse{Durable: true}, nil
+			}
+			return &api.MoveBundlePrecheckResponse{
+				Durable:   true,
+				Over:      "workspace.bytes",
+				Workspace: api.MoveBundleRootEstimate{Bytes: 5 << 30, Entries: 100, Over: "bytes"},
+			}, nil
+		}
+		bf.disp.mu.Unlock()
+
+		rec := bf.reincarnate(t, ReincarnateAgentRequest{Handoff: "forced bundle", TargetBroker: bf.dst.ID, ForceMove: true})
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		var resp ReincarnateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Equal(t, MoveTransferModeBundle, resp.TransferMode)
+
+		r, a := waitForBundleMoveSettled(t, bf.s, bf.agent.ID)
+		require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+		assert.Contains(t, r.Error, "transfer mode changed from bundle to recreate")
+		assert.Contains(t, r.Error, "bundle exceeds limit:")
+		assert.Equal(t, bf.src.ID, a.RuntimeBrokerID)
+		bf.disp.mu.Lock()
+		assert.Equal(t, 0, bf.disp.stopCalls, "must fail before stop")
+		bf.disp.mu.Unlock()
+	})
+}
+
+// R1: When the stale sweep fails the record while status polls report changing
+// progress, CAS-gated progress writes must detect the lost CAS and exit
+// without resetting agent.ReincarnationState back to stopping/provisioning or
+// overwriting the sweep's failure message.
+func TestMoveBundleWorker_LostCASWithChangingProgressPreservesFailedAgent(t *testing.T) {
+	t.Run("export phase (stopping)", func(t *testing.T) {
+		bf := setupBundleMoveWorkerFixture(t)
+		bf.srv.moveBundlePollInterval = 10 * time.Millisecond
+		bf.srv.moveBundleProgressInterval = 15 * time.Millisecond
+		bf.srv.moveBundleTouchInterval = 500 * time.Millisecond
+
+		started := make(chan struct{})
+		var startOnce sync.Once
+		var polls atomic.Int32
+
+		bf.disp.mu.Lock()
+		bf.disp.moveBundleExportStatusFn = func(_ context.Context, _ *store.Agent, rid string) (*api.MoveBundleJobStatus, error) {
+			n := polls.Add(1)
+			startOnce.Do(func() { close(started) })
+			return &api.MoveBundleJobStatus{
+				ReincarnationID: rid,
+				Kind:            api.MoveBundleJobKindExport,
+				State:           api.MoveBundleJobStateRunning,
+				Progress:        api.MoveBundleProgress{BytesDone: int64(n) * (1 << 20), BytesTotal: 1 << 30},
+			}, nil
+		}
+		bf.disp.mu.Unlock()
+
+		rec := bf.reincarnate(t, ReincarnateAgentRequest{Handoff: "r1 export", TargetBroker: bf.dst.ID})
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+		<-started
+		swept, err := bf.srv.sweepStaleReincarnationsOlderThan(context.Background(), time.Now().Add(time.Hour))
+		require.NoError(t, err)
+		require.Equal(t, 1, swept)
+
+		// Wait for worker to observe lost CAS on next progress write and exit.
+		time.Sleep(120 * time.Millisecond)
+		afterExit := polls.Load()
+		time.Sleep(60 * time.Millisecond)
+		assert.Equal(t, afterExit, polls.Load(), "worker must stop polling after lost CAS")
+
+		a, err := bf.s.GetAgent(context.Background(), bf.agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ReincarnationStateFailed, a.ReincarnationState, "progress write must not reset agent back to stopping")
+		assert.Equal(t, "error", a.Phase)
+		assert.Contains(t, a.Message, "hub restarted during reincarnation", "sweep message must remain intact")
+		assert.NotContains(t, a.Message, "migrating:")
+	})
+
+	t.Run("import phase (provisioning)", func(t *testing.T) {
+		bf := setupBundleMoveWorkerFixture(t)
+		bf.srv.moveBundlePollInterval = 10 * time.Millisecond
+		bf.srv.moveBundleProgressInterval = 15 * time.Millisecond
+		bf.srv.moveBundleTouchInterval = 500 * time.Millisecond
+
+		started := make(chan struct{})
+		var startOnce sync.Once
+		var polls atomic.Int32
+
+		bf.disp.mu.Lock()
+		bf.disp.moveBundleImportStatusFn = func(_ context.Context, _ *store.Agent, rid string) (*api.MoveBundleJobStatus, error) {
+			n := polls.Add(1)
+			startOnce.Do(func() { close(started) })
+			return &api.MoveBundleJobStatus{
+				ReincarnationID: rid,
+				Kind:            api.MoveBundleJobKindImport,
+				State:           api.MoveBundleJobStateRunning,
+				Progress:        api.MoveBundleProgress{BytesDone: int64(n) * (1 << 20), BytesTotal: 1 << 30},
+			}, nil
+		}
+		bf.disp.mu.Unlock()
+
+		rec := bf.reincarnate(t, ReincarnateAgentRequest{Handoff: "r1 import", TargetBroker: bf.dst.ID})
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+		<-started
+		swept, err := bf.srv.sweepStaleReincarnationsOlderThan(context.Background(), time.Now().Add(time.Hour))
+		require.NoError(t, err)
+		require.Equal(t, 1, swept)
+
+		time.Sleep(120 * time.Millisecond)
+		afterExit := polls.Load()
+		time.Sleep(60 * time.Millisecond)
+		assert.Equal(t, afterExit, polls.Load(), "worker must stop polling after lost CAS")
+
+		a, err := bf.s.GetAgent(context.Background(), bf.agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ReincarnationStateFailed, a.ReincarnationState, "progress write must not reset agent back to provisioning")
+		assert.Equal(t, "error", a.Phase)
+		assert.Contains(t, a.Message, "hub restarted during reincarnation", "sweep message must remain intact")
+		assert.NotContains(t, a.Message, "migrating:")
+
+		_, _, starts := bf.disp.moveSnapshot()
+		assert.Empty(t, starts, "worker must not start target after lost CAS during import")
+	})
+}
+
+// R2: Real hub-side poll timeout when broker keeps returning running forever
+// while touchReincarnation keeps the record alive.
+func TestMoveBundleWorker_HubPollTimeout(t *testing.T) {
+	t.Run("export poll timeout", func(t *testing.T) {
+		bf := setupBundleMoveWorkerFixture(t)
+		bf.srv.config.MoveBundle.ExportTimeout = time.Second
+		bf.srv.moveBundlePollInterval = 20 * time.Millisecond
+		bf.srv.moveBundleTouchInterval = 50 * time.Millisecond
+
+		bf.disp.mu.Lock()
+		bf.disp.moveBundleExportStatusFn = func(_ context.Context, _ *store.Agent, rid string) (*api.MoveBundleJobStatus, error) {
+			return &api.MoveBundleJobStatus{
+				ReincarnationID: rid,
+				Kind:            api.MoveBundleJobKindExport,
+				State:           api.MoveBundleJobStateRunning,
+			}, nil
+		}
+		bf.disp.mu.Unlock()
+
+		r, a := startBundleMove(t, bf)
+		require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+		assert.True(t, strings.HasPrefix(r.Error, "bundle export failed:"), "got %q", r.Error)
+		assert.Contains(t, r.Error, "timed out after")
+		assert.Equal(t, bf.src.ID, a.RuntimeBrokerID)
+		assert.Contains(t, a.Message, "agent state is intact on "+bf.src.Name)
+
+		waitForBundleStagingDeleted(t, bf.stor, expectedBundlePrefix(t, bf.srv.HubID(), r.ID))
+		assert.Equal(t, 0, bf.stor.objectCount())
+		provisions, _, starts := bf.disp.moveSnapshot()
+		assert.Empty(t, provisions)
+		assert.Empty(t, starts)
+	})
+
+	t.Run("import poll timeout", func(t *testing.T) {
+		bf := setupBundleMoveWorkerFixture(t)
+		bf.srv.config.MoveBundle.ImportTimeout = time.Second
+		bf.srv.moveBundlePollInterval = 20 * time.Millisecond
+		bf.srv.moveBundleTouchInterval = 50 * time.Millisecond
+
+		bf.disp.mu.Lock()
+		bf.disp.moveBundleImportStatusFn = func(_ context.Context, _ *store.Agent, rid string) (*api.MoveBundleJobStatus, error) {
+			return &api.MoveBundleJobStatus{
+				ReincarnationID: rid,
+				Kind:            api.MoveBundleJobKindImport,
+				State:           api.MoveBundleJobStateRunning,
+			}, nil
+		}
+		bf.disp.mu.Unlock()
+
+		r, a := startBundleMove(t, bf)
+		require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+		assert.True(t, strings.HasPrefix(r.Error, "bundle import failed:"), "got %q", r.Error)
+		assert.Contains(t, r.Error, "timed out after")
+		assert.Equal(t, bf.src.ID, a.RuntimeBrokerID)
+		assert.Len(t, bf.disp.recreatedDeletes(), 1, "import poll timeout must roll back with DeleteRecreated")
+
+		waitForBundleStagingDeleted(t, bf.stor, expectedBundlePrefix(t, bf.srv.HubID(), r.ID))
+		assert.Equal(t, 0, bf.stor.objectCount())
+	})
+}
+
+// O2: Transient transport errors on status polls are tolerated up to
+// moveBundleMaxConsecutivePollErrors; 404 stays immediately definitive.
+func TestMoveBundleWorker_TransientPollErrors(t *testing.T) {
+	t.Run("recovers after transient errors below limit", func(t *testing.T) {
+		bf := setupBundleMoveWorkerFixture(t)
+		origStatus := bf.disp.moveBundleExportStatusFn
+		var calls atomic.Int32
+		bf.disp.mu.Lock()
+		bf.disp.moveBundleExportStatusFn = func(ctx context.Context, a *store.Agent, rid string) (*api.MoveBundleJobStatus, error) {
+			if calls.Add(1) < moveBundleMaxConsecutivePollErrors {
+				return nil, errors.New("temporary control-channel reconnect")
+			}
+			return origStatus(ctx, a, rid)
+		}
+		bf.disp.mu.Unlock()
+
+		r, a := startBundleMove(t, bf)
+		require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+		assert.Equal(t, bf.dst.ID, a.RuntimeBrokerID)
+		assert.Equal(t, int32(moveBundleMaxConsecutivePollErrors), calls.Load())
+	})
+
+	t.Run("fails after consecutive error limit reached", func(t *testing.T) {
+		bf := setupBundleMoveWorkerFixture(t)
+		var calls atomic.Int32
+		bf.disp.mu.Lock()
+		bf.disp.moveBundleExportStatusFn = func(_ context.Context, _ *store.Agent, _ string) (*api.MoveBundleJobStatus, error) {
+			calls.Add(1)
+			return nil, errors.New("persistent network blip")
+		}
+		bf.disp.mu.Unlock()
+
+		r, a := startBundleMove(t, bf)
+		require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+		assert.True(t, strings.HasPrefix(r.Error, "bundle export failed:"), "got %q", r.Error)
+		assert.Contains(t, r.Error, "persistent network blip")
+		assert.Equal(t, int32(moveBundleMaxConsecutivePollErrors), calls.Load())
+		assert.Equal(t, bf.src.ID, a.RuntimeBrokerID)
+		waitForBundleStagingDeleted(t, bf.stor, expectedBundlePrefix(t, bf.srv.HubID(), r.ID))
+	})
+}
+
+// O4: Step-5 manifest verification requires both workspace and home roots.
+func TestMoveBundleWorker_ManifestMissingRequiredRoot(t *testing.T) {
+	bf := setupBundleMoveWorkerFixture(t)
+	origStatus := bf.disp.moveBundleExportStatusFn
+	bf.disp.mu.Lock()
+	bf.disp.moveBundleExportStatusFn = func(ctx context.Context, a *store.Agent, rid string) (*api.MoveBundleJobStatus, error) {
+		st, err := origStatus(ctx, a, rid)
+		if err != nil {
+			return nil, err
+		}
+		delete(st.Manifest.Roots, bundle.RootHome)
+		return st, nil
+	}
+	bf.disp.mu.Unlock()
+
+	r, a := startBundleMove(t, bf)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.True(t, strings.HasPrefix(r.Error, "bundle export failed:"), "got %q", r.Error)
+	assert.Contains(t, r.Error, `manifest missing required root "home"`)
+	assert.Equal(t, bf.src.ID, a.RuntimeBrokerID)
+	waitForBundleStagingDeleted(t, bf.stor, expectedBundlePrefix(t, bf.srv.HubID(), r.ID))
+	provisions, _, starts := bf.disp.moveSnapshot()
+	assert.Empty(t, provisions)
+	assert.Empty(t, starts)
 }

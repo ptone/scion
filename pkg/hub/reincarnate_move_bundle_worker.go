@@ -38,6 +38,14 @@ const (
 	// reincarnation record's updated_at while polling a long export/import
 	// job so the 30-minute stale sweep never reaps a live transfer (design §3.7).
 	defaultMoveBundleTouchInterval = 30 * time.Second
+	// defaultMoveBundleProgressInterval throttles CAS-gated agent progress
+	// message writes while polling so long transfers do not spam row writes.
+	defaultMoveBundleProgressInterval = 10 * time.Second
+	// moveBundleMaxConsecutivePollErrors is the number of consecutive
+	// transient transport/5xx errors on status polls before the move fails.
+	// 404, broker job state=failed, and pollCtx expiry remain immediately
+	// definitive.
+	moveBundleMaxConsecutivePollErrors = 3
 
 	// Fixed error prefixes required by design §3.2.
 	moveBundleErrPrefixExport = "bundle export failed:"
@@ -57,6 +65,13 @@ func (s *Server) moveBundleTouchEvery() time.Duration {
 		return s.moveBundleTouchInterval
 	}
 	return defaultMoveBundleTouchInterval
+}
+
+func (s *Server) moveBundleProgressEvery() time.Duration {
+	if s.moveBundleProgressInterval > 0 {
+		return s.moveBundleProgressInterval
+	}
+	return defaultMoveBundleProgressInterval
 }
 
 // touchReincarnation bumps agent_reincarnations.updated_at via a same-state
@@ -123,7 +138,12 @@ func (s *Server) runMoveBundleExport(ctx context.Context, md agentMoveDispatcher
 		return bundle.Manifest{}, "", false, errors.New(formatMoveBundleError(moveBundleErrPrefixExport, err.Error()))
 	}
 
-	s.updateMoveBundleProgressMessage(ctx, agent.ID, store.ReincarnationStateStopping, moveBundleProgressMessage("uploading snapshot", api.MoveBundleProgress{}), lastMsg)
+	initialMsg := moveBundleProgressMessage("uploading snapshot", api.MoveBundleProgress{})
+	if touched, touchErr := s.touchReincarnation(ctx, agent.ID, reincarnationID, store.AgentReincarnationStateStopping, reincarnateStrPtr(initialMsg)); touchErr == nil && !touched {
+		return bundle.Manifest{}, "", true, nil
+	} else if touchErr == nil && lastMsg != nil {
+		*lastMsg = initialMsg
+	}
 
 	status, err := md.DispatchMoveBundleExport(ctx, agent, reincarnationID, limits, secretTargets)
 	if err != nil {
@@ -181,7 +201,8 @@ func (s *Server) verifyAndPersistMoveBundleManifest(ctx context.Context, reincar
 	for _, rootName := range []string{bundle.RootWorkspace, bundle.RootHome} {
 		rm, ok := manifest.Roots[rootName]
 		if !ok {
-			continue
+			return bundle.Manifest{}, "", errors.New(formatMoveBundleError(moveBundleErrPrefixExport,
+				fmt.Sprintf("manifest missing required root %q", rootName)))
 		}
 		rootLim := limits.WorkspaceLimits()
 		if rootName == bundle.RootHome {
@@ -259,7 +280,12 @@ func (s *Server) verifyAndPersistMoveBundleManifest(ctx context.Context, reincar
 // immediately without any side effects.
 func (s *Server) runMoveBundleImport(ctx context.Context, md agentMoveDispatcher, agent *store.Agent, reincarnationID string, manifest bundle.Manifest, manifestHash string, lastMsg *string) (bool, error) {
 	limits := s.MoveBundleImportLimits()
-	s.updateMoveBundleProgressMessage(ctx, agent.ID, store.ReincarnationStateProvisioning, moveBundleProgressMessage("restoring snapshot", api.MoveBundleProgress{}), lastMsg)
+	initialMsg := moveBundleProgressMessage("restoring snapshot", api.MoveBundleProgress{})
+	if touched, touchErr := s.touchReincarnation(ctx, agent.ID, reincarnationID, store.AgentReincarnationStateProvisioning, reincarnateStrPtr(initialMsg)); touchErr == nil && !touched {
+		return true, nil
+	} else if touchErr == nil && lastMsg != nil {
+		*lastMsg = initialMsg
+	}
 
 	status, err := md.DispatchMoveBundleImport(ctx, agent, reincarnationID, manifest, manifestHash, limits)
 	if err != nil {
@@ -307,7 +333,10 @@ func (s *Server) pollMoveBundleJob(ctx context.Context, p moveBundlePollParams) 
 
 	pollInterval := s.moveBundlePollEvery()
 	touchInterval := s.moveBundleTouchEvery()
+	progressInterval := s.moveBundleProgressEvery()
 	lastTouch := time.Now()
+	lastProgressWrite := time.Now()
+	consecutiveErrors := 0
 
 	for {
 		switch status.State {
@@ -325,11 +354,17 @@ func (s *Server) pollMoveBundleJob(ctx context.Context, p moveBundlePollParams) 
 			return nil, false, errors.New(formatMoveBundleError(p.errPrefix, fmt.Sprintf("unexpected broker job state %q", status.State)))
 		}
 
+		// Every agent-row progress write is CAS-gated through touchReincarnation
+		// so a worker whose record was already failed (e.g. by the stale sweep)
+		// can never overwrite agent.ReincarnationState back to in-flight.
 		msg := moveBundleProgressMessage(p.actionLabel, status.Progress)
-		needTouch := time.Since(lastTouch) >= touchInterval
-		if needTouch {
+		msgChanged := p.lastMsg == nil || msg != *p.lastMsg
+		now := time.Now()
+		needTouch := now.Sub(lastTouch) >= touchInterval
+		needProgress := msgChanged && now.Sub(lastProgressWrite) >= progressInterval
+		if needTouch || needProgress {
 			var msgPtr *string
-			if p.lastMsg == nil || msg != *p.lastMsg {
+			if msgChanged {
 				msgPtr = reincarnateStrPtr(msg)
 			}
 			touched, touchErr := s.touchReincarnation(ctx, p.agentID, p.reincarnationID, p.expectState, msgPtr)
@@ -343,12 +378,13 @@ func (s *Server) pollMoveBundleJob(ctx context.Context, p moveBundlePollParams) 
 					"agent_id", p.agentID, "reincarnation_id", p.reincarnationID, "state", p.expectState, "error", touchErr)
 			} else {
 				lastTouch = time.Now()
-				if msgPtr != nil && p.lastMsg != nil {
-					*p.lastMsg = msg
+				if msgPtr != nil {
+					lastProgressWrite = lastTouch
+					if p.lastMsg != nil {
+						*p.lastMsg = msg
+					}
 				}
 			}
-		} else {
-			s.updateMoveBundleProgressMessage(ctx, p.agentID, p.expectState, msg, p.lastMsg)
 		}
 
 		timer := time.NewTimer(pollInterval)
@@ -362,8 +398,7 @@ func (s *Server) pollMoveBundleJob(ctx context.Context, p moveBundlePollParams) 
 		case <-timer.C:
 		}
 
-		var err error
-		status, err = p.poll(pollCtx)
+		nextStatus, err := p.poll(pollCtx)
 		if err != nil {
 			if isBrokerNotFound(err) {
 				return nil, false, errors.New(formatMoveBundleError(p.errPrefix, p.notFoundReason))
@@ -371,28 +406,24 @@ func (s *Server) pollMoveBundleJob(ctx context.Context, p moveBundlePollParams) 
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(pollCtx.Err(), context.DeadlineExceeded) {
 				return nil, false, errors.New(formatMoveBundleError(p.errPrefix, fmt.Sprintf("timed out after %s", p.timeout)))
 			}
-			return nil, false, errors.New(formatMoveBundleError(p.errPrefix, dispatchFailureText(err)))
+			if pollCtx.Err() != nil {
+				return nil, false, errors.New(formatMoveBundleError(p.errPrefix, pollCtx.Err().Error()))
+			}
+			consecutiveErrors++
+			s.agentLifecycleLog.Warn("move bundle: transient status poll error",
+				"agent_id", p.agentID, "reincarnation_id", p.reincarnationID, "state", p.expectState,
+				"consecutive_errors", consecutiveErrors, "max_consecutive_errors", moveBundleMaxConsecutivePollErrors,
+				"error", agentpkg.RedactURLsInText(err.Error()))
+			if consecutiveErrors >= moveBundleMaxConsecutivePollErrors {
+				return nil, false, errors.New(formatMoveBundleError(p.errPrefix, dispatchFailureText(err)))
+			}
+			continue
 		}
-		if status == nil {
+		if nextStatus == nil {
 			return nil, false, errors.New(formatMoveBundleError(p.errPrefix, "empty job status response from broker"))
 		}
-	}
-}
-
-func (s *Server) updateMoveBundleProgressMessage(ctx context.Context, agentID, stateName, msg string, lastMsg *string) {
-	if lastMsg != nil && *lastMsg == msg {
-		return
-	}
-	if _, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
-		reincarnationState: stateName,
-		message:            reincarnateStrPtr(msg),
-	}, reincarnationStepMaxAttempts); err != nil {
-		s.agentLifecycleLog.Warn("move bundle: failed to update agent progress message",
-			"agent_id", agentID, "state", stateName, "error", err)
-		return
-	}
-	if lastMsg != nil {
-		*lastMsg = msg
+		consecutiveErrors = 0
+		status = nextStatus
 	}
 }
 
