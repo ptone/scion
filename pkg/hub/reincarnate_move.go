@@ -81,16 +81,18 @@ var moveCheckOrder = []string{
 }
 
 // moveBundleCheckOrder lists every move eligibility check in evaluation order
-// for bundle mode. bundle_source runs after access and capability so no RPC is
-// sent to an unreachable/incapable broker or for an unauthorized caller.
+// for bundle mode. bundle_experiment runs first among bundle-specific checks
+// so an off-experiment hub reports that cleanly before workspace_bundleable;
+// bundle_source runs after access and capability so no RPC is sent to an
+// unreachable/incapable broker or for an unauthorized caller.
 var moveBundleCheckOrder = []string{
 	moveCheckRuntimeTarget,
 	moveCheckWorkspaceMode,
 	moveCheckWorkspaceStorage,
 	moveCheckSameExport,
 	moveCheckWorkspaceOnExport,
-	moveCheckWorkspaceBundleable,
 	moveCheckBundleExperiment,
+	moveCheckWorkspaceBundleable,
 	moveCheckBundleStorage,
 	moveCheckTargetProfile,
 	moveCheckTargetHealth,
@@ -356,6 +358,7 @@ func evaluateMoveEligibility(in moveEligibilityInput) (MoveVerdict, *moveRefusal
 		return vr, refr
 	}
 	vr.TransferMode = MoveTransferModeRecreate
+	vr.BundleUnavailable = refb.Message
 	vr.Consequences = buildMoveConsequences(MoveTransferModeRecreate, in, nil)
 	return vr, nil
 }
@@ -548,18 +551,18 @@ func evaluateMoveChecks(in moveEligibilityInput, mode moveEvalMode) (MoveVerdict
 		waive()
 		waive()
 		waive()
-		// 4a. workspace_bundleable: clone-per-agent and empty-per-agent only.
+		// 4a. bundle_experiment: hub.agent_move_bundle must be enabled.
+		if !in.BundleExperimentEnabled {
+			return fail(http.StatusPreconditionFailed, ErrCodeExperimentDisabled,
+				fmt.Sprintf("bundle transfer requires the %s experiment", experiments.AgentMoveBundle))
+		}
+		pass()
+		// 4b. workspace_bundleable: clone-per-agent and empty-per-agent only.
 		msg, failMsg := moveWorkspaceBundleable(in)
 		if failMsg != "" {
 			return fail(http.StatusConflict, ErrCodeConflict, failMsg)
 		}
 		v.Checks[idx].Message = msg
-		pass()
-		// 4b. bundle_experiment: hub.agent_move_bundle must be enabled.
-		if !in.BundleExperimentEnabled {
-			return fail(http.StatusPreconditionFailed, ErrCodeExperimentDisabled,
-				fmt.Sprintf("bundle transfer requires the %s experiment", experiments.AgentMoveBundle))
-		}
 		pass()
 		// 4c. bundle_storage: Hub object storage configured and HTTP-signable.
 		if in.BundleStorageError != "" {
@@ -757,7 +760,7 @@ func evaluateMoveChecks(in moveEligibilityInput, mode moveEvalMode) (MoveVerdict
 		precheck, err := in.Probes.BundleSource(src, in.Agent)
 		if err != nil {
 			return fail(http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
-				fmt.Sprintf("source bundle precheck failed: %v", err))
+				moveBundlePrecheckErrorMessage(err))
 		}
 		if precheck == nil {
 			return fail(http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail,
@@ -1178,6 +1181,26 @@ func (s *Server) moveBundleSecretFileTargets(ctx context.Context, agent *store.A
 	return []string{}, nil
 }
 
+// errMoveBundleSecretTargetsFailed marks a secret-target resolution error in
+// moveBundleSourceProbe so moveBundlePrecheckErrorMessage maps it to a fixed
+// client-safe message without leaking backend details.
+var errMoveBundleSecretTargetsFailed = errors.New("could not resolve the agent's secret targets")
+
+// moveBundlePrecheckErrorMessage returns a client-safe refusal message for a
+// failed bundle_source probe. Raw transport errors (which may contain internal
+// broker endpoint URLs), store errors, and secret-backend errors never reach
+// API responses; broker HTTP status errors are sanitized via dispatchFailureText.
+func moveBundlePrecheckErrorMessage(err error) string {
+	if errors.Is(err, errMoveBundleSecretTargetsFailed) {
+		return errMoveBundleSecretTargetsFailed.Error()
+	}
+	var se *brokerStatusError
+	if errors.As(err, &se) && se != nil {
+		return "source bundle precheck failed: " + dispatchFailureText(se)
+	}
+	return "source bundle precheck failed"
+}
+
 // moveBundleSourceProbe returns the moveProbes.BundleSource callback that
 // calls DispatchMoveBundlePrecheck on the source broker using the Hub's
 // configured move-bundle limits and hub-resolved file-type secret targets.
@@ -1195,9 +1218,17 @@ func (s *Server) moveBundleSourceProbe(ctx context.Context) func(src *store.Runt
 		srcAgent := withBroker(agent, src.ID)
 		secretTargets, err := s.moveBundleSecretFileTargets(ctx, srcAgent)
 		if err != nil {
+			s.agentLifecycleLog.Warn("move bundle precheck: failed to resolve secret file targets",
+				"agent_id", agent.ID, "source_broker_id", src.ID, "error", err)
+			return nil, errMoveBundleSecretTargetsFailed
+		}
+		resp, err := md.DispatchMoveBundlePrecheck(ctx, srcAgent, limits, secretTargets)
+		if err != nil {
+			s.agentLifecycleLog.Warn("move bundle precheck: broker precheck failed",
+				"agent_id", agent.ID, "source_broker_id", src.ID, "error", err)
 			return nil, err
 		}
-		return md.DispatchMoveBundlePrecheck(ctx, srcAgent, limits, secretTargets)
+		return resp, nil
 	}
 }
 

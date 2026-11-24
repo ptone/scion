@@ -33,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -405,6 +406,38 @@ func TestMoveBundleDownloadURLs_AuthzMatrix(t *testing.T) {
 	rec = fNoManifest.doAsBroker(http.MethodPost, fNoManifest.downloadURLsPath(fNoManifest.dstID, fNoManifest.agent.ID, fNoManifest.rec.ID), fNoManifest.dstID, nil)
 	assert.Equal(t, http.StatusConflict, rec.Code)
 
+	// Mismatched reincarnationId in manifest -> 502 (RuntimeError).
+	fBadRID := newMoveBundleEndpointFixture(t, store.AgentReincarnationStateProvisioning, store.TransferModeBundle)
+	badManifest := manifest
+	badManifest.ReincarnationID = tid("other-rid")
+	badBytes, _, err := bundle.CanonicalManifest(badManifest)
+	require.NoError(t, err)
+	badKey, err := storage.MoveBundleManifestPath(fBadRID.srv.HubID(), fBadRID.rec.ID)
+	require.NoError(t, err)
+	_, err = fBadRID.stor.Upload(context.Background(), badKey, bytes.NewReader(badBytes), storage.UploadOptions{ContentType: "application/json"})
+	require.NoError(t, err)
+	rec = fBadRID.doAsBroker(http.MethodPost, fBadRID.downloadURLsPath(fBadRID.dstID, fBadRID.agent.ID, fBadRID.rec.ID), fBadRID.dstID, nil)
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+
+	// Corrupt manifest JSON -> 502 (RuntimeError).
+	fCorrupt := newMoveBundleEndpointFixture(t, store.AgentReincarnationStateProvisioning, store.TransferModeBundle)
+	corruptKey, err := storage.MoveBundleManifestPath(fCorrupt.srv.HubID(), fCorrupt.rec.ID)
+	require.NoError(t, err)
+	_, err = fCorrupt.stor.Upload(context.Background(), corruptKey, strings.NewReader("{not valid json"), storage.UploadOptions{ContentType: "application/json"})
+	require.NoError(t, err)
+	rec = fCorrupt.doAsBroker(http.MethodPost, fCorrupt.downloadURLsPath(fCorrupt.dstID, fCorrupt.agent.ID, fCorrupt.rec.ID), fCorrupt.dstID, nil)
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+
+	// Oversized manifest (> moveBundleManifestMaxBytes) -> 502 (RuntimeError).
+	fOversize := newMoveBundleEndpointFixture(t, store.AgentReincarnationStateProvisioning, store.TransferModeBundle)
+	oversizeKey, err := storage.MoveBundleManifestPath(fOversize.srv.HubID(), fOversize.rec.ID)
+	require.NoError(t, err)
+	oversizeData := bytes.Repeat([]byte(" "), moveBundleManifestMaxBytes+10)
+	_, err = fOversize.stor.Upload(context.Background(), oversizeKey, bytes.NewReader(oversizeData), storage.UploadOptions{ContentType: "application/json"})
+	require.NoError(t, err)
+	rec = fOversize.doAsBroker(http.MethodPost, fOversize.downloadURLsPath(fOversize.dstID, fOversize.agent.ID, fOversize.rec.ID), fOversize.dstID, nil)
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+
 	// Non-GCS (local) and nil storage -> 409 move_bundle_unsupported.
 	for _, stor := range []storage.Storage{nil, &mockStorage{provider: storage.ProviderLocal}} {
 		f.srv.SetStorage(stor)
@@ -415,7 +448,7 @@ func TestMoveBundleDownloadURLs_AuthzMatrix(t *testing.T) {
 }
 
 func TestResolveMoveBundleSecretFileTargets_ForwardedOnPrecheckAndExport(t *testing.T) {
-	_, s := testServer(t)
+	srv, s := testServer(t)
 	ctx := context.Background()
 
 	// Configure local secret backend with project-scoped file and env secrets.
@@ -482,19 +515,95 @@ func TestResolveMoveBundleSecretFileTargets_ForwardedOnPrecheckAndExport(t *test
 	agent := &store.Agent{ID: tid("sec-agent"), Slug: "sec-agent", Name: "sec-agent", ProjectID: proj.ID, RuntimeBrokerID: broker.ID}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
+	// O2: ResolveMoveBundleSecretFileTargets uses metadata-only store.ListSecrets
+	// and does not require or call secretBackend.Resolve.
 	disp := NewHTTPAgentDispatcher(s, false, slog.Default())
-	disp.SetSecretBackend(secBackend)
+	srv.SetDispatcher(disp)
 
 	targets, err := disp.ResolveMoveBundleSecretFileTargets(ctx, agent)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"~/.config/corp/cert.pem"}, targets)
 
-	limits := config.DefaultMoveBundleConfig().ExportLimits()
-	_, err = disp.DispatchMoveBundlePrecheck(ctx, agent, limits, targets)
+	// O6: Verify moveBundleSourceProbe itself resolves and forwards secret targets.
+	probe := srv.moveBundleSourceProbe(ctx)
+	require.NotNil(t, probe)
+	_, err = probe(broker, agent)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"~/.config/corp/cert.pem"}, gotPrecheckTargets)
 
+	limits := config.DefaultMoveBundleConfig().ExportLimits()
 	_, err = disp.DispatchMoveBundleExport(ctx, agent, "rid-sec-1", limits, targets)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"~/.config/corp/cert.pem"}, gotExportTargets)
+}
+
+// O6: Handler-level HTTP dry-run tests covering planReincarnateMove wiring of
+// experimentEnabled(AgentMoveBundle), moveBundleStorageCheck, and moveBundleSourceProbe.
+func TestReincarnateMove_BundleDryRun_HandlerWiring(t *testing.T) {
+	setup := func(t *testing.T, enableExp bool) *moveFixture {
+		t.Helper()
+		f := setupForceMoveFixture(t, false, func(dst *store.RuntimeBroker) {
+			dst.AutoProvide = true
+			dst.Capabilities = &store.BrokerCapabilities{
+				Reprovision:       true,
+				AgentMove:         true,
+				AgentMoveRecreate: true,
+				AgentMoveBundle:   true,
+			}
+		})
+		ctx := context.Background()
+		f.src.Capabilities = &store.BrokerCapabilities{
+			Reprovision:       true,
+			AgentMove:         true,
+			AgentMoveRecreate: true,
+			AgentMoveBundle:   true,
+		}
+		require.NoError(t, f.s.UpdateRuntimeBroker(ctx, f.src))
+		f.srv.SetStorage(newFakeMoveBundleStorage())
+		if enableExp {
+			setExperimentOverrides(t, f.srv, map[string]bool{experiments.AgentMoveBundle: true})
+		}
+		return f
+	}
+
+	t.Run("experiment off returns refusal with bundleUnavailable naming experiment", func(t *testing.T) {
+		f := setup(t, false)
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/reincarnate",
+			ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		var body struct {
+			Error struct {
+				Details struct {
+					Verdict MoveVerdict `json:"verdict"`
+				} `json:"details"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.False(t, body.Error.Details.Verdict.Eligible)
+		assert.Contains(t, body.Error.Details.Verdict.BundleUnavailable, experiments.AgentMoveBundle)
+	})
+
+	t.Run("experiment on with GCS and AgentMoveBundle returns transferMode bundle", func(t *testing.T) {
+		f := setup(t, true)
+		f.disp.moveBundlePrecheckFn = func(_ context.Context, _ *store.Agent, lim api.MoveBundleLimits, targets []string) (*api.MoveBundlePrecheckResponse, error) {
+			assert.NoError(t, lim.Validate())
+			assert.NotNil(t, targets)
+			return &api.MoveBundlePrecheckResponse{
+				Durable:   true,
+				Workspace: api.MoveBundleRootEstimate{Bytes: 8 << 20, Entries: 120},
+				Home:      api.MoveBundleRootEstimate{Bytes: 2 << 20, Entries: 40},
+			}, nil
+		}
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/reincarnate",
+			ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp ReincarnateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.NotNil(t, resp.MoveVerdict)
+		assert.True(t, resp.MoveVerdict.Eligible)
+		assert.Equal(t, MoveTransferModeBundle, resp.MoveVerdict.TransferMode)
+		require.NotNil(t, resp.MoveVerdict.BundleEstimate)
+		assert.Equal(t, int64(8<<20), resp.MoveVerdict.BundleEstimate.WorkspaceBytes)
+		assert.Equal(t, int64(2<<20), resp.MoveVerdict.BundleEstimate.HomeBytes)
+	})
 }

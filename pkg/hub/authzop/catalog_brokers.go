@@ -261,7 +261,7 @@ var brokerOperations = []OperationSpec{
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden, DenialConflict},
+		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"},
 			{Package: "pkg/hub", Function: "TestMoveBundleUploadURL_AuthzMatrix"},
@@ -287,7 +287,7 @@ var brokerOperations = []OperationSpec{
 		Effects:          []SecurityEffect{EffectReadOne},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden, DenialConflict},
+		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"},
 			{Package: "pkg/hub", Function: "TestMoveBundleDownloadURLs_AuthzMatrix"},

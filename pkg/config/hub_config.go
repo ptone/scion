@@ -1595,6 +1595,17 @@ func (c MoveBundleConfig) IsZero() bool {
 	return c == (MoveBundleConfig{})
 }
 
+// durationToPositiveSeconds converts a positive duration to whole seconds,
+// rounding sub-second remainders up to at least 1 so MoveBundleLimits.Validate
+// never rejects a positive sub-second config duration as 0.
+func durationToPositiveSeconds(d time.Duration) int {
+	secs := int((d + time.Second - 1) / time.Second)
+	if secs < 1 {
+		return 1
+	}
+	return secs
+}
+
 func (c MoveBundleConfig) toAPILimits(jobTimeout time.Duration) api.MoveBundleLimits {
 	lim := api.MoveBundleLimits{
 		WorkspaceMaxBytes:   DefaultMoveBundleWorkspaceMaxBytes,
@@ -1604,8 +1615,8 @@ func (c MoveBundleConfig) toAPILimits(jobTimeout time.Duration) api.MoveBundleLi
 		MaxDepth:            DefaultMoveBundleMaxDepth,
 		MaxPathLen:          DefaultMoveBundleMaxPathLen,
 		PartSize:            DefaultMoveBundlePartSize,
-		TimeoutSeconds:      int(jobTimeout / time.Second),
-		PartStallSeconds:    int(DefaultMoveBundlePartStallTimeout / time.Second),
+		TimeoutSeconds:      durationToPositiveSeconds(jobTimeout),
+		PartStallSeconds:    durationToPositiveSeconds(DefaultMoveBundlePartStallTimeout),
 	}
 	if c.WorkspaceMaxBytes > 0 {
 		lim.WorkspaceMaxBytes = c.WorkspaceMaxBytes
@@ -1629,7 +1640,7 @@ func (c MoveBundleConfig) toAPILimits(jobTimeout time.Duration) api.MoveBundleLi
 		lim.PartSize = c.PartSize
 	}
 	if c.PartStallTimeout > 0 {
-		lim.PartStallSeconds = int(c.PartStallTimeout / time.Second)
+		lim.PartStallSeconds = durationToPositiveSeconds(c.PartStallTimeout)
 	}
 	return lim
 }

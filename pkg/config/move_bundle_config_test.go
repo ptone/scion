@@ -69,6 +69,23 @@ func TestMoveBundleConfig_OverridesAndTimeouts(t *testing.T) {
 	assert.Equal(t, 90, imp.PartStallSeconds)
 }
 
+func TestMoveBundleConfig_SubSecondDurationsRoundUp(t *testing.T) {
+	cfg := MoveBundleConfig{
+		ExportTimeout:    500 * time.Millisecond,
+		ImportTimeout:    1 * time.Millisecond,
+		PartStallTimeout: 1500 * time.Millisecond,
+	}
+	exp := cfg.ExportLimits()
+	assert.Equal(t, 1, exp.TimeoutSeconds)
+	assert.Equal(t, 2, exp.PartStallSeconds)
+	assert.NoError(t, exp.Validate())
+
+	imp := cfg.ImportLimits()
+	assert.Equal(t, 1, imp.TimeoutSeconds)
+	assert.Equal(t, 2, imp.PartStallSeconds)
+	assert.NoError(t, imp.Validate())
+}
+
 func TestV1ServerConfig_ReincarnateMoveBundleRoundTrip(t *testing.T) {
 	v1 := &V1ServerConfig{
 		Reincarnate: &V1ReincarnateConfig{

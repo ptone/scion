@@ -100,3 +100,22 @@ func TestCheckHubSupportsForce_BundleMode(t *testing.T) {
 	}
 	assert.NoError(t, checkHubSupportsForce(true, resp))
 }
+
+// T12 (O4): printMoveVerdict also prints "bundle transfer unavailable: <reason>"
+// when --force falls through to an accepted recreate move.
+func TestPrintMoveVerdict_ForcedRecreateShowsBundleUnavailable(t *testing.T) {
+	var out bytes.Buffer
+	printMoveVerdict(&out, &hubclient.MoveVerdict{
+		Eligible:          true,
+		SourceBroker:      hubclient.MoveBrokerRef{ID: "b1", Name: "docker-a"},
+		TargetBroker:      hubclient.MoveBrokerRef{ID: "b2", Name: "docker-b"},
+		TransferMode:      "recreate",
+		BundleUnavailable: "hub object storage is not configured",
+		Checks: []hubclient.MoveCheck{
+			{Name: "same_export", Result: "waived"},
+		},
+	})
+	got := out.String()
+	assert.Contains(t, got, "Uncommitted and unpushed work in the agent's workspace will not survive this move.")
+	assert.Contains(t, got, "bundle transfer unavailable: hub object storage is not configured")
+}

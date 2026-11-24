@@ -231,22 +231,54 @@ func (d *HTTPAgentDispatcher) prepareMoveBundleCall(ctx context.Context, agent *
 }
 
 // ResolveMoveBundleSecretFileTargets returns the deduplicated, sorted list of
-// file-type resolved secret targets for agent across all applicable scopes.
+// file-type secret targets for agent across all applicable scopes using
+// metadata-only store listing (ListSecrets). It never fetches or decrypts
+// secret values and never runs or flushes the start-time owner-material gate.
 // Always returns a non-nil slice on success (an explicit empty slice when no
 // file-type secrets apply) so callers can pass it directly to
 // DispatchMoveBundlePrecheck and DispatchMoveBundleExport.
 func (d *HTTPAgentDispatcher) ResolveMoveBundleSecretFileTargets(ctx context.Context, agent *store.Agent) ([]string, error) {
-	if d.secretBackend == nil || agent == nil {
+	if d.store == nil || agent == nil {
 		return []string{}, nil
 	}
-	resolved, _, err := d.resolveSecrets(ctx, agent)
-	if err != nil {
-		return nil, fmt.Errorf("resolve file-type secret targets: %w", err)
+	type scopeRef struct {
+		scope   string
+		scopeID string
+	}
+	var scopes []scopeRef
+	if isShellAgent(agent) {
+		if agent.OwnerID != "" {
+			scopes = append(scopes, scopeRef{store.ScopeUser, agent.OwnerID})
+		}
+	} else {
+		if agent.RuntimeBrokerID != "" {
+			scopes = append(scopes, scopeRef{store.ScopeRuntimeBroker, agent.RuntimeBrokerID})
+		}
+		if agent.ProjectID != "" {
+			scopes = append(scopes, scopeRef{store.ScopeProject, agent.ProjectID})
+		}
+		if agent.OwnerID != "" {
+			scopes = append(scopes, scopeRef{store.ScopeUser, agent.OwnerID})
+		}
+		if d.agentSecretsEnabled() && agent.ID != "" {
+			scopes = append(scopes, scopeRef{store.ScopeAgent, agent.ID})
+		}
 	}
 	seen := make(map[string]struct{})
 	targets := make([]string, 0)
-	for _, sec := range resolved {
-		if sec.Type == store.SecretTypeFile && sec.Target != "" {
+	for _, sc := range scopes {
+		secrets, err := d.store.ListSecrets(ctx, store.SecretFilter{
+			Scope:   sc.scope,
+			ScopeID: sc.scopeID,
+			Type:    store.SecretTypeFile,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list %s file-type secret targets: %w", sc.scope, err)
+		}
+		for _, sec := range secrets {
+			if sec.Target == "" {
+				continue
+			}
 			if _, dup := seen[sec.Target]; !dup {
 				seen[sec.Target] = struct{}{}
 				targets = append(targets, sec.Target)

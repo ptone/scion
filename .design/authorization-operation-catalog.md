@@ -14661,7 +14661,7 @@
 
 **Effects:** `update-resource`
 
-**Denial Codes:** `forbidden`, `conflict`
+**Denial Codes:** `forbidden`
 
 ### Tests
 
@@ -14696,7 +14696,7 @@
 
 **Effects:** `read-one`
 
-**Denial Codes:** `forbidden`, `conflict`
+**Denial Codes:** `forbidden`
 
 ### Tests
 

@@ -300,10 +300,21 @@ func TestEvaluateMoveEligibility_BundleUnavailableMatrix(t *testing.T) {
 			name: "precheck error",
 			mutate: func(in *moveEligibilityInput) {
 				in.Probes.BundleSource = func(src *store.RuntimeBroker, _ *store.Agent) (*api.MoveBundlePrecheckResponse, error) {
-					return nil, errors.New("broker timeout")
+					return nil, errors.New(`Post "http://10.0.0.1:9800/x": dial tcp`)
 				}
 			},
-			wantSubstr:     "source bundle precheck failed: broker timeout",
+			wantSubstr:     "source bundle precheck failed",
+			expectProbeRun: true,
+			recreateOK:     true,
+		},
+		{
+			name: "secret targets error",
+			mutate: func(in *moveEligibilityInput) {
+				in.Probes.BundleSource = func(src *store.RuntimeBroker, _ *store.Agent) (*api.MoveBundlePrecheckResponse, error) {
+					return nil, errMoveBundleSecretTargetsFailed
+				}
+			},
+			wantSubstr:     "could not resolve the agent's secret targets",
 			expectProbeRun: true,
 			recreateOK:     true,
 		},
@@ -329,6 +340,9 @@ func TestEvaluateMoveEligibility_BundleUnavailableMatrix(t *testing.T) {
 			if !strings.Contains(v.BundleUnavailable, tc.wantSubstr) {
 				t.Errorf("BundleUnavailable = %q, want substring %q", v.BundleUnavailable, tc.wantSubstr)
 			}
+			if strings.Contains(v.BundleUnavailable, "10.0.0.1") || strings.Contains(v.BundleUnavailable, "http://") {
+				t.Errorf("BundleUnavailable leaked internal endpoint URL: %q", v.BundleUnavailable)
+			}
 			if !tc.expectProbeRun && calls["bundle_source:"+in.Src.ID] != 0 {
 				t.Errorf("bundle_source probe ran unexpectedly")
 			}
@@ -345,8 +359,33 @@ func TestEvaluateMoveEligibility_BundleUnavailableMatrix(t *testing.T) {
 				if ref != nil || v.TransferMode != MoveTransferModeRecreate {
 					t.Fatalf("got mode=%q ref=%+v, want recreate", v.TransferMode, ref)
 				}
+				// O4: forced recreate carries BundleUnavailable explaining why bundle did not apply.
+				if !strings.Contains(v.BundleUnavailable, tc.wantSubstr) {
+					t.Errorf("forced recreate BundleUnavailable = %q, want substring %q", v.BundleUnavailable, tc.wantSubstr)
+				}
+				if strings.Contains(v.BundleUnavailable, "10.0.0.1") || strings.Contains(v.BundleUnavailable, "http://") {
+					t.Errorf("forced recreate BundleUnavailable leaked internal endpoint URL: %q", v.BundleUnavailable)
+				}
 			}
 		})
+	}
+}
+
+// T8 (O5b): bundle_experiment runs before workspace_bundleable so an off-experiment
+// hub reports the experiment requirement even for shared-workspace agents.
+func TestEvaluateMoveEligibility_BundleExperimentBeforeWorkspaceBundleable(t *testing.T) {
+	calls := moveTestProbeCalls{}
+	in := bundleMoveInput(calls)
+	in.BundleExperimentEnabled = false
+	in.CloneMode = false
+	in.WorkspaceMode = string(store.SharingModeSharedPlain)
+
+	v, ref := evaluateMoveEligibility(in)
+	if ref == nil {
+		t.Fatal("expected refusal")
+	}
+	if !strings.Contains(v.BundleUnavailable, experiments.AgentMoveBundle) {
+		t.Errorf("BundleUnavailable = %q, want experiment reason before workspace_bundleable", v.BundleUnavailable)
 	}
 }
 
