@@ -175,8 +175,14 @@ const (
 
 	// BrokerErrCodeMoveBundleUnsupported marks a move-bundle signed-URL
 	// request refused (409) because hub object storage cannot issue HTTP(S)
-	// signed URLs.
+	// signed URLs, or a broker export refused (409) on a non-durable runtime.
 	BrokerErrCodeMoveBundleUnsupported = "move_bundle_unsupported"
+
+	// BrokerErrCodeMoveBundleHomeRecordMissing marks a move-bundle export
+	// refused (409) because the broker-owned start record
+	// (.scion-move-bundle-home.json) is missing or invalid; the agent must be
+	// restarted once to record its resolved home and secret exclusions.
+	BrokerErrCodeMoveBundleHomeRecordMissing = "move_bundle_home_record_missing"
 
 	// BrokerErrDetailHomeReset is the error detail key every error answer
 	// to a create request with resetHome carries, whatever its status

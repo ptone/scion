@@ -224,6 +224,9 @@ func (d *HTTPAgentDispatcher) prepareMoveBundleCall(ctx context.Context, agent *
 	if err != nil {
 		return ctx, nil, "", projectDispatchInfo{}, fmt.Errorf("resolve project dispatch info: %w", err)
 	}
+	if agent.ProjectID != "" && info.projectID == "" {
+		return ctx, nil, "", projectDispatchInfo{}, fmt.Errorf("resolve project dispatch info: project %s: %w", agent.ProjectID, store.ErrNotFound)
+	}
 	return ctx, mbClient, endpoint, info, nil
 }
 

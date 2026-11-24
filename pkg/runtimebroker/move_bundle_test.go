@@ -251,6 +251,7 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 			Limits:          api.DefaultMoveBundleLimits(),
 		})
 		assert.Equal(t, http.StatusConflict, expRec.Code, expRec.Body.String())
+		assert.Contains(t, expRec.Body.String(), api.BrokerErrCodeMoveBundleHomeRecordMissing)
 		assert.Contains(t, expRec.Body.String(), moveBundleHomeRecordMissingReason)
 	})
 
@@ -318,7 +319,8 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 
 		srcSrv := newTestServer(t)
 		srcSrv.moveBundle = moveBundleSettings{
-			client: objSrv.Client(),
+			durabilityRuntime: "docker",
+			client:            objSrv.Client(),
 			fetchUploadURL: func(_ context.Context, _, _, rid string, req *api.MoveBundleUploadURLRequest) (*api.MoveBundleUploadURLResponse, error) {
 				return &api.MoveBundleUploadURLResponse{
 					URL:     fmt.Sprintf("%s/%s/%s/part-%05d.tgz", objSrv.URL, rid, req.Root, req.PartIndex),
@@ -448,7 +450,8 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 
 		srcSrv := newTestServer(t)
 		srcSrv.moveBundle = moveBundleSettings{
-			client: objSrv.Client(),
+			durabilityRuntime: "docker",
+			client:            objSrv.Client(),
 			fetchUploadURL: func(_ context.Context, _, _, rid string, req *api.MoveBundleUploadURLRequest) (*api.MoveBundleUploadURLResponse, error) {
 				u := fmt.Sprintf("%s/%s/%s/part-%05d.tgz?X-Goog-Signature=TOPSECRETUPLOAD", objSrv.URL, rid, req.Root, req.PartIndex)
 				return &api.MoveBundleUploadURLResponse{
@@ -556,6 +559,7 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		entered := make(chan struct{}, 2)
 		srv := newTestServer(t)
 		srv.moveBundle = moveBundleSettings{
+			durabilityRuntime: "docker",
 			fetchUploadURL: func(ctx context.Context, _, _, _ string, _ *api.MoveBundleUploadURLRequest) (*api.MoveBundleUploadURLResponse, error) {
 				select {
 				case entered <- struct{}{}:
@@ -600,6 +604,7 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 
 		srv := newTestServer(t)
 		srv.moveBundle = moveBundleSettings{
+			durabilityRuntime: "docker",
 			fetchUploadURL: func(ctx context.Context, _, _, _ string, _ *api.MoveBundleUploadURLRequest) (*api.MoveBundleUploadURLResponse, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
@@ -635,8 +640,9 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 
 		srv := newTestServer(t)
 		srv.moveBundle = moveBundleSettings{
-			client:      objSrv.Client(),
-			partBackoff: []time.Duration{},
+			durabilityRuntime: "docker",
+			client:            objSrv.Client(),
+			partBackoff:       []time.Duration{},
 			fetchUploadURL: func(_ context.Context, _, _, _ string, _ *api.MoveBundleUploadURLRequest) (*api.MoveBundleUploadURLResponse, error) {
 				return &api.MoveBundleUploadURLResponse{
 					URL:     objSrv.URL + "/part?X-Goog-Signature=" + secretToken,
@@ -796,6 +802,52 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		now = now.Add(2 * time.Minute)
 		_, ok = reg.get(key, "rid-gc")
 		assert.False(t, ok)
+	})
+
+	t.Run("export refuses non-durable runtime (S3)", func(t *testing.T) {
+		srcProject, srcAgentDir, srcWS, _ := newMoveBundleTestAgentDir(t, "dev-nondurable")
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
+		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "a.txt"), []byte("data"), 0o644))
+
+		srv := newTestServer(t)
+		srv.moveBundle.durabilityRuntime = "kubernetes"
+		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-nondurable/move-bundle/export?projectId=p1", api.MoveBundleExportRequest{
+			ReincarnationID: "rid-nondurable",
+			ProjectID:       "p1",
+			ProjectPath:     srcProject,
+			Limits:          api.DefaultMoveBundleLimits(),
+		})
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), api.BrokerErrCodeMoveBundleUnsupported)
+	})
+
+	t.Run("export refuses running agent (S3)", func(t *testing.T) {
+		srcProject, srcAgentDir, srcWS, _ := newMoveBundleTestAgentDir(t, "dev-running")
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
+		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "a.txt"), []byte("data"), 0o644))
+
+		mgr := &mockManager{
+			agents: []api.AgentInfo{
+				{
+					ID:              "container-running",
+					Name:            "dev-running",
+					ProjectID:       "p1",
+					Phase:           "running",
+					ContainerStatus: "Up 2 minutes",
+				},
+			},
+		}
+		srv := newTestServerWithManager(t, mgr)
+		srv.moveBundle.durabilityRuntime = "docker"
+		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-running/move-bundle/export?projectId=p1", api.MoveBundleExportRequest{
+			ReincarnationID: "rid-running",
+			ProjectID:       "p1",
+			ProjectPath:     srcProject,
+			Limits:          api.DefaultMoveBundleLimits(),
+		})
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), api.BrokerErrCodeMoveBundleJobConflict)
+		assert.Contains(t, rec.Body.String(), "agent must be stopped before bundle export")
 	})
 }
 

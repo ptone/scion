@@ -108,3 +108,62 @@ func TestMoveBundleHomeRecord_WriteReadAndExpand(t *testing.T) {
 	_, ok = ExpandHomeRelTarget("~/.kube/config", "/home")
 	assert.False(t, ok, "/home is not a user home")
 }
+
+func TestMoveBundleHomeRecord_FailedWriteRemovesStaleRecord(t *testing.T) {
+	dir := t.TempDir()
+
+	// Seed a valid record from an earlier start.
+	require.NoError(t, WriteMoveBundleHomeRecord(dir, runtime.RunConfig{
+		UnixUsername: "scion",
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "old", Type: "file", Target: "~/.config/old/secret.key"},
+		},
+	}))
+	_, err := ReadMoveBundleHomeRecord(dir)
+	require.NoError(t, err)
+
+	// A subsequent start whose RunConfig cannot produce a valid record must fail
+	// AND remove the stale record so export fails closed instead of using stale excludes.
+	err = WriteMoveBundleHomeRecord(dir, runtime.RunConfig{})
+	assert.ErrorIs(t, err, ErrMoveBundleHomeRecordInvalid)
+
+	_, err = ReadMoveBundleHomeRecord(dir)
+	assert.ErrorIs(t, err, ErrMoveBundleHomeRecordMissing, "stale record must be removed when a later write fails")
+}
+
+func TestStart_WritesMoveBundleHomeRecord(t *testing.T) {
+	fx := newMoveAbsentFixture(t, "docker", false)
+	opts := moveAbsentOpts(fx.projectPath, "start-rec-agent", true)
+	opts.ResolvedSecrets = []api.ResolvedSecret{
+		{Name: "my_file_secret", Type: "file", Target: "~/.config/app/secret.key", Value: "top-secret-value"},
+	}
+
+	_, err := fx.mgr.Start(context.Background(), opts)
+	require.NoError(t, err)
+
+	agentDir := filepath.Join(fx.projectPath, "agents", "start-rec-agent")
+	rec, err := ReadMoveBundleHomeRecord(agentDir)
+	require.NoError(t, err, "AgentManager.Start must persist the move-bundle home record")
+	assert.NotEmpty(t, rec.UnixUsername)
+	assert.NotEmpty(t, rec.HomeAbs)
+	assert.Contains(t, rec.HomeExcludes, ".config/app/secret.key")
+}
+
+func TestResolveMoveBundleAgentDirs_MatchesProvisionAgentStateDir(t *testing.T) {
+	fx := newMoveAbsentFixture(t, "docker", false)
+	opts := api.StartOptions{
+		Name:        "parity-agent",
+		ProjectPath: fx.projectPath,
+	}
+	wantAgentDir, err := provisionAgentStateDir(context.Background(), opts)
+	require.NoError(t, err)
+	wantProjectDir, err := config.GetResolvedProjectDir(fx.projectPath)
+	require.NoError(t, err)
+
+	got, err := ResolveMoveBundleAgentDirs(context.Background(), "docker", opts)
+	require.NoError(t, err)
+	assert.Equal(t, wantAgentDir, got.AgentDir)
+	assert.Equal(t, filepath.Join(wantAgentDir, "workspace"), got.WorkspaceDir)
+	assert.Equal(t, config.GetAgentHomePath(wantProjectDir, "parity-agent"), got.HomeDir)
+	assert.False(t, got.SharedWorkspace)
+}

@@ -15,14 +15,19 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
@@ -154,8 +159,16 @@ func BuildMoveBundleHomeRecord(runCfg runtime.RunConfig) (*MoveBundleHomeRecord,
 
 // WriteMoveBundleHomeRecord writes <agentDir>/.scion-move-bundle-home.json
 // using privatefs so it has owner-only permissions/DACL and is never written
-// through a symlink.
+// through a symlink. Any existing record is removed first so a failed write
+// never leaves a stale record behind (fail closed).
 func WriteMoveBundleHomeRecord(agentDir string, runCfg runtime.RunConfig) error {
+	// Best-effort remove any existing record first so a build or write error
+	// never leaves a stale record on disk.
+	if root, rmOpenErr := os.OpenRoot(agentDir); rmOpenErr == nil {
+		_ = root.Remove(MoveBundleHomeRecordFile)
+		_ = root.Close()
+	}
+
 	rec, err := BuildMoveBundleHomeRecord(runCfg)
 	if err != nil {
 		return err
@@ -175,6 +188,50 @@ func WriteMoveBundleHomeRecord(agentDir string, runCfg runtime.RunConfig) error 
 		return fmt.Errorf("write move-bundle home record: %w", err)
 	}
 	return nil
+}
+
+// MoveBundleAgentDirs holds the resolved host paths for an agent's bundle
+// roots, computed with the same helpers Provision and Start use.
+type MoveBundleAgentDirs struct {
+	AgentDir        string
+	WorkspaceDir    string
+	HomeDir         string
+	SharedWorkspace bool
+}
+
+// ResolveMoveBundleAgentDirs resolves an agent's state, workspace, and home
+// directories using the same provisionAgentStateDir and
+// sharedLayoutAgentWorkspace helpers that Provision and Start use (including
+// HubProjectID split-storage resolution). When the agent's workspace lives on
+// a shared project storage layout, SharedWorkspace is reported true so Phase 1
+// precheck/export can refuse it cleanly.
+func ResolveMoveBundleAgentDirs(ctx context.Context, runtimeName string, opts api.StartOptions) (MoveBundleAgentDirs, error) {
+	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
+	if err != nil {
+		return MoveBundleAgentDirs{}, fmt.Errorf("resolve project dir: %w", err)
+	}
+	if _, err := checkAgentDirContained(projectDir, opts.Name, false); err != nil {
+		return MoveBundleAgentDirs{}, fmt.Errorf("agent dir containment: %w", err)
+	}
+	ctx = contextWithAgentRuntime(ctx, runtimeName)
+	agentDir, err := provisionAgentStateDir(ctx, opts)
+	if err != nil {
+		return MoveBundleAgentDirs{}, fmt.Errorf("resolve agent state dir: %w", err)
+	}
+	sharedWS, err := sharedLayoutAgentWorkspace(ctx, nil, projectDir, opts.Name, agentDir)
+	if err != nil {
+		return MoveBundleAgentDirs{}, err
+	}
+	homeDir := config.GetAgentHomePath(projectDir, opts.Name)
+	if agentDir != config.GetAgentDir(projectDir, opts.Name, false) {
+		homeDir = filepath.Join(agentDir, "home")
+	}
+	return MoveBundleAgentDirs{
+		AgentDir:        agentDir,
+		WorkspaceDir:    filepath.Join(agentDir, "workspace"),
+		HomeDir:         homeDir,
+		SharedWorkspace: sharedWS != "",
+	}, nil
 }
 
 // ReadMoveBundleHomeRecord reads and validates

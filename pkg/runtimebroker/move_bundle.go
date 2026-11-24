@@ -169,13 +169,9 @@ func (s *Server) handleMoveBundle(w http.ResponseWriter, r *http.Request, id, pr
 }
 
 // moveBundleDirs holds the resolved host paths for an agent's bundle roots.
-type moveBundleDirs struct {
-	agentDir     string
-	workspaceDir string
-	homeDir      string
-}
+type moveBundleDirs = agent.MoveBundleAgentDirs
 
-func (s *Server) resolveMoveBundleDirs(agentSlug, projectID, projectPath, projectSlug string) (moveBundleDirs, error) {
+func (s *Server) resolveMoveBundleDirs(ctx context.Context, runtimeName, agentSlug, projectID, projectPath, projectSlug string) (moveBundleDirs, error) {
 	if !isSingleCleanPathElement(agentSlug) {
 		return moveBundleDirs{}, fmt.Errorf("invalid agent id")
 	}
@@ -201,25 +197,38 @@ func (s *Server) resolveMoveBundleDirs(agentSlug, projectID, projectPath, projec
 		rawProject = globalDir
 	}
 
-	projectDir, err := config.GetResolvedProjectDir(rawProject)
-	if err != nil {
-		return moveBundleDirs{}, fmt.Errorf("resolve project dir: %w", err)
-	}
-	if _, err := agent.CheckAgentDirContained(projectDir, agentSlug, false); err != nil {
-		return moveBundleDirs{}, fmt.Errorf("agent dir containment: %w", err)
-	}
+	return agent.ResolveMoveBundleAgentDirs(ctx, runtimeName, api.StartOptions{
+		Name:         agentSlug,
+		ProjectPath:  rawProject,
+		HubProjectID: projectID,
+		BrokerMode:   true,
+	})
+}
 
-	agentDir := config.GetAgentDir(projectDir, agentSlug, false)
-	homeDir := config.GetAgentHomePath(projectDir, agentSlug)
-	// Bundle-eligible agents (clone-per-agent, empty-per-agent, and
-	// WorkspaceSource="move-bundle" target provisions) always place their
-	// workspace at <agentDir>/workspace, including in the global project.
-	workspaceDir := filepath.Join(agentDir, "workspace")
-	return moveBundleDirs{
-		agentDir:     agentDir,
-		workspaceDir: workspaceDir,
-		homeDir:      homeDir,
-	}, nil
+// isMoveBundleAgentRunning reports whether the runtime currently lists the
+// agent in a running/starting state, so export can refuse to snapshot a live
+// container.
+func (s *Server) isMoveBundleAgentRunning(ctx context.Context, id, projectID string) (bool, error) {
+	mgr := s.resolveManagerForAgent(ctx, id, projectID)
+	if mgr == nil {
+		return false, nil
+	}
+	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
+	if err != nil {
+		return false, err
+	}
+	for _, a := range agents {
+		if !matchesAgent(a, id, projectID) {
+			continue
+		}
+		phase := strings.ToLower(strings.TrimSpace(a.Phase))
+		status := strings.ToLower(strings.TrimSpace(a.ContainerStatus))
+		if phase == "running" || phase == "starting" || phase == "cloning" ||
+			strings.HasPrefix(status, "up") || status == "running" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // resolveMoveBundleRuntimeName determines the runtime type name for durability
@@ -334,7 +343,8 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	rtName := s.resolveMoveBundleRuntimeName(r, id, firstNonEmpty(req.ProjectID, projectID))
+	effProjectID := firstNonEmpty(req.ProjectID, projectID)
+	rtName := s.resolveMoveBundleRuntimeName(r, id, effProjectID)
 	if !api.IsLocalDiskRuntime(rtName) {
 		writeJSON(w, http.StatusOK, api.MoveBundlePrecheckResponse{
 			Durable: false,
@@ -344,8 +354,10 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 	}
 
 	dirs, err := s.resolveMoveBundleDirs(
+		r.Context(),
+		rtName,
 		id,
-		firstNonEmpty(req.ProjectID, projectID),
+		effProjectID,
 		firstNonEmpty(req.ProjectPath, r.URL.Query().Get("projectPath")),
 		firstNonEmpty(req.ProjectSlug, r.URL.Query().Get("projectSlug")),
 	)
@@ -353,8 +365,15 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 		ValidationError(w, err.Error(), nil)
 		return
 	}
+	if dirs.SharedWorkspace {
+		writeJSON(w, http.StatusOK, api.MoveBundlePrecheckResponse{
+			Durable: false,
+			Reason:  "shared layout workspace is not yet supported for bundle moves",
+		})
+		return
+	}
 
-	homeEx, homeExErr := loadMoveBundleHomeExcluder(dirs.agentDir, req.SecretFileTargets)
+	homeEx, homeExErr := loadMoveBundleHomeExcluder(dirs.AgentDir, req.SecretFileTargets)
 	if homeExErr != nil {
 		s.agentLifecycleLog.Warn("Move-bundle precheck: home exclusion record unavailable",
 			"agent_id", id, "error", homeExErr)
@@ -365,7 +384,7 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	wsEst, wsErr := estimateMoveBundleRoot(r.Context(), dirs.workspaceDir, bundle.WorkspaceExcluder(), req.Limits.WorkspaceLimits())
+	wsEst, wsErr := estimateMoveBundleRoot(r.Context(), dirs.WorkspaceDir, bundle.WorkspaceExcluder(), req.Limits.WorkspaceLimits())
 	if wsErr != nil {
 		if errors.Is(wsErr, fs.ErrNotExist) {
 			NotFound(w, "Agent workspace")
@@ -394,7 +413,7 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	homeEst, homeErr := estimateMoveBundleRoot(r.Context(), dirs.homeDir, homeEx, req.Limits.HomeLimits())
+	homeEst, homeErr := estimateMoveBundleRoot(r.Context(), dirs.HomeDir, homeEx, req.Limits.HomeLimits())
 	if homeErr != nil {
 		if errors.Is(homeErr, fs.ErrNotExist) {
 			NotFound(w, "Agent home")
@@ -475,7 +494,27 @@ func (s *Server) handleMoveBundleExportStart(w http.ResponseWriter, r *http.Requ
 	}
 
 	effProjectID := firstNonEmpty(req.ProjectID, projectID)
+	rtName := s.resolveMoveBundleRuntimeName(r, id, effProjectID)
+	if !api.IsLocalDiskRuntime(rtName) {
+		writeError(w, http.StatusConflict, api.BrokerErrCodeMoveBundleUnsupported, "not yet supported", nil)
+		return
+	}
+
+	running, runCheckErr := s.isMoveBundleAgentRunning(r.Context(), id, effProjectID)
+	if runCheckErr != nil {
+		s.agentLifecycleLog.Warn("Move-bundle export: failed to verify agent is stopped",
+			"agent_id", id, "error", runCheckErr)
+		InternalError(w)
+		return
+	}
+	if running {
+		writeError(w, http.StatusConflict, api.BrokerErrCodeMoveBundleJobConflict, "agent must be stopped before bundle export", nil)
+		return
+	}
+
 	dirs, err := s.resolveMoveBundleDirs(
+		r.Context(),
+		rtName,
 		id,
 		effProjectID,
 		firstNonEmpty(req.ProjectPath, r.URL.Query().Get("projectPath")),
@@ -485,12 +524,16 @@ func (s *Server) handleMoveBundleExportStart(w http.ResponseWriter, r *http.Requ
 		ValidationError(w, err.Error(), nil)
 		return
 	}
+	if dirs.SharedWorkspace {
+		writeError(w, http.StatusConflict, api.BrokerErrCodeMoveBundleUnsupported, "shared layout workspace is not yet supported for bundle moves", nil)
+		return
+	}
 
-	homeEx, homeExErr := loadMoveBundleHomeExcluder(dirs.agentDir, req.SecretFileTargets)
+	homeEx, homeExErr := loadMoveBundleHomeExcluder(dirs.AgentDir, req.SecretFileTargets)
 	if homeExErr != nil {
 		s.agentLifecycleLog.Warn("Move-bundle export refused: home exclusion record unavailable",
 			"agent_id", id, "error", homeExErr)
-		writeError(w, http.StatusConflict, api.BrokerErrCodeMoveBundleUnsupported, moveBundleHomeRecordMissingReason, nil)
+		writeError(w, http.StatusConflict, api.BrokerErrCodeMoveBundleHomeRecordMissing, moveBundleHomeRecordMissingReason, nil)
 		return
 	}
 
@@ -551,8 +594,8 @@ func (s *Server) runMoveBundleExport(
 		ex   bundle.Excluder
 		lim  bundle.Limits
 	}{
-		{bundle.RootWorkspace, dirs.workspaceDir, bundle.WorkspaceExcluder(), req.Limits.WorkspaceLimits()},
-		{bundle.RootHome, dirs.homeDir, homeEx, req.Limits.HomeLimits()},
+		{bundle.RootWorkspace, dirs.WorkspaceDir, bundle.WorkspaceExcluder(), req.Limits.WorkspaceLimits()},
+		{bundle.RootHome, dirs.HomeDir, homeEx, req.Limits.HomeLimits()},
 	}
 
 	results := make(chan rootResult, len(roots))
@@ -757,7 +800,10 @@ func (s *Server) handleMoveBundleImportStart(w http.ResponseWriter, r *http.Requ
 	}
 
 	effProjectID := firstNonEmpty(req.ProjectID, projectID)
+	rtName := s.resolveMoveBundleRuntimeName(r, id, effProjectID)
 	dirs, err := s.resolveMoveBundleDirs(
+		r.Context(),
+		rtName,
 		id,
 		effProjectID,
 		firstNonEmpty(req.ProjectPath, r.URL.Query().Get("projectPath")),
@@ -770,9 +816,9 @@ func (s *Server) handleMoveBundleImportStart(w http.ResponseWriter, r *http.Requ
 
 	// Confirm the agent directory was provisioned for this exact move
 	// (fresh-agent-dir writes agent.MoveMarkerFile with req.ReincarnationID).
-	moveMarker, moveMarkerErr := agent.ReadMoveMarker(dirs.agentDir)
+	moveMarker, moveMarkerErr := agent.ReadMoveMarker(dirs.AgentDir)
 	if moveMarkerErr != nil {
-		if _, statErr := os.Stat(dirs.agentDir); errors.Is(statErr, fs.ErrNotExist) {
+		if _, statErr := os.Stat(dirs.AgentDir); errors.Is(statErr, fs.ErrNotExist) {
 			NotFound(w, "Agent directory")
 			return
 		}
@@ -784,7 +830,7 @@ func (s *Server) handleMoveBundleImportStart(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	imported, markerErr := hasMoveBundleImportedMarker(dirs.agentDir, req.ReincarnationID)
+	imported, markerErr := hasMoveBundleImportedMarker(dirs.AgentDir, req.ReincarnationID)
 	if markerErr != nil {
 		if errors.Is(markerErr, fs.ErrNotExist) {
 			NotFound(w, "Agent directory")
@@ -849,19 +895,19 @@ func (s *Server) runMoveBundleImport(
 	defer func() { _ = os.RemoveAll(scratchDir) }()
 
 	// Create sibling staging directories ".<base>.bundle-<32hex>" on the same
-	// filesystem as workspaceDir and homeDir.
-	wsStageName, err := newMoveBundleStageName(filepath.Base(dirs.workspaceDir))
+	// filesystem as WorkspaceDir and HomeDir.
+	wsStageName, err := newMoveBundleStageName(filepath.Base(dirs.WorkspaceDir))
 	if err != nil {
 		job.markFailed("bundle import failed: generate workspace staging name", "", st.now())
 		return
 	}
-	homeStageName, err := newMoveBundleStageName(filepath.Base(dirs.homeDir))
+	homeStageName, err := newMoveBundleStageName(filepath.Base(dirs.HomeDir))
 	if err != nil {
 		job.markFailed("bundle import failed: generate home staging name", "", st.now())
 		return
 	}
-	wsStagePath := filepath.Join(filepath.Dir(dirs.workspaceDir), wsStageName)
-	homeStagePath := filepath.Join(filepath.Dir(dirs.homeDir), homeStageName)
+	wsStagePath := filepath.Join(filepath.Dir(dirs.WorkspaceDir), wsStageName)
+	homeStagePath := filepath.Join(filepath.Dir(dirs.HomeDir), homeStageName)
 
 	if err := os.Mkdir(wsStagePath, 0o755); err != nil {
 		job.markFailed("bundle import failed: create workspace staging dir", "", st.now())
@@ -941,7 +987,7 @@ func (s *Server) runMoveBundleImport(
 	}
 
 	// Commit workspace (empty dir; fail on any conflicting top-level name).
-	if err := commitMoveBundleWorkspace(dirs.workspaceDir, wsStageName); err != nil {
+	if err := commitMoveBundleWorkspace(dirs.WorkspaceDir, wsStageName); err != nil {
 		if errors.Is(err, errMoveBundleCommitCrash) {
 			keepStagingOnCrash = true
 		}
@@ -950,7 +996,7 @@ func (s *Server) runMoveBundleImport(
 	}
 
 	// Commit home (provision-rendered files win; skip and count).
-	skipped, err := commitMoveBundleHome(dirs.homeDir, homeStageName)
+	skipped, err := commitMoveBundleHome(dirs.HomeDir, homeStageName)
 	if err != nil {
 		if errors.Is(err, errMoveBundleCommitCrash) {
 			keepStagingOnCrash = true
@@ -968,7 +1014,7 @@ func (s *Server) runMoveBundleImport(
 	}
 
 	// Write imported marker only after both roots commit.
-	if err := writeMoveBundleImportedMarker(dirs.agentDir, req.ReincarnationID); err != nil {
+	if err := writeMoveBundleImportedMarker(dirs.AgentDir, req.ReincarnationID); err != nil {
 		job.markFailed(formatMoveBundleError("bundle import failed", err), "", st.now())
 		return
 	}

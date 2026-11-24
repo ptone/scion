@@ -618,6 +618,10 @@ type reincarnateTestDispatcher struct {
 	moveProvisionFailsBeforeF4 bool
 	moveProvisionIDs           []string
 	recreatedDeleteIDs         []string
+	// bundleProvisionCalls records DispatchAgentProvisionForBundleMove calls
+	// separately so Part D tests can distinguish a bundle provision
+	// (WorkspaceSource="move-bundle") from a recreate provision (N1).
+	bundleProvisionCalls []bundleProvisionRecord
 
 	// Move-bundle hooks for Part D worker tests (T11).
 	moveBundlePrecheckFn     func(ctx context.Context, agent *store.Agent, limits api.MoveBundleLimits, secretFileTargets []string) (*api.MoveBundlePrecheckResponse, error)
@@ -5351,7 +5355,20 @@ func (d *reincarnateTestDispatcher) DispatchAgentDeleteRecreated(_ context.Conte
 	return nil
 }
 
+type bundleProvisionRecord struct {
+	BrokerID        string
+	WorkspaceSource string
+	ReincarnationID string
+}
+
 func (d *reincarnateTestDispatcher) DispatchAgentProvisionForBundleMove(ctx context.Context, agent *store.Agent, moveID string) error {
+	d.mu.Lock()
+	d.bundleProvisionCalls = append(d.bundleProvisionCalls, bundleProvisionRecord{
+		BrokerID:        agent.RuntimeBrokerID,
+		WorkspaceSource: api.WorkspaceSourceMoveBundle,
+		ReincarnationID: moveID,
+	})
+	d.mu.Unlock()
 	return d.DispatchAgentProvisionForMove(ctx, agent, "fresh-agent-dir", moveID)
 }
 
