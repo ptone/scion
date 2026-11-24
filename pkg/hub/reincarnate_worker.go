@@ -1423,7 +1423,7 @@ func (s *Server) failMoveAndRollBack(ctx context.Context, md agentMoveDispatcher
 		return
 	}
 	s.rollbackMove(ctx, md, agentID, reincarnationID, move, srcAgent, targetUntouched)
-	s.writeFailedAgent(ctx, agentID, reincarnationID, store.EdgeDeactivationReincarnateFailed, errMsg, "", previous, failNow)
+	s.writeFailedAgent(ctx, agentID, reincarnationID, store.EdgeDeactivationReincarnateFailed, errMsg, previous, failNow)
 	s.reconcileFailedMove(ctx, reincarnationID)
 }
 
@@ -1456,7 +1456,7 @@ func (s *Server) finishFailReincarnation(ctx context.Context, agentID, reincarna
 			"agent_id", agentID, "reincarnation_id", reincarnationID)
 		return
 	}
-	s.writeFailedAgent(ctx, agentID, reincarnationID, store.EdgeDeactivationReincarnateFailed, errMsg, agentMsg, restoreConfig, failNow)
+	s.writeFailedAgentWithMessage(ctx, agentID, reincarnationID, store.EdgeDeactivationReincarnateFailed, errMsg, agentMsg, restoreConfig, failNow)
 	s.reconcileFailedMove(ctx, reincarnationID)
 }
 
@@ -1474,7 +1474,11 @@ func (s *Server) finishFailReincarnation(ctx context.Context, agentID, reincarna
 // the restored configuration change together. Without restoreConfig the disk
 // keeps the new generation's configuration, and the authority records
 // written for it stay.
-func (s *Server) writeFailedAgent(ctx context.Context, agentID, reincarnationID string, cause store.EdgeDeactivationCause, errMsg, agentMsg string, restoreConfig *store.AgentAppliedConfig, now time.Time) {
+func (s *Server) writeFailedAgent(ctx context.Context, agentID, reincarnationID string, cause store.EdgeDeactivationCause, errMsg string, restoreConfig *store.AgentAppliedConfig, now time.Time) {
+	s.writeFailedAgentWithMessage(ctx, agentID, reincarnationID, cause, errMsg, "", restoreConfig, now)
+}
+
+func (s *Server) writeFailedAgentWithMessage(ctx context.Context, agentID, reincarnationID string, cause store.EdgeDeactivationCause, errMsg, agentMsg string, restoreConfig *store.AgentAppliedConfig, now time.Time) {
 	if agentMsg == "" {
 		agentMsg = "reincarnation failed: " + errMsg
 	}
@@ -1558,7 +1562,7 @@ func (s *Server) failListedReincarnation(ctx context.Context, rec *store.AgentRe
 	if err != nil || !ok {
 		return false
 	}
-	s.writeFailedAgent(ctx, rec.AgentID, rec.ID, cause, errMsg, "", restoreConfig, failNow)
+	s.writeFailedAgent(ctx, rec.AgentID, rec.ID, cause, errMsg, restoreConfig, failNow)
 	s.reconcileFailedMove(ctx, rec.ID)
 	return true
 }
