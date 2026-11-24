@@ -7585,7 +7585,7 @@ func (s *Server) findAgentRuntimeTarget(ctx context.Context, id, projectID strin
 	defMgr, defRT, _ := s.defaultPair()
 
 	// Try the default runtime first.
-	if useDefault {
+	if useDefault && defMgr != nil {
 		agents, err := defMgr.List(ctx, filter)
 		if err == nil && len(agents) > 0 {
 			return defMgr, defRT, true
@@ -7608,7 +7608,7 @@ func (s *Server) findAgentRuntimeTarget(ctx context.Context, id, projectID strin
 	// This supports pre-existing containers and solo/CLI mode.
 	if projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
-		if useDefault {
+		if useDefault && defMgr != nil {
 			agents, err := defMgr.List(ctx, fallbackFilter)
 			if err == nil && hasAgentInProjectOrUnlabeled(agents, projectID) {
 				return defMgr, defRT, true

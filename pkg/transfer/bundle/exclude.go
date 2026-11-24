@@ -109,14 +109,79 @@ type HomeExcluderOptions struct {
 	AgentHomeAbs string
 }
 
+// WorkspaceExcluderOptions configures WorkspaceExcluderWithOptions.
+type WorkspaceExcluderOptions struct {
+	// ExtraLiterals are additional workspace-relative literal paths (such as
+	// file-type secrets or auth files targeted under /workspace), canonicalised
+	// via path.Clean and matched literally as exact path or subtree prefix
+	// (never globs). Absolute paths or ".." traversal entries cause Write and
+	// Estimate to fail closed with an error.
+	ExtraLiterals []string
+	// WorkspaceAbs is the agent's in-container absolute workspace mount path
+	// (typically "/workspace"). When non-empty, an absolute symlink target under
+	// WorkspaceAbs encountered while resolving an exclusion entry is rebased to
+	// a root-relative path and resolution continues.
+	WorkspaceAbs string
+}
+
 // WorkspaceExcluder returns the excluder for a workspace root: root `.scion`
 // and `.scion/**` only (case-insensitive on the root element, matching
 // transfer.ExcludeWorkspaceObject). `.git/**` and nested `a/.scion` are kept.
 func WorkspaceExcluder() Excluder {
-	return ExcluderFunc(func(relPath string, _ bool) bool {
-		first, _, _ := strings.Cut(relPath, "/")
-		return transfer.IsWorkspaceIdentityName(first)
-	})
+	return WorkspaceExcluderWithOptions(WorkspaceExcluderOptions{})
+}
+
+// WorkspaceExcluderWithOptions returns the excluder for a workspace root: root
+// `.scion` and `.scion/**` (case-insensitive on the root element) unioned with
+// any caller-supplied ExtraLiterals (e.g. file-type secrets or auth files
+// targeted under /workspace). When passed to Write or Estimate, ExtraLiterals
+// receive the same fail-closed symlinked-ancestor resolution (rebasing absolute
+// links under opts.WorkspaceAbs) and excluded-secret hardlink detection as
+// HomeExcluder.
+func WorkspaceExcluderWithOptions(opts WorkspaceExcluderOptions) Excluder {
+	var secretPrefixes []string
+	var initErr error
+	for _, raw := range opts.ExtraLiterals {
+		c, err := canonicalizeExtraLiteral(raw)
+		if err != nil {
+			if initErr == nil {
+				initErr = err
+			}
+			continue
+		}
+		if c == "" {
+			continue
+		}
+		secretPrefixes = append(secretPrefixes, c)
+	}
+	return &workspaceExcluder{
+		inner: &prefixExcluder{
+			prefixes:       secretPrefixes,
+			secretPrefixes: secretPrefixes,
+			agentHomeAbs:   cleanAbsHome(opts.WorkspaceAbs),
+			initErr:        initErr,
+		},
+	}
+}
+
+type workspaceExcluder struct {
+	inner *prefixExcluder
+}
+
+func (e *workspaceExcluder) Exclude(relPath string, isDir bool) bool {
+	first, _, _ := strings.Cut(relPath, "/")
+	if transfer.IsWorkspaceIdentityName(first) {
+		return true
+	}
+	return e.inner.Exclude(relPath, isDir)
+}
+
+func (e *workspaceExcluder) resolveInRoot(root *os.Root) (Excluder, excludedInodeSet, error) {
+	resolved, inodes, err := e.inner.resolveInRoot(root)
+	if err != nil {
+		return nil, excludedInodeSet{}, err
+	}
+	return &workspaceExcluder{inner: resolved.(*prefixExcluder)}, inodes, nil
 }
 
 // HomeExcluder returns the excluder for a $HOME root: always including the

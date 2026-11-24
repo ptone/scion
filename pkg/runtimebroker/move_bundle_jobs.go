@@ -237,3 +237,26 @@ func (r *moveBundleJobRegistry) cancelAndWaitForAgent(ctx context.Context, proje
 	}
 	return nil
 }
+
+// hasRunningForAgent reports whether any move-bundle job (export or import) is
+// currently running for (projectID, agentSlug).
+func (r *moveBundleJobRegistry) hasRunningForAgent(projectID, agentSlug string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gcLocked()
+	for k, j := range r.jobs {
+		if k.Agent.AgentSlug != agentSlug {
+			continue
+		}
+		if projectID != "" && k.Agent.ProjectID != "" && k.Agent.ProjectID != projectID {
+			continue
+		}
+		j.mu.Lock()
+		running := j.state == api.MoveBundleJobStateRunning
+		j.mu.Unlock()
+		if running {
+			return true
+		}
+	}
+	return false
+}

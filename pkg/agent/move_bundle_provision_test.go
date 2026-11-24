@@ -73,17 +73,20 @@ func TestMoveBundleHomeRecord_WriteReadAndExpand(t *testing.T) {
 	_, err = BuildMoveBundleHomeRecord(runtime.RunConfig{})
 	assert.ErrorIs(t, err, ErrMoveBundleHomeRecordInvalid)
 
-	// Valid record persists resolved UnixUsername, HomeAbs, file secrets, and auth files.
+	// Valid record persists resolved UnixUsername, HomeAbs, WorkspaceAbs, file secrets, and auth files.
 	cfg := runtime.RunConfig{
-		UnixUsername: "scion",
+		UnixUsername:       "scion",
+		ContainerWorkspace: "/workspace",
 		ResolvedSecrets: []api.ResolvedSecret{
 			{Name: "k1", Type: "file", Target: "~/.config/app/key.pem"},
 			{Name: "k2", Type: "file", Target: "/home/scion/.ssh/id_ed25519"},
 			{Name: "k3", Type: "file", Target: "/etc/outside.pem"},
+			{Name: "k4", Type: "file", Target: "/workspace/.env"},
 		},
 		ResolvedAuth: &api.ResolvedAuth{
 			Files: []api.FileMapping{
 				{SourcePath: "/host/a", ContainerPath: "~/.claude/.credentials.json"},
+				{SourcePath: "/host/b", ContainerPath: "/workspace/config/auth.json"},
 			},
 		},
 	}
@@ -93,10 +96,14 @@ func TestMoveBundleHomeRecord_WriteReadAndExpand(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "scion", rec.UnixUsername)
 	assert.Equal(t, "/home/scion", rec.HomeAbs)
+	assert.Equal(t, "/workspace", rec.WorkspaceAbs)
 	assert.Contains(t, rec.HomeExcludes, ".config/app/key.pem")
 	assert.Contains(t, rec.HomeExcludes, ".ssh/id_ed25519")
 	assert.Contains(t, rec.HomeExcludes, ".claude/.credentials.json")
 	assert.NotContains(t, rec.HomeExcludes, "etc/outside.pem")
+	assert.Contains(t, rec.WorkspaceExcludes, ".env")
+	assert.Contains(t, rec.WorkspaceExcludes, "config/auth.json")
+	assert.NotContains(t, rec.WorkspaceExcludes, "etc/outside.pem")
 
 	// ExpandHomeRelTarget works directly against homeAbs (including /root) and rejects /home.
 	rel, ok := ExpandHomeRelTarget("~/.gemini/antigravity-cli/token", "/home/scion")
@@ -107,6 +114,18 @@ func TestMoveBundleHomeRecord_WriteReadAndExpand(t *testing.T) {
 	assert.Equal(t, ".copilot/config.json", rel)
 	_, ok = ExpandHomeRelTarget("~/.kube/config", "/home")
 	assert.False(t, ok, "/home is not a user home")
+
+	// ExpandAbsRelTarget resolves workspace-relative targets and rejects paths outside rootAbs.
+	rel, ok = ExpandAbsRelTarget("/workspace/.env", "/workspace")
+	assert.True(t, ok)
+	assert.Equal(t, ".env", rel)
+	rel, ok = ExpandAbsRelTarget("/src/sub/sa.json", "/src")
+	assert.True(t, ok)
+	assert.Equal(t, "sub/sa.json", rel)
+	_, ok = ExpandAbsRelTarget("/workspace2/.env", "/workspace")
+	assert.False(t, ok)
+	_, ok = ExpandAbsRelTarget("~/.env", "/workspace")
+	assert.False(t, ok)
 }
 
 func TestMoveBundleHomeRecord_FailedWriteRemovesStaleRecord(t *testing.T) {
@@ -136,6 +155,7 @@ func TestStart_WritesMoveBundleHomeRecord(t *testing.T) {
 	opts := moveAbsentOpts(fx.projectPath, "start-rec-agent", true)
 	opts.ResolvedSecrets = []api.ResolvedSecret{
 		{Name: "my_file_secret", Type: "file", Target: "~/.config/app/secret.key", Value: "top-secret-value"},
+		{Name: "my_ws_secret", Type: "file", Target: "/workspace/.env", Value: "API_KEY=secret"},
 	}
 
 	_, err := fx.mgr.Start(context.Background(), opts)
@@ -146,7 +166,9 @@ func TestStart_WritesMoveBundleHomeRecord(t *testing.T) {
 	require.NoError(t, err, "AgentManager.Start must persist the move-bundle home record")
 	assert.NotEmpty(t, rec.UnixUsername)
 	assert.NotEmpty(t, rec.HomeAbs)
+	assert.Equal(t, "/workspace", rec.WorkspaceAbs)
 	assert.Contains(t, rec.HomeExcludes, ".config/app/secret.key")
+	assert.Contains(t, rec.WorkspaceExcludes, ".env")
 }
 
 func TestResolveMoveBundleAgentDirs_MatchesProvisionAgentStateDir(t *testing.T) {
@@ -166,4 +188,54 @@ func TestResolveMoveBundleAgentDirs_MatchesProvisionAgentStateDir(t *testing.T) 
 	assert.Equal(t, filepath.Join(wantAgentDir, "workspace"), got.WorkspaceDir)
 	assert.Equal(t, config.GetAgentHomePath(wantProjectDir, "parity-agent"), got.HomeDir)
 	assert.False(t, got.SharedWorkspace)
+}
+
+func TestResolveMoveBundleAgentDirs_SharedLayoutAndSplitStorage(t *testing.T) {
+	// Shared project storage layout (kubernetes + NFS share):
+	// agent state lives in the broker-local external agent dir (split storage)
+	// and SharedWorkspace is reported true so Phase 1 precheck/export refuse it.
+	sl := newSharedLayoutStarter(t, "kubernetes")
+	opts := api.StartOptions{
+		Name:         "test-agent",
+		ProjectPath:  sl.root,
+		HubProjectID: sharedRootUUID,
+		BrokerMode:   true,
+	}
+	got, err := ResolveMoveBundleAgentDirs(context.Background(), "kubernetes", opts)
+	require.NoError(t, err)
+	assert.True(t, got.SharedWorkspace, "shared project storage layout must be flagged SharedWorkspace=true")
+	assert.Equal(t, sl.ext, got.AgentDir, "split-storage external agent dir must match provisionAgentStateDir")
+	assert.Equal(t, filepath.Join(sl.ext, "home"), got.HomeDir)
+
+	// Local-disk runtime on the same NFS shared project layout:
+	// agent state resolves to the broker-local external agent dir (split storage),
+	// matching provisionAgentStateDir, and SharedWorkspace is still true because
+	// the project workspace lives on the shared layout.
+	gotLocal, err := ResolveMoveBundleAgentDirs(context.Background(), "docker", opts)
+	require.NoError(t, err)
+	wantLocal, err := provisionAgentStateDir(contextWithAgentRuntime(context.Background(), "docker"), opts)
+	require.NoError(t, err)
+	assert.Equal(t, wantLocal, gotLocal.AgentDir)
+	assert.Equal(t, sl.ext, gotLocal.AgentDir)
+	assert.Equal(t, filepath.Join(sl.ext, "workspace"), gotLocal.WorkspaceDir)
+	assert.Equal(t, filepath.Join(sl.ext, "home"), gotLocal.HomeDir)
+	assert.True(t, gotLocal.SharedWorkspace)
+
+	// Non-shared split-storage project (local project dir outside any NFS share
+	// with HubProjectID + BrokerMode): resolves to the same agent dir as
+	// provisionAgentStateDir with SharedWorkspace=false.
+	fx := newMoveAbsentFixture(t, "docker", false)
+	splitOpts := api.StartOptions{
+		Name:         "split-agent",
+		ProjectPath:  fx.projectPath,
+		HubProjectID: "11111111-2222-3333-4444-555555555555",
+		BrokerMode:   true,
+	}
+	wantSplit, err := provisionAgentStateDir(contextWithAgentRuntime(context.Background(), "docker"), splitOpts)
+	require.NoError(t, err)
+	gotSplit, err := ResolveMoveBundleAgentDirs(context.Background(), "docker", splitOpts)
+	require.NoError(t, err)
+	assert.Equal(t, wantSplit, gotSplit.AgentDir)
+	assert.Equal(t, filepath.Join(wantSplit, "workspace"), gotSplit.WorkspaceDir)
+	assert.False(t, gotSplit.SharedWorkspace)
 }

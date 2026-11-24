@@ -752,3 +752,103 @@ func TestT2_UnixUnportablePathError(t *testing.T) {
 		t.Errorf("Write err = %v, want ErrUnportablePath(bad\\name.txt)", err)
 	}
 }
+
+func TestWorkspaceExcluderWithOptions_SecretsSymlinksAndHardlinks(t *testing.T) {
+	ctx := context.Background()
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	scratch := t.TempDir()
+
+	// Normal workspace file + .scion identity dir (always excluded).
+	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(srcDir, ".scion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, ".scion", "marker"), []byte("id"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Direct file secret at /workspace/.env and hard-linked copy.
+	if err := os.WriteFile(filepath.Join(srcDir, ".env"), []byte("SECRET_KEY=topsecret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(srcDir, ".env"), filepath.Join(srcDir, "env-hardlink.txt")); err != nil {
+		t.Fatal(err)
+	}
+	// Secret reached through an absolute in-workspace symlinked ancestor:
+	// config -> /workspace/real-cfg, secret at /workspace/config/sa.json.
+	if err := os.MkdirAll(filepath.Join(srcDir, "real-cfg"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "real-cfg", "sa.json"), []byte("SA_SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "real-cfg", "app.yaml"), []byte("ok: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/workspace/real-cfg", filepath.Join(srcDir, "config")); err != nil {
+		t.Fatal(err)
+	}
+
+	srcRoot, err := os.OpenRoot(srcDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srcRoot.Close() }()
+	dstRoot, err := os.OpenRoot(dstDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dstRoot.Close() }()
+
+	ex := WorkspaceExcluderWithOptions(WorkspaceExcluderOptions{
+		ExtraLiterals: []string{".env", "config/sa.json"},
+		WorkspaceAbs:  "/workspace",
+	})
+	lim := DefaultWorkspaceLimits()
+
+	est, err := Estimate(ctx, srcRoot, ex, lim)
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	store := newMemStore()
+	rm, err := Write(ctx, srcRoot, scratch, ex, lim, store)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if est.Entries != rm.Entries || est.Bytes != rm.Bytes {
+		t.Fatalf("Estimate %+v != Write %+v", est, rm)
+	}
+	if err := Extract(ctx, dstRoot, scratch, rm, lim, store); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+
+	for _, leaked := range []string{".scion/marker", ".env", "env-hardlink.txt", "config/sa.json", "real-cfg/sa.json"} {
+		if _, err := os.Stat(filepath.Join(dstDir, filepath.FromSlash(leaked))); !os.IsNotExist(err) {
+			t.Errorf("excluded workspace path %q leaked to target (stat err=%v)", leaked, err)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(dstDir, "main.go")); err != nil || string(got) != "package main\n" {
+		t.Errorf("main.go = %q, err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dstDir, "real-cfg", "app.yaml")); err != nil || string(got) != "ok: true\n" {
+		t.Errorf("real-cfg/app.yaml = %q, err=%v", got, err)
+	}
+
+	// Escaping symlinked ancestor on an excluded workspace secret must fail closed.
+	escDir := t.TempDir()
+	if err := os.Symlink("/etc", filepath.Join(escDir, "config")); err != nil {
+		t.Fatal(err)
+	}
+	escRoot, err := os.OpenRoot(escDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = escRoot.Close() }()
+	_, err = Estimate(ctx, escRoot, ex, lim)
+	var unportable *ErrUnportableHome
+	if !errors.As(err, &unportable) {
+		t.Fatalf("expected *ErrUnportableHome on escaping workspace secret ancestor, got %v", err)
+	}
+}

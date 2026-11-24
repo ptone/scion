@@ -56,12 +56,39 @@ var (
 )
 
 // MoveBundleHomeRecord is the persisted broker-owned record of an agent's
-// resolved container home identity and staged secret/auth exclusions.
+// resolved container home/workspace identity and staged secret/auth exclusions.
 type MoveBundleHomeRecord struct {
-	Version      int      `json:"version"`
-	UnixUsername string   `json:"unixUsername"`
-	HomeAbs      string   `json:"homeAbs"`
-	HomeExcludes []string `json:"homeExcludes"`
+	Version           int      `json:"version"`
+	UnixUsername      string   `json:"unixUsername"`
+	HomeAbs           string   `json:"homeAbs"`
+	HomeExcludes      []string `json:"homeExcludes"`
+	WorkspaceAbs      string   `json:"workspaceAbs,omitempty"`
+	WorkspaceExcludes []string `json:"workspaceExcludes,omitempty"`
+}
+
+// ExpandAbsRelTarget resolves an absolute container secret/auth target path
+// under rootAbs (such as "/workspace/.env" under "/workspace") into a canonical
+// slash-separated path relative to rootAbs. Returns ("", false) when target is
+// not an absolute path strictly inside rootAbs, or rootAbs is empty/root.
+func ExpandAbsRelTarget(target, rootAbs string) (string, bool) {
+	target = strings.TrimSpace(target)
+	if !strings.HasPrefix(target, "/") {
+		return "", false
+	}
+	cleanRoot := path.Clean(strings.TrimSpace(rootAbs))
+	if !strings.HasPrefix(cleanRoot, "/") || cleanRoot == "/" {
+		return "", false
+	}
+	abs := path.Clean(target)
+	prefix := cleanRoot + "/"
+	if !strings.HasPrefix(abs, prefix) {
+		return "", false
+	}
+	rel := strings.TrimPrefix(abs, prefix)
+	if rel == "" || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", false
+	}
+	return rel, true
 }
 
 // ExpandHomeRelTarget resolves a container secret/auth target path (either
@@ -112,6 +139,11 @@ func BuildMoveBundleHomeRecord(runCfg runtime.RunConfig) (*MoveBundleHomeRecord,
 		return nil, fmt.Errorf("%w: invalid resolved homeAbs %q", ErrMoveBundleHomeRecordInvalid, homeAbs)
 	}
 
+	wsAbs := path.Clean(strings.TrimSpace(runCfg.ContainerWorkspace))
+	if !strings.HasPrefix(wsAbs, "/") || wsAbs == "/" {
+		wsAbs = "/workspace"
+	}
+
 	seen := make(map[string]struct{})
 	add := func(rel string) {
 		rel = strings.TrimSpace(rel)
@@ -120,16 +152,27 @@ func BuildMoveBundleHomeRecord(runCfg runtime.RunConfig) (*MoveBundleHomeRecord,
 		}
 		seen[rel] = struct{}{}
 	}
+	seenWS := make(map[string]struct{})
+	addWS := func(rel string) {
+		rel = strings.TrimSpace(rel)
+		if rel == "" {
+			return
+		}
+		seenWS[rel] = struct{}{}
+	}
 
 	for _, rel := range runtime.PortableHomeExcludes(runCfg) {
 		add(rel)
 	}
 	// Independently expand every file-type ResolvedSecret and ResolvedAuth.Files
-	// target against homeAbs so nothing can be silently dropped.
+	// target against both homeAbs and wsAbs so nothing can be silently dropped.
 	for _, sec := range runCfg.ResolvedSecrets {
 		if sec.Type == "file" && sec.Target != "" {
 			if rel, ok := ExpandHomeRelTarget(sec.Target, homeAbs); ok {
 				add(rel)
+			}
+			if rel, ok := ExpandAbsRelTarget(sec.Target, wsAbs); ok {
+				addWS(rel)
 			}
 		}
 	}
@@ -138,6 +181,9 @@ func BuildMoveBundleHomeRecord(runCfg runtime.RunConfig) (*MoveBundleHomeRecord,
 			if f.SourcePath != "" && f.ContainerPath != "" {
 				if rel, ok := ExpandHomeRelTarget(f.ContainerPath, homeAbs); ok {
 					add(rel)
+				}
+				if rel, ok := ExpandAbsRelTarget(f.ContainerPath, wsAbs); ok {
+					addWS(rel)
 				}
 			}
 		}
@@ -149,11 +195,19 @@ func BuildMoveBundleHomeRecord(runCfg runtime.RunConfig) (*MoveBundleHomeRecord,
 	}
 	slices.Sort(excludes)
 
+	wsExcludes := make([]string, 0, len(seenWS))
+	for rel := range seenWS {
+		wsExcludes = append(wsExcludes, rel)
+	}
+	slices.Sort(wsExcludes)
+
 	return &MoveBundleHomeRecord{
-		Version:      moveBundleHomeRecordVersion,
-		UnixUsername: user,
-		HomeAbs:      homeAbs,
-		HomeExcludes: excludes,
+		Version:           moveBundleHomeRecordVersion,
+		UnixUsername:      user,
+		HomeAbs:           homeAbs,
+		HomeExcludes:      excludes,
+		WorkspaceAbs:      wsAbs,
+		WorkspaceExcludes: wsExcludes,
 	}, nil
 }
 
@@ -267,6 +321,10 @@ func ReadMoveBundleHomeRecord(agentDir string) (*MoveBundleHomeRecord, error) {
 	rec.HomeAbs = path.Clean(strings.TrimSpace(rec.HomeAbs))
 	if rec.UnixUsername == "" || !strings.HasPrefix(rec.HomeAbs, "/") || rec.HomeAbs == "/" || rec.HomeAbs == "/home" {
 		return nil, fmt.Errorf("%w: missing or invalid unixUsername/homeAbs", ErrMoveBundleHomeRecordInvalid)
+	}
+	rec.WorkspaceAbs = path.Clean(strings.TrimSpace(rec.WorkspaceAbs))
+	if !strings.HasPrefix(rec.WorkspaceAbs, "/") || rec.WorkspaceAbs == "/" {
+		rec.WorkspaceAbs = "/workspace"
 	}
 	return &rec, nil
 }

@@ -121,8 +121,15 @@ func TestBrokerCapabilities_AdvertiseAgentMoveBundle(t *testing.T) {
 
 func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 	projectPath, agentDir, wsDir, homeDir := newMoveBundleTestAgentDir(t, "dev")
-	writeTestHomeRecord(t, agentDir, scionrt.RunConfig{UnixUsername: "scion"})
+	writeTestHomeRecord(t, agentDir, scionrt.RunConfig{
+		UnixUsername: "scion",
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "ws_env", Type: "file", Target: "/workspace/.env"},
+		},
+	})
 	require.NoError(t, os.WriteFile(filepath.Join(wsDir, "hello.txt"), []byte("hello world"), 0o644))
+	// Excluded workspace file secret should not be counted in precheck estimate (R1).
+	require.NoError(t, os.WriteFile(filepath.Join(wsDir, ".env"), bytes.Repeat([]byte("e"), 4096), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(homeDir, "notes.txt"), []byte("my notes"), 0o600))
 	// Excluded secret in home should not be counted.
 	require.NoError(t, os.MkdirAll(filepath.Join(homeDir, ".scion"), 0o755))
@@ -226,6 +233,71 @@ func TestMoveBundlePrecheck_DurabilityAndEstimate(t *testing.T) {
 		assert.NotContains(t, resp.Reason, `bad\name.txt`)
 		assert.Empty(t, resp.Over)
 		assert.Empty(t, resp.Workspace.Over)
+	})
+
+	t.Run("missing agent dir returns 404 on precheck instead of restart hint (N3)", func(t *testing.T) {
+		emptyProj := filepath.Join(t.TempDir(), ".scion")
+		require.NoError(t, os.MkdirAll(emptyProj, 0o755))
+
+		srv := newTestServer(t)
+		srv.moveBundle.durabilityRuntime = "docker"
+		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/ghost-agent/move-bundle/precheck", api.MoveBundlePrecheckRequest{
+			ProjectPath: emptyProj,
+			Limits:      api.DefaultMoveBundleLimits(),
+		})
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), moveBundleHomeRecordMissingReason)
+	})
+
+	t.Run("shared layout workspace refused on precheck and export (S2)", func(t *testing.T) {
+		srv := newTestServer(t)
+		srv.moveBundle.durabilityRuntime = "docker"
+
+		home := os.Getenv("HOME")
+		mountRoot := filepath.Join(t.TempDir(), "nfs")
+		globalDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(globalDir, 0o755))
+		settingsYAML := fmt.Sprintf(`schema_version: "1"
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: %s
+      shares:
+        - id: share-1
+          server: 10.0.0.2
+          export: /scion-workspaces
+          pv_name: ws-pv
+`, mountRoot)
+		require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsYAML), 0o644))
+
+		const sharedProjID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+		sharedRoot := filepath.Join(mountRoot, "share-1", "projects", sharedProjID)
+		sharedScion := filepath.Join(sharedRoot, ".scion")
+		require.NoError(t, os.MkdirAll(sharedScion, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(sharedScion, "project-id"), []byte(sharedProjID+"\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(sharedScion, "project-slug"), []byte("web\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(sharedScion, "settings.yaml"), []byte("schema_version: \"1\"\n"), 0o644))
+
+		preRec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-shared/move-bundle/precheck?projectId="+sharedProjID, api.MoveBundlePrecheckRequest{
+			ProjectID:   sharedProjID,
+			ProjectPath: sharedRoot,
+			Limits:      api.DefaultMoveBundleLimits(),
+		})
+		require.Equal(t, http.StatusOK, preRec.Code, preRec.Body.String())
+		var preResp api.MoveBundlePrecheckResponse
+		require.NoError(t, json.Unmarshal(preRec.Body.Bytes(), &preResp))
+		assert.False(t, preResp.Durable)
+		assert.Equal(t, "shared layout workspace is not yet supported for bundle moves", preResp.Reason)
+
+		expRec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-shared/move-bundle/export?projectId="+sharedProjID, api.MoveBundleExportRequest{
+			ReincarnationID: "rid-shared",
+			ProjectID:       sharedProjID,
+			ProjectPath:     sharedRoot,
+			Limits:          api.DefaultMoveBundleLimits(),
+		})
+		assert.Equal(t, http.StatusConflict, expRec.Code, expRec.Body.String())
+		assert.Contains(t, expRec.Body.String(), api.BrokerErrCodeMoveBundleUnsupported)
 	})
 
 	t.Run("missing home record fails closed on precheck and export (C1c, C1f)", func(t *testing.T) {
@@ -401,6 +473,7 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 			UnixUsername: "scion",
 			ResolvedSecrets: []api.ResolvedSecret{
 				{Name: "my_api_key", Type: "file", Target: "~/.config/custom-app/secret.key"},
+				{Name: "ws_env_secret", Type: "file", Target: "/workspace/.env"},
 			},
 			ResolvedAuth: &api.ResolvedAuth{
 				Files: []api.FileMapping{
@@ -408,6 +481,9 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 				},
 			},
 		})
+		require.NoError(t, os.WriteFile(filepath.Join(srcWS, ".env"), []byte("WS_SECRET=do-not-bundle\n"), 0o600))
+		require.NoError(t, os.MkdirAll(filepath.Join(srcWS, "config"), 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "config", "hub-sa.json"), []byte(`{"private_key":"hub-ws-secret"}`), 0o600))
 		require.NoError(t, os.MkdirAll(filepath.Join(srcHome, ".config", "custom-app"), 0o700))
 		require.NoError(t, os.WriteFile(filepath.Join(srcHome, ".config", "custom-app", "secret.key"), []byte("injected-secret-value"), 0o600))
 		require.NoError(t, os.MkdirAll(filepath.Join(srcHome, ".config", "hub-secret"), 0o700))
@@ -470,7 +546,7 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 			AgentID:           "agent-uuid-1",
 			ProjectID:         "proj-1",
 			ProjectPath:       srcProject,
-			SecretFileTargets: []string{"~/.config/hub-secret/token.pem"},
+			SecretFileTargets: []string{"~/.config/hub-secret/token.pem", "/workspace/config/hub-sa.json"},
 			Limits:            lim,
 		}
 		rec := doMoveBundleReq(t, srcSrv, http.MethodPost, "/api/v1/agents/dev/move-bundle/export?projectId=proj-1", exportReq)
@@ -548,6 +624,11 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		assert.True(t, os.IsNotExist(err), "hub-supplied secret file target must be excluded from bundle")
 		_, err = os.Stat(filepath.Join(dstHome, ".claude", ".credentials.json"))
 		assert.True(t, os.IsNotExist(err), "harness auth file target must be excluded from bundle")
+		// R1: workspace-targeted file secrets (record + hub-supplied) must never be bundled.
+		_, err = os.Stat(filepath.Join(dstWS, ".env"))
+		assert.True(t, os.IsNotExist(err), "record workspace file-secret /workspace/.env must be excluded from bundle")
+		_, err = os.Stat(filepath.Join(dstWS, "config", "hub-sa.json"))
+		assert.True(t, os.IsNotExist(err), "hub-supplied workspace file-secret /workspace/config/hub-sa.json must be excluded from bundle")
 	})
 
 	t.Run("409 conflict on different rid while running", func(t *testing.T) {
@@ -848,6 +929,160 @@ func TestMoveBundle_T6_ExportImportJobModelAndTransport(t *testing.T) {
 		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), api.BrokerErrCodeMoveBundleJobConflict)
 		assert.Contains(t, rec.Body.String(), "agent must be stopped before bundle export")
+	})
+
+	t.Run("export refuses with 409 when no runtime manager resolves (O3)", func(t *testing.T) {
+		srcProject, srcAgentDir, srcWS, _ := newMoveBundleTestAgentDir(t, "dev-nomgr")
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
+		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "a.txt"), []byte("data"), 0o644))
+
+		srv := newTestServerWithManager(t, nil)
+		srv.moveBundle.durabilityRuntime = "docker"
+		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-nomgr/move-bundle/export?projectId=p1", api.MoveBundleExportRequest{
+			ReincarnationID: "rid-nomgr",
+			ProjectID:       "p1",
+			ProjectPath:     srcProject,
+			Limits:          api.DefaultMoveBundleLimits(),
+		})
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), api.BrokerErrCodeMoveBundleJobConflict)
+	})
+
+	t.Run("export refuses git worktree workspace (O4)", func(t *testing.T) {
+		srcProject, srcAgentDir, srcWS, _ := newMoveBundleTestAgentDir(t, "dev-worktree")
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
+		require.NoError(t, os.WriteFile(filepath.Join(srcWS, ".git"), []byte("gitdir: /host/repo/.git/worktrees/dev-worktree\n"), 0o644))
+
+		srv := newTestServer(t)
+		srv.moveBundle.durabilityRuntime = "docker"
+		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-worktree/move-bundle/export?projectId=p1", api.MoveBundleExportRequest{
+			ReincarnationID: "rid-worktree",
+			ProjectID:       "p1",
+			ProjectPath:     srcProject,
+			Limits:          api.DefaultMoveBundleLimits(),
+		})
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), api.BrokerErrCodeMoveBundleUnsupported)
+	})
+
+	t.Run("job status resolves projectId consistently with POST (N1)", func(t *testing.T) {
+		srcProject, srcAgentDir, srcWS, _ := newMoveBundleTestAgentDir(t, "dev-n1")
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
+		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "a.txt"), []byte("data"), 0o644))
+
+		srv := newTestServer(t)
+		srv.moveBundle = moveBundleSettings{
+			durabilityRuntime: "docker",
+			partBackoff:       []time.Duration{},
+			fetchUploadURL: func(_ context.Context, _, _, _ string, _ *api.MoveBundleUploadURLRequest) (*api.MoveBundleUploadURLResponse, error) {
+				return nil, fmt.Errorf("stop early")
+			},
+		}
+
+		// Mismatched query vs body projectId is rejected with 400.
+		badRec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-n1/move-bundle/export?projectId=p1", api.MoveBundleExportRequest{
+			ReincarnationID: "rid-n1-bad",
+			ProjectID:       "p2",
+			ProjectPath:     srcProject,
+			Limits:          api.DefaultMoveBundleLimits(),
+		})
+		assert.Equal(t, http.StatusBadRequest, badRec.Code, badRec.Body.String())
+
+		// POST with body ProjectID only (no query projectId) is retrievable by GET with no query projectId.
+		postRec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-n1/move-bundle/export", api.MoveBundleExportRequest{
+			ReincarnationID: "rid-n1-ok",
+			ProjectID:       "p1",
+			ProjectPath:     srcProject,
+			Limits:          api.DefaultMoveBundleLimits(),
+		})
+		require.Equal(t, http.StatusAccepted, postRec.Code, postRec.Body.String())
+
+		st := waitForMoveBundleJob(t, srv, "dev-n1", "", api.MoveBundleJobKindExport, "rid-n1-ok")
+		assert.Equal(t, "rid-n1-ok", st.ReincarnationID)
+	})
+
+	t.Run("job errors are class-only and carry no host path (Part D S1)", func(t *testing.T) {
+		srcProject, srcAgentDir, srcWS, _ := newMoveBundleTestAgentDir(t, "dev-hostpath")
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
+		// Remove workspace dir so runMoveBundleExport hits an os.OpenRoot *fs.PathError
+		// containing the absolute host path srcWS.
+		require.NoError(t, os.RemoveAll(srcWS))
+
+		srv := newTestServer(t)
+		srv.moveBundle.durabilityRuntime = "docker"
+		rec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-hostpath/move-bundle/export?projectId=p1", api.MoveBundleExportRequest{
+			ReincarnationID: "rid-hostpath",
+			ProjectID:       "p1",
+			ProjectPath:     srcProject,
+			Limits:          api.DefaultMoveBundleLimits(),
+		})
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+		st := waitForMoveBundleJob(t, srv, "dev-hostpath", "p1", api.MoveBundleJobKindExport, "rid-hostpath")
+		assert.Equal(t, api.MoveBundleJobStateFailed, st.State)
+		assert.Equal(t, "bundle export failed: filesystem operation failed", st.Error)
+		assert.NotContains(t, st.Error, srcWS, "job error must not leak absolute host workspace path")
+		assert.NotContains(t, st.Error, "/", "job error must not contain host path separators")
+	})
+
+	t.Run("precheck refuses while a move-bundle job is still running (Part D S2)", func(t *testing.T) {
+		srcProject, srcAgentDir, srcWS, _ := newMoveBundleTestAgentDir(t, "dev-busy")
+		writeTestHomeRecord(t, srcAgentDir, scionrt.RunConfig{UnixUsername: "scion"})
+		require.NoError(t, os.WriteFile(filepath.Join(srcWS, "a.txt"), []byte("data"), 0o644))
+
+		block := make(chan struct{})
+		entered := make(chan struct{}, 2)
+		srv := newTestServer(t)
+		srv.moveBundle = moveBundleSettings{
+			durabilityRuntime: "docker",
+			partBackoff:       []time.Duration{},
+			fetchUploadURL: func(ctx context.Context, _, _, _ string, _ *api.MoveBundleUploadURLRequest) (*api.MoveBundleUploadURLResponse, error) {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				select {
+				case <-block:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				return nil, context.Canceled
+			},
+		}
+
+		expRec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-busy/move-bundle/export?projectId=p1", api.MoveBundleExportRequest{
+			ReincarnationID: "rid-busy-1",
+			ProjectID:       "p1",
+			ProjectPath:     srcProject,
+			Limits:          api.DefaultMoveBundleLimits(),
+		})
+		require.Equal(t, http.StatusAccepted, expRec.Code, expRec.Body.String())
+		<-entered
+
+		preRec := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-busy/move-bundle/precheck?projectId=p1", api.MoveBundlePrecheckRequest{
+			ProjectID:   "p1",
+			ProjectPath: srcProject,
+			Limits:      api.DefaultMoveBundleLimits(),
+		})
+		require.Equal(t, http.StatusOK, preRec.Code, preRec.Body.String())
+		var preResp api.MoveBundlePrecheckResponse
+		require.NoError(t, json.Unmarshal(preRec.Body.Bytes(), &preResp))
+		assert.False(t, preResp.Durable)
+		assert.Equal(t, "a previous move-bundle job is still running", preResp.Reason)
+
+		close(block)
+		_ = waitForMoveBundleJob(t, srv, "dev-busy", "p1", api.MoveBundleJobKindExport, "rid-busy-1")
+
+		// Once the job finishes, precheck succeeds again.
+		preRec2 := doMoveBundleReq(t, srv, http.MethodPost, "/api/v1/agents/dev-busy/move-bundle/precheck?projectId=p1", api.MoveBundlePrecheckRequest{
+			ProjectID:   "p1",
+			ProjectPath: srcProject,
+			Limits:      api.DefaultMoveBundleLimits(),
+		})
+		require.Equal(t, http.StatusOK, preRec2.Code, preRec2.Body.String())
+		var preResp2 api.MoveBundlePrecheckResponse
+		require.NoError(t, json.Unmarshal(preRec2.Body.Bytes(), &preResp2))
+		assert.True(t, preResp2.Durable)
 	})
 }
 
