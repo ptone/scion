@@ -451,13 +451,23 @@ func TestResolveMoveBundleSecretFileTargets_ForwardedOnPrecheckAndExport(t *test
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Configure local secret backend with project-scoped file and env secrets.
+	// Configure local secret backend with hub-scoped and project-scoped file
+	// secrets plus an env secret.
 	proj := &store.Project{ID: tid("sec-proj"), Slug: "sec-proj", Name: "Sec Proj", Created: time.Now(), Updated: time.Now()}
 	require.NoError(t, s.CreateProject(ctx, proj))
 
 	hubID := "test-hub-secret-targets"
 	secBackend := secret.NewLocalBackend(s, hubID, "test-secret-key-0123456789abcdef")
 	_, _, err := secBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "HUB_CREDS",
+		Value:      "hub-creds-data",
+		SecretType: store.SecretTypeFile,
+		Target:     ".config/x/creds",
+		Scope:      secret.ScopeHub,
+		ScopeID:    hubID,
+	})
+	require.NoError(t, err)
+	_, _, err = secBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       "PROJ_CERT",
 		Value:      "pem-data",
 		SecretType: store.SecretTypeFile,
@@ -516,25 +526,27 @@ func TestResolveMoveBundleSecretFileTargets_ForwardedOnPrecheckAndExport(t *test
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
 	// O2: ResolveMoveBundleSecretFileTargets uses metadata-only store.ListSecrets
-	// and does not require or call secretBackend.Resolve.
+	// (including store.ScopeHub) and does not require or call secretBackend.Resolve.
 	disp := NewHTTPAgentDispatcher(s, false, slog.Default())
+	disp.SetHubID(hubID)
 	srv.SetDispatcher(disp)
 
+	wantTargets := []string{".config/x/creds", "~/.config/corp/cert.pem"}
 	targets, err := disp.ResolveMoveBundleSecretFileTargets(ctx, agent)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"~/.config/corp/cert.pem"}, targets)
+	assert.Equal(t, wantTargets, targets)
 
 	// O6: Verify moveBundleSourceProbe itself resolves and forwards secret targets.
 	probe := srv.moveBundleSourceProbe(ctx)
 	require.NotNil(t, probe)
 	_, err = probe(broker, agent)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"~/.config/corp/cert.pem"}, gotPrecheckTargets)
+	assert.Equal(t, wantTargets, gotPrecheckTargets)
 
 	limits := config.DefaultMoveBundleConfig().ExportLimits()
 	_, err = disp.DispatchMoveBundleExport(ctx, agent, "rid-sec-1", limits, targets)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"~/.config/corp/cert.pem"}, gotExportTargets)
+	assert.Equal(t, wantTargets, gotExportTargets)
 }
 
 // O6: Handler-level HTTP dry-run tests covering planReincarnateMove wiring of

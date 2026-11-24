@@ -885,7 +885,7 @@ func isReincarnateHandoffTemplateInvocation(cmd *cobra.Command) bool {
 func init() {
 	reincarnateCmd.Flags().StringVar(&reincarnateHandoffFile, "handoff-file", "", "File whose content becomes the new generation's first task (required for self-migration)")
 	reincarnateCmd.Flags().BoolVar(&reincarnateDryRun, "dry-run", false, "Print the resolved reincarnation plan without migrating anything")
-	reincarnateCmd.Flags().StringVar(&reincarnateBroker, "broker", "", "Move the agent to this runtime broker (name or ID); both brokers must mount the same NFS export. The move is dry-run first and refused if not eligible")
+	reincarnateCmd.Flags().StringVar(&reincarnateBroker, "broker", "", "Move the agent to this runtime broker (name or ID). Uses a shared NFS export when available, or copies workspace and home through hub storage when bundle transfer is enabled. The move is dry-run first and refused if not eligible")
 	reincarnateCmd.Flags().BoolVar(&reincarnateForce, "force", false, "With --broker, move even when the workspace cannot travel through a shared NFS export or bundle: when nothing better applies, the workspace is recreated on the target and uncommitted or unpushed work, the home and the harness session are lost. Run with --dry-run first to see exactly what is kept and lost")
 	reincarnateCmd.Flags().BoolVar(&reincarnateHandoffTemplate, "handoff-template", false, "Print the handoff template and exit")
 	reincarnateCmd.Flags().StringVar(&reincarnateServiceAccount, "service-account", "", "GCP service account for the new generation: its id, email or display name (same access checks as create)")

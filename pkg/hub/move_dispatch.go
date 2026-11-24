@@ -251,6 +251,7 @@ func (d *HTTPAgentDispatcher) ResolveMoveBundleSecretFileTargets(ctx context.Con
 			scopes = append(scopes, scopeRef{store.ScopeUser, agent.OwnerID})
 		}
 	} else {
+		scopes = append(scopes, scopeRef{store.ScopeHub, d.hubID})
 		if agent.RuntimeBrokerID != "" {
 			scopes = append(scopes, scopeRef{store.ScopeRuntimeBroker, agent.RuntimeBrokerID})
 		}
