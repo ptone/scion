@@ -142,7 +142,9 @@ type Event struct {
 	SourceID string
 	// DeliveryID is the provider delivery identifier.
 	DeliveryID string
-	// DedupKey is the per-target deduplication key (e.g. "<delivery>/<project_id>").
+	// DedupKey is the delivery-scoped deduplication key emitted by the Normalizer
+	// (e.g. lowercased delivery ID for GitHub, or a composite event hash for Jira).
+	// EventSink composes the per-target key "<DedupKey>/<ProjectID>" during fan-out.
 	DedupKey string
 	// Type is the canonical trigger event type (e.g. "github.issue_comment.created").
 	Type string

@@ -493,6 +493,42 @@ func TestRouteDeps_ContentDisabledUnsupportedAndRateLimited(t *testing.T) {
 		}
 	})
 
+	t.Run("content disabled suppresses target/header/delivery errors with 200 ignored and single gate read", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			err  error
+		}{
+			{"target_mismatch", source.ErrTargetMismatch},
+			{"invalid_headers", source.ErrInvalidHeaders},
+			{"invalid_delivery_id", source.ErrInvalidDeliveryID},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				deps, v, _, norm, _, sink, _, aud, met := newTestRouteHarness()
+				v.err = tc.err
+				gateReads := 0
+				deps.ContentEnabled = func(context.Context) bool {
+					gateReads++
+					return false
+				}
+
+				rec := postTestBody(deps, []byte(`{}`))
+				if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"ignored"`) {
+					t.Fatalf("got %d %s, want 200 ignored", rec.Code, rec.Body.String())
+				}
+				if gateReads != 1 {
+					t.Errorf("gateReads = %d, want 1", gateReads)
+				}
+				if aud.targetMismatch != 0 || len(aud.receipts) != 0 || len(met.deliveries) != 0 {
+					t.Errorf("gate-off must emit no audit/metrics, got targetMismatch=%d receipts=%d metrics=%v",
+						aud.targetMismatch, len(aud.receipts), met.deliveries)
+				}
+				if norm.calls != 0 || sink.calls != 0 {
+					t.Errorf("gate-off must not call normalizer/sink")
+				}
+			})
+		}
+	})
+
 	t.Run("unsupported event returns 200 ignored before limiter", func(t *testing.T) {
 		deps, v, _, norm, _, sink, lim, _, met := newTestRouteHarness()
 		v.deliv.Unsupported = true

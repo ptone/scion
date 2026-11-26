@@ -44,6 +44,10 @@ const (
 	RouteStatusNoProject           = "no_project"
 	RouteStatusError               = "error"
 
+	RoutingStatusNone         = "none"
+	RoutingStatusOK           = "ok"
+	RoutingStatusStalePrimary = "stale_primary"
+
 	RoutingRoutedToPrimary = "routed_to_primary"
 	RoutingStalePrimary    = "stale_primary"
 )
@@ -425,11 +429,11 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	bypassed := targets[0].BypassedProjectIDs
 	auditRouting := ""
 	switch targets[0].RoutingStatus {
-	case "ok":
+	case RoutingStatusOK:
 		if len(bypassed) > 0 {
 			auditRouting = RoutingRoutedToPrimary
 		}
-	case "stale_primary":
+	case RoutingStatusStalePrimary:
 		auditRouting = RoutingStalePrimary
 	}
 
@@ -490,6 +494,9 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if ev.DeliveryID == "" {
 		ev.DeliveryID = deliv.ID
+	}
+	if ev.DedupKey == "" {
+		ev.DedupKey = deliv.ID
 	}
 	if ev.ReceivedAt.IsZero() {
 		ev.ReceivedAt = now
@@ -603,15 +610,27 @@ func (d RouteDeps) handleVerifyError(w http.ResponseWriter, ctx context.Context,
 		d.recordMetric("error")
 		d.writeError(w, http.StatusUnauthorized, "unauthorized", "invalid webhook signature")
 	case errors.Is(err, ErrTargetMismatch):
+		if d.ContentEnabled != nil && !d.ContentEnabled(ctx) {
+			writeRouteJSON(w, http.StatusOK, map[string]string{"status": RouteStatusIgnored, "event": deliv.Event})
+			return
+		}
 		if d.Audit != nil {
 			d.Audit.RecordTargetMismatch(ctx, now)
 		}
 		d.recordMetric("target_mismatch")
 		d.writeError(w, http.StatusBadRequest, "invalid_request", "wrong target")
 	case errors.Is(err, ErrInvalidHeaders):
+		if d.ContentEnabled != nil && !d.ContentEnabled(ctx) {
+			writeRouteJSON(w, http.StatusOK, map[string]string{"status": RouteStatusIgnored, "event": deliv.Event})
+			return
+		}
 		d.recordMetric("error")
 		d.writeError(w, http.StatusBadRequest, "invalid_request", "invalid event header")
 	case errors.Is(err, ErrInvalidDeliveryID):
+		if d.ContentEnabled != nil && !d.ContentEnabled(ctx) {
+			writeRouteJSON(w, http.StatusOK, map[string]string{"status": RouteStatusIgnored, "event": deliv.Event})
+			return
+		}
 		d.recordMetric("error")
 		d.writeError(w, http.StatusBadRequest, "invalid_request", "invalid delivery id")
 	default:

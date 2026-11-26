@@ -34,6 +34,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	githubtrigger "github.com/GoogleCloudPlatform/scion/pkg/hub/trigger/github"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger/source"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -223,8 +224,9 @@ func TestGitHubWebhookIngress_RoutesThroughSeamAccessors(t *testing.T) {
 }
 
 // TestSourceEventSink_UsesConfiguredKind verifies that sourceEventSink persists
-// and deduplicates events using ev.SourceKind (set from RouteDeps.Kind) rather
-// than a hard-coded GitHub constant.
+// and deduplicates events using ev.SourceKind (set from RouteDeps.Kind) and
+// composes per-target dedup keys from ev.DedupKey without overwriting it with
+// ev.DeliveryID.
 func TestSourceEventSink_UsesConfiguredKind(t *testing.T) {
 	f := setupGitHubIngressFixture(t)
 	ctx := context.Background()
@@ -237,6 +239,7 @@ func TestSourceEventSink_UsesConfiguredKind(t *testing.T) {
 		SourceKind:   "jira",
 		SourceID:     "site-1",
 		DeliveryID:   "jira-deliv-1",
+		DedupKey:     "jira-composite-key-42",
 		Type:         "jira.issue.updated",
 		Subject:      "jira:PROJ-42",
 		OccurredAt:   now,
@@ -253,18 +256,103 @@ func TestSourceEventSink_UsesConfiguredKind(t *testing.T) {
 	require.Len(t, res1, 1)
 	assert.Equal(t, source.TargetStatusQueued, res1[0].Status)
 
-	stored, err := f.store.GetTriggerEventByDedupKey(ctx, "jira", "site-1", "jira-deliv-1/"+proj.ID)
+	stored, err := f.store.GetTriggerEventByDedupKey(ctx, "jira", "site-1", "jira-composite-key-42/"+proj.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "jira", stored.SourceKind)
 	assert.Equal(t, res1[0].EventID, stored.ID)
 
 	// Redelivery with same body SHA-256 deduplicates under "jira".
 	ev.DeliveryID = "jira-deliv-2"
+	ev.DedupKey = "jira-composite-key-43"
 	res2, err := sink.EnqueueForTargets(ctx, ev, "bodysha-jira-1", targets)
 	require.NoError(t, err)
 	require.Len(t, res2, 1)
 	assert.Equal(t, source.TargetStatusDuplicate, res2[0].Status)
 	assert.Equal(t, res1[0].EventID, res2[0].EventID)
+}
+
+// TestSourceEventSink_TwoTargetFanOutWithEmptyDeliveryID proves that a
+// non-GitHub event with an empty DeliveryID and a delivery-scoped DedupKey
+// fans out to multiple targets with distinct per-target keys (both queued).
+func TestSourceEventSink_TwoTargetFanOutWithEmptyDeliveryID(t *testing.T) {
+	f := setupGitHubIngressFixture(t)
+	ctx := context.Background()
+	projA := f.createCandidateProject(t, "fanout-empty-deliv-a", "https://github.com/acme/widgets.git", f.instID)
+	projB := f.createCandidateProject(t, "fanout-empty-deliv-b", "https://github.com/acme/widgets.git", f.instID)
+
+	sink := &sourceEventSink{srv: f.srv}
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	ev := source.Event{
+		Handled:      true,
+		SourceKind:   "jira",
+		SourceID:     "site-2",
+		DeliveryID:   "",
+		DedupKey:     "jira-hash-issue-99",
+		Type:         "jira.issue.updated",
+		Subject:      "jira:PROJ-99",
+		OccurredAt:   now,
+		ReceivedAt:   now,
+		Attributes:   map[string]string{"provider": "jira"},
+		Payload:      []byte(`{"issue":"PROJ-99"}`),
+		PayloadBytes: len(`{"issue":"PROJ-99"}`),
+	}
+	targets := []source.Target{
+		{ProjectID: projA.ID, InstallationID: "site-2", Resource: "PROJ"},
+		{ProjectID: projB.ID, InstallationID: "site-2", Resource: "PROJ"},
+	}
+
+	results, err := sink.EnqueueForTargets(ctx, ev, "bodysha-jira-fanout", targets)
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	assert.Equal(t, source.TargetStatusQueued, results[0].Status)
+	assert.Equal(t, source.TargetStatusQueued, results[1].Status)
+	assert.NotEqual(t, results[0].EventID, results[1].EventID)
+
+	gotA, err := f.store.GetTriggerEventByDedupKey(ctx, "jira", "site-2", "jira-hash-issue-99/"+projA.ID)
+	require.NoError(t, err)
+	assert.Equal(t, results[0].EventID, gotA.ID)
+
+	gotB, err := f.store.GetTriggerEventByDedupKey(ctx, "jira", "site-2", "jira-hash-issue-99/"+projB.ID)
+	require.NoError(t, err)
+	assert.Equal(t, results[1].EventID, gotB.ID)
+}
+
+// TestGitHubWebhookIngress_PersistedDedupKeyMatchesLegacyFormat verifies that
+// GitHub events persisted through RouteDeps + sourceEventSink store the exact
+// same per-project dedup key as githubtrigger.DedupKey(deliveryID, projectID).
+func TestGitHubWebhookIngress_PersistedDedupKeyMatchesLegacyFormat(t *testing.T) {
+	f := setupGitHubIngressFixture(t)
+	ctx := context.Background()
+	proj := f.createCandidateProject(t, "legacy-dedup-proj", "https://github.com/acme/widgets.git", f.instID)
+
+	rawDeliv := strings.ToUpper(uuid.NewString())
+	body := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "hello", f.currentTime())
+	rec := f.postDelivery(t, "issue_comment", rawDeliv, body, nil)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	wantKey := githubtrigger.DedupKey(strings.ToLower(rawDeliv), proj.ID)
+	stored, err := f.store.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindGitHub, strconv.FormatInt(f.instID, 10), wantKey)
+	require.NoError(t, err)
+	assert.Equal(t, wantKey, stored.DedupKey)
+}
+
+// TestGitHubWebhookIngress_GateOffWrongTargetReturns200IgnoredNoRejectedAudit
+// verifies that when the content experiment gate is off, a signed delivery with
+// a wrong target ID returns 200 ignored with no trigger.github.rejected audit.
+func TestGitHubWebhookIngress_GateOffWrongTargetReturns200IgnoredNoRejectedAudit(t *testing.T) {
+	f := setupGitHubIngressFixture(t)
+	setTriggerExperimentsForGitHubIngressTest(t, f.srv, true, false)
+	f.auditBuf.Reset()
+
+	body := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "hello", f.currentTime())
+	rec := f.postDelivery(t, "issue_comment", uuid.NewString(), body, func(r *http.Request) {
+		r.Header.Set("X-GitHub-Hook-Installation-Target-Type", "repository")
+		r.Header.Set("X-GitHub-Hook-Installation-Target-ID", "999999")
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.JSONEq(t, `{"status":"ignored","event":"issue_comment"}`, rec.Body.String())
+	assert.Empty(t, f.auditBuf.String(), "gate-off must not emit trigger.github.rejected audit")
+	assert.Equal(t, int64(0), f.srv.githubWebhookIngress.targetMismatchCount.Load())
 }
 
 // TestGitHubWebhookIngress_ErrorPathLogsViaHubAPIError proves that rejected

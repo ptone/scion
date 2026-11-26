@@ -15,6 +15,7 @@
 package github_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -176,6 +177,149 @@ func TestWireVerifier_VerifyAndDedupKey(t *testing.T) {
 	}
 	if !triggithub.IsDeliveryGUID("11111111-2222-3333-4444-555555555555") || triggithub.IsDeliveryGUID("not-a-guid") {
 		t.Error("unexpected IsDeliveryGUID result")
+	}
+}
+
+type stubNormalizer struct{ calls int }
+
+func (s *stubNormalizer) Normalize(_ context.Context, _ source.Delivery, _ any, _ source.Target) (source.Event, error) {
+	s.calls++
+	return source.Event{Handled: true, SourceID: "1"}, nil
+}
+
+type stubSink struct{ calls int }
+
+func (s *stubSink) EnqueueForTargets(_ context.Context, _ source.Event, _ string, _ []source.Target) ([]source.TargetResult, error) {
+	s.calls++
+	return nil, nil
+}
+
+type stubAudit struct {
+	targetMismatch int
+	receipts       int
+}
+
+func (s *stubAudit) RecordReceipt(_ context.Context, _ source.ReceiptAuditRecord) { s.receipts++ }
+func (s *stubAudit) RecordTargetMismatch(_ context.Context, _ time.Time)          { s.targetMismatch++ }
+func (s *stubAudit) RecordSelfIgnored(_ context.Context)                          {}
+
+type stubMetrics struct{ calls int }
+
+func (s *stubMetrics) RecordDelivery(_, _ string) { s.calls++ }
+
+func TestWireVerifier_RouteDeps_GateFlipNeverBypassesChecks(t *testing.T) {
+	secret := "flip-secret"
+	body := []byte(`{"action":"created"}`)
+	sig := signTestWebhook(body, secret)
+
+	cases := []struct {
+		name           string
+		seq            []bool
+		targetType     string
+		targetID       string
+		deliveryID     string
+		wantStatus     int
+		wantBodySubstr string
+		wantMismatch   int
+		wantMetrics    int
+	}{
+		{
+			name:           "off_to_on_wrong_target_returns_200_ignored_no_audit",
+			seq:            []bool{false, true},
+			targetType:     "repository",
+			targetID:       "9999",
+			deliveryID:     "11111111-2222-3333-4444-555555555555",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: `"status":"ignored"`,
+			wantMismatch:   0,
+			wantMetrics:    0,
+		},
+		{
+			name:           "on_to_off_wrong_target_returns_400",
+			seq:            []bool{true, false},
+			targetType:     "repository",
+			targetID:       "9999",
+			deliveryID:     "11111111-2222-3333-4444-555555555555",
+			wantStatus:     http.StatusBadRequest,
+			wantBodySubstr: "wrong target",
+			wantMismatch:   1,
+			wantMetrics:    1,
+		},
+		{
+			name:           "off_to_on_non_guid_delivery_returns_200_ignored",
+			seq:            []bool{false, true},
+			targetType:     "integration",
+			targetID:       "12345",
+			deliveryID:     "not-a-guid",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: `"status":"ignored"`,
+			wantMismatch:   0,
+			wantMetrics:    0,
+		},
+		{
+			name:           "on_to_off_non_guid_delivery_returns_400",
+			seq:            []bool{true, false},
+			targetType:     "integration",
+			targetID:       "12345",
+			deliveryID:     "not-a-guid",
+			wantStatus:     http.StatusBadRequest,
+			wantBodySubstr: "invalid delivery id",
+			wantMismatch:   0,
+			wantMetrics:    1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			norm := &stubNormalizer{}
+			sink := &stubSink{}
+			aud := &stubAudit{}
+			met := &stubMetrics{}
+			reads := 0
+			deps := source.RouteDeps{
+				Kind:       triggithub.SourceKind,
+				Verifier:   &triggithub.WireVerifier{ExpectedAppID: 12345},
+				Normalizer: norm,
+				Sink:       sink,
+				Audit:      aud,
+				Metrics:    met,
+				Secrets:    source.SecretFunc(func(context.Context) (string, error) { return secret, nil }),
+				ContentEnabled: func(context.Context) bool {
+					idx := reads
+					if idx >= len(tc.seq) {
+						idx = len(tc.seq) - 1
+					}
+					reads++
+					return tc.seq[idx]
+				},
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(body))
+			req.Header.Set("X-Hub-Signature-256", sig)
+			req.Header.Set("X-GitHub-Event", triggithub.EventIssueComment)
+			req.Header.Set("X-GitHub-Delivery", tc.deliveryID)
+			req.Header.Set("X-GitHub-Hook-Installation-Target-Type", tc.targetType)
+			req.Header.Set("X-GitHub-Hook-Installation-Target-ID", tc.targetID)
+
+			rec := httptest.NewRecorder()
+			deps.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantBodySubstr) {
+				t.Errorf("body = %q, want substring %q", rec.Body.String(), tc.wantBodySubstr)
+			}
+			if reads != 1 {
+				t.Errorf("ContentEnabled reads = %d, want 1", reads)
+			}
+			if norm.calls != 0 || sink.calls != 0 {
+				t.Errorf("Normalize (%d) and Sink (%d) must never be called", norm.calls, sink.calls)
+			}
+			if aud.targetMismatch != tc.wantMismatch || met.calls != tc.wantMetrics {
+				t.Errorf("audit mismatch=%d (want %d), metrics=%d (want %d)", aud.targetMismatch, tc.wantMismatch, met.calls, tc.wantMetrics)
+			}
+		})
 	}
 }
 

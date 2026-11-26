@@ -160,11 +160,6 @@ type WireVerifier struct {
 	// ErrWebhookTargetMismatch, matching production handleGitHubContentWebhook
 	// step 1.
 	ExpectedAppID int64
-	// ContentEnabledFn reports whether content-event trigger ingress is enabled.
-	// When non-nil and returning false, non-lifecycle deliveries skip step 1–2
-	// target/header/delivery checks after signature verification so step 0 can
-	// return 200 ignored unchanged.
-	ContentEnabledFn func() bool
 	// Now returns the delivery receipt timestamp (defaults to time.Now).
 	Now func() time.Time
 }
@@ -210,13 +205,8 @@ func (v *WireVerifier) Verify(r *http.Request, body []byte, secrets source.Secre
 		eventName == EventInstallation ||
 		eventName == EventInstallationRepositories
 
-	contentEnabled := true
-	if v != nil && v.ContentEnabledFn != nil {
-		contentEnabled = v.ContentEnabledFn()
-	}
-
 	var unsupported bool
-	if !isNonContent && contentEnabled {
+	if !isNonContent {
 		// Step 1: target-id check fails closed when resolved AppID <= 0.
 		var expectedAppID int64
 		if v != nil {
@@ -476,12 +466,16 @@ func resultToSourceEvent(res Result, receivedAt time.Time, t source.Target) sour
 	if sourceID == "" && res.InstallationID > 0 {
 		sourceID = strconv.FormatInt(res.InstallationID, 10)
 	}
+	dedupKey := res.DeliveryID
+	if t.ProjectID != "" {
+		dedupKey = res.DedupKey(t.ProjectID)
+	}
 	return source.Event{
 		Handled:      res.Handled,
 		SourceKind:   res.SourceKind,
 		SourceID:     sourceID,
 		DeliveryID:   res.DeliveryID,
-		DedupKey:     res.DedupKey(t.ProjectID),
+		DedupKey:     dedupKey,
 		Type:         res.Type,
 		Action:       res.Action,
 		Resource:     res.RepoFullName,

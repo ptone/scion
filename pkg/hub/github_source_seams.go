@@ -32,9 +32,8 @@ import (
 // Server's live configured AppID and clock.
 func (s *Server) GitHubSourceWireVerifier() source.WireVerifier {
 	var v source.WireVerifier = &triggithub.WireVerifier{
-		ExpectedAppIDFn:  s.githubAppConfiguredID,
-		ContentEnabledFn: s.githubTriggersEnabled,
-		Now:              s.githubWebhookIngress.now,
+		ExpectedAppIDFn: s.githubAppConfiguredID,
+		Now:             s.githubWebhookIngress.now,
 	}
 	if wrap := s.githubWebhookIngress.getWrapWireVerifier(); wrap != nil {
 		v = wrap(v)
@@ -94,7 +93,12 @@ func (s *Server) GitHubSourceInstallationResolver() source.InstallationResolver 
 				routing[repo] = store.GitHubTriggerRoute{PrimaryProjectID: primaryID}
 			}
 			selected, bypassed, routingStatus := ApplyPrimaryRouting(candidates, routing, repoFullName)
-			if routingStatus == GitHubTriggerRoutingStatusStalePrimary {
+			sourceRoutingStatus := source.RoutingStatusNone
+			switch routingStatus {
+			case GitHubTriggerRoutingStatusOK:
+				sourceRoutingStatus = source.RoutingStatusOK
+			case GitHubTriggerRoutingStatusStalePrimary:
+				sourceRoutingStatus = source.RoutingStatusStalePrimary
 				s.githubWebhookIngress.maybeWarnStalePrimary(instID, repoFullName, s.githubWebhookIngress.now().UTC())
 			}
 			targets := make([]source.Target, len(selected))
@@ -103,7 +107,7 @@ func (s *Server) GitHubSourceInstallationResolver() source.InstallationResolver 
 					ProjectID:          selected[i].ID,
 					InstallationID:     inst.ID,
 					Resource:           repoFullName,
-					RoutingStatus:      routingStatus,
+					RoutingStatus:      sourceRoutingStatus,
 					BypassedProjectIDs: append([]string(nil), bypassed...),
 				}
 			}

@@ -417,9 +417,9 @@ func (sink *sourceEventSink) EnqueueForTargets(ctx context.Context, ev source.Ev
 
 	for i := range targets {
 		tgt := &targets[i]
-		dedupKey := ev.DedupKey
-		if ev.DeliveryID != "" && tgt.ProjectID != "" {
-			dedupKey = ev.DeliveryID + "/" + tgt.ProjectID
+		dedupKey := ""
+		if ev.DedupKey != "" && tgt.ProjectID != "" {
+			dedupKey = ev.DedupKey + "/" + tgt.ProjectID
 		}
 		storeEv := store.TriggerEvent{
 			ID:           uuid.NewString(),
