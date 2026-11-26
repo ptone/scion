@@ -147,6 +147,7 @@ func newMemoTestHarness(
 		return okBinaryResult(inst.Model), nil
 	}
 	reg.MustRegister(&mpFakeAdapter{name: "fake-mp", invokeFn: wrappedInvoke})
+	reg.MustRegister(&mpFakeAdapter{name: "fake-mp-2", invokeFn: wrappedInvoke})
 
 	rt := systemoneruntime.New(systemoneruntime.Config{
 		Registry:         reg,
@@ -587,62 +588,173 @@ func TestMemo_NoCrossSend(t *testing.T) {
 }
 
 // A6: TestMemo_TimeoutNotPublished
-// Kills: timeout poisoning.
+// Kills: publishing timeouts (runtime_latched_timeout_not_published) and
+// publishing caller-canceled results (caller_canceled_not_published).
 func TestMemo_TimeoutNotPublished(t *testing.T) {
-	allow := newMutableAllowlist("proj-1", "inst-a")
-	var attemptNum atomic.Int32
-	leaderStarted := make(chan struct{})
-	h := newMemoTestHarness(t, []systemoneruntime.Instance{defaultMemoInstance("inst-a", 1)}, allow, func(ctx context.Context, _ provider.Transport, iv provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
-		n := attemptNum.Add(1)
-		if n == 1 {
-			close(leaderStarted)
-			<-ctx.Done()
-			return provider.ModelResult{}, ctx.Err()
-		}
-		return okBinaryResult(iv.Model), nil
-	})
-
-	memo := messagepolicy.NewJudgmentMemo("send-a6", h.resolver())
-	opts := []messagepolicy.EvalOption{
-		messagepolicy.WithMaxEvalTime(1500 * time.Millisecond),
-		messagepolicy.WithJudgmentMemo(memo),
-		messagepolicy.WithMemoMode(messagepolicy.ModeEnforce),
-	}
 	req := systemone.Request{
 		ProjectID: "proj-1",
 		Input:     systemone.Input{Fields: []provider.InputField{{Name: messagepolicy.FieldMessageBody, Kind: spec.FieldKindText, Trust: spec.TrustUntrusted, Value: "hi"}}},
 	}
 
-	var (
-		wg        sync.WaitGroup
-		leaderCls messagepolicy.Classification
-		waiterEv  *systemone.Evaluation
-		waiterCls messagepolicy.Classification
-	)
+	t.Run("runtime_latched_timeout_not_published", func(t *testing.T) {
+		allow := newMutableAllowlist("proj-1", "inst-a")
+		var attemptNum atomic.Int32
+		leaderStarted := make(chan struct{})
+		h := newMemoTestHarness(t, []systemoneruntime.Instance{defaultMemoInstance("inst-a", 1)}, allow, func(ctx context.Context, _ provider.Transport, iv provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+			if attemptNum.Add(1) == 1 {
+				close(leaderStarted)
+				<-ctx.Done()
+				return provider.ModelResult{}, ctx.Err()
+			}
+			return okBinaryResult(iv.Model), nil
+		})
 
-	// Leader has a short deadline that times out.
-	leaderCtx, leaderCancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
-	defer leaderCancel()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_, leaderCls = h.ev.EvaluateSystemOne(leaderCtx, memoRuleBodyOnly, req, opts...)
-	}()
-	<-leaderStarted
+		memo := messagepolicy.NewJudgmentMemo("send-a6-timeout", h.resolver())
+		// Small MaxEvalTime with context.Background() drives the leader into a
+		// genuine runtime-latched timeout (Reason == "timeout").
+		opts := []messagepolicy.EvalOption{
+			messagepolicy.WithMaxEvalTime(250 * time.Millisecond),
+			messagepolicy.WithJudgmentMemo(memo),
+			messagepolicy.WithMemoMode(messagepolicy.ModeEnforce),
+		}
 
-	// Waiter has a live deadline; must NOT reuse leader's timeout and must succeed as new leader.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		waiterEv, waiterCls = h.ev.EvaluateSystemOne(context.Background(), memoRuleBodyOnly, req, opts...)
-	}()
-	wg.Wait()
+		var (
+			wg        sync.WaitGroup
+			leaderCls messagepolicy.Classification
+			waiterEv  *systemone.Evaluation
+			waiterCls messagepolicy.Classification
+		)
 
-	assert.Equal(t, messagepolicy.ClassFailed, leaderCls.Class)
-	assert.Equal(t, messagepolicy.ClassPass, waiterCls.Class, "waiter with live deadline must evaluate fresh and succeed")
-	require.NotNil(t, waiterEv)
-	assert.False(t, waiterEv.CacheHit)
-	assert.Equal(t, int32(2), h.calls.Load())
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, leaderCls = h.ev.EvaluateSystemOne(context.Background(), memoRuleBodyOnly, req, opts...)
+		}()
+		<-leaderStarted
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			waiterEv, waiterCls = h.ev.EvaluateSystemOne(context.Background(), memoRuleBodyOnly, req, opts...)
+		}()
+		wg.Wait()
+
+		assert.Equal(t, messagepolicy.ClassFailed, leaderCls.Class)
+		assert.Equal(t, string(provider.FailTimeout), leaderCls.Reason, "leader must hit runtime-latched timeout")
+		assert.Equal(t, messagepolicy.ClassPass, waiterCls.Class, "waiter with live deadline must evaluate fresh and succeed")
+		require.NotNil(t, waiterEv)
+		assert.False(t, waiterEv.CacheHit)
+		assert.Equal(t, int32(2), h.calls.Load())
+	})
+
+	t.Run("caller_canceled_not_published", func(t *testing.T) {
+		allow := newMutableAllowlist("proj-1", "inst-a")
+		var attemptNum atomic.Int32
+		leaderStarted := make(chan struct{})
+		h := newMemoTestHarness(t, []systemoneruntime.Instance{defaultMemoInstance("inst-a", 1)}, allow, func(ctx context.Context, _ provider.Transport, iv provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+			if attemptNum.Add(1) == 1 {
+				close(leaderStarted)
+				<-ctx.Done()
+				return provider.ModelResult{}, ctx.Err()
+			}
+			return okBinaryResult(iv.Model), nil
+		})
+
+		memo := messagepolicy.NewJudgmentMemo("send-a6-cancel", h.resolver())
+		opts := []messagepolicy.EvalOption{
+			messagepolicy.WithMaxEvalTime(1500 * time.Millisecond),
+			messagepolicy.WithJudgmentMemo(memo),
+			messagepolicy.WithMemoMode(messagepolicy.ModeEnforce),
+		}
+
+		var (
+			wg        sync.WaitGroup
+			leaderCls messagepolicy.Classification
+			waiterEv  *systemone.Evaluation
+			waiterCls messagepolicy.Classification
+		)
+
+		leaderCtx, leaderCancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+		defer leaderCancel()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, leaderCls = h.ev.EvaluateSystemOne(leaderCtx, memoRuleBodyOnly, req, opts...)
+		}()
+		<-leaderStarted
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			waiterEv, waiterCls = h.ev.EvaluateSystemOne(context.Background(), memoRuleBodyOnly, req, opts...)
+		}()
+		wg.Wait()
+
+		assert.Equal(t, messagepolicy.ClassFailed, leaderCls.Class)
+		assert.Equal(t, string(provider.FailCanceled), leaderCls.Reason, "short caller ctx must classify as canceled")
+		assert.Equal(t, messagepolicy.ClassPass, waiterCls.Class, "waiter with live deadline must evaluate fresh and succeed")
+		require.NotNil(t, waiterEv)
+		assert.False(t, waiterEv.CacheHit)
+		assert.Equal(t, int32(2), h.calls.Load())
+	})
+}
+
+// TestMemo_SharedDeadlineTimeoutMatchesBaseline (Part 2 R1 regression):
+// N=4 same-rule policies sharing one soCtx whose deadline equals MaxEvalTime,
+// with a provider that never answers, must produce the exact same Reason as
+// the nil-memo baseline (all failed/timeout) with calls <= baseline.
+func TestMemo_SharedDeadlineTimeoutMatchesBaseline(t *testing.T) {
+	const numPolicies = 4
+	const budget = 300 * time.Millisecond
+
+	runOnce := func(t *testing.T, useMemo bool) ([]string, int32) {
+		t.Helper()
+		allow := newMutableAllowlist("proj-1", "inst-a")
+		h := newMemoTestHarness(t, []systemoneruntime.Instance{defaultMemoInstance("inst-a", 1)}, allow, func(ctx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+			<-ctx.Done()
+			return provider.ModelResult{}, ctx.Err()
+		})
+
+		var memo *messagepolicy.JudgmentMemo
+		if useMemo {
+			memo = messagepolicy.NewJudgmentMemo("send-r1-shared-dl", h.resolver())
+		}
+		soCtx, soCancel := context.WithTimeout(context.Background(), budget)
+		defer soCancel()
+
+		reasons := make([]string, numPolicies)
+		var wg sync.WaitGroup
+		for i := 0; i < numPolicies; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				opts := []messagepolicy.EvalOption{
+					messagepolicy.WithMaxEvalTime(budget),
+				}
+				if memo != nil {
+					opts = append(opts, messagepolicy.WithJudgmentMemo(memo), messagepolicy.WithMemoMode(messagepolicy.ModeEnforce))
+				}
+				_, cls := h.ev.EvaluateSystemOne(soCtx, memoRuleBodyOnly, systemone.Request{
+					ProjectID: "proj-1",
+					RuleID:    "pol",
+					Input:     systemone.Input{Fields: []provider.InputField{{Name: messagepolicy.FieldMessageBody, Kind: spec.FieldKindText, Trust: spec.TrustUntrusted, Value: "stuck"}}},
+				}, opts...)
+				reasons[idx] = cls.Class + "/" + cls.Reason
+			}(i)
+		}
+		wg.Wait()
+		return reasons, h.calls.Load()
+	}
+
+	baselineReasons, baselineCalls := runOnce(t, false)
+	memoReasons, memoCalls := runOnce(t, true)
+
+	assert.Equal(t, baselineReasons, memoReasons, "every policy's classification must match nil-memo baseline")
+	for i, r := range memoReasons {
+		assert.Equal(t, messagepolicy.ClassFailed+"/"+string(provider.FailTimeout), r, "policy %d must classify as failed/timeout", i)
+	}
+	assert.LessOrEqual(t, memoCalls, baselineCalls, "memo calls must not exceed baseline calls")
+	assert.Equal(t, int32(1), memoCalls, "waiters whose remaining deadline < budget must not start a doomed second call")
 }
 
 // A7: TestMemo_ReuseRevalidation
@@ -731,6 +843,48 @@ func TestMemo_ReuseRevalidation(t *testing.T) {
 		assert.False(t, eval2.CacheHit)
 		assert.Equal(t, "inst-b", eval2.Attempts[0].Instance)
 		assert.Equal(t, int32(2), h.calls.Load())
+	})
+
+	// O1: changing only Model at the same InstanceRevision must force a fresh call.
+	t.Run("model_change_same_revision_forces_fresh_call", func(t *testing.T) {
+		allow := newMutableAllowlist("proj-1", "inst-a")
+		inst := defaultMemoInstance("inst-a", 1)
+		h := newMemoTestHarness(t, []systemoneruntime.Instance{inst}, allow, nil)
+		memo := messagepolicy.NewJudgmentMemo("send-a7-model", h.resolver())
+		opts := []messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(time.Second), messagepolicy.WithJudgmentMemo(memo), messagepolicy.WithMemoMode(messagepolicy.ModeEnforce)}
+
+		_, cls1 := h.ev.EvaluateSystemOne(context.Background(), memoRuleBodyOnly, req, opts...)
+		require.Equal(t, messagepolicy.ClassPass, cls1.Class)
+		require.Equal(t, int32(1), h.calls.Load())
+
+		inst.Model = "fake-model-2" // same Revision (1)
+		h.instances.set(inst)
+
+		eval2, cls2 := h.ev.EvaluateSystemOne(context.Background(), memoRuleBodyOnly, req, opts...)
+		require.Equal(t, messagepolicy.ClassPass, cls2.Class)
+		assert.False(t, eval2.CacheHit)
+		assert.Equal(t, int32(2), h.calls.Load(), "model change at same revision must force fresh provider call")
+	})
+
+	// O1: changing only Adapter at the same InstanceRevision must force a fresh call.
+	t.Run("adapter_change_same_revision_forces_fresh_call", func(t *testing.T) {
+		allow := newMutableAllowlist("proj-1", "inst-a")
+		inst := defaultMemoInstance("inst-a", 1)
+		h := newMemoTestHarness(t, []systemoneruntime.Instance{inst}, allow, nil)
+		memo := messagepolicy.NewJudgmentMemo("send-a7-adapter", h.resolver())
+		opts := []messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(time.Second), messagepolicy.WithJudgmentMemo(memo), messagepolicy.WithMemoMode(messagepolicy.ModeEnforce)}
+
+		_, cls1 := h.ev.EvaluateSystemOne(context.Background(), memoRuleBodyOnly, req, opts...)
+		require.Equal(t, messagepolicy.ClassPass, cls1.Class)
+		require.Equal(t, int32(1), h.calls.Load())
+
+		inst.Adapter = "fake-mp-2" // same Revision (1)
+		h.instances.set(inst)
+
+		eval2, cls2 := h.ev.EvaluateSystemOne(context.Background(), memoRuleBodyOnly, req, opts...)
+		require.Equal(t, messagepolicy.ClassPass, cls2.Class)
+		assert.False(t, eval2.CacheHit)
+		assert.Equal(t, int32(2), h.calls.Load(), "adapter change at same revision must force fresh provider call")
 	})
 }
 

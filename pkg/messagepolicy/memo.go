@@ -19,6 +19,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -27,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
@@ -310,16 +312,74 @@ func (m *JudgmentMemo) revalidateBinding(
 	return true
 }
 
+// effectiveMemoBudget computes the runtime's effective own-deadline budget for
+// a compiled rule and MaxEvalTime ceiling, matching runtime.effectiveOwnDuration.
+func effectiveMemoBudget(ruleTimeout, maxEvalTime time.Duration) time.Duration {
+	d := 2 * time.Second // matches runtime.DefaultRuleTimeout
+	if ruleTimeout > 0 {
+		d = ruleTimeout
+	}
+	if maxEvalTime > 0 {
+		margin := max(ruleengine.EngineDeadlineMargin(maxEvalTime), 0)
+		engDur := max(maxEvalTime-margin, 0)
+		if engDur < d {
+			d = engDur
+		}
+	}
+	return d
+}
+
+// classifyWaiterContext classifies a waiter's context termination to match the
+// runtime's own-deadline vs caller-context rule: caller-ctx expiry before the
+// waiter's own runtime deadline is FailCanceled; own runtime deadline expiry is
+// FailTimeout.
+func classifyWaiterContext(err error, ownDeadline time.Time) Classification {
+	if errors.Is(err, context.DeadlineExceeded) && !time.Now().Before(ownDeadline) {
+		return ClassifyError(&ruleengine.FailedError{Reason: string(provider.FailTimeout), Cause: err})
+	}
+	return ClassifyError(&ruleengine.FailedError{Reason: string(provider.FailCanceled), Cause: err})
+}
+
+// waitForOwnDeadlineOrCancel waits until either ownDeadline elapses (returning
+// timeout) or ctx is done (classified via classifyWaiterContext). Used when a
+// leader did not publish and the waiter's remaining ctx deadline is shorter
+// than the runtime's effective budget so taking leadership would convert a
+// runtime timeout into caller cancellation.
+func waitForOwnDeadlineOrCancel(ctx context.Context, ownDeadline time.Time) Classification {
+	if ctx != nil && ctx.Err() != nil {
+		return classifyWaiterContext(ctx.Err(), ownDeadline)
+	}
+	rem := time.Until(ownDeadline)
+	if rem <= 0 {
+		return ClassifyError(&ruleengine.FailedError{Reason: string(provider.FailTimeout), Cause: context.DeadlineExceeded})
+	}
+	timer := time.NewTimer(rem)
+	defer timer.Stop()
+	if ctx == nil {
+		<-timer.C
+		return ClassifyError(&ruleengine.FailedError{Reason: string(provider.FailTimeout), Cause: context.DeadlineExceeded})
+	}
+	select {
+	case <-timer.C:
+		return ClassifyError(&ruleengine.FailedError{Reason: string(provider.FailTimeout), Cause: context.DeadlineExceeded})
+	case <-ctx.Done():
+		return classifyWaiterContext(ctx.Err(), ownDeadline)
+	}
+}
+
 func (e *Evaluator) evaluateSystemOneWithMemo(
 	ctx context.Context,
 	rawRule string,
 	req systemone.Request,
 	cfg evalConfig,
 ) (*systemone.Evaluation, Classification) {
+	start := time.Now()
 	memo := cfg.memo
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
-			return nil, ClassifyError(err)
+			// Match evaluateSystemOneUncached: an already-done caller context
+			// at entry always classifies as canceled.
+			return nil, ClassifyError(&ruleengine.FailedError{Reason: string(provider.FailCanceled), Cause: err})
 		}
 	}
 
@@ -335,6 +395,8 @@ func (e *Evaluator) evaluateSystemOneWithMemo(
 		return e.evaluateSystemOneUncached(ctx, rawRule, req, cfg)
 	}
 
+	requiredBudget := effectiveMemoBudget(compiled.Timeout, cfg.maxEvalTime)
+	ownDeadline := start.Add(requiredBudget)
 	key := buildMemoKey(memo.sendID, compiled, req.ProjectID, req.Input, cfg.memoMode, cfg.maxEvalTime)
 
 	// Frozen snapshot path (shadow worker): read-only lookup, never blocks on
@@ -353,7 +415,7 @@ func (e *Evaluator) evaluateSystemOneWithMemo(
 	for {
 		if ctx != nil {
 			if err := ctx.Err(); err != nil {
-				return nil, ClassifyError(err)
+				return nil, classifyWaiterContext(err, ownDeadline)
 			}
 		}
 
@@ -374,7 +436,7 @@ func (e *Evaluator) evaluateSystemOneWithMemo(
 				select {
 				case <-flight.done:
 				case <-ctx.Done():
-					return nil, ClassifyError(ctx.Err())
+					return nil, classifyWaiterContext(ctx.Err(), ownDeadline)
 				}
 			} else {
 				<-flight.done
@@ -385,8 +447,15 @@ func (e *Evaluator) evaluateSystemOneWithMemo(
 				}
 				return e.evaluateSystemOneUncached(ctx, rawRule, req, cfg)
 			}
-			// Leader did not publish (e.g., timeout, canceled, capacity, 0 attempts):
-			// retry loop so this waiter can become the new leader if its context is still live.
+			// Leader did not publish (e.g., timeout, canceled, capacity, 0 attempts).
+			// Take leadership only if our own ctx deadline still leaves at least the
+			// runtime's effective budget for this key; otherwise wait for ownDeadline
+			// or ctx.Done() and classify identically to the uncached path.
+			if ctx != nil {
+				if dl, hasDL := ctx.Deadline(); hasDL && time.Until(dl) < requiredBudget {
+					return nil, waitForOwnDeadlineOrCancel(ctx, ownDeadline)
+				}
+			}
 			continue
 		}
 
