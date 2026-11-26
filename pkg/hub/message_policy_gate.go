@@ -446,7 +446,14 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 			}
 		default:
 			start := time.Now()
-			classification = s.evalOneMessagePolicyWithFacts(ctx, pol, job.snapshot.projectID, facts, act, budget, soBudget, job.memo, store.MessagePolicyModeShadow)
+			var shadowSoOpts []messagepolicy.EvalOption
+			if job.memo != nil {
+				shadowSoOpts = []messagepolicy.EvalOption{
+					messagepolicy.WithJudgmentMemo(job.memo),
+					messagepolicy.WithMemoMode(store.MessagePolicyModeShadow),
+				}
+			}
+			classification = s.evalOneMessagePolicyWithFacts(ctx, pol, job.snapshot.projectID, facts, act, budget, soBudget, shadowSoOpts...)
 			elapsed = time.Since(start)
 		}
 		if ctx.Err() != nil {
@@ -665,7 +672,10 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 			go func(idx int, p *store.MessagePolicy) {
 				defer wg.Done()
 				start := time.Now()
-				cls := s.evalOneMessagePolicyWithFacts(soCtx, p, snap.projectID, facts, act, budget, soBudget, enforceMemo, store.MessagePolicyModeEnforce)
+				cls := s.evalOneMessagePolicyWithFacts(soCtx, p, snap.projectID, facts, act, budget, soBudget,
+					messagepolicy.WithJudgmentMemo(enforceMemo),
+					messagepolicy.WithMemoMode(store.MessagePolicyModeEnforce),
+				)
 				results[idx] = enforceEvalResult{
 					policy:         p,
 					classification: cls,
@@ -708,7 +718,7 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 			elapsed = results[i].elapsed
 		default:
 			start := time.Now()
-			classification = s.evalOneMessagePolicyWithFacts(ctx, pol, snap.projectID, facts, act, budget, soBudget, nil, store.MessagePolicyModeEnforce)
+			classification = s.evalOneMessagePolicyWithFacts(ctx, pol, snap.projectID, facts, act, budget, soBudget)
 			elapsed = time.Since(start)
 		}
 
@@ -890,8 +900,7 @@ func (s *Server) evalOneMessagePolicyWithFacts(
 	act messagepolicy.Activation,
 	budget *ruleengine.BudgetTracker,
 	soMaxEvalTime time.Duration,
-	memo *messagepolicy.JudgmentMemo,
-	memoMode string,
+	extraSoOpts ...messagepolicy.EvalOption,
 ) messagepolicy.Classification {
 	if fn := s.messagePolicyGate.evalOverride; fn != nil {
 		if c, handled := fn(ctx, pol, act, budget); handled {
@@ -913,10 +922,9 @@ func (s *Server) evalOneMessagePolicyWithFacts(
 	if projectID != "" {
 		evalCtx = systemoneruntime.WithEvalProjectID(ctx, projectID)
 	}
-	soOpts := []messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(soMaxEvalTime)}
-	if memo != nil {
-		soOpts = append(soOpts, messagepolicy.WithJudgmentMemo(memo), messagepolicy.WithMemoMode(memoMode))
-	}
+	soOpts := make([]messagepolicy.EvalOption, 0, 1+len(extraSoOpts))
+	soOpts = append(soOpts, messagepolicy.WithMaxEvalTime(soMaxEvalTime))
+	soOpts = append(soOpts, extraSoOpts...)
 	return ev.EvaluatePolicy(
 		evalCtx,
 		pol.ID,
