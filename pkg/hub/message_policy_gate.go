@@ -24,12 +24,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
+	systemonespec "github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -72,6 +75,7 @@ type OTelMessagePolicyMetrics struct {
 	shadowDrops     metric.Int64Counter
 	admissionErrors metric.Int64Counter
 	uncovered       metric.Int64Counter
+	memoHits        metric.Int64Counter
 }
 
 // NewOTelMessagePolicyMetrics constructs OTel instruments for the message
@@ -101,12 +105,17 @@ func NewOTelMessagePolicyMetrics(mp metric.MeterProvider) (*OTelMessagePolicyMet
 	if err != nil {
 		return nil, err
 	}
+	memoHits, err := meter.Int64Counter("scion.message_policy.memo_hits", metric.WithUnit("{hit}"))
+	if err != nil {
+		return nil, err
+	}
 	return &OTelMessagePolicyMetrics{
 		evaluations:     evals,
 		durationMs:      dur,
 		shadowDrops:     drops,
 		admissionErrors: admErrs,
 		uncovered:       uncov,
+		memoHits:        memoHits,
 	}, nil
 }
 
@@ -130,6 +139,26 @@ func (s *Server) recordMessagePolicyEvalMetric(class, mode, surface string, elap
 		attribute.String("mode", mode),
 		attribute.String("surface", surface),
 	))
+}
+
+func (s *Server) recordMessagePolicyMemoHit(surface string) {
+	m := s.messagePolicyMetrics.Load()
+	if m == nil || m.memoHits == nil {
+		return
+	}
+	m.memoHits.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("surface", surface),
+	))
+}
+
+func (s *Server) systemOneBindingResolver() messagepolicy.BindingResolver {
+	return func(ctx context.Context, compiled *systemonespec.Compiled, projectID string) (systemone.ResolvedBinding, bool) {
+		rt := s.SystemOneRuntime()
+		if rt == nil {
+			return systemone.ResolvedBinding{}, false
+		}
+		return rt.ResolveBindingForReuse(ctx, compiled, projectID)
+	}
 }
 
 func (s *Server) recordMessagePolicyShadowDrop(projectID string, policyCount int) {
@@ -231,6 +260,7 @@ type messagePolicyShadowJob struct {
 	unmentionedUnavailable bool
 	droppedCount           int
 	messageID              string
+	memo                   *messagepolicy.JudgmentMemo
 }
 
 func policyUsesUnmentionedAgentSlugs(pol *store.MessagePolicy) bool {
@@ -257,6 +287,7 @@ type h2FactSnapshot struct {
 	recipientID     string
 	recipientSlug   string
 	msgType         string
+	introBody       string
 	msgBody         string
 	hasChoices      bool
 	urgent          bool
@@ -270,6 +301,7 @@ type h2PolicyInput struct {
 	req                 *OutboundMessageRequest
 	routing             *routingResult
 	hasChoices          bool
+	promptText          string
 	artifactAttachments int
 }
 
@@ -415,7 +447,14 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 			}
 		default:
 			start := time.Now()
-			classification = s.evalOneMessagePolicyWithFacts(ctx, pol, job.snapshot.projectID, facts, act, budget, soBudget)
+			var shadowSoOpts []messagepolicy.EvalOption
+			if job.memo != nil {
+				shadowSoOpts = []messagepolicy.EvalOption{
+					messagepolicy.WithJudgmentMemo(job.memo),
+					messagepolicy.WithMemoMode(store.MessagePolicyModeShadow),
+				}
+			}
+			classification = s.evalOneMessagePolicyWithFacts(ctx, pol, job.snapshot.projectID, facts, act, budget, soBudget, shadowSoOpts...)
 			elapsed = time.Since(start)
 		}
 		if ctx.Err() != nil {
@@ -423,6 +462,9 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 		}
 
 		s.recordMessagePolicyEvalMetric(classification.Class, store.MessagePolicyModeShadow, job.snapshot.surface, elapsed)
+		if classification.Evaluation != nil && classification.Evaluation.CacheHit {
+			s.recordMessagePolicyMemoHit(job.snapshot.surface)
+		}
 		if classification.AdmissionError {
 			s.recordMessagePolicyAdmissionError(job.snapshot.projectID, pol.ID, pol.Name, classification.Reason)
 		}
@@ -611,9 +653,12 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 	}
 
 	results := make([]enforceEvalResult, len(enforcePols))
+	var shadowMemo *messagepolicy.JudgmentMemo
 	if hasSystemOneEnforce && factsErr == nil {
 		// Evaluate enforce policies carrying a system_one_rule concurrently under
-		// the shared synchronous System One send deadline (consumer design §5.5).
+		// the shared synchronous System One send deadline (consumer design §5.5),
+		// sharing a per-send judgment memo discarded at the end of this send.
+		enforceMemo := messagepolicy.NewJudgmentMemo(api.NewUUID(), s.systemOneBindingResolver())
 		soCtx, soCancel := context.WithTimeout(ctx, soBudget)
 		var wg sync.WaitGroup
 		for i := 0; i < len(enforcePols) && i < store.MaxActiveMatchingMessagePolicies; i++ {
@@ -628,7 +673,10 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 			go func(idx int, p *store.MessagePolicy) {
 				defer wg.Done()
 				start := time.Now()
-				cls := s.evalOneMessagePolicyWithFacts(soCtx, p, snap.projectID, facts, act, budget, soBudget)
+				cls := s.evalOneMessagePolicyWithFacts(soCtx, p, snap.projectID, facts, act, budget, soBudget,
+					messagepolicy.WithJudgmentMemo(enforceMemo),
+					messagepolicy.WithMemoMode(store.MessagePolicyModeEnforce),
+				)
 				results[idx] = enforceEvalResult{
 					policy:         p,
 					classification: cls,
@@ -638,6 +686,9 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		}
 		wg.Wait()
 		soCancel()
+		if len(shadowPols) > 0 {
+			shadowMemo = enforceMemo.FreezeForShadow(s.systemOneBindingResolver())
+		}
 	}
 
 	var firstReject *enforceEvalResult
@@ -673,6 +724,9 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		}
 
 		s.recordMessagePolicyEvalMetric(classification.Class, store.MessagePolicyModeEnforce, snap.surface, elapsed)
+		if classification.Evaluation != nil && classification.Evaluation.CacheHit {
+			s.recordMessagePolicyMemoHit(snap.surface)
+		}
 		if classification.AdmissionError {
 			s.recordMessagePolicyAdmissionError(snap.projectID, pol.ID, pol.Name, classification.Reason)
 		}
@@ -738,6 +792,7 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 				factsUnavailable:       factsErr != nil,
 				unmentionedUnavailable: needUnmentionedEnforce && unmentionedErr != nil,
 				messageID:              "",
+				memo:                   shadowMemo,
 			})
 		}
 
@@ -802,6 +857,7 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 			factsUnavailable:       factsErr != nil,
 			unmentionedUnavailable: needUnmentionedEnforce && unmentionedErr != nil,
 			droppedCount:           droppedShadow,
+			memo:                   shadowMemo,
 		}
 	}
 
@@ -845,6 +901,7 @@ func (s *Server) evalOneMessagePolicyWithFacts(
 	act messagepolicy.Activation,
 	budget *ruleengine.BudgetTracker,
 	soMaxEvalTime time.Duration,
+	extraSoOpts ...messagepolicy.EvalOption,
 ) messagepolicy.Classification {
 	if fn := s.messagePolicyGate.evalOverride; fn != nil {
 		if c, handled := fn(ctx, pol, act, budget); handled {
@@ -866,6 +923,9 @@ func (s *Server) evalOneMessagePolicyWithFacts(
 	if projectID != "" {
 		evalCtx = systemoneruntime.WithEvalProjectID(ctx, projectID)
 	}
+	soOpts := make([]messagepolicy.EvalOption, 0, 1+len(extraSoOpts))
+	soOpts = append(soOpts, messagepolicy.WithMaxEvalTime(soMaxEvalTime))
+	soOpts = append(soOpts, extraSoOpts...)
 	return ev.EvaluatePolicy(
 		evalCtx,
 		pol.ID,
@@ -875,7 +935,7 @@ func (s *Server) evalOneMessagePolicyWithFacts(
 		projectID,
 		facts,
 		[]messagepolicy.EvalOption{messagepolicy.WithBudget(budget)},
-		[]messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(soMaxEvalTime)},
+		soOpts,
 	)
 }
 
@@ -893,12 +953,22 @@ func deriveH2FactSnapshot(in *h2PolicyInput) h2FactSnapshot {
 			(req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:"))
 	}
 
+	msgBody := req.Msg
+	if in.promptText != "" {
+		if msgBody == "" {
+			msgBody = in.promptText
+		} else {
+			msgBody = msgBody + "\n\n" + in.promptText
+		}
+	}
+
 	snap := h2FactSnapshot{
 		projectID:       agent.ProjectID,
 		senderID:        agent.ID,
 		senderSlug:      agent.Slug,
 		msgType:         req.Type,
-		msgBody:         req.Msg,
+		introBody:       req.Msg,
+		msgBody:         msgBody,
 		hasChoices:      in.hasChoices,
 		urgent:          req.Urgent,
 		attachmentCount: len(req.Attachments) + in.artifactAttachments,
@@ -994,8 +1064,8 @@ func (s *Server) buildH2MessagePolicyFacts(
 		projectAgents     []store.Agent
 		agentsLoaded      bool
 	)
-	if snap.projectID != "" && strings.Contains(snap.msgBody, "@") {
-		proseAgentMentions := dropSelfMentionName(messages.ExtractProseMentionsWithOptions(snap.msgBody, mentionOpts), snap.senderSlug)
+	if snap.projectID != "" && strings.Contains(snap.introBody, "@") {
+		proseAgentMentions := dropSelfMentionName(messages.ExtractProseMentionsWithOptions(snap.introBody, mentionOpts), snap.senderSlug)
 		if len(proseAgentMentions) > 0 {
 			agents, err := listAllProjectAgents(ctx, s.store, snap.projectID)
 			if err != nil {
@@ -1024,8 +1094,8 @@ func (s *Server) buildH2MessagePolicyFacts(
 
 	var mentionedUserIDs []string
 	humans := preloadedHumans
-	if snap.projectID != "" && strings.Contains(snap.msgBody, "@") {
-		if wrapped := messages.ExtractProseWrappedMentionsWithOptions(snap.msgBody, mentionOpts); len(wrapped) > 0 {
+	if snap.projectID != "" && strings.Contains(snap.introBody, "@") {
+		if wrapped := messages.ExtractProseWrappedMentionsWithOptions(snap.introBody, mentionOpts); len(wrapped) > 0 {
 			if !humansLoaded {
 				loadedHumans, err := s.projectHumanMembersStrict(ctx, snap.projectID)
 				if err != nil {

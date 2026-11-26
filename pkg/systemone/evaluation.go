@@ -24,6 +24,9 @@ import (
 // DialectName is the ruleengine dialect identifier ("system_one").
 const DialectName = runtime.DialectName
 
+// DefaultRuleTimeout is the authoring default rule timeout when omitted.
+const DefaultRuleTimeout = runtime.DefaultRuleTimeout
+
 // Class aliases runtime.Class ("success" | "uncertain" | "failed").
 type Class = runtime.Class
 
@@ -49,6 +52,7 @@ type (
 	InputFingerprint    = runtime.InputFingerprint
 	Input               = runtime.Input
 	Decision            = runtime.Decision
+	ResolvedBinding     = runtime.ResolvedBinding
 )
 
 // Request wraps a System One Input with consumer-authorized evaluation context
