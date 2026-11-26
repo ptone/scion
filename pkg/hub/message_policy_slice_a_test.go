@@ -431,20 +431,81 @@ func TestL1_PromptTextInBody(t *testing.T) {
 		}
 		require.NoError(t, f.s.CreateMessagePolicy(ctx, mentionOnlyPol))
 
-		// Intro has NO mentions; prompt text contains both @peer-bot and @<alice email>.
+		// (a) Intro has NO mentions; decision question and choice label contain @peer-bot and @<alice email>.
 		rr := f.sendOutbound(t, OutboundMessageRequest{
 			Recipient: "user:" + f.alice.Email,
 			Msg:       "Please pick an option below.",
 			Decisions: []messages.DecisionInput{
 				{
 					Question: "Should we ask @peer-bot or @" + f.alice.Email + " to review?",
-					Choices:  []messages.ChoiceInput{{Label: "Ask @peer-bot"}},
+					Choices:  []messages.ChoiceInput{{Label: "@peer-bot"}},
 				},
 			},
 		})
-		require.Equal(t, http.StatusOK, rr.Code, "mention-only CEL policy must admit when mentions appear only in prompt text: %s", rr.Body.String())
+		require.Equal(t, http.StatusOK, rr.Code, "mention-only CEL policy must admit when mentions appear only in decision prompt text: %s", rr.Body.String())
 
-		// Verify directly via buildH2MessagePolicyFacts that mention facts equal intro-only values.
+		// (b) Intro has NO mentions; command-request script contains @peer-bot and @<alice email>.
+		rrCmd := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "Please approve this script.",
+			CommandRequest: &messages.CommandRequestInput{
+				Key:         "r1-mention-cmd",
+				Description: "Notify @peer-bot after check",
+				Script:      "echo \"@peer-bot @" + f.alice.Email + "\"",
+			},
+		})
+		require.Equal(t, http.StatusOK, rrCmd.Code, "mention-only CEL policy must admit when mentions appear only in command-request script: %s", rrCmd.Body.String())
+
+		// (c) Group-conversation case: a decision posted to the group whose choice label is
+		// @peer-bot must still list peer-bot in conversation.unmentioned_agent_slugs.
+		groupConv, err := f.s.CreateConversation(ctx, &store.Conversation{
+			ID:        "conv-r1-group",
+			ProjectID: f.project.ID,
+			Kind:      "group",
+			Topic:     "r1-group",
+		})
+		require.NoError(t, err)
+		require.NoError(t, f.s.AddParticipant(ctx, &store.ConversationParticipant{
+			ConversationID: groupConv.ID,
+			PrincipalKind:  "agent",
+			PrincipalID:    f.agent.ID,
+		}))
+		require.NoError(t, f.s.AddParticipant(ctx, &store.ConversationParticipant{
+			ConversationID: groupConv.ID,
+			PrincipalKind:  "agent",
+			PrincipalID:    peerAgent.ID,
+		}))
+
+		groupSnap := deriveH2FactSnapshot(&h2PolicyInput{
+			agent: f.agent,
+			req: &OutboundMessageRequest{
+				Msg:  "Group decision intro without mentions.",
+				Type: messages.TypeDecisionPrompt,
+			},
+			routing: &routingResult{
+				ConversationID: groupConv.ID,
+				ConvResult: &ConversationResult{
+					ConversationID: groupConv.ID,
+					Kind:           "group",
+					DisplayName:    "r1-group",
+				},
+			},
+			hasChoices: true,
+			promptText: messagepolicy.PolicyPromptText([]messages.Decision{
+				{
+					Question: "Who should take this?",
+					Choices:  []messages.Choice{{Label: "@peer-bot"}},
+				},
+			}, nil, nil),
+		})
+		groupFacts, _, _, factsErr, unmentionedErr := f.srv.buildH2MessagePolicyFacts(ctx, groupSnap, nil, false, true)
+		require.NoError(t, factsErr)
+		require.NoError(t, unmentionedErr)
+		assert.Empty(t, groupFacts.MentionedAgentIDs, "prompt-text @peer-bot must not enter mentioned_agent_ids")
+		assert.Contains(t, groupFacts.Conversation.UnmentionedAgentSlugs, "peer-bot", "peer-bot must remain in conversation.unmentioned_agent_slugs")
+		assert.Contains(t, groupFacts.Message.Body, "@peer-bot", "composite message.body still contains prompt text")
+
+		// Verify directly via buildH2MessagePolicyFacts for direct send that mention facts equal intro-only values.
 		snap := deriveH2FactSnapshot(&h2PolicyInput{
 			agent: f.agent,
 			req: &OutboundMessageRequest{
