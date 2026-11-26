@@ -1360,6 +1360,45 @@ func (r *Runtime) resolveBinding(
 	return inst, adapter, caps, ""
 }
 
+// ResolveBindingForReuse re-runs the runtime's binding selection for compiled
+// under projectID using the exact same resolveBinding implementation as
+// Evaluate. It performs non-secret store reads only: it never reads secrets,
+// mints credentials, touches admission permits, or alters Evaluate behavior.
+//
+// Snapshot contract: the returned binding is valid as of this read. A later
+// mutation falls in the same window that a single uncached evaluation already
+// has between resolveBinding and provider invocation; no atomicity is claimed,
+// and existing authorization and credential resolution paths are unchanged.
+func (r *Runtime) ResolveBindingForReuse(
+	ctx context.Context,
+	compiled *spec.Compiled,
+	projectID string,
+) (ResolvedBinding, bool) {
+	if r == nil || compiled == nil {
+		return ResolvedBinding{}, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return ResolvedBinding{}, false
+	}
+	inst, adapter, _, reason := r.resolveBinding(ctx, ctx, compiled, EvalOptions{
+		ProjectID:      strings.TrimSpace(projectID),
+		RequireProject: true,
+	})
+	if reason != "" || adapter == nil {
+		return ResolvedBinding{}, false
+	}
+	return ResolvedBinding{
+		InstanceName:     inst.Name,
+		InstanceRevision: inst.Revision,
+		Adapter:          adapter.Name(),
+		ConfiguredModel:  inst.Model,
+		Enabled:          inst.Enabled,
+	}, true
+}
+
 func canonicalScopesKey(scopes []string) string {
 	if len(scopes) == 0 {
 		return ""

@@ -98,12 +98,24 @@ func (e *Evaluator) EvaluateSystemOne(
 	req systemone.Request,
 	opts ...EvalOption,
 ) (*systemone.Evaluation, Classification) {
+	cfg := applyEvalOpts(opts)
+	if cfg.memo != nil {
+		return e.evaluateSystemOneWithMemo(ctx, rawRule, req, cfg)
+	}
+	return e.evaluateSystemOneUncached(ctx, rawRule, req, cfg)
+}
+
+func (e *Evaluator) evaluateSystemOneUncached(
+	ctx context.Context,
+	rawRule string,
+	req systemone.Request,
+	cfg evalConfig,
+) (*systemone.Evaluation, Classification) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return nil, ClassifyError(&ruleengine.FailedError{Reason: celengine.ReasonCanceled, Cause: err})
 		}
 	}
-	cfg := applyEvalOpts(opts)
 	compiled, err := e.CompileSystemOne(ctx, rawRule)
 	if err != nil {
 		// When hub.system_one is turned off after a policy was authored,
@@ -250,6 +262,8 @@ type EvalOption func(*evalConfig)
 type evalConfig struct {
 	tracker     *ruleengine.BudgetTracker
 	maxEvalTime time.Duration
+	memo        *JudgmentMemo
+	memoMode    string
 }
 
 // WithBudget attaches an aggregate per-send BudgetTracker (see NewSendBudget).
@@ -263,6 +277,22 @@ func WithBudget(tracker *ruleengine.BudgetTracker) EvalOption {
 func WithMaxEvalTime(d time.Duration) EvalOption {
 	return func(c *evalConfig) {
 		c.maxEvalTime = d
+	}
+}
+
+// WithJudgmentMemo attaches a per-send JudgmentMemo to the EvaluateSystemOne
+// boundary. A nil memo preserves uncached behavior.
+func WithJudgmentMemo(memo *JudgmentMemo) EvalOption {
+	return func(c *evalConfig) {
+		c.memo = memo
+	}
+}
+
+// WithMemoMode records the policy evaluation mode ("enforce" or "shadow") in
+// the per-send JudgmentMemo key.
+func WithMemoMode(mode string) EvalOption {
+	return func(c *evalConfig) {
+		c.memoMode = mode
 	}
 }
 

@@ -49,6 +49,7 @@ type (
 	InputFingerprint    = runtime.InputFingerprint
 	Input               = runtime.Input
 	Decision            = runtime.Decision
+	ResolvedBinding     = runtime.ResolvedBinding
 )
 
 // Request wraps a System One Input with consumer-authorized evaluation context

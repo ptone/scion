@@ -291,8 +291,19 @@ type Evaluation struct {
 	FallbackCause   string                  `json:"fallback_cause,omitempty"`
 	Input           InputFingerprint        `json:"input"`
 	CacheHit        bool                    `json:"cache_hit,omitempty"`
+	SourceEvalID    string                  `json:"source_eval_id,omitempty"`
 	RevalidationDue bool                    `json:"revalidation_due,omitempty"`
 	Elapsed         time.Duration           `json:"elapsed"`
+}
+
+// ResolvedBinding is the credential-free binding selection returned by
+// Runtime.ResolveBindingForReuse for memo reuse validation.
+type ResolvedBinding struct {
+	InstanceName     string
+	InstanceRevision int64
+	Adapter          string
+	ConfiguredModel  string
+	Enabled          bool
 }
 
 // HasModelAliasReported reports whether the adapter flagged ResolvedModel with

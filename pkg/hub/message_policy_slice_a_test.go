@@ -35,6 +35,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 func sliceAEnableAllExperiments(t *testing.T, srv *Server) {
@@ -536,4 +538,143 @@ func TestOversize_Composite(t *testing.T) {
 
 	// Provider should have been called twice (truncate + nobody), not for reject or CEL.
 	assert.Equal(t, int32(2), providerCalls.Load())
+}
+
+// TestH2Gate_MemoEnforceShadowAndMetric verifies end-to-end per-send judgment
+// memoization through the Hub H2 gate:
+//   - Two enforce policies with identical System One rules make 1 provider call,
+//     produce separate CEL outcomes, and record CacheHit=true + source_eval_id
+//     on the waiter decision row.
+//   - A shadow policy with the same System One rule reuses the frozen snapshot
+//     (still 1 provider call total) and records CacheHit=true + source_eval_id.
+//   - The OTel scion.message_policy.memo_hits{surface} counter increments for
+//     non-leader hits.
+//   - A second send makes a fresh provider call (no cross-send reuse).
+func TestH2Gate_MemoEnforceShadowAndMetric(t *testing.T) {
+	ctx := context.Background()
+	f := newMpgFixture(t, true)
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	otelMetrics, err := NewOTelMessagePolicyMetrics(mp)
+	require.NoError(t, err)
+	f.srv.SetMessagePolicyMetrics(otelMetrics)
+
+	var providerCalls atomic.Int32
+	mpgEnableSystemOne(t, f.srv, f.s, f.project.ID, "ts-h2-memo", func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"model": "jev-1.14.0",
+			"answers": {"flagged": {"type": "noul", "noul": 0.92}},
+			"usage": {"input_tokens": 20, "output_tokens": 1}
+		}`))
+	})
+	sliceAEnableAllExperiments(t, f.srv)
+
+	sharedS1Rule := `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"binding":{"instance":"ts-h2-memo"},"questions":[{"id":"flagged","type":"binary","instructions":"Is this flagged?"}]}}`
+
+	// Enforce policy A: passes when flagged==true (inverted CEL).
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, &store.MessagePolicy{
+		ProjectID:     f.project.ID,
+		Name:          "memo-enforce-a",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeEnforce,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+		ViolationRule: `!judgment_flags.flagged`,
+		SystemOneRule: sharedS1Rule,
+		SystemOneRefs: []string{"ts-h2-memo"},
+		OnUncertain:   store.MessagePolicyOutcomeAdmit,
+		OnFailed:      store.MessagePolicyOutcomeAdmit,
+	}))
+	// Enforce policy B: same System One rule, passes when flagged==true too (so send admits and shadow runs).
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, &store.MessagePolicy{
+		ProjectID:     f.project.ID,
+		Name:          "memo-enforce-b",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeEnforce,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+		ViolationRule: `!judgment_flags.flagged`,
+		SystemOneRule: sharedS1Rule,
+		SystemOneRefs: []string{"ts-h2-memo"},
+		OnUncertain:   store.MessagePolicyOutcomeAdmit,
+		OnFailed:      store.MessagePolicyOutcomeAdmit,
+	}))
+	// Shadow policy C: same System One rule, violates when flagged==true.
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, &store.MessagePolicy{
+		ProjectID:     f.project.ID,
+		Name:          "memo-shadow-c",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeShadow,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+		ViolationRule: `judgment_flags.flagged`,
+		SystemOneRule: sharedS1Rule,
+		SystemOneRefs: []string{"ts-h2-memo"},
+		OnUncertain:   store.MessagePolicyOutcomeAdmit,
+		OnFailed:      store.MessagePolicyOutcomeAdmit,
+	}))
+
+	// Send 1: 2 enforce + 1 shadow = 3 decision rows, 1 provider call, 2 memo hits.
+	rr1 := f.sendOutbound(t, OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Msg:       "Hello memo world",
+	})
+	require.Equal(t, http.StatusOK, rr1.Code, rr1.Body.String())
+
+	rows := mpgWaitForDecisionCount(t, f.s, f.project.ID, 3)
+	assert.Equal(t, int32(1), providerCalls.Load(), "enforce leader + enforce waiter + shadow must share 1 provider call")
+
+	var leaderEvalID string
+	var cacheHits int
+	for _, row := range rows {
+		var proj messagepolicy.EvaluationProjection
+		require.NoError(t, json.Unmarshal(row.Evaluation, &proj))
+		if proj.CacheHit {
+			cacheHits++
+			assert.NotEmpty(t, proj.SourceEvalID, "cache-hit row %s must record source_eval_id", row.PolicyName)
+		} else {
+			leaderEvalID = proj.EvalID
+			assert.Empty(t, proj.SourceEvalID)
+		}
+		if row.PolicyName == "memo-shadow-c" {
+			assert.Equal(t, store.MessagePolicyClassViolation, row.Class, "shadow CEL must still evaluate independently")
+			assert.True(t, proj.CacheHit, "shadow row must reuse frozen enforce snapshot")
+		}
+	}
+	assert.NotEmpty(t, leaderEvalID)
+	assert.Equal(t, 2, cacheHits, "expected 1 enforce waiter hit + 1 shadow hit")
+	for _, row := range rows {
+		var proj messagepolicy.EvaluationProjection
+		require.NoError(t, json.Unmarshal(row.Evaluation, &proj))
+		if proj.CacheHit {
+			assert.Equal(t, leaderEvalID, proj.SourceEvalID)
+		}
+	}
+
+	// Verify OTel scion.message_policy.memo_hits{surface="agent_to_user"} == 2.
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	var memoHitCount int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name == "scion.message_policy.memo_hits" {
+				if sum, ok := m.Data.(metricdata.Sum[int64]); ok {
+					for _, dp := range sum.DataPoints {
+						memoHitCount += dp.Value
+					}
+				}
+			}
+		}
+	}
+	assert.Equal(t, int64(2), memoHitCount, "scion.message_policy.memo_hits must equal 2")
+
+	// Send 2: brand-new send MUST make a new provider call (calls = 2).
+	rr2 := f.sendOutbound(t, OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Msg:       "Hello memo world",
+	})
+	require.Equal(t, http.StatusOK, rr2.Code, rr2.Body.String())
+	_ = mpgWaitForDecisionCount(t, f.s, f.project.ID, 6)
+	assert.Equal(t, int32(2), providerCalls.Load(), "second send must not reuse first send's memo")
 }

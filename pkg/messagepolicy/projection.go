@@ -107,6 +107,7 @@ type EvaluationProjection struct {
 	FallbackUsed    bool                        `json:"fallback_used,omitempty"`
 	FallbackCause   string                      `json:"fallback_cause,omitempty"`
 	CacheHit        bool                        `json:"cache_hit,omitempty"`
+	SourceEvalID    string                      `json:"source_eval_id,omitempty"`
 	RevalidationDue bool                        `json:"revalidation_due,omitempty"`
 	InputFields     []InputFieldProjection      `json:"input_fields,omitempty"`
 	Truncated       bool                        `json:"truncated,omitempty"`
@@ -142,6 +143,7 @@ func ProjectEvaluation(eval *systemone.Evaluation) *EvaluationProjection {
 		FallbackUsed:    eval.FallbackUsed,
 		FallbackCause:   eval.FallbackCause,
 		CacheHit:        eval.CacheHit,
+		SourceEvalID:    eval.SourceEvalID,
 		RevalidationDue: eval.RevalidationDue,
 		ElapsedMs:       elapsedMs,
 	}
