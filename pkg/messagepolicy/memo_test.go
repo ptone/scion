@@ -754,8 +754,16 @@ func TestMemo_SharedDeadlineTimeoutMatchesBaseline(t *testing.T) {
 		memoReasons, memoCalls := runOnce(t, true)
 
 		assert.Equal(t, baselineReasons, memoReasons, "every policy's classification must match nil-memo baseline")
+		onFailedReasons := map[string]string{
+			string(provider.FailTimeout):  messagepolicy.OutcomeAdmit,
+			string(provider.FailCanceled): messagepolicy.OutcomeReject,
+		}
 		for i, r := range memoReasons {
 			assert.Equal(t, messagepolicy.ClassFailed+"/"+string(provider.FailTimeout), r, "policy %d must classify as failed/timeout", i)
+			baseOut := messagepolicy.ResolveOutcome(messagepolicy.ClassFailed, baselineReasons[i][len(messagepolicy.ClassFailed)+1:], messagepolicy.OutcomeReject, messagepolicy.OutcomeReject, onFailedReasons)
+			memoOut := messagepolicy.ResolveOutcome(messagepolicy.ClassFailed, r[len(messagepolicy.ClassFailed)+1:], messagepolicy.OutcomeReject, messagepolicy.OutcomeReject, onFailedReasons)
+			assert.Equal(t, baseOut, memoOut, "policy %d on_failed_reasons outcome must match baseline", i)
+			assert.Equal(t, messagepolicy.OutcomeAdmit, memoOut)
 		}
 		assert.LessOrEqual(t, memoCalls, baselineCalls, "memo calls must not exceed baseline calls")
 		assert.Equal(t, int32(1), memoCalls, "waiters whose remaining deadline < budget must not start a doomed second call")
@@ -813,8 +821,16 @@ func TestMemo_SharedDeadlineTimeoutMatchesBaseline(t *testing.T) {
 		memoReasons, memoCalls := runOnce(t, true)
 
 		assert.Equal(t, baselineReasons, memoReasons, "every policy's classification must match nil-memo baseline on explicit cancel")
+		onFailedReasons := map[string]string{
+			string(provider.FailTimeout):  messagepolicy.OutcomeAdmit,
+			string(provider.FailCanceled): messagepolicy.OutcomeReject,
+		}
 		for i, r := range memoReasons {
 			assert.Equal(t, messagepolicy.ClassFailed+"/"+string(provider.FailCanceled), r, "policy %d must classify as failed/canceled", i)
+			baseOut := messagepolicy.ResolveOutcome(messagepolicy.ClassFailed, baselineReasons[i][len(messagepolicy.ClassFailed)+1:], messagepolicy.OutcomeReject, messagepolicy.OutcomeReject, onFailedReasons)
+			memoOut := messagepolicy.ResolveOutcome(messagepolicy.ClassFailed, r[len(messagepolicy.ClassFailed)+1:], messagepolicy.OutcomeReject, messagepolicy.OutcomeReject, onFailedReasons)
+			assert.Equal(t, baseOut, memoOut, "policy %d on_failed_reasons outcome must match baseline", i)
+			assert.Equal(t, messagepolicy.OutcomeReject, memoOut)
 		}
 		assert.LessOrEqual(t, memoCalls, baselineCalls)
 	})
@@ -969,8 +985,16 @@ func TestMemo_SharedDeadlineTimeoutMatchesBaseline(t *testing.T) {
 		memoReasons, memoLatencies, memoCalls := runOnce(t, true)
 
 		assert.Equal(t, baseReasons, memoReasons, "every policy's classification must match nil-memo baseline under capacity saturation")
+		onFailedReasons := map[string]string{
+			string(provider.FailCapacity): messagepolicy.OutcomeAdmit,
+			string(provider.FailTimeout):  messagepolicy.OutcomeReject,
+		}
 		for i, r := range memoReasons {
 			assert.Equal(t, messagepolicy.ClassFailed+"/"+string(provider.FailCapacity), r, "policy %d must classify as failed/capacity", i)
+			baseOut := messagepolicy.ResolveOutcome(messagepolicy.ClassFailed, baseReasons[i][len(messagepolicy.ClassFailed)+1:], messagepolicy.OutcomeReject, messagepolicy.OutcomeReject, onFailedReasons)
+			memoOut := messagepolicy.ResolveOutcome(messagepolicy.ClassFailed, r[len(messagepolicy.ClassFailed)+1:], messagepolicy.OutcomeReject, messagepolicy.OutcomeReject, onFailedReasons)
+			assert.Equal(t, baseOut, memoOut, "policy %d on_failed_reasons outcome must match baseline", i)
+			assert.Equal(t, messagepolicy.OutcomeAdmit, memoOut)
 		}
 		assert.LessOrEqual(t, memoCalls, baseCalls, "memo calls must not exceed baseline calls")
 		for i, lat := range memoLatencies {
