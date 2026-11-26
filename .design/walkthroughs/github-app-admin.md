@@ -134,7 +134,7 @@ curl -s "$HUB_URL/api/v1/github-app/installations/$INSTALLATION_ID" \
 
 When you first set up the webhook, GitHub sends a `ping` event. Check your Hub logs for:
 ```
-GitHub webhook received event=ping
+Source webhook received source_kind=github event=ping
 ```
 
 ### 4.2 Verify via GitHub Delivery Log
@@ -146,7 +146,7 @@ GitHub webhook received event=ping
 
 1. Go to your GitHub App installation settings on GitHub.
 2. Add a new repository to the installation.
-3. Check Hub logs for: `GitHub webhook received event=installation_repositories`
+3. Check Hub logs for: `Source webhook received source_kind=github event=installation_repositories`
 4. Verify the installation's repo list updated:
    ```bash
    curl -s "$HUB_URL/api/v1/github-app/installations/$INSTALLATION_ID" \

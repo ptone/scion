@@ -38,8 +38,11 @@ func (f SecretFunc) WebhookSecret(ctx context.Context) (string, error) {
 // Delivery holds provider-neutral metadata extracted from a verified incoming
 // webhook delivery.
 type Delivery struct {
-	// ID is the provider's delivery identifier (e.g. X-GitHub-Delivery).
+	// ID is the canonical provider delivery identifier (e.g. lowercased X-GitHub-Delivery).
 	ID string
+	// RawID is the original unmodified delivery identifier from the wire header,
+	// if different from ID (used for receipt logging).
+	RawID string
 	// TargetID is the provider app or target identifier from request headers
 	// (e.g. X-GitHub-Hook-Installation-Target-ID), or "" if the provider has none.
 	TargetID string
@@ -48,6 +51,10 @@ type Delivery struct {
 	TargetType string
 	// Event is the provider's event family name (e.g. "issue_comment", "installation").
 	Event string
+	// Unsupported is true when the verified delivery's event family is outside
+	// the provider's supported content-event table and should be acknowledged
+	// with 200 ignored without consuming rate-limit budget.
+	Unsupported bool
 	// Headers holds allow-listed delivery headers.
 	Headers map[string]string
 	// ReceivedAt records when the hub received the delivery.
@@ -135,10 +142,17 @@ type Event struct {
 	SourceID string
 	// DeliveryID is the provider delivery identifier.
 	DeliveryID string
-	// DedupKey is the per-target deduplication key (e.g. "<delivery>/<project_id>").
+	// DedupKey is the delivery-scoped deduplication key emitted by the Normalizer
+	// (e.g. lowercased delivery ID for GitHub, or a composite event hash for Jira).
+	// EventSink composes the per-target key "<DedupKey>/<ProjectID>" during fan-out.
 	DedupKey string
 	// Type is the canonical trigger event type (e.g. "github.issue_comment.created").
 	Type string
+	// Action is the provider event action (e.g. "created", "opened"), if any.
+	Action string
+	// Resource is the external resource identifier (e.g. "owner/repo" for GitHub,
+	// project key for Jira).
+	Resource string
 	// Subject is the canonical subject key (e.g. "github:owner/repo#42").
 	Subject string
 	// OccurredAt is when the event occurred on the provider.
@@ -149,6 +163,8 @@ type Event struct {
 	Attributes map[string]string
 	// Lists holds normalised list-valued attributes.
 	Lists map[string][]string
+	// Headers holds allow-listed delivery headers propagated from Delivery.
+	Headers map[string]string
 	// Payload holds the bounded projected JSON payload.
 	Payload []byte
 	// PayloadBytes is the byte length of Payload.
@@ -162,6 +178,14 @@ type Event struct {
 // Normalizer converts a verified provider delivery into a provider-neutral Event.
 type Normalizer interface {
 	Normalize(ctx context.Context, d Delivery, payload any, t Target) (Event, error)
+}
+
+// FinalizingNormalizer is an optional interface a Normalizer may implement
+// when normalization can be refined after installation/actor resolution
+// (for example, re-evaluating mentions once a lazily fetched app identity
+// cache is warm).
+type FinalizingNormalizer interface {
+	Finalize(ctx context.Context, d Delivery, payload any, ev Event) (Event, error)
 }
 
 // Enricher is the drainer-side source enrichment hook consulted once per event

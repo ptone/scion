@@ -31,23 +31,30 @@ import (
 // GitHubSourceWireVerifier returns GitHub's source.WireVerifier backed by the
 // Server's live configured AppID and clock.
 func (s *Server) GitHubSourceWireVerifier() source.WireVerifier {
-	return &triggithub.WireVerifier{
+	var v source.WireVerifier = &triggithub.WireVerifier{
 		ExpectedAppIDFn: s.githubAppConfiguredID,
 		Now:             s.githubWebhookIngress.now,
 	}
+	if wrap := s.githubWebhookIngress.getWrapWireVerifier(); wrap != nil {
+		v = wrap(v)
+	}
+	return v
 }
 
 // GitHubSourceInstallationResolver returns GitHub's source.InstallationResolver
 // backed by Server's installation store lookup, candidate/primary routing, and
 // installation/installation_repositories lifecycle handlers.
 func (s *Server) GitHubSourceInstallationResolver() source.InstallationResolver {
-	return &triggithub.InstallationResolver{
+	var r source.InstallationResolver = &triggithub.InstallationResolver{
 		LookupInstallation: func(ctx context.Context, installationID int64) (source.Installation, error) {
 			if s.store == nil {
-				return source.Installation{}, errors.New("trigger store is not available")
+				return source.Installation{}, fmt.Errorf("%w: trigger store is not available", source.ErrUnavailable)
 			}
 			inst, err := s.store.GetGitHubInstallation(ctx, installationID)
 			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return source.Installation{}, fmt.Errorf("%w: %w", source.ErrInstallationNotFound, err)
+				}
 				return source.Installation{}, err
 			}
 			var routing map[string]string
@@ -68,7 +75,7 @@ func (s *Server) GitHubSourceInstallationResolver() source.InstallationResolver 
 		},
 		ResolveTargets: func(ctx context.Context, inst source.Installation, repoFullName string) ([]source.Target, error) {
 			if s.store == nil {
-				return nil, errors.New("trigger store is not available")
+				return nil, fmt.Errorf("%w: trigger store is not available", source.ErrUnavailable)
 			}
 			instID, err := strconv.ParseInt(strings.TrimSpace(inst.ID), 10, 64)
 			if err != nil || instID <= 0 {
@@ -86,13 +93,21 @@ func (s *Server) GitHubSourceInstallationResolver() source.InstallationResolver 
 				routing[repo] = store.GitHubTriggerRoute{PrimaryProjectID: primaryID}
 			}
 			selected, bypassed, routingStatus := ApplyPrimaryRouting(candidates, routing, repoFullName)
+			sourceRoutingStatus := source.RoutingStatusNone
+			switch routingStatus {
+			case GitHubTriggerRoutingStatusOK:
+				sourceRoutingStatus = source.RoutingStatusOK
+			case GitHubTriggerRoutingStatusStalePrimary:
+				sourceRoutingStatus = source.RoutingStatusStalePrimary
+				s.githubWebhookIngress.maybeWarnStalePrimary(instID, repoFullName, s.githubWebhookIngress.now().UTC())
+			}
 			targets := make([]source.Target, len(selected))
 			for i := range selected {
 				targets[i] = source.Target{
 					ProjectID:          selected[i].ID,
 					InstallationID:     inst.ID,
 					Resource:           repoFullName,
-					RoutingStatus:      routingStatus,
+					RoutingStatus:      sourceRoutingStatus,
 					BypassedProjectIDs: append([]string(nil), bypassed...),
 				}
 			}
@@ -109,13 +124,17 @@ func (s *Server) GitHubSourceInstallationResolver() source.InstallationResolver 
 			}
 		},
 	}
+	if wrap := s.githubWebhookIngress.getWrapResolver(); wrap != nil {
+		r = wrap(r)
+	}
+	return r
 }
 
 // GitHubSourceNormalizer returns GitHub's source.Normalizer wired to Server's
 // in-memory App mention identity cache (pure, no DB or network I/O, matching
 // webhook ingress step 4).
 func (s *Server) GitHubSourceNormalizer() source.Normalizer {
-	return &triggithub.EventNormalizer{
+	var n source.Normalizer = &triggithub.EventNormalizer{
 		OptionsFn: func(_ context.Context, d source.Delivery) triggithub.Options {
 			slug, aliases, _ := s.peekGitHubAppMentionIdentities()
 			return triggithub.Options{
@@ -124,17 +143,37 @@ func (s *Server) GitHubSourceNormalizer() source.Normalizer {
 				ReceivedAt:     d.ReceivedAt,
 			}
 		},
+		FinalizeFn: func(ctx context.Context, _ source.Delivery) (string, []string, bool) {
+			slug, aliases, ok := s.GitHubAppMentionIdentities(ctx)
+			if !ok || slug == "" {
+				return "", nil, false
+			}
+			return slug, aliases, true
+		},
 	}
+	if wrap := s.githubWebhookIngress.getWrapNormalizer(); wrap != nil {
+		n = wrap(n)
+	}
+	return n
 }
 
 // GitHubSourceActorIdentity returns GitHub's source.ActorIdentity backed by
 // Server's App bot login and configured AppID.
 func (s *Server) GitHubSourceActorIdentity() source.ActorIdentity {
-	return &triggithub.AppActorIdentity{
+	var a source.ActorIdentity = &triggithub.AppActorIdentity{
 		Resolve: func(ctx context.Context) (string, int64) {
-			return s.GitHubAppBotLogin(ctx), s.githubAppConfiguredID()
+			botLogin := s.GitHubAppBotLogin(ctx)
+			appID := s.githubAppConfiguredID()
+			if botLogin == "" {
+				s.githubWebhookIngress.maybeWarnUnknownAppIdentity(appID, s.githubWebhookIngress.now().UTC())
+			}
+			return botLogin, appID
 		},
 	}
+	if wrap := s.githubWebhookIngress.getWrapActor(); wrap != nil {
+		a = wrap(a)
+	}
+	return a
 }
 
 // GitHubSourceIdentityMinter returns GitHub's source.IdentityMinter backed by
