@@ -69,6 +69,7 @@ type memoEntry struct {
 type memoFlight struct {
 	done      chan struct{}
 	published bool
+	reason    string
 	entry     *memoEntry
 }
 
@@ -312,10 +313,10 @@ func (m *JudgmentMemo) revalidateBinding(
 	return true
 }
 
-// effectiveMemoBudget computes the runtime's effective own-deadline budget for
-// a compiled rule and MaxEvalTime ceiling, matching runtime.effectiveOwnDuration.
+// effectiveMemoBudget computes an upper bound on runtime.effectiveOwnDuration
+// for a compiled rule and MaxEvalTime ceiling.
 func effectiveMemoBudget(ruleTimeout, maxEvalTime time.Duration) time.Duration {
-	d := 2 * time.Second // matches runtime.DefaultRuleTimeout
+	d := systemone.DefaultRuleTimeout
 	if ruleTimeout > 0 {
 		d = ruleTimeout
 	}
@@ -342,12 +343,12 @@ func classifyWaiterContext(err error, ownDeadline time.Time) Classification {
 
 // waitForOwnDeadlineOrCancel waits until either ownDeadline elapses (returning
 // timeout) or ctx is done (classified via classifyWaiterContext). Used when a
-// leader did not publish and the waiter's remaining ctx deadline is shorter
-// than the runtime's effective budget so taking leadership would convert a
-// runtime timeout into caller cancellation.
+// leader timed out and the waiter's remaining ctx deadline is shorter than the
+// runtime's effective budget so taking leadership would convert a runtime
+// timeout into caller cancellation. Caller guarantees ctx != nil.
 func waitForOwnDeadlineOrCancel(ctx context.Context, ownDeadline time.Time) Classification {
-	if ctx != nil && ctx.Err() != nil {
-		return classifyWaiterContext(ctx.Err(), ownDeadline)
+	if err := ctx.Err(); err != nil {
+		return classifyWaiterContext(err, ownDeadline)
 	}
 	rem := time.Until(ownDeadline)
 	if rem <= 0 {
@@ -355,10 +356,6 @@ func waitForOwnDeadlineOrCancel(ctx context.Context, ownDeadline time.Time) Clas
 	}
 	timer := time.NewTimer(rem)
 	defer timer.Stop()
-	if ctx == nil {
-		<-timer.C
-		return ClassifyError(&ruleengine.FailedError{Reason: string(provider.FailTimeout), Cause: context.DeadlineExceeded})
-	}
 	select {
 	case <-timer.C:
 		return ClassifyError(&ruleengine.FailedError{Reason: string(provider.FailTimeout), Cause: context.DeadlineExceeded})
@@ -447,11 +444,13 @@ func (e *Evaluator) evaluateSystemOneWithMemo(
 				}
 				return e.evaluateSystemOneUncached(ctx, rawRule, req, cfg)
 			}
-			// Leader did not publish (e.g., timeout, canceled, capacity, 0 attempts).
-			// Take leadership only if our own ctx deadline still leaves at least the
-			// runtime's effective budget for this key; otherwise wait for ownDeadline
-			// or ctx.Done() and classify identically to the uncached path.
-			if ctx != nil {
+			// Leader did not publish. Decline leadership ONLY when the leader
+			// failed with a runtime timeout and our remaining ctx deadline is
+			// shorter than the effective budget (so a fresh attempt would turn
+			// timeout into caller cancellation). For all other unpublishable
+			// reasons (capacity, budget_exhausted, zero-attempt, caller cancel),
+			// continue and re-lead so every policy keeps baseline semantics.
+			if flight.reason == string(provider.FailTimeout) && ctx != nil {
 				if dl, hasDL := ctx.Deadline(); hasDL && time.Until(dl) < requiredBudget {
 					return nil, waitForOwnDeadlineOrCancel(ctx, ownDeadline)
 				}
@@ -470,6 +469,7 @@ func (e *Evaluator) evaluateSystemOneWithMemo(
 		if memo.inflight[key] == flight {
 			delete(memo.inflight, key)
 		}
+		flight.reason = cls.Reason
 		if isPublishableResult(eval, cls) {
 			ent := &memoEntry{
 				eval:    cloneEvaluation(eval),

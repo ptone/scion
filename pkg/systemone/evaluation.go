@@ -24,6 +24,9 @@ import (
 // DialectName is the ruleengine dialect identifier ("system_one").
 const DialectName = runtime.DialectName
 
+// DefaultRuleTimeout is the authoring default rule timeout when omitted.
+const DefaultRuleTimeout = runtime.DefaultRuleTimeout
+
 // Class aliases runtime.Class ("success" | "uncertain" | "failed").
 type Class = runtime.Class
 

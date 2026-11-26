@@ -709,7 +709,7 @@ func TestMemo_TimeoutNotPublished(t *testing.T) {
 func TestMemo_SharedDeadlineTimeoutMatchesBaseline(t *testing.T) {
 	t.Run("shared_deadline_timeout", func(t *testing.T) {
 		const numPolicies = 4
-		const budget = 300 * time.Millisecond
+		const budget = 1 * time.Second
 
 		runOnce := func(t *testing.T, useMemo bool) ([]string, int32) {
 			t.Helper()
@@ -870,11 +870,9 @@ func TestMemo_SharedDeadlineTimeoutMatchesBaseline(t *testing.T) {
 			}()
 			<-leaderEntered
 
-			waiterDone := make(chan struct{})
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				defer close(waiterDone)
 				_, cls := h.ev.EvaluateSystemOne(waiterCtx, memoRuleBodyOnly, req, opts...)
 				waiterRes = cls.Class + "/" + cls.Reason
 			}()
@@ -894,6 +892,117 @@ func TestMemo_SharedDeadlineTimeoutMatchesBaseline(t *testing.T) {
 		assert.Equal(t, messagepolicy.ClassPass+"/", memoWaiter)
 		assert.LessOrEqual(t, memoCalls, baseCalls)
 		assert.Equal(t, int32(2), memoCalls)
+	})
+
+	// R1' regression: saturated MaxInFlight where AdmissionWait (40ms) > margin (30ms
+	// at 600ms budget). Waiters MUST re-lead and classify as capacity (matching the
+	// nil-memo baseline) rather than sleeping to their deadline and reporting timeout.
+	t.Run("saturated_capacity_matches_baseline", func(t *testing.T) {
+		const numPolicies = 3
+		const budget = 600 * time.Millisecond
+
+		runOnce := func(t *testing.T, useMemo bool) ([]string, []time.Duration, int32) {
+			t.Helper()
+			allow := newMutableAllowlist("proj-1", "inst-a")
+			inst := defaultMemoInstance("inst-a", 1)
+			inst.Limits.MaxInFlight = 1
+
+			holderIn := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			h := newMemoTestHarness(t, []systemoneruntime.Instance{inst}, allow, func(ctx context.Context, _ provider.Transport, iv provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+				once.Do(func() { close(holderIn) })
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+				return okBinaryResult(iv.Model), nil
+			})
+			mk := func(v string) systemone.Request {
+				return systemone.Request{
+					ProjectID: "proj-1",
+					RuleID:    "pol",
+					Input:     systemone.Input{Fields: []provider.InputField{{Name: messagepolicy.FieldMessageBody, Kind: spec.FieldKindText, Trust: spec.TrustUntrusted, Value: v}}},
+				}
+			}
+
+			holderDone := make(chan struct{})
+			go func() {
+				defer close(holderDone)
+				_, _ = h.ev.EvaluateSystemOne(context.Background(), memoRuleBodyOnly, mk("holder"), messagepolicy.WithMaxEvalTime(3*time.Second))
+			}()
+			<-holderIn
+			defer func() {
+				close(release)
+				<-holderDone
+			}()
+
+			var memo *messagepolicy.JudgmentMemo
+			if useMemo {
+				memo = messagepolicy.NewJudgmentMemo("send-r1p-cap", h.resolver())
+			}
+			soCtx, soCancel := context.WithTimeout(context.Background(), budget)
+			defer soCancel()
+
+			reasons := make([]string, numPolicies)
+			latencies := make([]time.Duration, numPolicies)
+			var wg sync.WaitGroup
+			for i := 0; i < numPolicies; i++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					opts := []messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(budget)}
+					if memo != nil {
+						opts = append(opts, messagepolicy.WithJudgmentMemo(memo), messagepolicy.WithMemoMode(messagepolicy.ModeEnforce))
+					}
+					s := time.Now()
+					_, cls := h.ev.EvaluateSystemOne(soCtx, memoRuleBodyOnly, mk("same"), opts...)
+					reasons[idx] = cls.Class + "/" + cls.Reason
+					latencies[idx] = time.Since(s)
+				}(i)
+			}
+			wg.Wait()
+			return reasons, latencies, h.calls.Load()
+		}
+
+		baseReasons, _, baseCalls := runOnce(t, false)
+		memoReasons, memoLatencies, memoCalls := runOnce(t, true)
+
+		assert.Equal(t, baseReasons, memoReasons, "every policy's classification must match nil-memo baseline under capacity saturation")
+		for i, r := range memoReasons {
+			assert.Equal(t, messagepolicy.ClassFailed+"/"+string(provider.FailCapacity), r, "policy %d must classify as failed/capacity", i)
+		}
+		assert.LessOrEqual(t, memoCalls, baseCalls, "memo calls must not exceed baseline calls")
+		for i, lat := range memoLatencies {
+			assert.Less(t, lat, budget/2, "waiter %d latency %v must stay well below budget %v (must not sleep to deadline)", i, lat, budget)
+		}
+	})
+
+	// M6: pre-expired WithDeadline ctx must match nil-memo baseline (canceled, not timeout).
+	t.Run("pre_expired_deadline_matches_baseline", func(t *testing.T) {
+		allow := newMutableAllowlist("proj-1", "inst-a")
+		h := newMemoTestHarness(t, []systemoneruntime.Instance{defaultMemoInstance("inst-a", 1)}, allow, nil)
+		req := systemone.Request{
+			ProjectID: "proj-1",
+			RuleID:    "pol",
+			Input:     systemone.Input{Fields: []provider.InputField{{Name: messagepolicy.FieldMessageBody, Kind: spec.FieldKindText, Trust: spec.TrustUntrusted, Value: "expired"}}},
+		}
+
+		expiredCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		defer cancel()
+
+		_, baseCls := h.ev.EvaluateSystemOne(expiredCtx, memoRuleBodyOnly, req, messagepolicy.WithMaxEvalTime(time.Second))
+		memo := messagepolicy.NewJudgmentMemo("send-m6", h.resolver())
+		_, memoCls := h.ev.EvaluateSystemOne(expiredCtx, memoRuleBodyOnly, req,
+			messagepolicy.WithMaxEvalTime(time.Second),
+			messagepolicy.WithJudgmentMemo(memo),
+			messagepolicy.WithMemoMode(messagepolicy.ModeEnforce),
+		)
+
+		assert.Equal(t, baseCls.Class, memoCls.Class)
+		assert.Equal(t, baseCls.Reason, memoCls.Reason, "pre-expired deadline ctx must match uncached Reason (canceled)")
+		assert.Equal(t, string(provider.FailCanceled), memoCls.Reason)
+		assert.Zero(t, h.calls.Load())
 	})
 }
 
