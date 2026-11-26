@@ -16,12 +16,10 @@ package hub
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"log/slog"
 	"maps"
-	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,7 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
-	githubtrigger "github.com/GoogleCloudPlatform/scion/pkg/hub/trigger/github"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger/source"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -149,6 +147,37 @@ type githubWebhookIngressState struct {
 	selfIgnoredCount    atomic.Int64
 	targetMismatchCount atomic.Int64
 	rateLimitedCount    atomic.Int64
+
+	// Optional test-only wrappers injected at the GitHubSource*() accessor
+	// boundary to prove production ingress routes through the seams.
+	wrapWireVerifier func(source.WireVerifier) source.WireVerifier
+	wrapResolver     func(source.InstallationResolver) source.InstallationResolver
+	wrapNormalizer   func(source.Normalizer) source.Normalizer
+	wrapActor        func(source.ActorIdentity) source.ActorIdentity
+}
+
+func (st *githubWebhookIngressState) getWrapWireVerifier() func(source.WireVerifier) source.WireVerifier {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.wrapWireVerifier
+}
+
+func (st *githubWebhookIngressState) getWrapResolver() func(source.InstallationResolver) source.InstallationResolver {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.wrapResolver
+}
+
+func (st *githubWebhookIngressState) getWrapNormalizer() func(source.Normalizer) source.Normalizer {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.wrapNormalizer
+}
+
+func (st *githubWebhookIngressState) getWrapActor() func(source.ActorIdentity) source.ActorIdentity {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.wrapActor
 }
 
 func (st *githubWebhookIngressState) now() time.Time {
@@ -305,11 +334,14 @@ func (st *githubWebhookIngressState) maybeWarnUnknownAppIdentity(appID int64, no
 	)
 }
 
-func (st *githubWebhookIngressState) recordReceiptAudit(ctx context.Context, rec githubReceiptAuditRecord) {
+func (st *githubWebhookIngressState) recordReceiptAuditWithKind(ctx context.Context, sourceKind string, rec githubReceiptAuditRecord) {
+	if sourceKind == "" {
+		sourceKind = store.TriggerSourceKindGitHub
+	}
 	l := st.auditLog()
 	attrs := []slog.Attr{
 		slog.String("event_type", trigger.AuditEventReceived),
-		slog.String("source_kind", store.TriggerSourceKindGitHub),
+		slog.String("source_kind", sourceKind),
 		slog.String("delivery", rec.Delivery),
 		slog.String("event", rec.Event),
 		slog.Int("payload_bytes", rec.PayloadBytes),
@@ -345,254 +377,73 @@ func (st *githubWebhookIngressState) recordReceiptAudit(ctx context.Context, rec
 	l.LogAttrs(ctx, slog.LevelInfo, trigger.AuditEventReceived, attrs...)
 }
 
-// handleGitHubContentWebhook executes Stage 3 design §4.1 steps 1–10 for
-// signature-verified GitHub App content-event deliveries after handleGitHubWebhook
-// has checked githubTriggersEnabled() in step 0.
-func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Request, eventType, deliveryID string, body []byte) {
-	ctx := r.Context()
-	now := s.githubWebhookIngress.now().UTC()
+// sourceEventSink implements source.EventSink for app-shaped webhook sources:
+// per-target transaction (quota lock, dedup by key and body SHA-256, pending
+// cap, trigger_events insert + durablequeue Enqueue) and post-commit wake.
+type sourceEventSink struct {
+	srv  *Server
+	kind string
+}
 
-	// Step 1: X-GitHub-Hook-Installation-Target-Type == "integration" and
-	// X-GitHub-Hook-Installation-Target-ID == <configured AppID>.
-	s.mu.RLock()
-	appID := s.config.GitHubAppConfig.AppID
-	s.mu.RUnlock()
+var _ source.EventSink = (*sourceEventSink)(nil)
 
-	if !githubtrigger.WebhookTargetMatches(r.Header, appID) {
-		s.githubWebhookIngress.recordTargetMismatchAudit(ctx, now)
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "wrong target", nil)
-		return
+func (sink *sourceEventSink) EnqueueForTargets(ctx context.Context, ev source.Event, bodySHA256 string, targets []source.Target) ([]source.TargetResult, error) {
+	if sink == nil || sink.srv == nil || sink.srv.store == nil {
+		return nil, source.ErrUnavailable
 	}
-
-	// Step 2: event family in Stage 3 table else 200 ignored; X-GitHub-Delivery
-	// present, <= 64 bytes, and GUID-shaped (8-4-4-4-12 hex).
-	if len(r.Header.Values("X-GitHub-Event")) != 1 {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid event header", nil)
-		return
-	}
-	if !githubtrigger.IsSupportedEvent(eventType) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": eventType})
-		return
-	}
-	if len(r.Header.Values("X-GitHub-Delivery")) != 1 || !githubtrigger.IsDeliveryGUID(deliveryID) {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid delivery id", nil)
-		return
-	}
-	deliveryID = strings.ToLower(deliveryID)
-
-	// Step 3: hub-wide verified bucket for GitHub (100/s burst 500, no IP keying).
-	if !s.githubWebhookIngress.allowVerified(now) {
-		s.githubWebhookIngress.rateLimitedCount.Add(1)
-		w.Header().Set("Retry-After", "5")
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "rate limit exceeded", nil)
-		return
-	}
-
-	// Compute the signed raw-body SHA-256 before normalisation (Stage 3 rev 1.8
-	// §4.3/§4.4): deduplicating on (project_id, source_kind, body_sha256) blocks
-	// fresh-GUID replays of a captured signed body while leaving GitHub's manual
-	// Redeliver (identical bytes) classified as duplicate.
-	rawBodySum := sha256.Sum256(body)
-	rawBodySHA256 := hex.EncodeToString(rawBodySum[:])
-
-	// Step 4: normalise once from the raw JSON payload (pure, no DB or network
-	// I/O). Envelope errors (malformed JSON/UTF-8/NUL, missing or invalid
-	// action, installation.id, repository.full_name, sender, or
-	// performed_via_github_app) leave normRes.InstallationID == 0 and fail with
-	// 400 immediately; family/subject/ceiling errors populate normRes's routing
-	// fields and hold normErr until step 8 to preserve the §4.1 refusal order.
-	peekSlug, peekAliases, hadSlug := s.peekGitHubAppMentionIdentities()
-	normRes, normErr := githubtrigger.Normalize(eventType, deliveryID, body, githubtrigger.Options{
-		AppSlug:        peekSlug,
-		MentionAliases: peekAliases,
-		ReceivedAt:     now,
-	})
-	if normRes.InstallationID <= 0 {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid payload", nil)
-		return
-	}
-
-	if s.store == nil {
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "trigger store is not available", nil)
-		return
-	}
-
-	// Step 5: installation lookup — must exist and have status == active.
-	inst, err := s.store.GetGitHubInstallation(ctx, normRes.InstallationID)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		slog.Error("GitHub trigger ingress installation lookup failed",
-			"installation_id", normRes.InstallationID,
-			"delivery_id", deliveryID,
-			"error", err,
-		)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "internal server error", nil)
-		return
-	}
-	if errors.Is(err, store.ErrNotFound) || inst == nil || inst.Status != store.GitHubInstallationStatusActive {
-		s.githubWebhookIngress.recordReceiptAudit(ctx, githubReceiptAuditRecord{
-			Delivery:       deliveryID,
-			Event:          eventType,
-			Action:         normRes.Action,
-			InstallationID: normRes.InstallationID,
-			Repo:           normRes.RepoFullName,
-			PayloadBytes:   len(body),
-			Result:         GitHubWebhookStatusUnknownInstallation,
-		})
-		writeJSON(w, http.StatusAccepted, GitHubWebhookAcceptedResponse{
-			Status:   GitHubWebhookStatusUnknownInstallation,
-			Delivery: deliveryID,
-		})
-		return
-	}
-
-	// Step 6: own-App guard (§5.7) — drop deliveries when either sender matches
-	// <slug>[bot] (type Bot) OR, on an object-creating action, the created
-	// object's performed_via_github_app.id equals the configured AppID.
-	botLogin := s.GitHubAppBotLogin(ctx)
-	if botLogin == "" {
-		s.githubWebhookIngress.maybeWarnUnknownAppIdentity(appID, now)
-	}
-	if normRes.IsOwnAppActor(botLogin, appID) {
-		s.githubWebhookIngress.selfIgnoredCount.Add(1)
-		writeJSON(w, http.StatusAccepted, GitHubWebhookAcceptedResponse{
-			Status:   GitHubWebhookStatusIgnored,
-			Reason:   "self",
-			Delivery: deliveryID,
-		})
-		return
-	}
-
-	// Step 7: fan-out (§4.2 steps 1–4).
-	candidates, err := s.listGitHubInstallationCandidateProjects(ctx, inst.InstallationID, normRes.RepoFullName)
-	if err != nil {
-		slog.Error("GitHub trigger ingress project fan-out lookup failed",
-			"installation_id", inst.InstallationID,
-			"delivery_id", deliveryID,
-			"error", err,
-		)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "internal server error", nil)
-		return
-	}
-	if len(candidates) == 0 {
-		s.githubWebhookIngress.recordReceiptAudit(ctx, githubReceiptAuditRecord{
-			Delivery:       deliveryID,
-			Event:          eventType,
-			Action:         normRes.Action,
-			InstallationID: inst.InstallationID,
-			Repo:           normRes.RepoFullName,
-			PayloadBytes:   len(body),
-			Result:         GitHubWebhookStatusNoProject,
-		})
-		writeJSON(w, http.StatusAccepted, GitHubWebhookAcceptedResponse{
-			Status:   GitHubWebhookStatusNoProject,
-			Delivery: deliveryID,
-		})
-		return
-	}
-
-	selected, bypassed, routingStatus := ApplyPrimaryRouting(candidates, inst.TriggerRouting, normRes.RepoFullName)
-	auditRouting := ""
-	switch routingStatus {
-	case GitHubTriggerRoutingStatusOK:
-		if len(bypassed) > 0 {
-			auditRouting = GitHubWebhookRoutingRoutedToPrimary
-		}
-	case GitHubTriggerRoutingStatusStalePrimary:
-		auditRouting = GitHubWebhookRoutingStalePrimary
-		s.githubWebhookIngress.maybeWarnStalePrimary(inst.InstallationID, normRes.RepoFullName, now)
-	}
-
-	selectedIDs := make([]string, len(selected))
-	for i := range selected {
-		selectedIDs[i] = selected[i].ID
-	}
-
-	// Step 8: finish command mention detection if step 6 lazily fetched GET /app
-	// on a cold slug cache, then handle any held normaliser error (§5, §10.2).
-	if !hadSlug {
-		appSlug, mentionAliases, _ := s.GitHubAppMentionIdentities(ctx)
-		if normErr == nil && appSlug != "" {
-			normErr = normRes.ApplyAppSlug(appSlug, mentionAliases)
-		}
-	}
-	if normErr != nil {
-		if errors.Is(normErr, githubtrigger.ErrAttributesCeilingExceeded) {
-			skipped := make([]GitHubWebhookSkippedProject, len(selected))
-			for i := range selected {
-				skipped[i] = GitHubWebhookSkippedProject{
-					ProjectID: selected[i].ID,
-					Reason:    GitHubWebhookSkipReasonAttributesCeiling,
-				}
-			}
-			s.githubWebhookIngress.recordReceiptAudit(ctx, githubReceiptAuditRecord{
-				Delivery:           deliveryID,
-				Event:              eventType,
-				Action:             normRes.Action,
-				InstallationID:     inst.InstallationID,
-				Repo:               normRes.RepoFullName,
-				PayloadBytes:       len(body),
-				Result:             GitHubWebhookStatusSkipped,
-				Routing:            auditRouting,
-				BypassedProjectIDs: bypassed,
-				ProjectIDs:         selectedIDs,
-				SkippedProjects:    skipped,
-			})
-			writeJSON(w, http.StatusAccepted, GitHubWebhookAcceptedResponse{
-				Status:          GitHubWebhookStatusSkipped,
-				Delivery:        deliveryID,
-				SkippedProjects: skipped,
-			})
-			return
-		}
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid payload", nil)
-		return
-	}
-
-	queue := s.TriggerEventQueue()
+	queue := sink.srv.TriggerEventQueue()
 	if queue == nil {
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "trigger event queue is not available", nil)
-		return
+		return nil, source.ErrUnavailable
 	}
 
-	// Step 9: per-project tx (dedup before pending-cap check, pending cap < 5000,
-	// insert trigger_events + durablequeue Enqueue) and Wake after commit.
-	storedHeaders := sanitizeGitHubEventHeaders(githubtrigger.FilterHeaders(r.Header))
-	projectedPayload := string(normRes.Payload)
+	sourceKind := sink.kind
+	if sourceKind == "" {
+		sourceKind = ev.SourceKind
+	}
+	storedHeaders := sanitizeGitHubEventHeaders(ev.Headers)
+	projectedPayload := string(ev.Payload)
+	receivedAt := ev.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = sink.srv.githubWebhookIngress.now().UTC()
+	}
 
 	var (
-		events    []GitHubWebhookProjectEvent
-		skipped   []GitHubWebhookSkippedProject
+		results   []source.TargetResult
 		anyQueued bool
 	)
 
-	for i := range selected {
-		proj := &selected[i]
-		ev := store.TriggerEvent{
+	for i := range targets {
+		tgt := &targets[i]
+		dedupKey := ev.DedupKey
+		if ev.DeliveryID != "" && tgt.ProjectID != "" {
+			dedupKey = ev.DeliveryID + "/" + tgt.ProjectID
+		}
+		storeEv := store.TriggerEvent{
 			ID:           uuid.NewString(),
-			ProjectID:    proj.ID,
-			SourceKind:   store.TriggerSourceKindGitHub,
-			SourceID:     normRes.SourceID,
-			Type:         normRes.Type,
-			Subject:      normRes.Subject,
-			DedupKey:     normRes.DedupKey(proj.ID),
-			BodySHA256:   rawBodySHA256,
-			OccurredAt:   normRes.OccurredAt,
-			ReceivedAt:   now,
-			Attributes:   maps.Clone(normRes.Attributes),
-			Lists:        copyTriggerStringListMap(normRes.Lists),
+			ProjectID:    tgt.ProjectID,
+			SourceKind:   sourceKind,
+			SourceID:     ev.SourceID,
+			Type:         ev.Type,
+			Subject:      ev.Subject,
+			DedupKey:     dedupKey,
+			BodySHA256:   bodySHA256,
+			OccurredAt:   ev.OccurredAt,
+			ReceivedAt:   receivedAt,
+			Attributes:   maps.Clone(ev.Attributes),
+			Lists:        copyTriggerStringListMap(ev.Lists),
 			Headers:      maps.Clone(storedHeaders),
 			Payload:      projectedPayload,
-			PayloadBytes: normRes.PayloadBytes,
+			PayloadBytes: ev.PayloadBytes,
 			Status:       store.TriggerEventStatusPending,
-			CreatedAt:    now,
+			CreatedAt:    receivedAt,
 		}
 
 		var dupEventID string
-		txErr := s.store.WithTx(ctx, func(tx store.Store) error {
-			if lErr := tx.LockTriggerQuota(ctx, proj.ID); lErr != nil {
+		txErr := sink.srv.store.WithTx(ctx, func(tx store.Store) error {
+			if lErr := tx.LockTriggerQuota(ctx, tgt.ProjectID); lErr != nil {
 				return lErr
 			}
-			existing, gErr := tx.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindGitHub, normRes.SourceID, ev.DedupKey)
+			existing, gErr := tx.GetTriggerEventByDedupKey(ctx, sourceKind, ev.SourceID, storeEv.DedupKey)
 			if gErr == nil && existing != nil {
 				dupEventID = existing.ID
 				return errGitHubDuplicateDelivery
@@ -601,7 +452,7 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 				return gErr
 			}
 
-			existingByBody, bErr := tx.GetTriggerEventByBodySHA256(ctx, proj.ID, store.TriggerSourceKindGitHub, ev.BodySHA256)
+			existingByBody, bErr := tx.GetTriggerEventByBodySHA256(ctx, tgt.ProjectID, sourceKind, storeEv.BodySHA256)
 			if bErr == nil && existingByBody != nil {
 				dupEventID = existingByBody.ID
 				return errGitHubDuplicateDelivery
@@ -614,7 +465,7 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 			if !ok {
 				return errGitHubMissingPendingCounterTx
 			}
-			pending, cErr := txCounter.CountDurableQueuePending(ctx, trigger.EventQueueKind, proj.ID)
+			pending, cErr := txCounter.CountDurableQueuePending(ctx, trigger.EventQueueKind, tgt.ProjectID)
 			if cErr != nil {
 				return cErr
 			}
@@ -622,23 +473,24 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 				return errGitHubProjectQueueFull
 			}
 
-			_, enqErr := trigger.EnqueueEvent(ctx, tx, tx, queue, &ev)
+			_, enqErr := trigger.EnqueueEvent(ctx, tx, tx, queue, &storeEv)
 			return enqErr
 		})
 
 		if txErr == nil {
 			anyQueued = true
-			events = append(events, GitHubWebhookProjectEvent{
-				ProjectID: proj.ID,
-				EventID:   ev.ID,
-				Status:    GitHubWebhookStatusQueued,
+			results = append(results, source.TargetResult{
+				ProjectID: tgt.ProjectID,
+				EventID:   storeEv.ID,
+				Status:    source.TargetStatusQueued,
 			})
 			continue
 		}
 
 		if errors.Is(txErr, errGitHubProjectQueueFull) {
-			skipped = append(skipped, GitHubWebhookSkippedProject{
-				ProjectID: proj.ID,
+			results = append(results, source.TargetResult{
+				ProjectID: tgt.ProjectID,
+				Status:    source.TargetStatusSkipped,
 				Reason:    GitHubWebhookSkipReasonQueueFull,
 			})
 			continue
@@ -646,13 +498,14 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 
 		if errors.Is(txErr, store.ErrInvalidInput) {
 			slog.Warn("Skipping GitHub trigger event rejected by store validation",
-				"project_id", proj.ID,
-				"installation_id", inst.InstallationID,
-				"delivery_id", deliveryID,
+				"project_id", tgt.ProjectID,
+				"installation_id", ev.SourceID,
+				"delivery_id", ev.DeliveryID,
 				"reason", GitHubWebhookSkipReasonInvalidEvent,
 			)
-			skipped = append(skipped, GitHubWebhookSkippedProject{
-				ProjectID: proj.ID,
+			results = append(results, source.TargetResult{
+				ProjectID: tgt.ProjectID,
+				Status:    source.TargetStatusSkipped,
 				Reason:    GitHubWebhookSkipReasonInvalidEvent,
 			})
 			continue
@@ -661,109 +514,166 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 		if errors.Is(txErr, errGitHubDuplicateDelivery) ||
 			(!errors.Is(txErr, durablequeue.ErrDuplicate) && errors.Is(txErr, store.ErrAlreadyExists)) {
 			if dupEventID == "" {
-				existing, gErr := s.store.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindGitHub, normRes.SourceID, ev.DedupKey)
-				if errors.Is(gErr, store.ErrNotFound) && ev.BodySHA256 != "" {
-					existing, gErr = s.store.GetTriggerEventByBodySHA256(ctx, proj.ID, store.TriggerSourceKindGitHub, ev.BodySHA256)
+				existing, gErr := sink.srv.store.GetTriggerEventByDedupKey(ctx, sourceKind, ev.SourceID, storeEv.DedupKey)
+				if errors.Is(gErr, store.ErrNotFound) && storeEv.BodySHA256 != "" {
+					existing, gErr = sink.srv.store.GetTriggerEventByBodySHA256(ctx, tgt.ProjectID, sourceKind, storeEv.BodySHA256)
 				}
 				if gErr != nil || existing == nil {
 					if anyQueued {
 						queue.Wake(trigger.EventQueueKind)
-						s.githubWebhookIngress.recordReceiptAudit(ctx, githubReceiptAuditRecord{
-							Delivery:           deliveryID,
-							Event:              eventType,
-							Action:             normRes.Action,
-							InstallationID:     inst.InstallationID,
-							Repo:               normRes.RepoFullName,
-							PayloadBytes:       len(body),
-							Result:             GitHubWebhookStatusError,
-							Routing:            auditRouting,
-							BypassedProjectIDs: bypassed,
-							ProjectIDs:         selectedIDs,
-							Events:             events,
-							SkippedProjects:    skipped,
-						})
 					}
 					slog.Error("Failed to resolve GitHub trigger event after unique conflict",
-						"project_id", proj.ID,
-						"installation_id", inst.InstallationID,
-						"delivery_id", deliveryID,
+						"project_id", tgt.ProjectID,
+						"installation_id", ev.SourceID,
+						"delivery_id", ev.DeliveryID,
 						"error", txErr,
 						"lookup_error", gErr,
 					)
-					writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to persist github trigger event", nil)
-					return
+					return results, txErr
 				}
 				dupEventID = existing.ID
 			}
-			events = append(events, GitHubWebhookProjectEvent{
-				ProjectID: proj.ID,
+			results = append(results, source.TargetResult{
+				ProjectID: tgt.ProjectID,
 				EventID:   dupEventID,
-				Status:    GitHubWebhookStatusDuplicate,
+				Status:    source.TargetStatusDuplicate,
 			})
 			continue
 		}
 
 		if anyQueued {
 			queue.Wake(trigger.EventQueueKind)
-			s.githubWebhookIngress.recordReceiptAudit(ctx, githubReceiptAuditRecord{
-				Delivery:           deliveryID,
-				Event:              eventType,
-				Action:             normRes.Action,
-				InstallationID:     inst.InstallationID,
-				Repo:               normRes.RepoFullName,
-				PayloadBytes:       len(body),
-				Result:             GitHubWebhookStatusError,
-				Routing:            auditRouting,
-				BypassedProjectIDs: bypassed,
-				ProjectIDs:         selectedIDs,
-				Events:             events,
-				SkippedProjects:    skipped,
-			})
 		}
 		slog.Error("Failed to persist GitHub trigger event",
-			"project_id", proj.ID,
-			"installation_id", inst.InstallationID,
-			"delivery_id", deliveryID,
+			"project_id", tgt.ProjectID,
+			"installation_id", ev.SourceID,
+			"delivery_id", ev.DeliveryID,
 			"error", txErr,
 		)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to persist github trigger event", nil)
-		return
+		return results, txErr
 	}
 
 	if anyQueued {
 		queue.Wake(trigger.EventQueueKind)
 	}
 
-	// Step 10: 202 response body + content-free trigger.event.received audit.
-	topStatus := GitHubWebhookStatusSkipped
-	switch {
-	case anyQueued:
-		topStatus = GitHubWebhookStatusQueued
-	case len(events) > 0:
-		topStatus = GitHubWebhookStatusDuplicate
-	}
+	return results, nil
+}
 
-	s.githubWebhookIngress.recordReceiptAudit(ctx, githubReceiptAuditRecord{
-		Delivery:           deliveryID,
-		Event:              eventType,
-		Action:             normRes.Action,
-		InstallationID:     inst.InstallationID,
-		Repo:               normRes.RepoFullName,
-		PayloadBytes:       len(body),
-		Result:             topStatus,
-		Routing:            auditRouting,
-		BypassedProjectIDs: bypassed,
-		ProjectIDs:         selectedIDs,
+type githubRouteLimiter struct {
+	st *githubWebhookIngressState
+}
+
+func (l githubRouteLimiter) Allow(now time.Time) bool {
+	if l.st.allowVerified(now) {
+		return true
+	}
+	l.st.rateLimitedCount.Add(1)
+	return false
+}
+
+type githubRouteAudit struct {
+	st *githubWebhookIngressState
+}
+
+func (a githubRouteAudit) RecordReceipt(ctx context.Context, rec source.ReceiptAuditRecord) {
+	var instID int64
+	if rec.InstallationID != "" {
+		if parsed, err := strconv.ParseInt(rec.InstallationID, 10, 64); err == nil && parsed > 0 {
+			instID = parsed
+		}
+	}
+	var events []GitHubWebhookProjectEvent
+	if len(rec.Events) > 0 {
+		events = make([]GitHubWebhookProjectEvent, len(rec.Events))
+		for i, e := range rec.Events {
+			events[i] = GitHubWebhookProjectEvent{
+				ProjectID: e.ProjectID,
+				EventID:   e.EventID,
+				Status:    e.Status,
+			}
+		}
+	}
+	var skipped []GitHubWebhookSkippedProject
+	if len(rec.SkippedProjects) > 0 {
+		skipped = make([]GitHubWebhookSkippedProject, len(rec.SkippedProjects))
+		for i, sp := range rec.SkippedProjects {
+			skipped[i] = GitHubWebhookSkippedProject{
+				ProjectID: sp.ProjectID,
+				Reason:    sp.Reason,
+			}
+		}
+	}
+	a.st.recordReceiptAuditWithKind(ctx, rec.Kind, githubReceiptAuditRecord{
+		Delivery:           rec.Delivery,
+		Event:              rec.Event,
+		Action:             rec.Action,
+		InstallationID:     instID,
+		Repo:               rec.Resource,
+		PayloadBytes:       rec.PayloadBytes,
+		Result:             rec.Result,
+		Routing:            rec.Routing,
+		BypassedProjectIDs: rec.BypassedProjectIDs,
+		ProjectIDs:         rec.ProjectIDs,
 		Events:             events,
 		SkippedProjects:    skipped,
 	})
+}
 
-	writeJSON(w, http.StatusAccepted, GitHubWebhookAcceptedResponse{
-		Status:          topStatus,
-		Delivery:        deliveryID,
-		Events:          events,
-		SkippedProjects: skipped,
+func (a githubRouteAudit) RecordTargetMismatch(ctx context.Context, now time.Time) {
+	a.st.recordTargetMismatchAudit(ctx, now)
+}
+
+func (a githubRouteAudit) RecordSelfIgnored(_ context.Context) {
+	a.st.selfIgnoredCount.Add(1)
+}
+
+func (s *Server) githubWebhookSecretSource() source.SecretSource {
+	return source.SecretFunc(func(ctx context.Context) (string, error) {
+		s.mu.RLock()
+		webhookSecret := s.config.GitHubAppConfig.WebhookSecret
+		s.mu.RUnlock()
+		if webhookSecret != "" {
+			return webhookSecret, nil
+		}
+		sec, err := s.loadGitHubAppSecret(ctx, GitHubAppSecretWebhookSecret)
+		if err == nil {
+			return sec, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Warn("GitHub webhook secret lookup failed", "error", err)
+		}
+		return "", nil
 	})
+}
+
+// githubSourceRouteDeps builds the provider-neutral source.RouteDeps for GitHub
+// App webhooks from the Server's GitHubSource*() seam accessors.
+func (s *Server) githubSourceRouteDeps() source.RouteDeps {
+	return source.RouteDeps{
+		Kind:       store.TriggerSourceKindGitHub,
+		Verifier:   s.GitHubSourceWireVerifier(),
+		Resolver:   s.GitHubSourceInstallationResolver(),
+		Normalizer: s.GitHubSourceNormalizer(),
+		Actor:      s.GitHubSourceActorIdentity(),
+		Secrets:    s.githubWebhookSecretSource(),
+		Sink:       &sourceEventSink{srv: s, kind: store.TriggerSourceKindGitHub},
+		Limiter:    githubRouteLimiter{st: &s.githubWebhookIngress},
+		Audit:      githubRouteAudit{st: &s.githubWebhookIngress},
+		MaxBody:    source.DefaultMaxBodyBytes,
+		Now:        s.githubWebhookIngress.now,
+		PingEvent:  "ping",
+		ContentEnabled: func(context.Context) bool {
+			return s.githubTriggersEnabled()
+		},
+		OnSecretNotConfigured: func() {
+			s.githubWebhookNoSecretWarnOnce.Do(func() {
+				slog.Warn("GitHub webhook received but no webhook secret is configured; rejecting")
+			})
+		},
+		SecretNotConfiguredMessage: "GitHub webhook is not configured",
+		PersistErrorMessage:        "failed to persist github trigger event",
+	}
 }
 
 func (s *Server) listGitHubInstallationCandidateProjects(ctx context.Context, installationID int64, repoFullName string) ([]store.Project, error) {

@@ -38,21 +38,61 @@ var (
 	_ source.WireVerifier         = (*WireVerifier)(nil)
 	_ source.InstallationResolver = (*InstallationResolver)(nil)
 	_ source.Normalizer           = (*EventNormalizer)(nil)
+	_ source.FinalizingNormalizer = (*EventNormalizer)(nil)
 	_ source.ActorIdentity        = (*AppActorIdentity)(nil)
 	_ source.IdentityMinter       = (*TokenMinter)(nil)
 	_ source.Readiness            = (*ReadinessChecker)(nil)
 	_ source.Presets              = (*PresetCatalog)(nil)
 )
 
+type wrappedSentinel struct {
+	msg    string
+	target error
+}
+
+func (e wrappedSentinel) Error() string { return e.msg }
+func (e wrappedSentinel) Unwrap() error { return e.target }
+
+type ceilingSkipError struct {
+	err error
+}
+
+func (e ceilingSkipError) Error() string { return e.err.Error() }
+func (e ceilingSkipError) Unwrap() []error {
+	return []error{e.err, source.ErrSkip{Reason: "attributes_ceiling"}}
+}
+
+func wrapNormalizeError(err error) error {
+	if errors.Is(err, ErrAttributesCeilingExceeded) {
+		return ceilingSkipError{err: err}
+	}
+	return err
+}
+
 // Sentinel errors returned by GitHub source seam adapters.
 var (
-	ErrWebhookSecretNotConfigured = errors.New("github source: webhook secret is not configured")
-	ErrInvalidWebhookSignature    = errors.New("github source: invalid webhook signature")
-	ErrInvalidWebhookHeaders      = errors.New("github source: invalid webhook headers")
-	ErrWebhookTargetMismatch      = errors.New("github source: webhook target mismatch")
-	ErrInvalidDeliveryID          = errors.New("github source: invalid delivery id")
-	ErrUnsupportedPayload         = errors.New("github source: unsupported payload type")
-	ErrNotConfigured              = errors.New("github source: adapter callback not configured")
+	ErrWebhookSecretNotConfigured error = wrappedSentinel{
+		msg:    "github source: webhook secret is not configured",
+		target: source.ErrSecretNotConfigured,
+	}
+	ErrInvalidWebhookSignature error = wrappedSentinel{
+		msg:    "github source: invalid webhook signature",
+		target: source.ErrInvalidSignature,
+	}
+	ErrInvalidWebhookHeaders error = wrappedSentinel{
+		msg:    "github source: invalid webhook headers",
+		target: source.ErrInvalidHeaders,
+	}
+	ErrWebhookTargetMismatch error = wrappedSentinel{
+		msg:    "github source: webhook target mismatch",
+		target: source.ErrTargetMismatch,
+	}
+	ErrInvalidDeliveryID error = wrappedSentinel{
+		msg:    "github source: invalid delivery id",
+		target: source.ErrInvalidDeliveryID,
+	}
+	ErrUnsupportedPayload = errors.New("github source: unsupported payload type")
+	ErrNotConfigured      = errors.New("github source: adapter callback not configured")
 )
 
 // GitHub lifecycle and ping webhook event names handled outside content-event routing.
@@ -120,6 +160,11 @@ type WireVerifier struct {
 	// ErrWebhookTargetMismatch, matching production handleGitHubContentWebhook
 	// step 1.
 	ExpectedAppID int64
+	// ContentEnabledFn reports whether content-event trigger ingress is enabled.
+	// When non-nil and returning false, non-lifecycle deliveries skip step 1–2
+	// target/header/delivery checks after signature verification so step 0 can
+	// return 200 ignored unchanged.
+	ContentEnabledFn func() bool
 	// Now returns the delivery receipt timestamp (defaults to time.Now).
 	Now func() time.Time
 }
@@ -156,7 +201,13 @@ func (v *WireVerifier) Verify(r *http.Request, body []byte, secrets source.Secre
 		eventName == EventInstallation ||
 		eventName == EventInstallationRepositories
 
-	if !isNonContent {
+	contentEnabled := true
+	if v != nil && v.ContentEnabledFn != nil {
+		contentEnabled = v.ContentEnabledFn()
+	}
+
+	var unsupported bool
+	if !isNonContent && contentEnabled {
 		// Step 1: target-id check fails closed when resolved AppID <= 0.
 		var expectedAppID int64
 		if v != nil {
@@ -182,6 +233,8 @@ func (v *WireVerifier) Verify(r *http.Request, body []byte, secrets source.Secre
 				return source.Delivery{}, ErrInvalidDeliveryID
 			}
 			deliveryID = strings.ToLower(deliveryID)
+		} else {
+			unsupported = true
 		}
 	}
 
@@ -191,12 +244,13 @@ func (v *WireVerifier) Verify(r *http.Request, body []byte, secrets source.Secre
 	}
 
 	return source.Delivery{
-		ID:         deliveryID,
-		TargetID:   targetID,
-		TargetType: targetType,
-		Event:      eventName,
-		Headers:    FilterHeaders(r.Header),
-		ReceivedAt: nowFn().UTC(),
+		ID:          deliveryID,
+		TargetID:    targetID,
+		TargetType:  targetType,
+		Event:       eventName,
+		Unsupported: unsupported,
+		Headers:     FilterHeaders(r.Header),
+		ReceivedAt:  nowFn().UTC(),
 	}, nil
 }
 
@@ -257,9 +311,12 @@ func (r *InstallationResolver) Targets(ctx context.Context, inst source.Installa
 	return r.ResolveTargets(ctx, inst, repo)
 }
 
-// OnLifecycle handles GitHub installation and installation_repositories
+// OnLifecycle handles GitHub ping, installation, and installation_repositories
 // lifecycle webhooks. Non-lifecycle events return (false, nil).
 func (r *InstallationResolver) OnLifecycle(ctx context.Context, d source.Delivery, payload any) (bool, error) {
+	if d.Event == EventPing {
+		return true, nil
+	}
 	if d.Event != EventInstallation && d.Event != EventInstallationRepositories {
 		return false, nil
 	}
@@ -305,6 +362,10 @@ type EventNormalizer struct {
 	// OptionsFn resolves per-delivery normalisation options (such as AppSlug,
 	// MentionAliases, and ReceivedAt). When nil, Options is used.
 	OptionsFn func(ctx context.Context, d source.Delivery) Options
+	// FinalizeFn resolves AppSlug and MentionAliases after actor resolution has
+	// had a chance to warm the App identity cache (Stage 3 §4.1 step 8). When
+	// nil, Finalize is a no-op.
+	FinalizeFn func(ctx context.Context, d source.Delivery) (appSlug string, mentionAliases []string, ok bool)
 	// Options holds static normalisation options used when OptionsFn is nil.
 	Options Options
 }
@@ -336,13 +397,45 @@ func (n *EventNormalizer) Normalize(ctx context.Context, d source.Delivery, payl
 		var err error
 		res, err = Normalize(d.Event, d.ID, p, opts)
 		if err != nil {
-			return source.Event{}, err
+			wrapped := wrapNormalizeError(err)
+			if res.InstallationID > 0 {
+				return resultToSourceEvent(res, d.ReceivedAt, t), wrapped
+			}
+			return source.Event{}, wrapped
 		}
 	default:
 		return source.Event{}, ErrUnsupportedPayload
 	}
 
 	return resultToSourceEvent(res, d.ReceivedAt, t), nil
+}
+
+// Finalize re-runs mention/command detection when step 4 ran with a cold App
+// slug cache ("mention_detection" == "unavailable") and step 6 warmed it.
+func (n *EventNormalizer) Finalize(ctx context.Context, d source.Delivery, payload any, ev source.Event) (source.Event, error) {
+	if n == nil || n.FinalizeFn == nil {
+		return ev, nil
+	}
+	if ev.Attributes["mention_detection"] != "unavailable" {
+		return ev, nil
+	}
+	body, ok := payload.([]byte)
+	if !ok {
+		return ev, nil
+	}
+	appSlug, aliases, hasSlug := n.FinalizeFn(ctx, d)
+	if !hasSlug || appSlug == "" {
+		return ev, nil
+	}
+	res, err := Normalize(d.Event, d.ID, body, Options{
+		AppSlug:        appSlug,
+		MentionAliases: aliases,
+		ReceivedAt:     d.ReceivedAt,
+	})
+	if err != nil {
+		return ev, wrapNormalizeError(err)
+	}
+	return resultToSourceEvent(res, d.ReceivedAt, source.Target{}), nil
 }
 
 func resultToSourceEvent(res Result, receivedAt time.Time, t source.Target) source.Event {
@@ -354,13 +447,19 @@ func resultToSourceEvent(res Result, receivedAt time.Time, t source.Target) sour
 	if res.PerformedViaAppID > 0 {
 		performedVia = strconv.FormatInt(res.PerformedViaAppID, 10)
 	}
+	sourceID := res.SourceID
+	if sourceID == "" && res.InstallationID > 0 {
+		sourceID = strconv.FormatInt(res.InstallationID, 10)
+	}
 	return source.Event{
 		Handled:      res.Handled,
 		SourceKind:   res.SourceKind,
-		SourceID:     res.SourceID,
+		SourceID:     sourceID,
 		DeliveryID:   res.DeliveryID,
 		DedupKey:     res.DedupKey(t.ProjectID),
 		Type:         res.Type,
+		Action:       res.Action,
+		Resource:     res.RepoFullName,
 		Subject:      res.Subject,
 		OccurredAt:   res.OccurredAt,
 		ReceivedAt:   receivedAt,

@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -32,87 +31,11 @@ import (
 )
 
 // handleGitHubWebhook handles POST /api/v1/webhooks/github.
-// This endpoint receives GitHub webhook events for the GitHub App integration.
-// It validates the webhook signature using the configured webhook secret and
-// processes installation lifecycle events idempotently.
+// SECURITY-GATE: webhook signature — unauthenticated route; RouteDeps.ServeHTTP
+// verifies the webhook secret and HMAC signature via GitHubSourceWireVerifier
+// before dispatching lifecycle or content events.
 func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		MethodNotAllowed(w, http.MethodPost)
-		return
-	}
-
-	// Read the raw body for signature verification
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // 10MB limit
-	if err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "failed to read request body", nil)
-		return
-	}
-
-	// Verify webhook signature — check in-memory config first, then secrets backend
-	s.mu.RLock()
-	webhookSecret := s.config.GitHubAppConfig.WebhookSecret
-	s.mu.RUnlock()
-	var secretLookupErr error
-	if webhookSecret == "" {
-		if sec, err := s.loadGitHubAppSecret(r.Context(), GitHubAppSecretWebhookSecret); err == nil {
-			webhookSecret = sec
-		} else if !errors.Is(err, store.ErrNotFound) {
-			secretLookupErr = err
-		}
-	}
-
-	// SECURITY-GATE: webhook signature — unauthenticated route; reject unless a webhook secret resolves and the signature verifies.
-	if webhookSecret == "" {
-		if secretLookupErr != nil {
-			slog.Warn("GitHub webhook secret lookup failed", "error", secretLookupErr)
-		}
-		s.githubWebhookNoSecretWarnOnce.Do(func() {
-			slog.Warn("GitHub webhook received but no webhook secret is configured; rejecting")
-		})
-		writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "GitHub webhook is not configured", nil)
-		return
-	}
-
-	signature := r.Header.Get("X-Hub-Signature-256")
-	if webhookSecret != "" {
-		if !githubapp.VerifyWebhookSignature(body, signature, webhookSecret) {
-			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "invalid webhook signature", nil)
-			return
-		}
-	}
-
-	// Parse the event type
-	eventType := r.Header.Get("X-GitHub-Event")
-	deliveryID := r.Header.Get("X-GitHub-Delivery")
-
-	slog.Info("GitHub webhook received",
-		"event", eventType,
-		"delivery_id", deliveryID,
-	)
-
-	switch eventType {
-	case "ping":
-		// GitHub sends a ping event when the webhook is first configured
-		writeJSON(w, http.StatusOK, map[string]string{"status": "pong"})
-		return
-
-	case "installation":
-		s.handleInstallationWebhook(w, r, body)
-		return
-
-	case "installation_repositories":
-		s.handleInstallationRepositoriesWebhook(w, r, body)
-		return
-
-	default:
-		if !s.githubTriggersEnabled() {
-			// Ignore unhandled event types unchanged when triggers or github_triggers is off (§4.1 step 0).
-			writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": eventType})
-			return
-		}
-		s.handleGitHubContentWebhook(w, r, eventType, deliveryID, body)
-		return
-	}
+	s.githubSourceRouteDeps().ServeHTTP(w, r)
 }
 
 // webhookInstallationEvent represents the payload for installation webhook events.
@@ -132,14 +55,6 @@ type webhookInstallationEvent struct {
 		FullName string `json:"full_name"`
 		Name     string `json:"name"`
 	} `json:"repositories"`
-}
-
-func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
-	if err := s.processInstallationWebhook(r.Context(), body); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid webhook payload", nil)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) processInstallationWebhook(ctx context.Context, body []byte) error {
@@ -256,14 +171,6 @@ type webhookInstallationRepositoriesEvent struct {
 		Name     string `json:"name"`
 	} `json:"repositories_removed"`
 	RepositorySelection string `json:"repository_selection"`
-}
-
-func (s *Server) handleInstallationRepositoriesWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
-	if err := s.processInstallationRepositoriesWebhook(r.Context(), body); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid webhook payload", nil)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) processInstallationRepositoriesWebhook(ctx context.Context, body []byte) error {
