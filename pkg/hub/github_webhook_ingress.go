@@ -19,6 +19,7 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -148,8 +149,9 @@ type githubWebhookIngressState struct {
 	targetMismatchCount atomic.Int64
 	rateLimitedCount    atomic.Int64
 
-	// Optional test-only wrappers injected at the GitHubSource*() accessor
+	// Test-only seam wrappers injected at the GitHubSource*() accessor
 	// boundary to prove production ingress routes through the seams.
+	// Must remain nil outside tests.
 	wrapWireVerifier func(source.WireVerifier) source.WireVerifier
 	wrapResolver     func(source.InstallationResolver) source.InstallationResolver
 	wrapNormalizer   func(source.Normalizer) source.Normalizer
@@ -380,9 +382,10 @@ func (st *githubWebhookIngressState) recordReceiptAuditWithKind(ctx context.Cont
 // sourceEventSink implements source.EventSink for app-shaped webhook sources:
 // per-target transaction (quota lock, dedup by key and body SHA-256, pending
 // cap, trigger_events insert + durablequeue Enqueue) and post-commit wake.
+// The source kind is taken from ev.SourceKind, which RouteDeps.ServeHTTP sets
+// from RouteDeps.Kind as the single source of truth.
 type sourceEventSink struct {
-	srv  *Server
-	kind string
+	srv *Server
 }
 
 var _ source.EventSink = (*sourceEventSink)(nil)
@@ -396,9 +399,9 @@ func (sink *sourceEventSink) EnqueueForTargets(ctx context.Context, ev source.Ev
 		return nil, source.ErrUnavailable
 	}
 
-	sourceKind := sink.kind
+	sourceKind := ev.SourceKind
 	if sourceKind == "" {
-		sourceKind = ev.SourceKind
+		return nil, errors.New("source event sink: missing event source kind")
 	}
 	storedHeaders := sanitizeGitHubEventHeaders(ev.Headers)
 	projectedPayload := string(ev.Payload)
@@ -657,7 +660,7 @@ func (s *Server) githubSourceRouteDeps() source.RouteDeps {
 		Normalizer: s.GitHubSourceNormalizer(),
 		Actor:      s.GitHubSourceActorIdentity(),
 		Secrets:    s.githubWebhookSecretSource(),
-		Sink:       &sourceEventSink{srv: s, kind: store.TriggerSourceKindGitHub},
+		Sink:       &sourceEventSink{srv: s},
 		Limiter:    githubRouteLimiter{st: &s.githubWebhookIngress},
 		Audit:      githubRouteAudit{st: &s.githubWebhookIngress},
 		MaxBody:    source.DefaultMaxBodyBytes,
@@ -673,6 +676,9 @@ func (s *Server) githubSourceRouteDeps() source.RouteDeps {
 		},
 		SecretNotConfiguredMessage: "GitHub webhook is not configured",
 		PersistErrorMessage:        "failed to persist github trigger event",
+		WriteError: func(w http.ResponseWriter, status int, code, message string) {
+			writeError(w, status, code, message, nil)
+		},
 	}
 }
 

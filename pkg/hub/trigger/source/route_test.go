@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -51,22 +52,26 @@ type fakeResolver struct {
 	lifecycleErr     error
 	lifecycleCalls   int
 
-	inst      source.Installation
-	instErr   error
-	instCalls int
+	inst        source.Installation
+	instErr     error
+	instCalls   int
+	instPayload any
 
-	targets      []source.Target
-	targetsErr   error
-	targetsCalls int
+	targets        []source.Target
+	targetsErr     error
+	targetsCalls   int
+	targetsPayload any
 }
 
-func (f *fakeResolver) Installation(_ context.Context, _ source.Delivery, _ any) (source.Installation, error) {
+func (f *fakeResolver) Installation(_ context.Context, _ source.Delivery, payload any) (source.Installation, error) {
 	f.instCalls++
+	f.instPayload = payload
 	return f.inst, f.instErr
 }
 
-func (f *fakeResolver) Targets(_ context.Context, _ source.Installation, _ any) ([]source.Target, error) {
+func (f *fakeResolver) Targets(_ context.Context, _ source.Installation, payload any) ([]source.Target, error) {
 	f.targetsCalls++
+	f.targetsPayload = payload
 	return f.targets, f.targetsErr
 }
 
@@ -294,7 +299,7 @@ func TestRouteDeps_VerifyFailures(t *testing.T) {
 			wantMetric:     "fake:error",
 		},
 		{
-			name:           "verifier ErrSkip returns 202",
+			name:           "verifier ErrSkip returns 202 and audits",
 			verifyErr:      source.ErrSkip{Reason: "filtered"},
 			wantStatus:     http.StatusAccepted,
 			wantBodySubstr: `"reason":"filtered"`,
@@ -322,6 +327,12 @@ func TestRouteDeps_VerifyFailures(t *testing.T) {
 			if secretHookCalls != tc.wantSecretHook {
 				t.Errorf("secretHookCalls = %d, want %d", secretHookCalls, tc.wantSecretHook)
 			}
+			var skipErr source.ErrSkip
+			if errors.As(tc.verifyErr, &skipErr) {
+				if len(aud.receipts) != 1 || aud.receipts[0].Result != source.RouteStatusSkipped || aud.receipts[0].Delivery != "deliv-1" {
+					t.Errorf("verifier ErrSkip must emit skipped receipt audit with delivery, got %+v", aud.receipts)
+				}
+			}
 			if res.lifecycleCalls != 0 || norm.calls != 0 || sink.calls != 0 {
 				t.Errorf("downstream stages should not run after verify failure")
 			}
@@ -330,6 +341,93 @@ func TestRouteDeps_VerifyFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRouteDeps_WriteErrorHookAndUnhandledEventAndLogSemantics(t *testing.T) {
+	t.Run("injectable WriteError is invoked on error exits", func(t *testing.T) {
+		deps, _, _, _, _, _, lim, _, _ := newTestRouteHarness()
+		lim.allow = false
+		var gotStatus int
+		var gotCode, gotMsg string
+		deps.WriteError = func(w http.ResponseWriter, status int, code, message string) {
+			gotStatus, gotCode, gotMsg = status, code, message
+			w.WriteHeader(status)
+		}
+
+		rec := postTestBody(deps, []byte(`{}`))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", rec.Code)
+		}
+		if gotStatus != http.StatusServiceUnavailable || gotCode != "unavailable" || gotMsg != "rate limit exceeded" {
+			t.Errorf("WriteError got (%d, %q, %q), want (503, unavailable, rate limit exceeded)", gotStatus, gotCode, gotMsg)
+		}
+	})
+
+	t.Run("normalizer Handled=false returns 200 ignored without resolving or enqueuing", func(t *testing.T) {
+		deps, _, res, norm, actor, sink, _, aud, met := newTestRouteHarness()
+		norm.ev.Handled = false
+
+		rec := postTestBody(deps, []byte(`{}`))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"ignored"`) {
+			t.Fatalf("got %d %s, want 200 ignored", rec.Code, rec.Body.String())
+		}
+		if res.instCalls != 0 || actor.calls != 0 || res.targetsCalls != 0 || sink.calls != 0 || len(aud.receipts) != 0 {
+			t.Errorf("unhandled event must stop before Installation/Actor/Targets/Sink")
+		}
+		if len(met.deliveries) != 1 || met.deliveries[0] != "fake:unsupported" {
+			t.Errorf("metrics = %v, want [fake:unsupported]", met.deliveries)
+		}
+	})
+
+	t.Run("RouteDeps.Kind overrides Event.SourceKind and Resolver receives normalized Event", func(t *testing.T) {
+		deps, _, res, norm, _, sink, _, _, _ := newTestRouteHarness()
+		deps.Kind = "canonical-kind"
+		norm.ev.SourceKind = "different-kind"
+
+		rec := postTestBody(deps, []byte(`{}`))
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202: %s", rec.Code, rec.Body.String())
+		}
+		if sink.gotEvent.SourceKind != "canonical-kind" {
+			t.Errorf("sink Event.SourceKind = %q, want canonical-kind", sink.gotEvent.SourceKind)
+		}
+		if _, ok := res.instPayload.(source.Event); !ok {
+			t.Errorf("Resolver.Installation received %T, want source.Event", res.instPayload)
+		}
+		if _, ok := res.targetsPayload.(source.Event); !ok {
+			t.Errorf("Resolver.Targets received %T, want source.Event", res.targetsPayload)
+		}
+	})
+
+	t.Run("received log fires before target rejection with RawID casing and never on invalid signature", func(t *testing.T) {
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		deps, v, _, _, _, _, _, _, _ := newTestRouteHarness()
+		v.deliv.ID = "aaaa-bbbb"
+		v.deliv.RawID = "AAAA-BBBB"
+		v.err = source.ErrInvalidSignature
+
+		rec := postTestBody(deps, []byte(`{}`))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+		if strings.Contains(buf.String(), "Source webhook received") {
+			t.Errorf("must not log received on invalid signature: %s", buf.String())
+		}
+
+		buf.Reset()
+		v.err = source.ErrTargetMismatch
+		rec = postTestBody(deps, []byte(`{}`))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+		if !strings.Contains(buf.String(), "Source webhook received") || !strings.Contains(buf.String(), "delivery_id=AAAA-BBBB") {
+			t.Errorf("expected received log with original RawID casing on target mismatch, got: %s", buf.String())
+		}
+	})
 }
 
 func TestRouteDeps_LifecycleHandled(t *testing.T) {

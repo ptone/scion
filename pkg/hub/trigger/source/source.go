@@ -38,8 +38,11 @@ func (f SecretFunc) WebhookSecret(ctx context.Context) (string, error) {
 // Delivery holds provider-neutral metadata extracted from a verified incoming
 // webhook delivery.
 type Delivery struct {
-	// ID is the provider's delivery identifier (e.g. X-GitHub-Delivery).
+	// ID is the canonical provider delivery identifier (e.g. lowercased X-GitHub-Delivery).
 	ID string
+	// RawID is the original unmodified delivery identifier from the wire header,
+	// if different from ID (used for receipt logging).
+	RawID string
 	// TargetID is the provider app or target identifier from request headers
 	// (e.g. X-GitHub-Hook-Installation-Target-ID), or "" if the provider has none.
 	TargetID string

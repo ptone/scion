@@ -60,8 +60,11 @@ var (
 	ErrUnavailable          = errors.New("source: ingress backend unavailable")
 )
 
-// ErrSkip lets a Verifier or Normalizer end a delivery with an audited reason
-// and an HTTP 202 response (for example, the GitHub attributes-ceiling case).
+// ErrSkip lets a Verifier or Normalizer end a delivery with a receipt audit
+// (result "skipped") and an HTTP 202 response. When returned after targets are
+// resolved (for example, the GitHub attributes-ceiling case), Reason is
+// recorded on each entry in skipped_projects; when returned before target
+// resolution, Reason is recorded on the top-level response.
 type ErrSkip struct {
 	Reason string
 }
@@ -183,6 +186,9 @@ type RouteDeps struct {
 	// PersistErrorMessage overrides the 500 error message returned when
 	// Sink.EnqueueForTargets fails.
 	PersistErrorMessage string
+	// WriteError writes an HTTP error response (and any hub-standard rejection
+	// logs). When nil, ServeHTTP falls back to writing a plain JSON error body.
+	WriteError func(w http.ResponseWriter, status int, code, message string)
 }
 
 // ServeHTTP executes the provider-neutral shared-route webhook pipeline:
@@ -193,7 +199,7 @@ type RouteDeps struct {
 func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		writeRouteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+		d.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
 		return
 	}
 
@@ -203,7 +209,7 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
 	if err != nil {
-		writeRouteError(w, http.StatusBadRequest, "invalid_request", "failed to read request body")
+		d.writeError(w, http.StatusBadRequest, "invalid_request", "failed to read request body")
 		return
 	}
 
@@ -212,31 +218,33 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if d.Verifier == nil {
 		d.recordMetric("error")
-		writeRouteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		d.writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
 	deliv, err := d.Verifier.Verify(r, body, d.Secrets)
 	if err != nil {
-		d.handleVerifyError(w, ctx, now, err)
+		// Emit the receipt log after signature authentication succeeds, even if
+		// target/header/delivery validation subsequently rejects the request.
+		if !errors.Is(err, ErrSecretNotConfigured) && !errors.Is(err, ErrInvalidSignature) &&
+			(errors.Is(err, ErrTargetMismatch) || errors.Is(err, ErrInvalidHeaders) || errors.Is(err, ErrInvalidDeliveryID) || isSkipErr(err)) {
+			d.logReceived(deliv)
+		}
+		d.handleVerifyError(w, ctx, now, deliv, len(body), err)
 		return
 	}
 	if !deliv.ReceivedAt.IsZero() {
 		now = deliv.ReceivedAt.UTC()
 	}
 
-	slog.Info("Source webhook received",
-		"source_kind", d.Kind,
-		"event", deliv.Event,
-		"delivery_id", deliv.ID,
-	)
+	d.logReceived(deliv)
 
 	// Lifecycle routing (ping / installation / installation_repositories).
 	if d.Resolver != nil {
 		handled, lErr := d.Resolver.OnLifecycle(ctx, deliv, body)
 		if lErr != nil {
 			d.recordMetric("error")
-			writeRouteError(w, http.StatusBadRequest, "invalid_request", "invalid webhook payload")
+			d.writeError(w, http.StatusBadRequest, "invalid_request", "invalid webhook payload")
 			return
 		}
 		if handled {
@@ -266,7 +274,7 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if d.Limiter != nil && !d.Limiter.Allow(now) {
 		d.recordMetric("rate_limited")
 		w.Header().Set("Retry-After", "5")
-		writeRouteError(w, http.StatusServiceUnavailable, "unavailable", "rate limit exceeded")
+		d.writeError(w, http.StatusServiceUnavailable, "unavailable", "rate limit exceeded")
 		return
 	}
 
@@ -279,10 +287,15 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// and wait until step 8 to preserve the refusal order.
 	if d.Normalizer == nil {
 		d.recordMetric("error")
-		writeRouteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		d.writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 	ev, normErr := d.Normalizer.Normalize(ctx, deliv, body, Target{})
+	if normErr == nil && !ev.Handled {
+		d.recordMetric("unsupported")
+		writeRouteJSON(w, http.StatusOK, map[string]string{"status": RouteStatusIgnored, "event": deliv.Event})
+		return
+	}
 	if normErr != nil && ev.SourceID == "" {
 		var skipErr ErrSkip
 		if errors.As(normErr, &skipErr) {
@@ -304,22 +317,22 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		d.recordMetric("error")
-		writeRouteError(w, http.StatusBadRequest, "invalid_request", "invalid payload")
+		d.writeError(w, http.StatusBadRequest, "invalid_request", "invalid payload")
 		return
 	}
 
 	if d.Resolver == nil {
 		d.recordMetric("error")
-		writeRouteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		d.writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 
-	// Step 5: installation lookup — must exist and be active.
-	inst, err := d.Resolver.Installation(ctx, deliv, body)
+	// Step 5: installation lookup — resolve from the single normalized event.
+	inst, err := d.Resolver.Installation(ctx, deliv, ev)
 	if err != nil {
 		if errors.Is(err, ErrUnavailable) {
 			d.recordMetric("error")
-			writeRouteError(w, http.StatusServiceUnavailable, "unavailable", "trigger store is not available")
+			d.writeError(w, http.StatusServiceUnavailable, "unavailable", "trigger store is not available")
 			return
 		}
 		if !errors.Is(err, ErrInstallationNotFound) {
@@ -330,7 +343,7 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"error", err,
 			)
 			d.recordMetric("error")
-			writeRouteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			d.writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
 		inst = Installation{}
@@ -368,12 +381,12 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 7: target fan-out and primary routing.
-	targets, err := d.Resolver.Targets(ctx, inst, body)
+	// Step 7: target fan-out and primary routing from the normalized event.
+	targets, err := d.Resolver.Targets(ctx, inst, ev)
 	if err != nil {
 		if errors.Is(err, ErrUnavailable) {
 			d.recordMetric("error")
-			writeRouteError(w, http.StatusServiceUnavailable, "unavailable", "trigger store is not available")
+			d.writeError(w, http.StatusServiceUnavailable, "unavailable", "trigger store is not available")
 			return
 		}
 		slog.Error("Source trigger ingress target fan-out lookup failed",
@@ -383,7 +396,7 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"error", err,
 		)
 		d.recordMetric("error")
-		writeRouteError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		d.writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
 	if len(targets) == 0 {
@@ -459,17 +472,17 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		d.recordMetric("error")
-		writeRouteError(w, http.StatusBadRequest, "invalid_request", "invalid payload")
+		d.writeError(w, http.StatusBadRequest, "invalid_request", "invalid payload")
 		return
 	}
 
 	// Step 9: per-target persistence + enqueue via EventSink.
 	if d.Sink == nil {
 		d.recordMetric("error")
-		writeRouteError(w, http.StatusServiceUnavailable, "unavailable", "trigger event queue is not available")
+		d.writeError(w, http.StatusServiceUnavailable, "unavailable", "trigger event queue is not available")
 		return
 	}
-	if ev.SourceKind == "" {
+	if d.Kind != "" {
 		ev.SourceKind = d.Kind
 	}
 	if ev.SourceID == "" {
@@ -491,7 +504,7 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if sinkErr != nil {
 		if errors.Is(sinkErr, ErrUnavailable) {
 			d.recordMetric("error")
-			writeRouteError(w, http.StatusServiceUnavailable, "unavailable", "trigger event queue is not available")
+			d.writeError(w, http.StatusServiceUnavailable, "unavailable", "trigger event queue is not available")
 			return
 		}
 		if anyQueued {
@@ -516,7 +529,7 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if msg == "" {
 			msg = "failed to persist trigger event"
 		}
-		writeRouteError(w, http.StatusInternalServerError, "internal_error", msg)
+		d.writeError(w, http.StatusInternalServerError, "internal_error", msg)
 		return
 	}
 
@@ -557,7 +570,24 @@ func (d RouteDeps) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (d RouteDeps) handleVerifyError(w http.ResponseWriter, ctx context.Context, now time.Time, err error) {
+func isSkipErr(err error) bool {
+	var skipErr ErrSkip
+	return errors.As(err, &skipErr)
+}
+
+func (d RouteDeps) logReceived(deliv Delivery) {
+	deliveryID := deliv.RawID
+	if deliveryID == "" {
+		deliveryID = deliv.ID
+	}
+	slog.Info("Source webhook received",
+		"source_kind", d.Kind,
+		"event", deliv.Event,
+		"delivery_id", deliveryID,
+	)
+}
+
+func (d RouteDeps) handleVerifyError(w http.ResponseWriter, ctx context.Context, now time.Time, deliv Delivery, payloadBytes int, err error) {
 	switch {
 	case errors.Is(err, ErrSecretNotConfigured):
 		if d.OnSecretNotConfigured != nil {
@@ -568,35 +598,51 @@ func (d RouteDeps) handleVerifyError(w http.ResponseWriter, ctx context.Context,
 		if msg == "" {
 			msg = "webhook is not configured"
 		}
-		writeRouteError(w, http.StatusServiceUnavailable, "internal_error", msg)
+		d.writeError(w, http.StatusServiceUnavailable, "internal_error", msg)
 	case errors.Is(err, ErrInvalidSignature):
 		d.recordMetric("error")
-		writeRouteError(w, http.StatusUnauthorized, "unauthorized", "invalid webhook signature")
+		d.writeError(w, http.StatusUnauthorized, "unauthorized", "invalid webhook signature")
 	case errors.Is(err, ErrTargetMismatch):
 		if d.Audit != nil {
 			d.Audit.RecordTargetMismatch(ctx, now)
 		}
 		d.recordMetric("target_mismatch")
-		writeRouteError(w, http.StatusBadRequest, "invalid_request", "wrong target")
+		d.writeError(w, http.StatusBadRequest, "invalid_request", "wrong target")
 	case errors.Is(err, ErrInvalidHeaders):
 		d.recordMetric("error")
-		writeRouteError(w, http.StatusBadRequest, "invalid_request", "invalid event header")
+		d.writeError(w, http.StatusBadRequest, "invalid_request", "invalid event header")
 	case errors.Is(err, ErrInvalidDeliveryID):
 		d.recordMetric("error")
-		writeRouteError(w, http.StatusBadRequest, "invalid_request", "invalid delivery id")
+		d.writeError(w, http.StatusBadRequest, "invalid_request", "invalid delivery id")
 	default:
 		var skipErr ErrSkip
 		if errors.As(err, &skipErr) {
+			d.recordReceipt(ctx, ReceiptAuditRecord{
+				Kind:         d.Kind,
+				Delivery:     deliv.ID,
+				Event:        deliv.Event,
+				PayloadBytes: payloadBytes,
+				Result:       RouteStatusSkipped,
+			})
 			d.recordMetric("skipped")
 			writeRouteJSON(w, http.StatusAccepted, AcceptedResponse{
-				Status: RouteStatusSkipped,
-				Reason: skipErr.Reason,
+				Status:   RouteStatusSkipped,
+				Reason:   skipErr.Reason,
+				Delivery: deliv.ID,
 			})
 			return
 		}
 		d.recordMetric("error")
-		writeRouteError(w, http.StatusUnauthorized, "unauthorized", "invalid webhook signature")
+		d.writeError(w, http.StatusUnauthorized, "unauthorized", "invalid webhook signature")
 	}
+}
+
+func (d RouteDeps) writeError(w http.ResponseWriter, status int, code, message string) {
+	if d.WriteError != nil {
+		d.WriteError(w, status, code, message)
+		return
+	}
+	writeRouteError(w, status, code, message)
 }
 
 func (d RouteDeps) nowUTC() time.Time {

@@ -215,6 +215,17 @@ func TestInstallationResolver(t *testing.T) {
 		t.Fatalf("unexpected targets: %+v", targets)
 	}
 
+	// Also resolves directly from a normalized source.Event without re-parsing raw JSON.
+	evPayload := source.Event{SourceID: "77", Resource: "acme/widgets"}
+	instFromEv, err := resolver.Installation(ctx, source.Delivery{Event: triggithub.EventIssueComment}, evPayload)
+	if err != nil || instFromEv.ID != "77" {
+		t.Fatalf("Installation(source.Event) = (%+v, %v), want ID 77", instFromEv, err)
+	}
+	targetsFromEv, err := resolver.Targets(ctx, instFromEv, evPayload)
+	if err != nil || len(targetsFromEv) != 1 || targetsFromEv[0].Resource != "acme/widgets" {
+		t.Fatalf("Targets(source.Event) = (%+v, %v), want acme/widgets", targetsFromEv, err)
+	}
+
 	// Content event is not a lifecycle event.
 	handled, err := resolver.OnLifecycle(ctx, source.Delivery{Event: triggithub.EventIssueComment}, payload)
 	if err != nil || handled || lifecycleCalled {

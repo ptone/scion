@@ -193,9 +193,18 @@ func (v *WireVerifier) Verify(r *http.Request, body []byte, secrets source.Secre
 	}
 
 	eventName := r.Header.Get("X-GitHub-Event")
-	deliveryID := r.Header.Get("X-GitHub-Delivery")
+	rawDeliveryID := r.Header.Get("X-GitHub-Delivery")
+	deliveryID := rawDeliveryID
 	targetType := r.Header.Get("X-GitHub-Hook-Installation-Target-Type")
 	targetID := r.Header.Get("X-GitHub-Hook-Installation-Target-ID")
+
+	partial := source.Delivery{
+		ID:         rawDeliveryID,
+		RawID:      rawDeliveryID,
+		TargetID:   targetID,
+		TargetType: targetType,
+		Event:      eventName,
+	}
 
 	isNonContent := eventName == EventPing ||
 		eventName == EventInstallation ||
@@ -218,7 +227,7 @@ func (v *WireVerifier) Verify(r *http.Request, body []byte, secrets source.Secre
 			}
 		}
 		if !WebhookTargetMatches(r.Header, expectedAppID) {
-			return source.Delivery{}, ErrWebhookTargetMismatch
+			return partial, ErrWebhookTargetMismatch
 		}
 
 		// Step 2: single X-GitHub-Event header, and for supported families a
@@ -226,11 +235,11 @@ func (v *WireVerifier) Verify(r *http.Request, body []byte, secrets source.Secre
 		// X-GitHub-Event value passes here with IsSupportedEvent("") == false,
 		// matching production's 200 ignored response.
 		if len(r.Header.Values("X-GitHub-Event")) != 1 {
-			return source.Delivery{}, ErrInvalidWebhookHeaders
+			return partial, ErrInvalidWebhookHeaders
 		}
 		if IsSupportedEvent(eventName) {
 			if len(r.Header.Values("X-GitHub-Delivery")) != 1 || !IsDeliveryGUID(deliveryID) {
-				return source.Delivery{}, ErrInvalidDeliveryID
+				return partial, ErrInvalidDeliveryID
 			}
 			deliveryID = strings.ToLower(deliveryID)
 		} else {
@@ -245,6 +254,7 @@ func (v *WireVerifier) Verify(r *http.Request, body []byte, secrets source.Secre
 
 	return source.Delivery{
 		ID:          deliveryID,
+		RawID:       rawDeliveryID,
 		TargetID:    targetID,
 		TargetType:  targetType,
 		Event:       eventName,
@@ -332,6 +342,21 @@ func (r *InstallationResolver) OnLifecycle(ctx context.Context, d source.Deliver
 
 func extractInstallationAndRepo(payload any) (int64, string, error) {
 	switch p := payload.(type) {
+	case source.Event:
+		var instID int64
+		if s := strings.TrimSpace(p.SourceID); s != "" {
+			parsed, err := strconv.ParseInt(s, 10, 64)
+			if err != nil {
+				return 0, "", fmt.Errorf("github source: invalid source installation id %q: %w", p.SourceID, err)
+			}
+			instID = parsed
+		}
+		return instID, p.Resource, nil
+	case *source.Event:
+		if p == nil {
+			return 0, "", ErrUnsupportedPayload
+		}
+		return extractInstallationAndRepo(*p)
 	case Result:
 		return p.InstallationID, p.RepoFullName, nil
 	case *Result:

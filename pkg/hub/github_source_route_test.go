@@ -20,8 +20,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -219,14 +223,14 @@ func TestGitHubWebhookIngress_RoutesThroughSeamAccessors(t *testing.T) {
 }
 
 // TestSourceEventSink_UsesConfiguredKind verifies that sourceEventSink persists
-// and deduplicates events using its configured source kind rather than a
-// hard-coded GitHub constant.
+// and deduplicates events using ev.SourceKind (set from RouteDeps.Kind) rather
+// than a hard-coded GitHub constant.
 func TestSourceEventSink_UsesConfiguredKind(t *testing.T) {
 	f := setupGitHubIngressFixture(t)
 	ctx := context.Background()
 	proj := f.createCandidateProject(t, "sink-kind-proj", "https://github.com/acme/widgets.git", f.instID)
 
-	sink := &sourceEventSink{srv: f.srv, kind: "jira"}
+	sink := &sourceEventSink{srv: f.srv}
 	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
 	ev := source.Event{
 		Handled:      true,
@@ -261,4 +265,146 @@ func TestSourceEventSink_UsesConfiguredKind(t *testing.T) {
 	require.Len(t, res2, 1)
 	assert.Equal(t, source.TargetStatusDuplicate, res2[0].Status)
 	assert.Equal(t, res1[0].EventID, res2[0].EventID)
+}
+
+// TestGitHubWebhookIngress_ErrorPathLogsViaHubAPIError proves that rejected
+// deliveries flow through the hub's writeError/apierr.WriteError path so
+// rate-limited 503s emit ERROR "API Error" logs and 400s emit INFO "API client error" logs.
+func TestGitHubWebhookIngress_ErrorPathLogsViaHubAPIError(t *testing.T) {
+	f := setupGitHubIngressFixture(t)
+	f.createCandidateProject(t, "errlog-proj", "https://github.com/acme/widgets.git", f.instID)
+
+	logBuf := &ghIngressLogBuffer{}
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	// 1. 400 invalid payload emits INFO "API client error".
+	logBuf.Reset()
+	rec400 := f.postDelivery(t, "issue_comment", uuid.NewString(), []byte(`{"action":"created"}`), nil)
+	require.Equal(t, http.StatusBadRequest, rec400.Code, rec400.Body.String())
+	logs400 := logBuf.String()
+	assert.Contains(t, logs400, `level=INFO`)
+	assert.Contains(t, logs400, `msg="API client error"`)
+	assert.Contains(t, logs400, `status=400`)
+	assert.Contains(t, logs400, `invalid payload`)
+
+	// 2. Drained verified bucket emits 503 + ERROR "API Error".
+	f.srv.githubWebhookIngress.mu.Lock()
+	f.srv.githubWebhookIngress.bucketInit = true
+	f.srv.githubWebhookIngress.bucketTokens = 0
+	f.srv.githubWebhookIngress.bucketRate = 0.0001
+	f.srv.githubWebhookIngress.bucketBurst = 1
+	f.srv.githubWebhookIngress.bucketLastCheck = f.currentTime()
+	f.srv.githubWebhookIngress.mu.Unlock()
+
+	logBuf.Reset()
+	body := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "hello", f.currentTime())
+	rec503 := f.postDelivery(t, "issue_comment", uuid.NewString(), body, nil)
+	require.Equal(t, http.StatusServiceUnavailable, rec503.Code, rec503.Body.String())
+	logs503 := logBuf.String()
+	assert.Contains(t, logs503, `level=ERROR`)
+	assert.Contains(t, logs503, `msg="API Error"`)
+	assert.Contains(t, logs503, `status=503`)
+	assert.Contains(t, logs503, `rate limit exceeded`)
+}
+
+// TestGitHubWebhookIngress_DuplicateCaseKeysUseNormalizedTenancy proves that
+// installation lookup and target fan-out use the single Normalize parse rather
+// than a case-insensitive struct re-decode of the raw body.
+func TestGitHubWebhookIngress_DuplicateCaseKeysUseNormalizedTenancy(t *testing.T) {
+	f := setupGitHubIngressFixture(t)
+	ctx := context.Background()
+
+	const otherInstID int64 = 998877
+	require.NoError(t, f.store.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: otherInstID,
+		AccountLogin:   "other",
+		AccountType:    "Organization",
+		AppID:          f.appID,
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+
+	projA := f.createCandidateProject(t, "case-proj-a", "https://github.com/acme/widgets.git", f.instID)
+	projB := f.createCandidateProject(t, "case-proj-b", "https://github.com/other/repo.git", otherInstID)
+
+	// Signed body carrying both exact lowercase keys ("installation", "repository")
+	// and differently-cased keys ("Installation", "Repository") that a second
+	// encoding/json struct decode would overwrite.
+	body := []byte(fmt.Sprintf(`{
+		"action": "created",
+		"installation": {"id": %d},
+		"Installation": {"id": %d},
+		"repository": {
+			"id": 101,
+			"name": "widgets",
+			"full_name": "acme/widgets",
+			"private": true,
+			"default_branch": "main",
+			"owner": {"login": "acme", "id": 10, "type": "Organization"}
+		},
+		"Repository": {
+			"full_name": "other/repo"
+		},
+		"sender": {"login": "alice", "id": 202, "type": "User"},
+		"issue": {
+			"number": 42,
+			"state": "open",
+			"title": "Case test",
+			"html_url": "https://github.com/acme/widgets/issues/42",
+			"user": {"login": "alice", "id": 202, "type": "User"}
+		},
+		"comment": {
+			"id": 9001,
+			"body": "hello",
+			"author_association": "MEMBER",
+			"html_url": "https://github.com/acme/widgets/issues/42#issuecomment-9001",
+			"created_at": "2026-11-18T12:00:00Z",
+			"updated_at": "2026-11-18T12:00:00Z",
+			"user": {"login": "alice", "id": 202, "type": "User"}
+		}
+	}`, f.instID, otherInstID))
+
+	deliv := uuid.NewString()
+	rec := f.postDelivery(t, "issue_comment", deliv, body, nil)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	var accepted GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
+	require.Equal(t, GitHubWebhookStatusQueued, accepted.Status)
+	require.Len(t, accepted.Events, 1)
+	assert.Equal(t, projA.ID, accepted.Events[0].ProjectID, "must route using normalized lowercase keys, not case-folded struct decode")
+
+	evsA, err := f.store.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: projA.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, evsA.Items, 1)
+	assert.Equal(t, strconv.FormatInt(f.instID, 10), evsA.Items[0].SourceID)
+
+	evsB, err := f.store.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: projB.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, evsB.Items)
+}
+
+// TestGitHubWebhookIngress_ReceivedLogBeforeTargetRejectionAndPreservesDeliveryCase
+// verifies that a signature-verified delivery logs "Source webhook received"
+// with original delivery_id casing even when target validation subsequently rejects it.
+func TestGitHubWebhookIngress_ReceivedLogBeforeTargetRejectionAndPreservesDeliveryCase(t *testing.T) {
+	f := setupGitHubIngressFixture(t)
+
+	logBuf := &ghIngressLogBuffer{}
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	upperDeliv := strings.ToUpper(uuid.NewString())
+	body := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "hello", f.currentTime())
+	rec := f.postDelivery(t, "issue_comment", upperDeliv, body, func(r *http.Request) {
+		r.Header.Set("X-GitHub-Hook-Installation-Target-ID", "999999")
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	logs := logBuf.String()
+	assert.Contains(t, logs, `msg="Source webhook received"`)
+	assert.Contains(t, logs, `source_kind=github`)
+	assert.Contains(t, logs, `delivery_id=`+upperDeliv)
 }
