@@ -104,3 +104,23 @@ func TestConversationTargetSource(t *testing.T) {
 		},
 	}))
 }
+
+func TestConversationParentTargetSource(t *testing.T) {
+	assert.Equal(t, TargetSource(""), ConversationParentTargetSource(nil))
+	assert.Equal(t, TargetSource(""), ConversationParentTargetSource(&messages.StructuredMessage{
+		ThreadID: "19:chan@thread.tacv2",
+	}))
+	assert.Equal(t, TargetSource(""), ConversationParentTargetSource(&messages.StructuredMessage{
+		Conversation: &messages.Conversation{
+			Surface:   "native",
+			ParentRef: "thread:p1:parent",
+		},
+	}))
+	assert.Equal(t, TargetSourceConversation, ConversationParentTargetSource(&messages.StructuredMessage{
+		ThreadID: "19:chan@thread.tacv2;messageid=1",
+		Conversation: &messages.Conversation{
+			Surface:   "teams",
+			ParentRef: "19:chan@thread.tacv2",
+		},
+	}))
+}

@@ -60,6 +60,19 @@ func ConversationTargetSource(msg *messages.StructuredMessage) TargetSource {
 	return ""
 }
 
+// ConversationParentTargetSource reports where ResolveConversationTarget(msg).ParentRef
+// originated: TargetSourceConversation when msg.Conversation supplies a non-native
+// ParentRef, or "" otherwise.
+func ConversationParentTargetSource(msg *messages.StructuredMessage) TargetSource {
+	if msg == nil {
+		return ""
+	}
+	if msg.Conversation != nil && msg.Conversation.Surface != "native" && msg.Conversation.ParentRef != "" {
+		return TargetSourceConversation
+	}
+	return ""
+}
+
 const maxLoggedTargetLen = 64
 
 // TruncateTargetID returns target capped to a bounded length for structured
