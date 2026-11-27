@@ -740,7 +740,8 @@ func TestUTCTimestampNormalize_LeavesStarTimesFixedWidth(t *testing.T) {
 	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
 		ID: topicID, ProjectID: proj.ID, Name: "stars", CreatedBy: "u1", CreatedAt: normBase,
 	}))
-	sel := StarSelector{ConversationKey: topicID, Channel: "web", ThreadID: topicID}
+	topicConvID := topicConversationID(t, wcs, topicID)
+	sel := StarSelector{ConversationKey: topicID, Channel: "web", ConversationID: topicConvID}
 
 	// One whole-second and one fractional save time: both are stored with
 	// nine fraction digits, so neither is in the trimmed canonical form.
@@ -750,7 +751,7 @@ func TestUTCTimestampNormalize_LeavesStarTimesFixedWidth(t *testing.T) {
 	for i, at := range []time.Time{whole, frac} {
 		require.NoError(t, s.CreateMessage(ctx, &store.Message{
 			ID: ids[i], ProjectID: proj.ID, Sender: "user:alice", Recipient: "chat",
-			Msg: fmt.Sprintf("star %d", i), Type: "chat", Channel: "web", ThreadID: topicID, CreatedAt: normBase,
+			Msg: fmt.Sprintf("star %d", i), Type: "chat", Channel: "web", ThreadID: topicID, ConversationID: topicConvID, CreatedAt: normBase,
 		}))
 		_, changed, err := stars.AddMessageStar(ctx, "u1", StarTarget{MessageID: ids[i], ProjectID: proj.ID, Selector: sel})
 		require.NoError(t, err)

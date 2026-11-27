@@ -87,8 +87,8 @@ type starStoreEnv struct {
 	deleteConversation func(t *testing.T, id string)
 }
 
-func threadSel(key string) StarSelector {
-	return StarSelector{ConversationKey: key, Channel: "web", ThreadID: key}
+func convSel(key, convID string) StarSelector {
+	return StarSelector{ConversationKey: key, Channel: "web", ConversationID: convID}
 }
 
 // testMessageStarStoreContract is the contract both dialects must meet
@@ -100,17 +100,30 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 	topic, topic2 := uuid.NewString(), uuid.NewString()
 	env.addTopic(t, topic)
 	env.addTopic(t, topic2)
-	conv := uuid.NewString()
+	conv, conv2 := uuid.NewString(), uuid.NewString()
+	env.setTopicConversation(t, topic, conv)
+	env.setTopicConversation(t, topic2, conv2)
 	base := time.Now().UTC().Add(-time.Hour)
 
 	m1 := uuid.NewString()
 	env.addMsg(t, m1, "web", topic, conv, base)
+	// Also a message with empty thread_id and only conversation_id set.
+	mNoThread := uuid.NewString()
+	env.addMsg(t, mNoThread, "web", "", conv, base.Add(30*time.Second))
 	add := func(user, id string, sel StarSelector) (StarRecord, bool, error) {
 		return st.AddMessageStar(ctx, user, StarTarget{MessageID: id, ProjectID: "proj-1", Selector: sel})
 	}
 
+	// Empty ConversationID fails with ErrInvalidInput.
+	_, _, err := add(userA, m1, StarSelector{ConversationKey: topic, Channel: "web"})
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	_, err = st.ListMessageStarCandidates(ctx, StarFilter{UserID: userA, Selector: StarSelector{ConversationKey: topic, Channel: "web"}, Limit: 10})
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	_, err = st.ListStarredHistory(ctx, StarHistoryQuery{UserID: userA, Selector: StarSelector{ConversationKey: topic, Channel: "web"}, Limit: 10})
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+
 	// Add, then an identical add keeps the association and its time.
-	rec, changed, err := add(userA, m1, threadSel(topic))
+	rec, changed, err := add(userA, m1, convSel(topic, conv))
 	require.NoError(t, err)
 	assert.True(t, changed)
 	assert.Equal(t, userA, rec.UserID)
@@ -118,7 +131,7 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 	assert.Equal(t, topic, rec.ConversationKey)
 	assert.Equal(t, "proj-1", rec.ProjectID)
 	assert.True(t, rec.StarredAt.Equal(rec.StarredAt.Truncate(starTimePrecision)), "stored precision")
-	again, changed, err := add(userA, m1, threadSel(topic))
+	again, changed, err := add(userA, m1, convSel(topic, conv))
 	require.NoError(t, err)
 	assert.False(t, changed)
 	assert.True(t, again.StarredAt.Equal(rec.StarredAt))
@@ -130,12 +143,15 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 	require.NoError(t, err)
 	assert.Nil(t, got, "another user's association is not visible")
 
-	// The conversation-ID selector matches the same message.
-	_, changed, err = add(userB, m1, StarSelector{ConversationKey: topic, Channel: "web", ConversationID: conv})
+	// Starring a message with empty thread_id succeeds via conversation_id.
+	_, changed, err = add(userB, m1, convSel(topic, conv))
+	require.NoError(t, err)
+	assert.True(t, changed)
+	_, changed, err = add(userB, mNoThread, convSel(topic, conv))
 	require.NoError(t, err)
 	assert.True(t, changed)
 
-	// Guard: wrong thread, wrong conversation, other channel, missing,
+	// Guard: wrong conversation, other channel, missing,
 	// deleted and deleted topic are not found, and nothing is inserted.
 	mOther := uuid.NewString()
 	env.addMsg(t, mOther, "telegram", topic, conv, base)
@@ -146,12 +162,12 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 		id  string
 		sel StarSelector
 	}{
-		"wrong thread":       {m1, threadSel(topic2)},
+		"wrong thread":       {m1, convSel(topic2, conv2)},
 		"wrong conversation": {m1, StarSelector{ConversationKey: topic, Channel: "web", ConversationID: uuid.NewString()}},
-		"other channel":      {mOther, threadSel(topic)},
-		"missing":            {uuid.NewString(), threadSel(topic)},
-		"deleted":            {mDel, threadSel(topic)},
-		"missing topic":      {m1, StarSelector{ConversationKey: uuid.NewString(), Channel: "web", ThreadID: topic}},
+		"other channel":      {mOther, convSel(topic, conv)},
+		"missing":            {uuid.NewString(), convSel(topic, conv)},
+		"deleted":            {mDel, convSel(topic, conv)},
+		"missing topic":      {m1, StarSelector{ConversationKey: uuid.NewString(), Channel: "web", ConversationID: conv}},
 	} {
 		_, _, err := add(userB, c.id, c.sel)
 		assert.ErrorIs(t, err, store.ErrNotFound, name)
@@ -164,10 +180,10 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 	// An existing association does not make a deleted target valid.
 	m2 := uuid.NewString()
 	env.addMsg(t, m2, "web", topic, conv, base.Add(time.Minute))
-	_, _, err = add(userA, m2, threadSel(topic))
+	_, _, err = add(userA, m2, convSel(topic, conv))
 	require.NoError(t, err)
 	require.NoError(t, env.wcs.SetMessageDeleted(ctx, m2, time.Now()))
-	_, _, err = add(userA, m2, threadSel(topic))
+	_, _, err = add(userA, m2, convSel(topic, conv))
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
 	// State: live, owned, with routing fields.
@@ -175,10 +191,10 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 	require.NoError(t, err)
 	require.Len(t, refs, 1, "deleted and unstarred are omitted")
 	assert.Equal(t, StarredMessageRef{MessageID: m1, ConversationKey: topic, ProjectID: "proj-1",
-		Channel: "web", ThreadID: topic, ConversationID: conv}, refs[0])
-	assert.True(t, refs[0].matches(threadSel(topic)))
-	assert.True(t, refs[0].matches(StarSelector{ConversationKey: topic, Channel: "web", ConversationID: conv}))
-	assert.False(t, refs[0].matches(threadSel(topic2)))
+		Channel: "web", ConversationID: conv}, refs[0])
+	assert.True(t, refs[0].matches(convSel(topic, conv)))
+	assert.False(t, refs[0].matches(StarSelector{ConversationKey: topic, Channel: "web"}))
+	assert.False(t, refs[0].matches(convSel(topic2, conv2)))
 	refs, err = st.ListStarredMessageIDs(ctx, uuid.NewString(), []string{m1})
 	require.NoError(t, err)
 	assert.Empty(t, refs)
@@ -189,7 +205,7 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 	for i := 0; i < 6; i++ {
 		id := uuid.NewString()
 		env.addMsg(t, id, "web", topic, conv, base.Add(time.Duration(i)*time.Second))
-		_, _, err := add(user, id, threadSel(topic))
+		_, _, err := add(user, id, convSel(topic, conv))
 		require.NoError(t, err)
 		ids = append(ids, id)
 	}
@@ -207,7 +223,7 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 	var walked []string
 	var after *StarPosition
 	for i := 0; i < 10; i++ {
-		page, err := st.ListMessageStarCandidates(ctx, StarFilter{UserID: user, Selector: threadSel(topic), After: after, Limit: 2})
+		page, err := st.ListMessageStarCandidates(ctx, StarFilter{UserID: user, Selector: convSel(topic, conv), After: after, Limit: 2})
 		require.NoError(t, err)
 		for _, it := range page.Items {
 			walked = append(walked, it.MessageID)
@@ -221,7 +237,7 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 
 	require.NoError(t, env.wcs.SetMessageDeleted(ctx, ids[4], time.Now()))
 	env.moveMsg(t, ids[5], topic2)
-	page, err := st.ListMessageStarCandidates(ctx, StarFilter{UserID: user, Selector: threadSel(topic), Limit: 100})
+	page, err := st.ListMessageStarCandidates(ctx, StarFilter{UserID: user, Selector: convSel(topic, conv), Limit: 100})
 	require.NoError(t, err)
 	assert.Nil(t, page.Next)
 	assert.Equal(t, append(append([]string(nil), tied...), ids[3]), func() []string {
@@ -231,16 +247,16 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 		}
 		return out
 	}(), "deleted and moved messages are omitted")
-	page, err = st.ListMessageStarCandidates(ctx, StarFilter{UserID: userB, Selector: threadSel(topic), Limit: 100})
+	page, err = st.ListMessageStarCandidates(ctx, StarFilter{UserID: userB, Selector: convSel(topic, conv), Limit: 100})
 	require.NoError(t, err)
-	assert.Equal(t, 1, len(page.Items))
+	assert.Equal(t, 2, len(page.Items))
 
 	// A deleted topic hides nothing by itself in the store (the handler's
 	// access check does) but refuses new stars.
 	m3 := uuid.NewString()
-	env.addMsg(t, m3, "web", topic2, "", base)
+	env.addMsg(t, m3, "web", topic2, conv2, base)
 	env.deleteTopic(t, topic2)
-	_, _, err = add(userA, m3, threadSel(topic2))
+	_, _, err = add(userA, m3, convSel(topic2, conv2))
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
 	// Remove reports whether a row existed.
@@ -256,15 +272,15 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 
 	// Re-adding after removal creates a fresh save time.
 	time.Sleep(2 * time.Millisecond)
-	re, changed, err := add(userA, m1, threadSel(topic))
+	re, changed, err := add(userA, m1, convSel(topic, conv))
 	require.NoError(t, err)
 	assert.True(t, changed)
 	assert.True(t, re.StarredAt.After(rec.StarredAt))
 
 	// Invalid input.
-	_, _, err = st.AddMessageStar(ctx, "", StarTarget{MessageID: m1, Selector: threadSel(topic)})
+	_, _, err = st.AddMessageStar(ctx, "", StarTarget{MessageID: m1, Selector: convSel(topic, conv)})
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
-	_, err = st.ListMessageStarCandidates(ctx, StarFilter{UserID: userA, Selector: threadSel(topic), Limit: 0})
+	_, err = st.ListMessageStarCandidates(ctx, StarFilter{UserID: userA, Selector: convSel(topic, conv), Limit: 0})
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 
 	// Init is repeatable; the migration is recorded once; rows survive.

@@ -55,13 +55,15 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 	t.Run("deletion clears every owner's star in the deletion transaction", func(t *testing.T) {
 		u1, u2 := uuid.NewString(), uuid.NewString()
 		topic := uuid.NewString()
+		topicConv := uuid.NewString()
 		env.addTopic(t, topic)
+		env.setTopicConversation(t, topic, topicConv)
 		m, m2 := uuid.NewString(), uuid.NewString()
-		env.addMsg(t, m, "web", topic, "", base)
-		env.addMsg(t, m2, "web", topic, "", base.Add(time.Second))
-		add(u1, m, threadSel(topic))
-		add(u2, m, threadSel(topic))
-		add(u1, m2, threadSel(topic))
+		env.addMsg(t, m, "web", topic, topicConv, base)
+		env.addMsg(t, m2, "web", "", topicConv, base.Add(time.Second))
+		add(u1, m, convSel(topic, topicConv))
+		add(u2, m, convSel(topic, topicConv))
+		add(u1, m2, convSel(topic, topicConv))
 
 		owners, err := st.MarkMessageDeletedAndClearStars(ctx, m, time.Now())
 		require.NoError(t, err)
@@ -71,7 +73,7 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 		assert.Nil(t, get(u1, m))
 		assert.Nil(t, get(u2, m))
 		assert.NotNil(t, get(u1, m2), "another message's star is kept")
-		_, _, err = st.AddMessageStar(ctx, u1, StarTarget{MessageID: m, Selector: threadSel(topic)})
+		_, _, err = st.AddMessageStar(ctx, u1, StarTarget{MessageID: m, Selector: convSel(topic, topicConv)})
 		assert.ErrorIs(t, err, store.ErrNotFound, "a deleted message cannot be starred again")
 		exts, err := env.wcs.GetMessageExts(ctx, []string{m})
 		require.NoError(t, err)
@@ -99,15 +101,13 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 		u1, u2 := uuid.NewString(), uuid.NewString()
 		dmKey := "dm:agent:" + uuid.NewString() + ":user:" + u1
 		otherKey := "dm:agent:" + uuid.NewString() + ":user:" + u1
-		conv := uuid.NewString()
-		modern, legacy, other := uuid.NewString(), uuid.NewString(), uuid.NewString()
-		// The modern message is matched only by its conversation ID, the
-		// legacy one only by its thread ID: promotion's two arms.
+		conv, otherConv := uuid.NewString(), uuid.NewString()
+		modern, dual, other := uuid.NewString(), uuid.NewString(), uuid.NewString()
+		// modern has empty thread_id; dual has both thread_id and conversation_id.
 		env.addMsg(t, modern, "web", "", conv, base)
-		env.addMsg(t, legacy, "web", dmKey, "", base.Add(time.Second))
-		env.addMsg(t, other, "web", otherKey, "", base)
-		modernSel := StarSelector{ConversationKey: dmKey, Channel: "web", ConversationID: conv}
-		legacySel := StarSelector{ConversationKey: dmKey, Channel: "web", ThreadID: dmKey}
+		env.addMsg(t, dual, "web", dmKey, conv, base.Add(time.Second))
+		env.addMsg(t, other, "web", otherKey, otherConv, base)
+		dmSel := StarSelector{ConversationKey: dmKey, Channel: "web", ConversationID: conv}
 		addDM := func(user, id string, sel StarSelector) StarRecord {
 			t.Helper()
 			rec, _, err := st.AddMessageStar(ctx, user, StarTarget{MessageID: id, Selector: sel})
@@ -115,11 +115,11 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 			return rec
 		}
 		before := map[string]StarRecord{
-			u1 + modern: addDM(u1, modern, modernSel),
-			u1 + legacy: addDM(u1, legacy, legacySel),
-			u2 + legacy: addDM(u2, legacy, legacySel),
+			u1 + modern: addDM(u1, modern, dmSel),
+			u1 + dual:   addDM(u1, dual, dmSel),
+			u2 + dual:   addDM(u2, dual, dmSel),
 		}
-		otherRec := addDM(u1, other, StarSelector{ConversationKey: otherKey, Channel: "web", ThreadID: otherKey})
+		otherRec := addDM(u1, other, StarSelector{ConversationKey: otherKey, Channel: "web", ConversationID: otherConv})
 
 		// A promotion that fails at its first step (a thread name already
 		// taken) moves no star.
@@ -144,7 +144,7 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 		// A promotion that fails AFTER its star update (the DM registry
 		// delete, its last step, is refused) rolls the star update back with
 		// everything else: stars keep the DM key and no project, and the
-		// messages stay in the DM (both arms still list them).
+		// messages stay in the DM.
 		require.NoError(t, env.wcs.UpsertDM(ctx, WebChatDM{ConversationKey: dmKey, ParticipantID: u1,
 			PeerID: strings.Split(dmKey, ":")[2], PeerKind: "agent"}))
 		undo := env.failDMDelete(t)
@@ -160,11 +160,9 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 			assert.Equal(t, "", got.ProjectID, "rolled back after the star update: %s", k)
 			assert.True(t, got.StarredAt.Equal(rec.StarredAt), k)
 		}
-		for name, sel := range map[string]StarSelector{"modern": modernSel, "legacy": legacySel} {
-			page, err := st.ListMessageStarCandidates(ctx, StarFilter{UserID: u1, Selector: sel, Limit: 10})
-			require.NoError(t, err)
-			assert.Len(t, page.Items, 1, "the %s message is still in the DM after the rollback", name)
-		}
+		page, err := st.ListMessageStarCandidates(ctx, StarFilter{UserID: u1, Selector: dmSel, Limit: 10})
+		require.NoError(t, err)
+		assert.Len(t, page.Items, 2, "both messages are still in the DM after the rollback")
 		lateTopic, err := env.wcs.GetTopic(ctx, late.ID)
 		require.NoError(t, err)
 		assert.Nil(t, lateTopic, "the rolled-back topic does not exist")
@@ -187,14 +185,14 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 		assert.Equal(t, otherRec, *got, "a star of a message that did not move is untouched")
 
 		// The moved stars list under the new thread.
-		page, err := st.ListMessageStarCandidates(ctx, StarFilter{UserID: u1, Selector: threadSel(topic.ID), Limit: 10})
+		page, err = st.ListMessageStarCandidates(ctx, StarFilter{UserID: u1, Selector: convSel(topic.ID, res.ConversationID), Limit: 10})
 		require.NoError(t, err)
 		ids := []string{}
 		for _, it := range page.Items {
 			ids = append(ids, it.MessageID)
 		}
-		assert.ElementsMatch(t, []string{modern, legacy}, ids)
-		page, err = st.ListMessageStarCandidates(ctx, StarFilter{UserID: u1, Selector: legacySel, Limit: 10})
+		assert.ElementsMatch(t, []string{modern, dual}, ids)
+		page, err = st.ListMessageStarCandidates(ctx, StarFilter{UserID: u1, Selector: dmSel, Limit: 10})
 		require.NoError(t, err)
 		assert.Empty(t, page.Items, "nothing is left under the DM key")
 	})
@@ -202,17 +200,20 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 	t.Run("conversation, user and project cleanup", func(t *testing.T) {
 		u1, u2 := uuid.NewString(), uuid.NewString()
 		topic, topic2 := uuid.NewString(), uuid.NewString()
+		conv, conv2, dmConv := uuid.NewString(), uuid.NewString(), uuid.NewString()
 		env.addTopic(t, topic)
 		env.addTopic(t, topic2)
+		env.setTopicConversation(t, topic, conv)
+		env.setTopicConversation(t, topic2, conv2)
 		dmKey := "dm:user:" + u1 + ":user:" + u2
 		a, b, c := uuid.NewString(), uuid.NewString(), uuid.NewString()
-		env.addMsg(t, a, "web", topic, "", base)
-		env.addMsg(t, b, "web", topic2, "", base)
-		env.addMsg(t, c, "web", dmKey, "", base)
-		add(u1, a, threadSel(topic))
-		add(u2, a, threadSel(topic))
-		add(u1, b, threadSel(topic2))
-		_, _, err := st.AddMessageStar(ctx, u1, StarTarget{MessageID: c, Selector: threadSel(dmKey)})
+		env.addMsg(t, a, "web", topic, conv, base)
+		env.addMsg(t, b, "web", topic2, conv2, base)
+		env.addMsg(t, c, "web", dmKey, dmConv, base)
+		add(u1, a, convSel(topic, conv))
+		add(u2, a, convSel(topic, conv))
+		add(u1, b, convSel(topic2, conv2))
+		_, _, err := st.AddMessageStar(ctx, u1, StarTarget{MessageID: c, Selector: convSel(dmKey, dmConv)})
 		require.NoError(t, err)
 
 		n, err := st.DeleteMessageStarsForConversation(ctx, topic)
@@ -227,7 +228,7 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 		assert.Nil(t, get(u1, b))
 		assert.Nil(t, get(u1, c))
 
-		add(u2, b, threadSel(topic2))
+		add(u2, b, convSel(topic2, conv2))
 		n, err = st.DeleteMessageStarsForProject(ctx, env.projectID)
 		require.NoError(t, err)
 		assert.GreaterOrEqual(t, n, int64(1))
@@ -245,20 +246,25 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 		live, gone := uuid.NewString(), uuid.NewString()
 		env.addUser(t, live)
 		liveTopic, deletedTopic := uuid.NewString(), uuid.NewString()
+		liveConv, deletedConv := uuid.NewString(), uuid.NewString()
 		env.addTopic(t, liveTopic)
 		env.addTopic(t, deletedTopic)
+		env.setTopicConversation(t, liveTopic, liveConv)
+		env.setTopicConversation(t, deletedTopic, deletedConv)
 		goneProject := uuid.NewString()
 		agentDM := "dm:agent:" + uuid.NewString() + ":user:" + live
 		humanDM := "dm:user:" + live + ":user:" + uuid.NewString()
 		staleDM := "dm:agent:" + uuid.NewString() + ":user:" + live
+		agentDMConv, humanDMConv := uuid.NewString(), uuid.NewString()
 
-		msg := func(thread string) string {
+		msg := func(thread, convID string) string {
 			id := uuid.NewString()
-			env.addMsg(t, id, "web", thread, "", base)
+			env.addMsg(t, id, "web", thread, convID, base)
 			return id
 		}
-		mLive, mLive2, mDeleted, mMoved := msg(liveTopic), msg(liveTopic), msg(liveTopic), msg(liveTopic)
-		mInDeletedTopic, mAgentDM, mHumanDM := msg(deletedTopic), msg(agentDM), msg(humanDM)
+		// mMoved has empty thread_id to prove repair joins on conversation_id.
+		mLive, mLive2, mDeleted, mMoved := msg(liveTopic, liveConv), msg(liveTopic, liveConv), msg(liveTopic, liveConv), msg("", liveConv)
+		mInDeletedTopic, mAgentDM, mHumanDM := msg("", deletedConv), msg(agentDM, agentDMConv), msg(humanDM, humanDMConv)
 		require.NoError(t, env.wcs.SetMessageDeleted(ctx, mDeleted, time.Now()))
 		env.deleteTopic(t, deletedTopic)
 		missingMsg := uuid.NewString()
@@ -341,11 +347,13 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 		owner := uuid.NewString()
 		env.addUser(t, owner)
 		topic := uuid.NewString()
+		topicConv := uuid.NewString()
 		env.addTopic(t, topic)
+		env.setTopicConversation(t, topic, topicConv)
 		at := time.Now().UTC().Add(-time.Minute).Truncate(starTimePrecision)
 		moved, kept := uuid.NewString(), uuid.NewString()
-		env.addMsg(t, moved, "web", topic, "", base)
-		env.addMsg(t, kept, "web", topic, "", base)
+		env.addMsg(t, moved, "web", "", topicConv, base)
+		env.addMsg(t, kept, "web", topic, topicConv, base)
 		env.insertStar(t, owner, moved, "dm:agent:"+uuid.NewString()+":user:"+owner, "", at)
 		env.insertStar(t, owner, kept, topic, env.projectID, at)
 		gone := []string{uuid.NewString(), uuid.NewString(), uuid.NewString()}
@@ -415,7 +423,7 @@ func TestMessageStarStore_SQLite_SingleConnection(t *testing.T) {
 	require.NotNil(t, stars)
 	seedDMData(t, db, wcs)
 	dmKey := "dm:agent:agent-uuid-1:user:user-uuid-1"
-	sel := StarSelector{ConversationKey: dmKey, Channel: "web", ThreadID: dmKey}
+	sel := StarSelector{ConversationKey: dmKey, Channel: "web", ConversationID: testSeedDMConvID}
 
 	rec, _, err := stars.AddMessageStar(ctx, "user-uuid-1", StarTarget{MessageID: "msg-1", Selector: sel})
 	require.NoError(t, err)
@@ -473,7 +481,7 @@ func TestMessageStarStore_SQLite_DeleteDMClearsStars(t *testing.T) {
 	seedDMData(t, db, wcs)
 	dmKey := "dm:agent:agent-uuid-1:user:user-uuid-1"
 	_, _, err := stars.AddMessageStar(ctx, "user-uuid-1", StarTarget{MessageID: "msg-2",
-		Selector: StarSelector{ConversationKey: dmKey, Channel: "web", ThreadID: dmKey}})
+		Selector: StarSelector{ConversationKey: dmKey, Channel: "web", ConversationID: testSeedDMConvID}})
 	require.NoError(t, err)
 	require.NoError(t, wcs.DeleteDM(ctx, dmKey))
 	got, err := stars.GetMessageStar(ctx, "user-uuid-1", "msg-2")
@@ -492,7 +500,7 @@ func TestMessageStarStore_SQLite_DeleteRollbackKeepsStars(t *testing.T) {
 	seedDMData(t, db, wcs)
 	dmKey := "dm:agent:agent-uuid-1:user:user-uuid-1"
 	_, _, err := stars.AddMessageStar(ctx, "user-uuid-1", StarTarget{MessageID: "msg-2",
-		Selector: StarSelector{ConversationKey: dmKey, Channel: "web", ThreadID: dmKey}})
+		Selector: StarSelector{ConversationKey: dmKey, Channel: "web", ConversationID: testSeedDMConvID}})
 	require.NoError(t, err)
 	// Make the star cleanup statement fail inside the transaction.
 	_, err = db.Exec(`CREATE TRIGGER star_delete_fails BEFORE DELETE ON webchat_message_star

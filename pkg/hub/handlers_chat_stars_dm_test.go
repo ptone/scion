@@ -375,15 +375,13 @@ func TestChatStars_PromotionKeepsStarsAndRechecksAccess(t *testing.T) {
 	f := newStarFixture(t, true)
 	ctx := context.Background()
 	d := f.memberDMs(t)
-	// The modern row is matched only by its conversation ID (no thread ID),
-	// the legacy row only by its thread ID: promotion's two arms.
+	// The modern row has no thread ID, the dual-written row has both:
+	// both match via conversation ID.
 	modern := f.dmMsg(t, "", d.agentConv, f.projA, "user:"+f.member, f.member, "modern", "web", time.Now().Add(-time.Hour))
-	legacy := f.dmMsg(t, d.agentKey, "", f.projA, "user:"+f.member, f.member, "legacy", "web", time.Now().Add(-2*time.Hour))
+	legacy := f.dmMsg(t, d.agentKey, d.agentConv, f.projA, "user:"+f.member, f.member, "legacy", "web", time.Now().Add(-2*time.Hour))
 	first := decodeStarPut(t, f.put(t, f.member, modern, d.agentKey))
-	// The legacy row is in history only under the thread-ID selector (the
-	// read switch off), so its star is stored with that selector.
 	legacyRec, _, err := f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: legacy, ProjectID: f.projA,
-		Selector: StarSelector{ConversationKey: d.agentKey, Channel: "web", ThreadID: d.agentKey}})
+		Selector: StarSelector{ConversationKey: d.agentKey, Channel: "web", ConversationID: d.agentConv}})
 	require.NoError(t, err)
 
 	ch, unsub := f.ep.Subscribe("user.*.chat.stars")
@@ -608,7 +606,7 @@ func TestChatStars_StateLeavesOutNonCanonicalStoredDMKey(t *testing.T) {
 		require.NotEqual(t, d.humanKey, swapped)
 		legacy := f.dmMsg(t, swapped, d.humanConv, uuid.Nil.String(), "user:"+f.member, f.member, "legacy", "web", time.Now())
 		_, _, err := f.stars.AddMessageStar(context.Background(), f.member, StarTarget{MessageID: legacy,
-			Selector: StarSelector{ConversationKey: swapped, Channel: "web", ThreadID: swapped}})
+			Selector: StarSelector{ConversationKey: swapped, Channel: "web", ConversationID: d.humanConv}})
 		require.NoError(t, err)
 		thread := f.threadMsg(t, f.topicA, f.projA, "t", time.Now())
 		decodeStarPut(t, f.put(t, f.member, thread, f.topicA))

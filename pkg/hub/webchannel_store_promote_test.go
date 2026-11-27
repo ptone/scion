@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS messages (
 	return store, db
 }
 
+const testSeedDMConvID = "11111111-1111-1111-1111-111111111111"
+
 // seedDMData sets up a DM conversation with messages, read states, and DM registry rows.
 func seedDMData(t *testing.T, db *sql.DB, store WebChatStore) {
 	t.Helper()
@@ -69,12 +71,12 @@ func seedDMData(t *testing.T, db *sql.DB, store WebChatStore) {
 
 	// Insert DM messages
 	_, err := db.Exec(`
-INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, channel, thread_id, msg, created)
+INSERT INTO messages (id, project_id, sender, sender_id, recipient, recipient_id, channel, thread_id, conversation_id, msg, created)
 VALUES
-    ('msg-1', 'proj-1', 'user:alice', 'user-uuid-1', 'agent:coder', 'agent-uuid-1', 'web', ?, 'hello agent', '2026-08-22T10:00:00Z'),
-    ('msg-2', 'proj-1', 'agent:coder', 'agent-uuid-1', 'user:alice', 'user-uuid-1', 'web', ?, 'hello user', '2026-08-22T10:01:00Z'),
-    ('msg-3', 'proj-1', 'user:alice', 'user-uuid-1', 'agent:coder', 'agent-uuid-1', 'web', ?, 'thanks', '2026-08-22T10:02:00Z')
-`, dmKey, dmKey, dmKey)
+    ('msg-1', 'proj-1', 'user:alice', 'user-uuid-1', 'agent:coder', 'agent-uuid-1', 'web', ?, ?, 'hello agent', '2026-08-22T10:00:00Z'),
+    ('msg-2', 'proj-1', 'agent:coder', 'agent-uuid-1', 'user:alice', 'user-uuid-1', 'web', ?, ?, 'hello user', '2026-08-22T10:01:00Z'),
+    ('msg-3', 'proj-1', 'user:alice', 'user-uuid-1', 'agent:coder', 'agent-uuid-1', 'web', ?, ?, 'thanks', '2026-08-22T10:02:00Z')
+`, dmKey, testSeedDMConvID, dmKey, testSeedDMConvID, dmKey, testSeedDMConvID)
 	require.NoError(t, err)
 
 	// Set up DM registry (two rows, one per participant)
@@ -361,19 +363,24 @@ func TestCountPendingMessages(t *testing.T) {
 
 	ctx := context.Background()
 	dmKey := "dm:agent:agent-uuid-1:user:user-uuid-1"
+	convID := "22222222-2222-2222-2222-222222222222"
 
-	// Insert messages with different dispatch states
+	// Insert messages with different dispatch states (including one with empty thread_id).
 	_, err := db.Exec(`
-INSERT INTO messages (id, sender, sender_id, recipient, recipient_id, channel, thread_id, msg, dispatch_state, created)
+INSERT INTO messages (id, sender, sender_id, recipient, recipient_id, channel, thread_id, conversation_id, msg, dispatch_state, created)
 VALUES
-    ('msg-d1', 'proj-1', 'agent:coder', 'agent-uuid-1', 'user:alice', 'web', ?, 'dispatched', 'dispatched', '2026-08-22T10:00:00Z'),
-    ('msg-d2', 'proj-1', 'agent:coder', 'agent-uuid-1', 'user:alice', 'web', ?, 'pending', 'pending', '2026-08-22T10:01:00Z')
-`, dmKey, dmKey)
+    ('msg-d1', 'proj-1', 'agent:coder', 'agent-uuid-1', 'user:alice', 'web', ?, ?, 'dispatched', 'dispatched', '2026-08-22T10:00:00Z'),
+    ('msg-d2', 'proj-1', 'agent:coder', 'agent-uuid-1', 'user:alice', 'web', '', ?, 'pending', 'pending', '2026-08-22T10:01:00Z')
+`, dmKey, convID, convID)
 	require.NoError(t, err)
 
-	count, err := store.CountPendingMessages(ctx, dmKey)
+	count, err := store.CountPendingMessages(ctx, convID)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
+
+	total, err := store.CountMessages(ctx, convID)
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
 }
 
 // TestPromoteDM_ThreadIDIndex verifies the thread_id_index migration runs.

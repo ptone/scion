@@ -3003,7 +3003,7 @@ func (f *promoteDMFixture) checkNotPromoted(t *testing.T, s store.Store) {
 			t.Errorf("a thread named %q was created", tp.Name)
 		}
 	}
-	n, err := f.wcs.CountMessages(ctx, f.dmKey)
+	n, err := f.wcs.CountMessages(ctx, f.directConvID)
 	if err != nil {
 		t.Fatalf("CountMessages: %v", err)
 	}

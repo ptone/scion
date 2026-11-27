@@ -4571,7 +4571,8 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 	}
 
 	// 9. Check for in-flight dispatches
-	pendingCount, err := wcs.CountPendingMessages(ctx, key)
+	dmConvID, _ := s.conversationIDForKey(ctx, wcs, key)
+	pendingCount, err := wcs.CountPendingMessages(ctx, dmConvID)
 	if err == nil && pendingCount > 0 {
 		writeError(w, http.StatusConflict, "IN_FLIGHT_MESSAGES",
 			"agent has pending replies — try again in a few seconds", nil)
@@ -4580,7 +4581,7 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 
 	// 10. Idempotency check: if DM has no messages left and a matching topic exists,
 	// the promotion already succeeded.
-	msgCount, _ := wcs.CountMessages(ctx, key)
+	msgCount, _ := wcs.CountMessages(ctx, dmConvID)
 	if msgCount == 0 {
 		// DM has no messages — check if promotion already happened
 		topics, listErr := wcs.ListTopics(ctx, projectID)

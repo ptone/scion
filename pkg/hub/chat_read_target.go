@@ -120,7 +120,6 @@ func (t chatReadTarget) starSelector() StarSelector {
 		ConversationKey: t.Key,
 		Channel:         t.Filter.Channel,
 		ConversationID:  t.Filter.ConversationID,
-		ThreadID:        t.Filter.ThreadID,
 	}
 }
 
@@ -131,10 +130,7 @@ func (t chatReadTarget) containsMessage(msg *store.Message) bool {
 	if f.Channel != "" && msg.Channel != f.Channel {
 		return false
 	}
-	if f.ConversationID != "" && msg.ConversationID != f.ConversationID {
-		return false
-	}
-	if f.ThreadID != "" && msg.ThreadID != f.ThreadID {
+	if f.ConversationID == "" || msg.ConversationID != f.ConversationID {
 		return false
 	}
 	return true

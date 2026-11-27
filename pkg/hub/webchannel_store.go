@@ -296,12 +296,12 @@ type WebChatStore interface {
 	MigrateReadState(ctx context.Context, oldKey, newKey string) error
 
 	// CountPendingMessages returns the number of messages with dispatch_state='pending'
-	// for the given thread_id. Used to check for in-flight agent dispatches before promotion.
-	CountPendingMessages(ctx context.Context, threadID string) (int, error)
+	// for the given conversation_id. Used to check for in-flight agent dispatches before promotion.
+	CountPendingMessages(ctx context.Context, conversationID string) (int, error)
 
-	// CountMessages returns the number of messages for the given thread_id.
+	// CountMessages returns the number of messages for the given conversation_id.
 	// Used for idempotency checks during DM promotion.
-	CountMessages(ctx context.Context, threadID string) (int, error)
+	CountMessages(ctx context.Context, conversationID string) (int, error)
 
 	// --- Per-recipient mention records ---
 
@@ -1875,12 +1875,17 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 	conditions = append(conditions, "x.deleted_at IS NULL")
 
 	if filter.ConversationKey != "" {
-		conditions = append(conditions, "thread_id = ?")
-		args = append(args, filter.ConversationKey)
+		if strings.HasPrefix(filter.ConversationKey, "dm:") {
+			conditions = append(conditions, "c.surface = 'native' AND c.external_ref = ? AND c.deleted_at IS NULL")
+			args = append(args, filter.ConversationKey)
+		} else {
+			conditions = append(conditions, "t.id = ?")
+			args = append(args, filter.ConversationKey)
+		}
 	}
 
 	if filter.ProjectID != "" {
-		conditions = append(conditions, "project_id = ?")
+		conditions = append(conditions, "m.project_id = ?")
 		args = append(args, filter.ProjectID)
 	} else if len(filter.ProjectIDs) > 0 {
 		placeholders := make([]string, len(filter.ProjectIDs))
@@ -1888,20 +1893,21 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 			placeholders[i] = "?"
 			args = append(args, pid)
 		}
-		conditions = append(conditions, fmt.Sprintf("project_id IN (%s)", strings.Join(placeholders, ",")))
+		conditions = append(conditions, fmt.Sprintf("m.project_id IN (%s)", strings.Join(placeholders, ",")))
 	}
 
-	// DM threads are private to their participants. Unless the search is
+	// DM conversations are private to their participants. Unless the search is
 	// scoped to one (already authorized) conversation, include a DM only when
-	// the caller occupies one of its user slots. Exact prefix/suffix
-	// comparison, not LIKE, so IDs are never treated as patterns.
+	// the caller occupies one of its user slots on conversations.external_ref.
+	// Exact prefix/suffix comparison, not LIKE, so IDs are never treated as
+	// patterns.
 	if filter.ConversationKey == "" {
 		if filter.DMParticipantUserID == "" {
-			conditions = append(conditions, "(thread_id IS NULL OR substr(thread_id, 1, 3) <> 'dm:')")
+			conditions = append(conditions, "(c.id IS NULL OR (c.kind <> 'direct' AND substr(COALESCE(c.external_ref, ''), 1, 3) <> 'dm:'))")
 		} else {
 			prefix, suffix := dmParticipantBounds(filter.DMParticipantUserID)
-			conditions = append(conditions, "(thread_id IS NULL OR substr(thread_id, 1, 3) <> 'dm:'"+
-				" OR substr(thread_id, 1, length(?)) = ? OR substr(thread_id, -length(?)) = ?)")
+			conditions = append(conditions, "(c.id IS NULL OR (c.kind <> 'direct' AND substr(COALESCE(c.external_ref, ''), 1, 3) <> 'dm:')"+
+				" OR substr(COALESCE(c.external_ref, ''), 1, length(?)) = ? OR substr(COALESCE(c.external_ref, ''), -length(?)) = ?)")
 			args = append(args, prefix, prefix, suffix, suffix)
 		}
 	}
@@ -1918,15 +1924,17 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 				return nil, "", fmt.Errorf("webchat store: search messages: %w: timestamp: %w", ErrInvalidSearchCursor, err)
 			}
 			cursorAt = cursorAt.UTC()
-			conditions = append(conditions, "(created < ? OR (created = ? AND id < ?))")
+			conditions = append(conditions, "(m.created < ? OR (m.created = ? AND m.id < ?))")
 			args = append(args, cursorAt, cursorAt, cursorParts[1])
 		}
 	}
 
 	query := fmt.Sprintf(`
-SELECT m.id, m.project_id, COALESCE(m.thread_id, ''), m.sender, m.msg, m.created
+SELECT m.id, m.project_id, COALESCE(t.id, CASE WHEN c.kind = 'direct' THEN c.external_ref ELSE '' END, ''), m.sender, m.msg, m.created
   FROM messages m
   LEFT JOIN webchat_message_ext x ON x.message_id = m.id
+  LEFT JOIN conversations c ON c.id = m.conversation_id
+  LEFT JOIN webchat_topic t ON lower(t.conversation_id) = m.conversation_id AND COALESCE(t.conversation_id, '') <> ''
  WHERE %s
  ORDER BY m.created DESC, m.id DESC
  LIMIT ?
@@ -2054,6 +2062,9 @@ func (s *sqliteWebChatStore) runMigrations() error {
 	}
 	if err := s.backfillTopicConversations(); err != nil {
 		return fmt.Errorf("topic conversation backfill: %w", err)
+	}
+	if err := s.backfillNativeMessageConversations(); err != nil {
+		return fmt.Errorf("native message conversation backfill: %w", err)
 	}
 	if err := s.reconcileTopicConversations(); err != nil {
 		return fmt.Errorf("topic conversation reconcile: %w", err)
@@ -2262,6 +2273,45 @@ func (s *sqliteWebChatStore) backfillTopicConversations() error {
 	}
 
 	return s.markMigrationCompleted("topic_conversation_backfill")
+}
+
+// backfillNativeMessageConversations fills messages.conversation_id from
+// webchat_topic.conversation_id for native topic rows whose conversation_id is
+// still NULL or empty. It only fills in missing values, so it is non-destructive
+// and idempotent. DM rows are already covered by messaging/backfill.go.
+func (s *sqliteWebChatStore) backfillNativeMessageConversations() error {
+	const migrationName = "messages_native_conversation_backfill"
+	done, err := s.migrationCompleted(migrationName)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	// messages is Ent-managed and may not exist yet. Leave the migration
+	// unrecorded when absent so the next Init runs it once messages exists.
+	tableExists, err := s.tableExists(context.Background(), "messages")
+	if err != nil {
+		return err
+	}
+	if !tableExists {
+		slog.Debug("Webchat native message conversation backfill deferred: messages table does not exist yet")
+		return nil
+	}
+
+	_, err = s.db.Exec(`
+UPDATE messages
+   SET conversation_id = lower(t.conversation_id)
+  FROM webchat_topic t
+ WHERE messages.thread_id = t.id
+   AND COALESCE(t.conversation_id, '') <> ''
+   AND (messages.conversation_id IS NULL OR messages.conversation_id = '')`)
+	if err != nil {
+		return fmt.Errorf("backfill native message conversation_id: %w", err)
+	}
+
+	return s.markMigrationCompleted(migrationName)
 }
 
 // reconcileTopicConversations is a one-time idempotent startup migration that
@@ -3174,24 +3224,30 @@ func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, 
 }
 
 // CountPendingMessages returns the number of messages with dispatch_state='pending'
-// for the given thread_id.
-func (s *sqliteWebChatStore) CountPendingMessages(ctx context.Context, threadID string) (int, error) {
+// for the given conversation_id.
+func (s *sqliteWebChatStore) CountPendingMessages(ctx context.Context, conversationID string) (int, error) {
+	if conversationID == "" {
+		return 0, nil
+	}
 	var count int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM messages WHERE thread_id = ? AND dispatch_state = 'pending'`,
-		threadID).Scan(&count)
+		`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND dispatch_state = 'pending'`,
+		strings.ToLower(conversationID)).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("webchat store: count pending messages: %w", err)
 	}
 	return count, nil
 }
 
-// CountMessages returns the number of messages for the given thread_id.
-func (s *sqliteWebChatStore) CountMessages(ctx context.Context, threadID string) (int, error) {
+// CountMessages returns the number of messages for the given conversation_id.
+func (s *sqliteWebChatStore) CountMessages(ctx context.Context, conversationID string) (int, error) {
+	if conversationID == "" {
+		return 0, nil
+	}
 	var count int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM messages WHERE thread_id = ?`,
-		threadID).Scan(&count)
+		`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`,
+		strings.ToLower(conversationID)).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("webchat store: count messages: %w", err)
 	}

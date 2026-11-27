@@ -84,7 +84,7 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 	add := func(u, msgID, key, projectID string) {
 		t.Helper()
 		_, _, err := st.AddMessageStar(ctx, u, StarTarget{MessageID: msgID, ProjectID: projectID,
-			Selector: StarSelector{ConversationKey: key, Channel: "web", ThreadID: key, ConversationID: convByKey[key]}})
+			Selector: StarSelector{ConversationKey: key, Channel: "web", ConversationID: convByKey[key]}})
 		require.NoError(t, err)
 	}
 	msg := func(key string, at time.Time) string {

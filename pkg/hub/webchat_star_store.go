@@ -36,8 +36,7 @@ import (
 
 // StarSelector is the native history scope a starred message must be in:
 // the conversation key the star is listed under, the history channel, and
-// the conversation selector history uses (the conversation ID when set,
-// else the thread ID).
+// the conversation ID history lists by.
 type StarSelector struct {
 	// ConversationKey is the topic ID (or exact DM key) the star is
 	// listed under.
@@ -45,10 +44,8 @@ type StarSelector struct {
 	// Channel limits matching messages to one channel ("web" for native
 	// chat); empty matches every channel.
 	Channel string
-	// ConversationID selects messages by conversation when set; otherwise
-	// ThreadID selects them by legacy thread ID.
+	// ConversationID selects messages by conversation (required).
 	ConversationID string
-	ThreadID       string
 }
 
 // StarTarget is a server-resolved star to add. It is never a client DTO.
@@ -101,22 +98,18 @@ type StarredMessageRef struct {
 	ConversationKey string
 	ProjectID       string
 	Channel         string
-	ThreadID        string
 	ConversationID  string
 }
 
 // matches reports whether ref is in the history scope of sel.
 func (ref StarredMessageRef) matches(sel StarSelector) bool {
-	if ref.ConversationKey != sel.ConversationKey {
+	if ref.ConversationKey != sel.ConversationKey || sel.ConversationID == "" {
 		return false
 	}
 	if sel.Channel != "" && ref.Channel != sel.Channel {
 		return false
 	}
-	if sel.ConversationID != "" {
-		return strings.EqualFold(ref.ConversationID, sel.ConversationID)
-	}
-	return ref.ThreadID == sel.ThreadID
+	return strings.EqualFold(ref.ConversationID, sel.ConversationID)
 }
 
 // MessagePosition is a keyset position in history order: a message's
@@ -164,9 +157,9 @@ func trimStarHistoryPage(page StarHistoryPage, limit int) StarHistoryPage {
 }
 
 // validStarHistoryQuery reports whether q names a user, a conversation
-// and a page size.
+// (both key and conversation ID) and a page size.
 func validStarHistoryQuery(q StarHistoryQuery) bool {
-	return q.UserID != "" && q.Selector.ConversationKey != "" && q.Limit >= 1
+	return q.UserID != "" && q.Selector.ConversationKey != "" && q.Selector.ConversationID != "" && q.Limit >= 1
 }
 
 // MessageStarStore persists starred messages. Both webchat store dialects
@@ -352,18 +345,13 @@ func (s *sqliteWebChatStore) initMessageStars() error {
 }
 
 // sqliteStarSelectorSQL returns the predicate (on messages m) and its
-// arguments for sel.
+// arguments for sel. An empty ConversationID matches nothing.
 func sqliteStarSelectorSQL(sel StarSelector) (string, []any) {
-	cond := "(? = '' OR m.channel = ?)"
-	args := []any{sel.Channel, sel.Channel}
-	if sel.ConversationID != "" {
-		cond += " AND m.conversation_id = ?"
-		args = append(args, strings.ToLower(sel.ConversationID))
-	} else {
-		cond += " AND m.thread_id = ?"
-		args = append(args, sel.ThreadID)
+	if sel.ConversationID == "" {
+		return "1 = 0", nil
 	}
-	return cond, args
+	return "(? = '' OR m.channel = ?) AND m.conversation_id = ?",
+		[]any{sel.Channel, sel.Channel, strings.ToLower(sel.ConversationID)}
 }
 
 // sqliteStarTargetGuard is the shared existence/scope/deletion check of an
@@ -380,7 +368,7 @@ func sqliteStarTargetGuard(target StarTarget) (string, []any) {
 }
 
 func (s *sqliteWebChatStore) AddMessageStar(ctx context.Context, userID string, target StarTarget) (StarRecord, bool, error) {
-	if userID == "" || target.MessageID == "" || target.Selector.ConversationKey == "" {
+	if userID == "" || target.MessageID == "" || target.Selector.ConversationKey == "" || target.Selector.ConversationID == "" {
 		return StarRecord{}, false, fmt.Errorf("webchat store: add message star: %w", store.ErrInvalidInput)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -472,7 +460,7 @@ SELECT user_id, message_id, conversation_key, COALESCE(project_id, ''), starred_
 }
 
 func (s *sqliteWebChatStore) ListMessageStarCandidates(ctx context.Context, f StarFilter) (StarCandidatePage, error) {
-	if f.UserID == "" || f.Selector.ConversationKey == "" || f.Limit < 1 {
+	if f.UserID == "" || f.Selector.ConversationKey == "" || f.Selector.ConversationID == "" || f.Limit < 1 {
 		return StarCandidatePage{}, fmt.Errorf("webchat store: list message stars: %w", store.ErrInvalidInput)
 	}
 	selCond, selArgs := sqliteStarSelectorSQL(f.Selector)
@@ -536,7 +524,7 @@ func (s *sqliteWebChatStore) ListStarredMessageIDs(ctx context.Context, userID s
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT st.message_id, st.conversation_key, COALESCE(st.project_id, ''),
-       COALESCE(m.channel, ''), COALESCE(m.thread_id, ''), COALESCE(m.conversation_id, '')
+       COALESCE(m.channel, ''), COALESCE(m.conversation_id, '')
   FROM webchat_message_star st
   JOIN messages m ON m.id = st.message_id
  WHERE st.user_id = ? AND st.message_id IN (`+strings.Join(placeholders, ",")+`)
@@ -549,7 +537,7 @@ SELECT st.message_id, st.conversation_key, COALESCE(st.project_id, ''),
 	for rows.Next() {
 		var ref StarredMessageRef
 		if err := rows.Scan(&ref.MessageID, &ref.ConversationKey, &ref.ProjectID,
-			&ref.Channel, &ref.ThreadID, &ref.ConversationID); err != nil {
+			&ref.Channel, &ref.ConversationID); err != nil {
 			return nil, fmt.Errorf("webchat store: list starred message ids: %w", err)
 		}
 		out = append(out, ref)
@@ -771,7 +759,7 @@ SELECT user_id, message_id FROM webchat_message_star
 UPDATE webchat_message_star
    SET conversation_key = t.id, project_id = t.project_id
   FROM messages m
-  JOIN webchat_topic t ON t.id = m.thread_id AND t.deleted_at IS NULL
+  JOIN webchat_topic t ON lower(t.conversation_id) = m.conversation_id AND COALESCE(t.conversation_id, '') <> '' AND t.deleted_at IS NULL
  WHERE m.id = webchat_message_star.message_id
    AND `+rng+`
    AND (webchat_message_star.conversation_key <> t.id OR webchat_message_star.project_id IS NOT t.project_id)
@@ -797,7 +785,7 @@ DELETE FROM webchat_message_star
      OR (substr(webchat_message_star.conversation_key, 1, 3) <> 'dm:'
          AND NOT EXISTS (SELECT 1 FROM webchat_topic t
                           WHERE t.id = webchat_message_star.conversation_key AND t.deleted_at IS NULL))
-     OR EXISTS (SELECT 1 FROM messages m JOIN webchat_topic t ON t.id = m.thread_id
+     OR EXISTS (SELECT 1 FROM messages m JOIN webchat_topic t ON lower(t.conversation_id) = m.conversation_id AND COALESCE(t.conversation_id, '') <> ''
                  WHERE m.id = webchat_message_star.message_id AND t.deleted_at IS NOT NULL))`, rngArgs...)
 	if err != nil {
 		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)

@@ -50,35 +50,38 @@ func testStarredHistoryContract(t *testing.T, env starStoreEnv) {
 	topic, topic2 := uuid.NewString(), uuid.NewString()
 	env.addTopic(t, topic)
 	env.addTopic(t, topic2)
-	conv := uuid.NewString()
+	conv, conv2 := uuid.NewString(), uuid.NewString()
+	env.setTopicConversation(t, topic, conv)
+	env.setTopicConversation(t, topic2, conv2)
 	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	at := func(minutes int) time.Time { return base.Add(time.Duration(minutes) * time.Minute) }
 
-	msg := func(channel, thread string, created time.Time) string {
+	msg := func(channel, thread, convID string, created time.Time) string {
 		id := uuid.NewString()
-		env.addMsg(t, id, channel, thread, conv, created)
+		env.addMsg(t, id, channel, thread, convID, created)
 		return id
 	}
-	m1 := msg("web", topic, at(1))
-	m2 := msg("web", topic, at(2))
+	m1 := msg("web", topic, conv, at(1))
+	// m2 has an empty thread_id to prove history reads key on conversation_id.
+	m2 := msg("web", "", conv, at(2))
 	// m3 and m4 share an instant: the ID breaks the tie.
-	m3 := msg("web", topic, at(3))
-	m4 := msg("web", topic, at(3))
-	unstarred := msg("web", topic, at(4))
-	m6 := msg("web", topic, at(5).Add(1500*time.Microsecond))
-	deleted := msg("web", topic, at(6))
-	telegram := msg("telegram", topic, at(7))
-	elsewhere := msg("web", topic2, at(8))
+	m3 := msg("web", topic, conv, at(3))
+	m4 := msg("web", topic, conv, at(3))
+	unstarred := msg("web", topic, conv, at(4))
+	m6 := msg("web", topic, conv, at(5).Add(1500*time.Microsecond))
+	deleted := msg("web", topic, conv, at(6))
+	telegram := msg("telegram", topic, conv, at(7))
+	elsewhere := msg("web", topic2, conv2, at(8))
 
-	star := func(user, id, key string) {
-		_, _, err := st.AddMessageStar(ctx, user, StarTarget{MessageID: id, ProjectID: "proj-1", Selector: threadSel(key)})
+	star := func(user, id, key, convID string) {
+		_, _, err := st.AddMessageStar(ctx, user, StarTarget{MessageID: id, ProjectID: "proj-1", Selector: convSel(key, convID)})
 		require.NoError(t, err)
 	}
 	for _, id := range []string{m1, m2, m3, m4, m6, deleted} {
-		star(userA, id, topic)
+		star(userA, id, topic, conv)
 	}
-	star(userA, elsewhere, topic2)
-	star(userB, m2, topic)
+	star(userA, elsewhere, topic2, conv2)
+	star(userB, m2, topic, conv)
 	// A star of another channel's message listed under the same key (the
 	// API would refuse it) is outside the history scope.
 	env.insertStar(t, userA, telegram, topic, "proj-1", time.Now())
@@ -91,7 +94,7 @@ func testStarredHistoryContract(t *testing.T, env starStoreEnv) {
 	}
 	newestFirst := []string{m6, tied[0], tied[1], m2, m1}
 
-	for _, sel := range []StarSelector{threadSel(topic), {ConversationKey: topic, Channel: "web", ConversationID: conv}} {
+	for _, sel := range []StarSelector{convSel(topic, conv)} {
 		q := StarHistoryQuery{UserID: userA, Selector: sel}
 
 		all := q
@@ -155,26 +158,26 @@ func testStarredHistoryContract(t *testing.T, env starStoreEnv) {
 	}
 
 	// Another user's stars are their own.
-	page, err := st.ListStarredHistory(ctx, StarHistoryQuery{UserID: userB, Selector: threadSel(topic), Limit: 50})
+	page, err := st.ListStarredHistory(ctx, StarHistoryQuery{UserID: userB, Selector: convSel(topic, conv), Limit: 50})
 	require.NoError(t, err)
 	assert.Equal(t, []string{m2}, starHistoryIDs(page))
 	assert.Equal(t, 1, page.Total)
 
 	// The other conversation lists its own star only.
-	page, err = st.ListStarredHistory(ctx, StarHistoryQuery{UserID: userA, Selector: threadSel(topic2), Limit: 50})
+	page, err = st.ListStarredHistory(ctx, StarHistoryQuery{UserID: userA, Selector: convSel(topic2, conv2), Limit: 50})
 	require.NoError(t, err)
 	assert.Equal(t, []string{elsewhere}, starHistoryIDs(page))
 
 	// A message that left the thread (its star still listed under the old
 	// key) is out of the thread's history scope.
 	env.moveMsg(t, m1, topic2)
-	page, err = st.ListStarredHistory(ctx, StarHistoryQuery{UserID: userA, Selector: threadSel(topic), Limit: 50})
+	page, err = st.ListStarredHistory(ctx, StarHistoryQuery{UserID: userA, Selector: convSel(topic, conv), Limit: 50})
 	require.NoError(t, err)
 	assert.Equal(t, []string{m6, tied[0], tied[1], m2}, starHistoryIDs(page))
 	assert.Equal(t, 4, page.Total)
 
 	// No stars: an empty page, not nil.
-	page, err = st.ListStarredHistory(ctx, StarHistoryQuery{UserID: uuid.NewString(), Selector: threadSel(topic), Limit: 50})
+	page, err = st.ListStarredHistory(ctx, StarHistoryQuery{UserID: uuid.NewString(), Selector: convSel(topic, conv), Limit: 50})
 	require.NoError(t, err)
 	assert.NotNil(t, page.Items)
 	assert.Empty(t, page.Items)
@@ -182,8 +185,8 @@ func testStarredHistoryContract(t *testing.T, env starStoreEnv) {
 
 	// Invalid input.
 	for _, bad := range []StarHistoryQuery{
-		{UserID: userA, Selector: threadSel(topic)},
-		{Selector: threadSel(topic), Limit: 1},
+		{UserID: userA, Selector: convSel(topic, conv)},
+		{Selector: convSel(topic, conv), Limit: 1},
 		{UserID: userA, Limit: 1},
 	} {
 		_, err := st.ListStarredHistory(ctx, bad)
@@ -202,14 +205,15 @@ func TestStarredHistory_SQLiteLegacyTimeSuffix(t *testing.T) {
 	older := f.threadMsg(t, f.topicA, f.projA, "older", base)
 	legacy := f.threadMsg(t, f.topicA, f.projA, "legacy", base.Add(time.Minute))
 	newer := f.threadMsg(t, f.topicA, f.projA, "newer", base.Add(2*time.Minute))
+	topicConv := topicConversationID(t, f.wcs, f.topicA)
 	for _, id := range []string{older, legacy, newer} {
-		_, _, err := f.stars.AddMessageStar(ctx, f.admin, StarTarget{MessageID: id, ProjectID: f.projA, Selector: threadSel(f.topicA)})
+		_, _, err := f.stars.AddMessageStar(ctx, f.admin, StarTarget{MessageID: id, ProjectID: f.projA, Selector: convSel(f.topicA, topicConv)})
 		require.NoError(t, err)
 	}
 	_, err := f.db.Exec(`UPDATE messages SET created = created || ' m=+0.0336' WHERE id = ?`, legacy)
 	require.NoError(t, err)
 
-	q := StarHistoryQuery{UserID: f.admin, Selector: threadSel(f.topicA), Limit: 50}
+	q := StarHistoryQuery{UserID: f.admin, Selector: convSel(f.topicA, topicConv), Limit: 50}
 	page, err := f.stars.ListStarredHistory(ctx, q)
 	require.NoError(t, err)
 	assert.Equal(t, []string{newer, legacy, older}, starHistoryIDs(page))

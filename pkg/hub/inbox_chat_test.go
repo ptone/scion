@@ -803,7 +803,6 @@ func TestUserMeInboxSummary_ChatStarredMessagesProjectsAndCap(t *testing.T) {
 				ConversationKey: convKey,
 				Channel:         "web",
 				ConversationID:  convID,
-				ThreadID:        convKey,
 			},
 		})
 		require.NoError(t, err)
@@ -818,7 +817,9 @@ func TestUserMeInboxSummary_ChatStarredMessagesProjectsAndCap(t *testing.T) {
 	// Read user DM with 1 starred message (contributes 0 projects).
 	userDMKey, userDMMsg := h.seedUserDM(projA.ID, f.member, peerID, "starred user dm", base.Add(2*time.Minute))
 	require.NoError(t, f.wcs.SetReadState(ctx, f.member, userDMKey, userDMMsg))
-	starMsg(userDMMsg, userDMKey, "", "")
+	userDMConv, err := f.s.GetConversationByExternalRef(ctx, "native", userDMKey)
+	require.NoError(t, err)
+	starMsg(userDMMsg, userDMKey, userDMConv.ID, "")
 
 	// Starred message in hidden project (must be excluded by authorizer).
 	topicHidden, convHidden, msgsHidden := seedWebThread(projHidden, "secret-thread", base.Add(3*time.Minute), 1, true)
@@ -923,13 +924,15 @@ func TestUserMeInboxSummary_ChatStarredHiddenAgentDMProjectNotDisclosed(t *testi
 
 	dmKey, dmMsgID := h.seedAgentDM(f.member, hiddenAgent, "starred hidden agent dm", time.Now().UTC().Truncate(time.Second))
 	require.NoError(t, f.wcs.SetReadState(ctx, f.member, dmKey, dmMsgID))
-	_, _, err := stars.AddMessageStar(ctx, f.member, StarTarget{
+	dmConv, err := f.s.GetConversationByExternalRef(ctx, "native", dmKey)
+	require.NoError(t, err)
+	_, _, err = stars.AddMessageStar(ctx, f.member, StarTarget{
 		MessageID: dmMsgID,
 		ProjectID: hiddenProj.ID,
 		Selector: StarSelector{
 			ConversationKey: dmKey,
 			Channel:         "web",
-			ThreadID:        dmKey,
+			ConversationID:  dmConv.ID,
 		},
 	})
 	require.NoError(t, err)
