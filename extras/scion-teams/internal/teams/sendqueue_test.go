@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,21 +32,20 @@ func TestSendQueue_EnqueueAndSend(t *testing.T) {
 	defer tokenServer.Close()
 
 	var sentCount int32
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&sentCount, 1)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ActivityResponse{ID: "sent-act"})
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	sq := NewSendQueue(sender, 10, 10*time.Millisecond, slog.Default())
 	defer sq.Close()
 
 	activity := &Activity{Type: "message", Text: "test"}
-	actID, err := sq.Enqueue(context.Background(), "conv-1", apiServer.URL, activity)
+	actID, err := sq.Enqueue(context.Background(), "conv-1", serviceURL, activity)
 
 	require.NoError(t, err)
 	assert.Equal(t, "sent-act", actID)
@@ -59,15 +57,14 @@ func TestSendQueue_MultipleSendsSerialize(t *testing.T) {
 	defer tokenServer.Close()
 
 	var timestamps []time.Time
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		timestamps = append(timestamps, time.Now())
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ActivityResponse{ID: "act"})
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	// Use a 50ms min delay to make timing measurable.
 	sq := NewSendQueue(sender, 10, 50*time.Millisecond, slog.Default())
@@ -76,7 +73,7 @@ func TestSendQueue_MultipleSendsSerialize(t *testing.T) {
 	// Send 3 messages to the same conversation.
 	for i := 0; i < 3; i++ {
 		activity := &Activity{Type: "message", Text: "test"}
-		_, err := sq.Enqueue(context.Background(), "conv-1", apiServer.URL, activity)
+		_, err := sq.Enqueue(context.Background(), "conv-1", serviceURL, activity)
 		require.NoError(t, err)
 	}
 
@@ -162,7 +159,7 @@ func TestSendQueue_429RetrySuccess(t *testing.T) {
 	defer tokenServer.Close()
 
 	var requestCount int32
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&requestCount, 1)
 		if count <= 2 {
 			// First two requests: rate limit.
@@ -174,16 +171,15 @@ func TestSendQueue_429RetrySuccess(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ActivityResponse{ID: "retry-success"})
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	sq := NewSendQueue(sender, 10, 1*time.Millisecond, slog.Default())
 	defer sq.Close()
 
 	activity := &Activity{Type: "message", Text: "rate limited"}
-	actID, err := sq.Enqueue(context.Background(), "conv-1", apiServer.URL, activity)
+	actID, err := sq.Enqueue(context.Background(), "conv-1", serviceURL, activity)
 
 	require.NoError(t, err)
 	assert.Equal(t, "retry-success", actID)
@@ -198,21 +194,20 @@ func TestSendQueue_429ExhaustsRetries(t *testing.T) {
 	defer tokenServer.Close()
 
 	var requestCount int32
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&requestCount, 1)
 		w.Header().Set("Retry-After", "0")
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	sq := NewSendQueue(sender, 10, 1*time.Millisecond, slog.Default())
 	defer sq.Close()
 
 	activity := &Activity{Type: "message", Text: "always limited"}
-	_, err := sq.Enqueue(context.Background(), "conv-1", apiServer.URL, activity)
+	_, err := sq.Enqueue(context.Background(), "conv-1", serviceURL, activity)
 
 	require.Error(t, err)
 	var retryErr *RetryAfterError
@@ -226,15 +221,14 @@ func TestSendQueue_ContextCancellation(t *testing.T) {
 	defer tokenServer.Close()
 
 	// Create a server that responds slowly but finishes.
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ActivityResponse{ID: "late"})
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	sq := NewSendQueue(sender, 10, 10*time.Millisecond, slog.Default())
 	defer sq.Close()
@@ -244,7 +238,7 @@ func TestSendQueue_ContextCancellation(t *testing.T) {
 	defer cancel()
 
 	activity := &Activity{Type: "message", Text: "test"}
-	_, err := sq.Enqueue(ctx, "conv-1", apiServer.URL, activity)
+	_, err := sq.Enqueue(ctx, "conv-1", serviceURL, activity)
 	// The context timeout fires before the API responds,
 	// so Enqueue returns a context error.
 	assert.Error(t, err)

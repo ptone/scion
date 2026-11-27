@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,7 +27,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin/teamshosts"
 )
+
+// ErrRedirectNotAllowed is returned when a Bot Connector HTTP request
+// attempts to follow an HTTP redirect.
+var ErrRedirectNotAllowed = errors.New("teams service URL redirect not allowed")
+
+func refuseRedirect(*http.Request, []*http.Request) error {
+	return ErrRedirectNotAllowed
+}
 
 // RetryAfterError indicates the API returned 429 Too Many Requests with
 // a Retry-After header. The caller should wait the specified duration.
@@ -40,18 +51,35 @@ func (e *RetryAfterError) Error() string {
 
 // Sender handles outbound REST API calls to the Bot Connector service.
 type Sender struct {
-	tokenProvider *TokenProvider
-	httpClient    *http.Client
-	log           *slog.Logger
+	tokenProvider     *TokenProvider
+	httpClient        *http.Client
+	log               *slog.Logger
+	extraServiceHosts []string
 }
 
 // NewSender creates a new Sender.
 func NewSender(tokenProvider *TokenProvider, log *slog.Logger) *Sender {
 	return &Sender{
 		tokenProvider: tokenProvider,
-		httpClient:    &http.Client{Timeout: 30 * time.Second},
-		log:           log,
+		httpClient: &http.Client{
+			Timeout:       30 * time.Second,
+			CheckRedirect: refuseRedirect,
+		},
+		log: log,
 	}
+}
+
+// SetExtraServiceHosts extends the built-in Bot Framework service URL host
+// allowlist with additional hostnames (for sovereign clouds or local emulators).
+// It never replaces or empties the built-in allowlist.
+func (s *Sender) SetExtraServiceHosts(hosts []string) {
+	if len(hosts) == 0 {
+		s.extraServiceHosts = nil
+		return
+	}
+	cp := make([]string, len(hosts))
+	copy(cp, hosts)
+	s.extraServiceHosts = cp
 }
 
 // sendActivity sends a new Activity to a conversation.
@@ -157,8 +185,29 @@ func (s *Sender) doWithRetry(ctx context.Context, method, apiURL string, body []
 	return resp, nil
 }
 
-// doRequest creates and executes an authorized HTTP request.
-func (s *Sender) doRequest(ctx context.Context, method, url string, body []byte) (*http.Response, error) {
+// doRequest validates the target URL against the Bot Framework host allowlist,
+// acquires a token, and executes an authorized HTTP request without following
+// redirects.
+func (s *Sender) doRequest(ctx context.Context, method, rawURL string, body []byte) (*http.Response, error) {
+	if err := teamshosts.ValidateServiceURL(rawURL, s.extraServiceHosts...); err != nil {
+		var denied *teamshosts.ServiceURLDeniedError
+		if errors.As(err, &denied) {
+			s.log.Warn("teams service URL denied",
+				"event", "teams_service_url_denied",
+				"direction", "outbound",
+				"reason", denied.Reason,
+				"host", denied.Host,
+			)
+		} else {
+			s.log.Warn("teams service URL denied",
+				"event", "teams_service_url_denied",
+				"direction", "outbound",
+				"error", err,
+			)
+		}
+		return nil, err
+	}
+
 	token, err := s.tokenProvider.GetToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get token: %w", err)
@@ -169,7 +218,7 @@ func (s *Sender) doRequest(ctx context.Context, method, url string, body []byte)
 		bodyReader = bytes.NewReader(body)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -179,8 +228,22 @@ func (s *Sender) doRequest(ctx context.Context, method, url string, body []byte)
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := s.httpClient.Do(req)
+	client := s.httpClient
+	if client.CheckRedirect == nil {
+		cp := *client
+		cp.CheckRedirect = refuseRedirect
+		client = &cp
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
+		if errors.Is(err, ErrRedirectNotAllowed) {
+			s.log.Warn("teams service URL redirect refused",
+				"event", "teams_service_url_denied",
+				"direction", "outbound",
+				"reason", "redirect_not_allowed",
+			)
+		}
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 

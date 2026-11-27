@@ -33,32 +33,47 @@ func TestTeamsBroker_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	var mu sync.Mutex
 	var delivered []string // conversation IDs extracted from request URL
 
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		delivered = append(delivered, r.URL.Path)
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ActivityResponse{ID: "resp-1"})
 	}))
-	defer apiServer.Close()
 
 	broker := NewBroker(slog.Default())
-	configureBrokerWithAPI(t, broker, apiServer.URL)
+	configureBrokerWithBotClient(t, broker, client)
 
 	ctx := context.Background()
+	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+		ConversationID: "19:chan-1@thread.tacv2",
+		ProjectID:      "p1",
+		Active:         true,
+	}))
+	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+		ConversationID:   "19:parent-chan@thread.tacv2",
+		ProjectID:        "p1",
+		Active:           true,
+		ShowAgentToAgent: true,
+	}))
+	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+		ConversationID: "19:legacy@thread.tacv2",
+		ProjectID:      "p1",
+		Active:         true,
+	}))
 	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "19:chan-1@thread.tacv2;messageid=100",
-		ServiceURL:     apiServer.URL,
+		ServiceURL:     serviceURL,
 		UpdatedAt:      time.Now(),
 	}))
 	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "19:parent-chan@thread.tacv2",
-		ServiceURL:     apiServer.URL,
+		ServiceURL:     serviceURL,
 		UpdatedAt:      time.Now(),
 	}))
 	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "19:legacy@thread.tacv2",
-		ServiceURL:     apiServer.URL,
+		ServiceURL:     serviceURL,
 		UpdatedAt:      time.Now(),
 	}))
 
@@ -168,9 +183,9 @@ func TestTeamsBroker_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Len(t, delivered, 4)
-	assert.Contains(t, delivered, "/v3/conversations/19:chan-1@thread.tacv2;messageid=100/activities")
-	assert.Contains(t, delivered, "/v3/conversations/19:parent-chan@thread.tacv2/activities")
-	assert.Contains(t, delivered, "/v3/conversations/19:legacy@thread.tacv2/activities")
+	assert.Contains(t, delivered, "/amer/v3/conversations/19:chan-1@thread.tacv2;messageid=100/activities")
+	assert.Contains(t, delivered, "/amer/v3/conversations/19:parent-chan@thread.tacv2/activities")
+	assert.Contains(t, delivered, "/amer/v3/conversations/19:legacy@thread.tacv2/activities")
 }
 
 func TestTeamsHubClient_DeliverInbound_ConversationPayload(t *testing.T) {
@@ -259,28 +274,46 @@ func TestTeamsBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	var mu sync.Mutex
 	var delivered []string
 
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		delivered = append(delivered, r.URL.Path)
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ActivityResponse{ID: "resp-1"})
 	}))
-	defer apiServer.Close()
 
 	broker := NewBroker(slog.Default())
-	configureBrokerWithAPI(t, broker, apiServer.URL)
+	configureBrokerWithBotClient(t, broker, client)
 	ctx := context.Background()
 
+	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+		ConversationID: "19:chan-1@thread.tacv2",
+		ProjectID:      "p1",
+		Active:         true,
+	}))
+	require.NoError(t, broker.store.CreateUserMapping(ctx, &TeamsUserMapping{
+		TeamsUserID: "teams-alice",
+		ScionUserID: "u1",
+		ScionEmail:  "alice",
+		LinkedAt:    time.Now(),
+	}))
+	require.NoError(t, broker.store.SetConversationContext(ctx, &ConversationContext{
+		TeamsUserID:        "teams-alice",
+		ProjectID:          "p1",
+		AgentSlug:          "coder",
+		LastConversationID: "a:dm-alice",
+		LastMessageAt:      time.Now(),
+	}))
 	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "19:chan-1@thread.tacv2;messageid=100",
-		ServiceURL:     apiServer.URL,
+		ServiceURL:     serviceURL,
 		UpdatedAt:      time.Now(),
 	}))
 	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
-		ConversationID: "a:dm-alice",
-		ServiceURL:     apiServer.URL,
-		UpdatedAt:      time.Now(),
+		ConversationID:   "a:dm-alice",
+		ServiceURL:       serviceURL,
+		ConversationType: "personal",
+		UpdatedAt:        time.Now(),
 	}))
 
 	topic := "scion.project.p1.user.u1.messages"
@@ -304,6 +337,7 @@ func TestTeamsBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	}))
 
 	// 2. Outbound DM reply with Conversation omitted (nil) and affinity Channel:"teams".
+	// Routes via the user's stored ConversationContext (not metadata).
 	require.NoError(t, broker.Publish(ctx, topic, &messages.StructuredMessage{
 		Version:        messages.Version,
 		Sender:         "agent:coder",
@@ -313,9 +347,6 @@ func TestTeamsBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 		Channel:        "teams",
 		ConversationID: "conv-dm-1",
 		Conversation:   nil,
-		Metadata: map[string]string{
-			"teams_conversation_id": "a:dm-alice",
-		},
 	}))
 
 	broker.mu.Lock()
@@ -326,8 +357,8 @@ func TestTeamsBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Len(t, delivered, 2)
-	assert.Contains(t, delivered, "/v3/conversations/19:chan-1@thread.tacv2;messageid=100/activities")
-	assert.Contains(t, delivered, "/v3/conversations/a:dm-alice/activities")
+	assert.Contains(t, delivered, "/amer/v3/conversations/19:chan-1@thread.tacv2;messageid=100/activities")
+	assert.Contains(t, delivered, "/amer/v3/conversations/a:dm-alice/activities")
 }
 
 // TestTeamsBroker_Publish_PreUpgradeReplyToIDNeverPostsToGuessedTarget (R-FV1)
@@ -338,22 +369,21 @@ func TestTeamsBroker_Publish_PreUpgradeReplyToIDNeverPostsToGuessedTarget(t *tes
 	var mu sync.Mutex
 	var delivered []string
 
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		delivered = append(delivered, r.URL.Path)
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ActivityResponse{ID: "resp-1"})
 	}))
-	defer apiServer.Close()
 
 	broker := NewBroker(slog.Default())
-	configureBrokerWithAPI(t, broker, apiServer.URL)
+	configureBrokerWithBotClient(t, broker, client)
 	ctx := context.Background()
 
 	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "19:linked-chan@thread.tacv2",
-		ServiceURL:     apiServer.URL,
+		ServiceURL:     serviceURL,
 		UpdatedAt:      time.Now(),
 	}))
 	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
@@ -384,5 +414,5 @@ func TestTeamsBroker_Publish_PreUpgradeReplyToIDNeverPostsToGuessedTarget(t *tes
 	mu.Lock()
 	defer mu.Unlock()
 	require.Len(t, delivered, 1)
-	assert.Equal(t, "/v3/conversations/19:linked-chan@thread.tacv2/activities", delivered[0])
+	assert.Equal(t, "/amer/v3/conversations/19:linked-chan@thread.tacv2/activities", delivered[0])
 }

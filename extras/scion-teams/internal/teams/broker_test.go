@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -332,18 +333,25 @@ func TestBroker_Publish_ChannelFilter(t *testing.T) {
 }
 
 func TestBroker_Publish_MetadataConversationTarget(t *testing.T) {
-	broker := NewBroker(slog.Default())
-	configureBrokerForPublish(t, broker)
+	var called atomic.Int32
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
 
-	// Store a conversation reference with a valid service URL.
+	broker := NewBroker(slog.Default())
+	configureBrokerWithBotClient(t, broker, client)
+
+	// Store a conversation reference with a valid service URL, but no link.
 	ctx := context.Background()
 	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "conv-target",
-		ServiceURL:     "https://smba.trafficmanager.net/amer/",
+		ServiceURL:     serviceURL,
 		UpdatedAt:      time.Now(),
 	}))
 
-	// The message targets a specific conversation via metadata.
+	// Metadata target keys are ignored; without a link/ThreadID/context,
+	// nothing is sent.
 	msg := &messages.StructuredMessage{
 		Version: messages.Version,
 		Sender:  "agent:test",
@@ -351,14 +359,13 @@ func TestBroker_Publish_MetadataConversationTarget(t *testing.T) {
 		Type:    messages.TypeInstruction,
 		Metadata: map[string]string{
 			"teams_conversation_id": "conv-target",
-			"teams_service_url":     "https://smba.trafficmanager.net/amer/",
+			"teams_service_url":     serviceURL,
 		},
 	}
 
-	// The actual send will fail (no real API), but routing should work
-	// and the origin marker should be set.
-	_ = broker.Publish(context.Background(), "project.agent.event", msg)
+	require.NoError(t, broker.Publish(context.Background(), "project.agent.event", msg))
 	assert.Equal(t, OriginMarkerValue, msg.Metadata[OriginMarkerKey])
+	assert.Equal(t, int32(0), called.Load(), "metadata target keys must not trigger delivery")
 }
 
 func TestBroker_Publish_ChannelLinkBroadcast(t *testing.T) {
@@ -549,9 +556,9 @@ func configureBrokerForPublish(t *testing.T, broker *TeamsBroker) {
 	t.Cleanup(func() { broker.Close() })
 }
 
-// configureBrokerWithAPI sets up a broker whose Sender points at apiServer
-// for outbound calls, so Publish actually sends through the SendQueue.
-func configureBrokerWithAPI(t *testing.T, broker *TeamsBroker, apiServerURL string) {
+// configureBrokerWithBotClient sets up a broker whose Sender uses client for
+// outbound Bot Connector calls, so Publish sends through the SendQueue.
+func configureBrokerWithBotClient(t *testing.T, broker *TeamsBroker, client *http.Client) {
 	t.Helper()
 
 	// Phase 1 + Phase 2 configure.
@@ -569,7 +576,7 @@ func configureBrokerWithAPI(t *testing.T, broker *TeamsBroker, apiServerURL stri
 	broker.tokenProvider.httpClient = tokenServer.Client()
 	// Replace the send queue with one that uses short delays for testing.
 	broker.sendQueue.Close()
-	broker.sender.httpClient = http.DefaultClient // uses apiServer URL directly
+	broker.sender.httpClient = client
 	broker.sendQueue = NewSendQueue(broker.sender, 100, 1*time.Millisecond, slog.Default())
 	broker.mu.Unlock()
 }
@@ -582,7 +589,7 @@ func TestBroker_Publish_MultiTargetReplyToIDs(t *testing.T) {
 	var mu sync.Mutex
 	received := make(map[string]string) // conversationID -> replyToID
 
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var act Activity
 		json.NewDecoder(r.Body).Decode(&act)
 		mu.Lock()
@@ -591,22 +598,21 @@ func TestBroker_Publish_MultiTargetReplyToIDs(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ActivityResponse{ID: "resp-" + act.ReplyToID})
 	}))
-	defer apiServer.Close()
 
 	broker := NewBroker(slog.Default())
-	configureBrokerWithAPI(t, broker, apiServer.URL)
+	configureBrokerWithBotClient(t, broker, client)
 
 	ctx := context.Background()
 
 	// Set up two conversations with conversation references via the store.
 	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "conv-A",
-		ServiceURL:     apiServer.URL,
+		ServiceURL:     serviceURL,
 		UpdatedAt:      time.Now(),
 	}))
 	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "conv-B",
-		ServiceURL:     apiServer.URL,
+		ServiceURL:     serviceURL,
 		UpdatedAt:      time.Now(),
 	}))
 	// Link both conversations to the same project.
@@ -713,22 +719,27 @@ func TestBroker_Publish_ThreadIDRouting(t *testing.T) {
 	// R6: Verify Priority 1 routing — ThreadID match finds the conversation.
 
 	var receivedPath string
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ActivityResponse{ID: "thread-act"})
 	}))
-	defer apiServer.Close()
 
 	broker := NewBroker(slog.Default())
-	configureBrokerWithAPI(t, broker, apiServer.URL)
+	configureBrokerWithBotClient(t, broker, client)
 
 	ctx := context.Background()
 
-	// Store a conversation reference that matches a thread ID.
+	// Link the conversation to the topic's project and store its reference.
+	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+		ConversationID: "thread-123",
+		ProjectID:      "proj",
+		Active:         true,
+		LinkedAt:       time.Now(),
+	}))
 	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "thread-123",
-		ServiceURL:     apiServer.URL,
+		ServiceURL:     serviceURL,
 		UpdatedAt:      time.Now(),
 	}))
 
@@ -1035,7 +1046,7 @@ func newAskUserBroker(t *testing.T, wrap func(Store) Store) (*TeamsBroker, func(
 	t.Helper()
 	var mu sync.Mutex
 	var sent []Activity
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var a Activity
 		if err := json.NewDecoder(r.Body).Decode(&a); err == nil {
 			mu.Lock()
@@ -1045,10 +1056,9 @@ func newAskUserBroker(t *testing.T, wrap func(Store) Store) (*TeamsBroker, func(
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ActivityResponse{ID: "sent-1"})
 	}))
-	t.Cleanup(apiServer.Close)
 
 	broker := NewBroker(slog.Default())
-	configureBrokerWithAPI(t, broker, apiServer.URL)
+	configureBrokerWithBotClient(t, broker, client)
 	ctx := context.Background()
 	require.NoError(t, broker.AddChannelLink(&ChannelLink{
 		ConversationID: "conv-1",
@@ -1059,7 +1069,7 @@ func newAskUserBroker(t *testing.T, wrap func(Store) Store) (*TeamsBroker, func(
 	}))
 	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
 		ConversationID: "conv-1",
-		ServiceURL:     apiServer.URL,
+		ServiceURL:     serviceURL,
 		UpdatedAt:      time.Now(),
 	}))
 	if wrap != nil {
@@ -1367,7 +1377,7 @@ func TestBroker_Publish_ConversationContextForLinkedUser(t *testing.T) {
 	var mu sync.Mutex
 	var sent []Activity
 	var sentPaths []string
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var a Activity
 		_ = json.NewDecoder(r.Body).Decode(&a)
 		mu.Lock()
@@ -1377,10 +1387,9 @@ func TestBroker_Publish_ConversationContextForLinkedUser(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ActivityResponse{ID: "out-act"})
 	}))
-	defer apiServer.Close()
 
 	broker := NewBroker(slog.Default())
-	configureBrokerWithAPI(t, broker, apiServer.URL)
+	configureBrokerWithBotClient(t, broker, client)
 	broker.mu.Lock()
 	broker.hubClient = NewHubClient(hubServer.URL, "dGVzdC1rZXk=", "teams-broker-1", slog.Default())
 	broker.mu.Unlock()
@@ -1407,7 +1416,7 @@ func TestBroker_Publish_ConversationContextForLinkedUser(t *testing.T) {
 		Text:         "builder please build",
 		From:         ChannelAccount{ID: "29:alice", Name: "Alice", AadObjectID: "aad-alice"},
 		Conversation: ConversationAccount{ID: "conv-linked"},
-		ServiceURL:   apiServer.URL,
+		ServiceURL:   serviceURL,
 	})
 	require.NoError(t, err)
 

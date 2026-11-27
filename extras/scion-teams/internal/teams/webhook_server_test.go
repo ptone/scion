@@ -221,6 +221,7 @@ func TestWebhookServer_ActivityTypeRouting(t *testing.T) {
 				Conversation: ConversationAccount{
 					ID: "conv-1",
 				},
+				ServiceURL: "https://smba.trafficmanager.net/amer/",
 			}
 
 			body, err := json.Marshal(activity)
@@ -266,6 +267,7 @@ func TestWebhookServer_InvokeResponse(t *testing.T) {
 		Conversation: ConversationAccount{
 			ID: "conv-1",
 		},
+		ServiceURL: "https://smba.trafficmanager.net/amer/",
 	}
 
 	body, err := json.Marshal(activity)

@@ -348,11 +348,12 @@ func (tj *testJWKS) signToken(claims jwt.MapClaims) string {
 
 func (tj *testJWKS) validClaims(appID string) jwt.MapClaims {
 	return jwt.MapClaims{
-		"iss": expectedIssuer,
-		"aud": appID,
-		"exp": time.Now().Add(1 * time.Hour).Unix(),
-		"nbf": time.Now().Add(-1 * time.Minute).Unix(),
-		"iat": time.Now().Unix(),
+		"iss":        expectedIssuer,
+		"aud":        appID,
+		"serviceurl": "https://smba.trafficmanager.net/amer/",
+		"exp":        time.Now().Add(1 * time.Hour).Unix(),
+		"nbf":        time.Now().Add(-1 * time.Minute).Unix(),
+		"iat":        time.Now().Unix(),
 	}
 }
 
