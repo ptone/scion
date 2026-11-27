@@ -372,6 +372,7 @@ func TestPublishWithMetadataChatID(t *testing.T) {
 	tgSrv := newFakeTelegramServer(t)
 	b := newTestBroker(t, tgSrv)
 
+	// Without a configured route for the topic, metadata telegram_chat_id is ignored.
 	msg := messages.NewInstruction("user:alice", "agent:coder", "direct route")
 	msg.Metadata = map[string]string{
 		"telegram_chat_id": "999",
@@ -379,10 +380,22 @@ func TestPublishWithMetadataChatID(t *testing.T) {
 
 	err := b.Publish(context.Background(), "any.topic", msg)
 	require.NoError(t, err)
+	assert.Empty(t, tgSrv.getSentMessages(), "metadata telegram_chat_id must be ignored")
+
+	// With a configured route for the topic, routing uses the configured route and ignores metadata.
+	b.chatRoutes[789] = "scion.project.p1.agent.coder.messages"
+	b.topicChats["scion.project.p1.agent.coder.messages"] = []int64{789}
+
+	msg2 := messages.NewInstruction("user:alice", "agent:coder", "routed via config")
+	msg2.Metadata = map[string]string{
+		"telegram_chat_id": "999",
+	}
+	err = b.Publish(context.Background(), "scion.project.p1.agent.coder.messages", msg2)
+	require.NoError(t, err)
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
-	assert.Equal(t, int64(999), sent[0].ChatID)
+	assert.Equal(t, int64(789), sent[0].ChatID)
 }
 
 func TestPublishPatternMatch(t *testing.T) {

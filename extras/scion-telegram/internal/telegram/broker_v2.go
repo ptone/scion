@@ -999,13 +999,17 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 
 	// Determine the project and agent from the topic.
 	projectID, agentSlug := parseTopicComponents(topic)
+	authzProjectID := canonicalTopicProjectID(topic)
 
 	// Route system messages to linked groups (similar to state-change
 	// with notify_in_group). System messages are operational notices and
 	// do not need DM routing.
 	if msg != nil && msg.Type == messages.TypeSystem {
 		if store != nil && projectID != "" {
-			links, _ := store.GetGroupLinksForProject(ctx, projectID)
+			links, err := store.GetGroupLinksForProject(ctx, projectID)
+			if err != nil {
+				b.log.Warn("Failed to get group links for system message", "project_id", projectID, "error", err)
+			}
 			for _, link := range links {
 				if link.Active && link.NotifyInGroup {
 					text := FormatSystemCard(msg)
@@ -1030,10 +1034,14 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	// instead of the group chat.
 	if msg != nil && msg.Type == messages.TypeStateChange {
 		// Route state changes to the recipient's personal DM AND to any
-		// linked groups that have notify_in_group enabled.
+		// linked groups that have notify_in_group enabled (fail closed on
+		// nil store, lookup error, inactive link, or NotifyInGroup=false).
 		dmErr := b.publishStateChangeDM(ctx, api, sq, store, msg, projectID, agentSlug)
 		if store != nil && projectID != "" {
-			links, _ := store.GetGroupLinksForProject(ctx, projectID)
+			links, err := store.GetGroupLinksForProject(ctx, projectID)
+			if err != nil {
+				b.log.Warn("Failed to get group links for state-change notification", "project_id", projectID, "error", err)
+			}
 			for _, link := range links {
 				if link.Active && link.NotifyInGroup {
 					text := FormatStateChangeCard(msg, agentSlug)
@@ -1056,12 +1064,15 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 
 	// Route input-needed prompts to the recipient user's personal DM when
 	// the recipient is a known user. Falls through to normal chat routing
-	// when there is no user recipient (e.g. metadata-based routing).
+	// when there is no user recipient.
 	if msg != nil && msg.Type == messages.TypeInputNeeded &&
 		strings.HasPrefix(msg.Recipient, "user:") {
 		dmErr := b.publishInputNeededDM(ctx, api, sq, store, msg, projectID, agentSlug)
 		if store != nil && projectID != "" {
-			links, _ := store.GetGroupLinksForProject(ctx, projectID)
+			links, err := store.GetGroupLinksForProject(ctx, projectID)
+			if err != nil {
+				b.log.Warn("Failed to get group links for input-needed notification", "project_id", projectID, "error", err)
+			}
 			for _, link := range links {
 				if link.Active && link.NotifyInGroup {
 					b.publishInputNeeded(ctx, api, sq, []int64{link.ChatID}, msg, agentSlug, projectID)
@@ -1074,38 +1085,29 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	// Collect target chat IDs via dynamic routing.
 	var chatIDs []int64
 
-	// Priority 0: Conversation external_ref (Phase 11).
-	// When a store and projectID are present, only post to the conversation's
-	// chat if it is still an active GroupLink for this project; otherwise fall
-	// back to the pre-P4 routing path so unlinking a group stops replies into
-	// existing forum-topic conversations.
+	// Priority 0: Explicit conversation target (Conversation.ExternalRef /
+	// ParentRef, or legacy ThreadID), gated by authorizeExplicitTarget.
+	// Forum topic (MessageThreadID) is applied only after the explicit chat
+	// is allowed (or when no explicit chat ID was supplied).
 	convChatID, hasConvChatID, convThreadID := parseTelegramConversationTarget(msg)
+	var forumThreadID int64
 	if hasConvChatID {
-		allowConvChat := true
-		if store != nil && projectID != "" {
-			link, err := store.GetGroupLink(ctx, convChatID)
-			if err != nil {
-				b.log.Warn("Failed to verify group link for conversation chat", "chat_id", convChatID, "error", err)
-				allowConvChat = false
-			} else if link == nil || !link.Active || link.ProjectID != projectID {
-				allowConvChat = false
-			}
+		container := strconv.FormatInt(convChatID, 10)
+		targetSrc := plugin.ConversationTargetSource(msg)
+		if targetSrc == "" {
+			targetSrc = plugin.ConversationParentTargetSource(msg)
 		}
-		if allowConvChat {
-			chatIDs = append(chatIDs, convChatID)
+		if authorizedChatID, ok, reason := b.authorizeExplicitTargetChat(ctx, store, authzProjectID, agentSlug, msg, container); !ok {
+			plugin.LogTargetDenied(b.log, "telegram", authzProjectID, targetSrc, container, reason)
+		} else {
+			chatIDs = append(chatIDs, authorizedChatID)
+			forumThreadID = convThreadID
 		}
+	} else {
+		forumThreadID = convThreadID
 	}
 
-	// Priority 1: Direct chat ID from metadata.
-	if len(chatIDs) == 0 && msg != nil && msg.Metadata != nil {
-		if chatIDStr, ok := msg.Metadata["telegram_chat_id"]; ok {
-			if chatID, err := strconv.ParseInt(chatIDStr, 10, 64); err == nil {
-				chatIDs = append(chatIDs, chatID)
-			}
-		}
-	}
-
-	// Priority 2: Look up via ConversationContext for the recipient.
+	// Priority 1: Look up via ConversationContext for the recipient.
 	if len(chatIDs) == 0 && msg != nil && msg.Recipient != "" && store != nil {
 		var denied bool
 		chatIDs, denied = b.resolveRecipientChats(ctx, msg.Recipient, msg.RecipientID, projectID, agentSlug)
@@ -1117,7 +1119,7 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		}
 	}
 
-	// Priority 3: Broadcast to all GroupLinks for the project.
+	// Priority 2: Broadcast to all GroupLinks for the project.
 	if len(chatIDs) == 0 && projectID != "" && store != nil {
 		links, err := store.GetGroupLinksForProject(ctx, projectID)
 		if err != nil {
@@ -1135,24 +1137,27 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		return nil
 	}
 
-	// Observer mode: filter agent-to-agent messages per group link setting.
+	// Observer mode (fail-closed): agent-to-agent messages are only delivered
+	// to chats with an active GroupLink where ShowAgentToAgent is true.
 	if msg != nil && !msg.Broadcasted &&
 		strings.HasPrefix(msg.Sender, "agent:") &&
 		strings.HasPrefix(msg.Recipient, "agent:") {
 		filtered := make([]int64, 0, len(chatIDs))
 		for _, chatID := range chatIDs {
+			if store == nil {
+				continue
+			}
 			link, err := store.GetGroupLink(ctx, chatID)
 			if err != nil {
-				b.log.Warn("Failed to load group link for observer check", "chat_id", chatID, "error", err)
-				filtered = append(filtered, chatID)
+				b.log.Warn("Failed to load group link for observer check; skipping chat", "chat_id", chatID, "error", err)
 				continue
 			}
-			if link == nil || link.ShowAgentToAgent {
-				filtered = append(filtered, chatID)
+			if link == nil || !link.Active || !link.ShowAgentToAgent {
+				b.log.Debug("Suppressed agent-to-agent message (observer mode off or unlinked)",
+					"chat_id", chatID, "sender", msg.Sender, "recipient", msg.Recipient, "linked", link != nil)
 				continue
 			}
-			b.log.Debug("Suppressed agent-to-agent message (observer mode off)",
-				"chat_id", chatID, "sender", msg.Sender, "recipient", msg.Recipient)
+			filtered = append(filtered, chatID)
 		}
 		chatIDs = filtered
 		if len(chatIDs) == 0 {
@@ -1174,19 +1179,13 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 
 	// Determine thread ID for Telegram forum topics.
 	var threadOpts []SendOption
-	if convThreadID != 0 {
-		threadOpts = append(threadOpts, SendOption{MessageThreadID: convThreadID})
+	if forumThreadID != 0 {
+		threadOpts = append(threadOpts, SendOption{MessageThreadID: forumThreadID})
 	}
 
-	// File attachment: check msg.Attachments (scion CLI --attach flag convention)
-	// first, then fall back to telegram_attachment_path metadata key.
-	if msg != nil {
-		attachPath := ""
-		if len(msg.Attachments) > 0 {
-			attachPath = msg.Attachments[0]
-		} else if msg.Metadata != nil {
-			attachPath = msg.Metadata["telegram_attachment_path"]
-		}
+	// File attachment: read only from msg.Attachments (scion CLI --attach flag convention).
+	if msg != nil && len(msg.Attachments) > 0 {
+		attachPath := msg.Attachments[0]
 		if attachPath != "" {
 			// Translate /workspace/<file> → /home/scion/.scion/projects/<projectSlug>/<file>
 			// Agent containers mount the hub's project directory as /workspace.
@@ -1843,16 +1842,13 @@ func (b *TelegramBrokerV2) resolveProjectSlug(ctx context.Context, store Store, 
 	return slug
 }
 
-// publishAttachment reads a file from the local filesystem and sends it to
-// each target chat via Telegram's sendDocument API. The message body is used
-// as the document caption.
+// publishAttachment reads a file from the local filesystem (from msg.Attachments)
+// and sends it to each target chat via Telegram's sendDocument API. The message
+// body is used as the document caption.
 //
-// This reads from telegram_attachment_path on the local filesystem, which
-// requires the plugin process to share a volume mount with the agent that
-// wrote the file. This is valid in single-VM / shared-dir setups but will
-// NOT work when agents and the plugin run in separate GKE pods with isolated
-// volumes. A future telegram_attachment_url metadata key should support
-// fetching the file from a URL (e.g. GCS signed URL) instead.
+// This requires the plugin process to share a volume mount with the agent that
+// wrote the file. This is valid in single-VM / shared-dir setups but will NOT
+// work when agents and the plugin run in separate GKE pods with isolated volumes.
 func (b *TelegramBrokerV2) publishAttachment(ctx context.Context, api *TelegramAPIClient, chatIDs []int64, msg *messages.StructuredMessage, agentSlug, attachPath string, opts ...SendOption) error {
 	f, err := openAttachmentFile(attachPath)
 	if err != nil {
@@ -1863,9 +1859,6 @@ func (b *TelegramBrokerV2) publishAttachment(ctx context.Context, api *TelegramA
 	defer f.Close()
 
 	filename := filepath.Base(strings.ReplaceAll(attachPath, "\\", "/"))
-	if name, ok := msg.Metadata["telegram_attachment_name"]; ok && name != "" {
-		filename = name
-	}
 
 	caption := truncateMessage(FormatMessageV2(msg, agentSlug))
 	// Telegram caption limit is 1024 characters.
