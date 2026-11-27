@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin/teamshosts"
 )
 
 // tenantIDPattern matches a valid UUID (Azure AD tenant IDs are always UUIDs).
@@ -72,16 +73,8 @@ func NewTeamsChannel(params map[string]string) *TeamsChannel {
 func (c *TeamsChannel) Name() string { return "teams" }
 
 // allowedTeamsServiceHosts is the closed set of Bot Framework service URL
-// hostnames for Teams: the public cloud (all regions share this host and
-// differ only in the path), GCC, GCC High and DoD. Source: Microsoft Teams
-// platform documentation, "Send proactive messages" (global service URLs).
-// The refusal message lists them in this order.
-var allowedTeamsServiceHosts = []string{
-	"smba.trafficmanager.net",
-	"smba.infra.gcc.teams.microsoft.com",
-	"smba.infra.gov.teams.microsoft.us",
-	"smba.infra.dod.teams.microsoft.us",
-}
+// hostnames for Teams, sourced from the shared teamshosts allowlist.
+var allowedTeamsServiceHosts = teamshosts.DefaultAllowedHosts()
 
 func (c *TeamsChannel) Validate() error {
 	if c.appID == "" {
