@@ -107,22 +107,21 @@ func TestOutbound_FreeTextThreadID_Existing_Succeeds_WithConversationID(t *testi
 	assert.Equal(t, conv.ID, stored.ConversationID)
 }
 
-// TestOutbound_FreeTextThreadID_ExternalChannel_NotGated pins that the
-// existing-thread check applies only to native delivery: an external
-// channel's plugin delivers to the ThreadID itself, so an unknown thread on
-// slack is still accepted, while the same send on web is rejected.
-func TestOutbound_FreeTextThreadID_ExternalChannel_NotGated(t *testing.T) {
+// TestOutbound_FreeTextThreadID_ExternalChannel_Gated pins that unknown raw
+// thread_ids on external channels are rejected with 422 just like native web
+// threads, without creating a conversation row.
+func TestOutbound_FreeTextThreadID_ExternalChannel_Gated(t *testing.T) {
 	srv, s, project, agent, user := def138Setup(t)
 	setupThreadTestChannels(t, srv, s, project, "web", "slack")
 
 	const threadID = "C123:1700000000.000100"
 	rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
 		Recipient: "user:" + user.Email,
-		Msg:       "to a slack thread",
+		Msg:       "to an unknown slack thread",
 		ThreadID:  threadID,
 		Channel:   "slack",
 	})
-	require.Equal(t, http.StatusOK, rr.Code, "slack: an unknown thread must not be rejected: %s", rr.Body.String())
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "slack: an unknown thread must be rejected: %s", rr.Body.String())
 
 	rr = postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
 		Recipient: "user:" + user.Email,
@@ -353,14 +352,19 @@ func TestOutboundThreadGateApplies(t *testing.T) {
 	}
 }
 
-// An outbound threaded send on an external channel stores its conversation
-// under the channel's surface, so an inbound reply on the same thread
-// resolves to the same conversation and no native one is created.
+// An outbound threaded send on an external channel reuses the conversation
+// created under that channel's surface by the inbound path, and no native
+// conversation is created.
 func TestOutbound_ExternalChannelThread_SharesInboundConversation(t *testing.T) {
 	srv, s, project, agent, user := def138Setup(t)
 	setupThreadTestChannels(t, srv, s, project, "web", "slack")
 
 	const threadID = "C999:1700000000.000200"
+	inbound, err := srv.resolvePhase5Conversation(context.Background(), threadID, project.ID, user.ID, agent.ID, "slack")
+	require.NoError(t, err)
+	require.NotNil(t, inbound)
+	assert.Equal(t, "slack", inbound.Surface)
+
 	rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
 		Recipient: "user:" + user.Email,
 		Msg:       "outbound to a slack thread",
@@ -372,17 +376,12 @@ func TestOutbound_ExternalChannelThread_SharesInboundConversation(t *testing.T) 
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
 	outboundConvID, _ := body["conversation_id"].(string)
 	require.NotEmpty(t, outboundConvID)
+	assert.Equal(t, inbound.ConversationID, outboundConvID, "outbound reply must reuse the inbound conversation")
 
 	extRef, err := messaging.ThreadConversationExternalRef(project.ID, threadID)
 	require.NoError(t, err)
 	_, err = s.GetConversationByExternalRef(context.Background(), "native", extRef)
 	assert.ErrorIs(t, err, store.ErrNotFound, "no native conversation for an external thread")
-
-	inbound, err := srv.resolvePhase5Conversation(context.Background(), threadID, project.ID, user.ID, agent.ID, "slack")
-	require.NoError(t, err)
-	require.NotNil(t, inbound)
-	assert.Equal(t, outboundConvID, inbound.ConversationID, "inbound reply must reuse the outbound conversation")
-	assert.Equal(t, "slack", inbound.Surface)
 }
 
 func TestOutboundThreadSurface(t *testing.T) {
