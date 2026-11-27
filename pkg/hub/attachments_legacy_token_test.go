@@ -96,13 +96,14 @@ func (f *refFixture) requireLegacyAnswers(t *testing.T, id string, granted, refu
 	}
 }
 
-// A file in alice's DM with agent aa (by thread key) downloads for a token
+// A file in alice's DM with agent aa downloads for a token
 // that reads that DM: inbox:read for the agent's project and agent:read on
 // the agent.
 func TestLegacyAttachmentDownloadToken_AgentDMFollowsConversationRead(t *testing.T) {
 	f := newRefFixture(t)
 	dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
-	file, _ := f.legacyLinkedFile(t, f.aa.ID, f.projA.ID, dm, "", "agent-dm.txt")
+	conv := f.legacyConversation(t, "direct", dm, [2]string{"user", f.ua.ID}, [2]string{"agent", f.aa.ID})
+	file, _ := f.legacyLinkedFile(t, f.aa.ID, f.projA.ID, dm, conv.ID, "agent-dm.txt")
 
 	f.requireLegacyAnswers(t, file,
 		[]legacyTokenCase{
@@ -118,12 +119,13 @@ func TestLegacyAttachmentDownloadToken_AgentDMFollowsConversationRead(t *testing
 	assert.Equal(t, http.StatusOK, f.download(t, f.ua, file).status, "the session is unchanged")
 }
 
-// A file in alice's DM with carol (by thread key) downloads only for a
+// A file in alice's DM with carol downloads only for a
 // token with inbox:read on a hub boundary: the DM has no project.
 func TestLegacyAttachmentDownloadToken_UserDMNeedsHubBoundary(t *testing.T) {
 	f := newRefFixture(t)
 	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
-	file, _ := f.legacyLinkedFile(t, f.uc.ID, uuid.Nil.String(), dm, "", "user-dm.txt")
+	conv := f.legacyConversation(t, "direct", dm, [2]string{"user", f.ua.ID}, [2]string{"user", f.uc.ID})
+	file, _ := f.legacyLinkedFile(t, f.uc.ID, uuid.Nil.String(), dm, conv.ID, "user-dm.txt")
 
 	f.requireLegacyAnswers(t, file,
 		[]legacyTokenCase{
@@ -161,7 +163,8 @@ func TestLegacyAttachmentDownloadToken_UnsentUploadOnlyForUploaderHubInbox(t *te
 func TestLegacyAttachmentDownloadToken_SentUploadFollowsMessageForUploader(t *testing.T) {
 	f := newRefFixture(t)
 	dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
-	file, _ := f.legacyLinkedFile(t, f.ua.ID, f.projA.ID, dm, "", "sent.txt")
+	conv := f.legacyConversation(t, "direct", dm, [2]string{"user", f.ua.ID}, [2]string{"agent", f.aa.ID})
+	file, _ := f.legacyLinkedFile(t, f.ua.ID, f.projA.ID, dm, conv.ID, "sent.txt")
 
 	f.requireLegacyAnswers(t, file,
 		[]legacyTokenCase{
@@ -171,21 +174,6 @@ func TestLegacyAttachmentDownloadToken_SentUploadFollowsMessageForUploader(t *te
 			{"uploader's token without agent:read", selfToken(t, f.ua.ID, hubBoundary(), "inbox:read")},
 		})
 	assert.Equal(t, http.StatusOK, f.download(t, f.ua, file).status, "the uploader's session reads it")
-}
-
-// legacyTopicFault fails every GetTopic after the first topicCallsOK calls.
-type legacyTopicFault struct {
-	WebChatStore
-	topicCallsOK int
-	topicCalls   int
-}
-
-func (w *legacyTopicFault) GetTopic(ctx context.Context, id string) (*WebChatTopic, error) {
-	w.topicCalls++
-	if w.topicCalls > w.topicCallsOK {
-		return nil, errRefStoreFault
-	}
-	return w.WebChatStore.GetTopic(ctx, id)
 }
 
 // A lookup the token check makes that fails refuses the download with the
@@ -200,7 +188,8 @@ func TestLegacyAttachmentDownloadToken_LookupErrorAnswersAsUnknown(t *testing.T)
 	t.Run("peer agent lookup", func(t *testing.T) {
 		f := newRefFixture(t)
 		dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
-		file, _ := f.legacyLinkedFile(t, f.aa.ID, f.projA.ID, dm, "", "agent-dm.txt")
+		conv := f.legacyConversation(t, "direct", dm, [2]string{"user", f.ua.ID}, [2]string{"agent", f.aa.ID})
+		file, _ := f.legacyLinkedFile(t, f.aa.ID, f.projA.ID, dm, conv.ID, "agent-dm.txt")
 		tok := reader(t, f)
 		require.Equal(t, http.StatusOK, f.downloadAs(t, tok, file).status, "readable while the store works")
 
@@ -228,21 +217,6 @@ func TestLegacyAttachmentDownloadToken_LookupErrorAnswersAsUnknown(t *testing.T)
 		assert.Equal(t, 2, f.faults.conversationCalls, "the token check must make the failing lookup")
 	})
 
-	t.Run("topic lookup", func(t *testing.T) {
-		f := newRefFixture(t)
-		file, _ := f.legacyLinkedFile(t, f.uc.ID, f.projA.ID, f.topicA, "", "topic.txt")
-		tok := reader(t, f)
-		require.Equal(t, http.StatusOK, f.downloadAs(t, tok, file).status, "readable while the store works")
-
-		missing := f.downloadAs(t, tok, uuid.NewString())
-		// The first lookup is canReadNativeMessage's; the second is the
-		// token check's.
-		faulty := &legacyTopicFault{WebChatStore: f.wcs, topicCallsOK: 1}
-		f.srv.SetWebChatStore(faulty)
-		assert.Equal(t, missing, f.downloadAs(t, tok, file))
-		assert.Equal(t, 2, faulty.topicCalls, "the token check must make the failing lookup")
-	})
-
 	t.Run("linked message list", func(t *testing.T) {
 		f := newRefFixture(t)
 		file := f.attach(t, "", f.ua.ID, "draft.txt")
@@ -256,9 +230,8 @@ func TestLegacyAttachmentDownloadToken_LookupErrorAnswersAsUnknown(t *testing.T)
 }
 
 // A token downloads a file attached to a message exactly when it may read
-// that message on its own route: the conversation message route for a
-// message in a conversation, the chat history route for one found by
-// thread key. The two decisions share one token rule and must not drift.
+// that message on its own route: the conversation message route or the chat
+// history route. The two decisions share one token rule and must not drift.
 func TestLegacyAttachmentDownloadToken_MatchesMessageRead(t *testing.T) {
 	f := newRefFixture(t)
 	ctx := context.Background()
@@ -268,6 +241,7 @@ func TestLegacyAttachmentDownloadToken_MatchesMessageRead(t *testing.T) {
 	otherUserDM := dmKeyFor(t, "user", f.ua.ID, "user", f.ub.ID)
 	agentConv := f.legacyConversation(t, "direct", agentDM, [2]string{"user", f.ua.ID}, [2]string{"agent", f.aa.ID})
 	userConv := f.legacyConversation(t, "direct", userDM, [2]string{"user", f.ua.ID}, [2]string{"user", f.uc.ID})
+	otherUserConv := f.legacyConversation(t, "direct", otherUserDM, [2]string{"user", f.ua.ID}, [2]string{"user", f.ub.ID})
 	groupNone := f.legacyConversation(t, "group", "group:none:"+uuid.NewString(), [2]string{"user", f.ua.ID})
 	topicConvID, err := f.srv.conversationIDForKey(ctx, f.wcs, f.topicA)
 	require.NoError(t, err)
@@ -285,8 +259,8 @@ func TestLegacyAttachmentDownloadToken_MatchesMessageRead(t *testing.T) {
 		cases = append(cases, messageCase{name: name, file: file,
 			route: "/api/v1/conversations/" + convID + "/messages/" + msg})
 	}
-	byThread := func(name, projectID, thread string) {
-		file, _ := f.legacyLinkedFile(t, f.uc.ID, projectID, thread, "", name+".txt")
+	byChatRoute := func(name, projectID, thread, convID string) {
+		file, _ := f.legacyLinkedFile(t, f.uc.ID, projectID, thread, convID, name+".txt")
 		cases = append(cases, messageCase{name: name, file: file,
 			route: "/api/v1/chat/conversations/" + thread + "/messages", chat: true})
 	}
@@ -294,9 +268,9 @@ func TestLegacyAttachmentDownloadToken_MatchesMessageRead(t *testing.T) {
 	inConversation("user DM conversation", uuid.Nil.String(), userDM, userConv.ID)
 	inConversation("group without a project", uuid.Nil.String(), "group-thread-"+groupNone.ID, groupNone.ID)
 	inConversation("topic conversation", f.projA.ID, f.topicA, topicConvID)
-	byThread("agent DM by thread key", f.projA.ID, agentDM)
-	byThread("user DM by thread key", uuid.Nil.String(), otherUserDM)
-	byThread("topic by thread key", f.projA.ID, f.topicA)
+	byChatRoute("agent DM by chat route", f.projA.ID, agentDM, agentConv.ID)
+	byChatRoute("user DM by chat route", uuid.Nil.String(), otherUserDM, otherUserConv.ID)
+	byChatRoute("topic by chat route", f.projA.ID, f.topicA, topicConvID)
 
 	tokens := []legacyTokenCase{
 		{"hub: inbox:read agent:read project:read", selfToken(t, f.ua.ID, hubBoundary(), "inbox:read", "agent:read", "project:read")},

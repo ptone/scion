@@ -2150,7 +2150,11 @@ func noRecipientSetupProject(t *testing.T) (*Server, store.Store, string, *store
 func seedAgentMessage(t *testing.T, s store.Store, proj *store.Project, topicID string, agent *store.Agent, content string) string {
 	t.Helper()
 	var convID string
-	if conv, err := s.GetConversationByExternalRef(t.Context(), "native", fmt.Sprintf("thread:%s:%s", proj.ID, topicID)); err == nil && conv != nil {
+	extRef := fmt.Sprintf("thread:%s:%s", proj.ID, topicID)
+	if strings.HasPrefix(topicID, "dm:") {
+		extRef = topicID
+	}
+	if conv, err := s.GetConversationByExternalRef(t.Context(), "native", extRef); err == nil && conv != nil {
 		convID = conv.ID
 	}
 	id := api.NewUUID()
@@ -2177,7 +2181,11 @@ func seedAgentMessage(t *testing.T, s store.Store, proj *store.Project, topicID 
 func seedHumanMessage(t *testing.T, s store.Store, proj *store.Project, topicID, senderID, content string) string {
 	t.Helper()
 	var convID string
-	if conv, err := s.GetConversationByExternalRef(t.Context(), "native", fmt.Sprintf("thread:%s:%s", proj.ID, topicID)); err == nil && conv != nil {
+	extRef := fmt.Sprintf("thread:%s:%s", proj.ID, topicID)
+	if strings.HasPrefix(topicID, "dm:") {
+		extRef = topicID
+	}
+	if conv, err := s.GetConversationByExternalRef(t.Context(), "native", extRef); err == nil && conv != nil {
 		convID = conv.ID
 	}
 	id := api.NewUUID()
