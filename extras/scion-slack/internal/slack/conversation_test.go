@@ -75,6 +75,16 @@ func TestSlackBroker_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	b := NewBroker(nil)
 	b.client = slackapi.New("xoxb-test", slackapi.OptionAPIURL(srv.URL+"/"))
 	b.store = newTestStore(t)
+	require.NoError(t, b.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ChannelID: "C0123ABC",
+		ProjectID: "p1",
+		Active:    true,
+	}))
+	require.NoError(t, b.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ChannelID: "C9999XYZ",
+		ProjectID: "p1",
+		Active:    true,
+	}))
 
 	// 1. Conversation field (Phase 11) with empty legacy Channel/ThreadID routes to Slack.
 	err := b.Publish(context.Background(), "scion.project.p1.user.u1.messages", &messages.StructuredMessage{
@@ -336,6 +346,11 @@ func TestSlackBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	b.store = newTestStore(t)
 	ctx := context.Background()
 
+	require.NoError(t, b.store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID: "C0123ABC",
+		ProjectID: "p1",
+		Active:    true,
+	}))
 	require.NoError(t, b.store.CreateUserMapping(ctx, &SlackUserMapping{
 		SlackUserID: "U_ALICE",
 		ScionEmail:  "alice@example.com",
@@ -543,7 +558,12 @@ func TestSlackBroker_Publish_PreUpgradeBareTimestampNeverPostsToTS(t *testing.T)
 	})
 	require.NoError(t, err)
 
-	// 2. Same row once ParentRef is populated: composes (ParentRef, ExternalRef).
+	// 2. Same row once ParentRef is populated and linked: composes (ParentRef, ExternalRef).
+	require.NoError(t, b.store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID: "C0123ABC",
+		ProjectID: "p1",
+		Active:    true,
+	}))
 	err = b.Publish(ctx, topic, &messages.StructuredMessage{
 		Version:        messages.Version,
 		Sender:         "agent:coder",
