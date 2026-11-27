@@ -184,9 +184,14 @@ func TestPublish_UnresolvedSharedDirAttachment_NeverOpened(t *testing.T) {
 	b := newTestBrokerV2(t, tgSrv)
 	b.projectSlugMap = map[string]string{sharedDirTestProjectID: "my-project"}
 
+	require.NoError(t, b.store.SaveGroupLink(context.Background(), &GroupLink{
+		ChatID:    -300,
+		ProjectID: sharedDirTestProjectID,
+		Active:    true,
+	}))
+
 	msg := messages.NewInstruction("agent:coder", "user:alice", "report attached")
 	msg.Attachments = []string{"/scion-volumes/scratchpad/out/report.txt"}
-	msg.Metadata = map[string]string{"telegram_chat_id": "-300"}
 
 	err := b.Publish(context.Background(), "scion.project."+sharedDirTestProjectID+".agent.coder.messages", msg)
 	require.NoError(t, err)
@@ -217,9 +222,14 @@ func TestPublish_ResolvedSharedDirAttachment_Opened(t *testing.T) {
 	b := newTestBrokerV2(t, tgSrv)
 	b.projectSlugMap = map[string]string{sharedDirTestProjectID: "my-project"}
 
+	require.NoError(t, b.store.SaveGroupLink(context.Background(), &GroupLink{
+		ChatID:    -300,
+		ProjectID: sharedDirTestProjectID,
+		Active:    true,
+	}))
+
 	msg := messages.NewInstruction("agent:coder", "user:alice", "report attached")
 	msg.Attachments = []string{"/scion-volumes/scratchpad/out/report.txt"}
-	msg.Metadata = map[string]string{"telegram_chat_id": "-300"}
 
 	// The file does not exist, so the send fails after the open; only the
 	// opened path matters here.

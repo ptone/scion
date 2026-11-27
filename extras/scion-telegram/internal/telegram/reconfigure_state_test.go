@@ -627,8 +627,14 @@ func TestV2_Reconfigure_WaitsForPublish(t *testing.T) {
 	require.NoError(t, b.Configure(cfg))
 	oldStore, oldQueue := b.store, b.sendQueue
 
+	require.NoError(t, b.store.SaveGroupLink(context.Background(), &GroupLink{
+		ChatID:    -300,
+		ProjectID: "proj-1",
+		LinkedAt:  time.Now().UTC(),
+		Active:    true,
+	}))
+
 	msg := messages.NewInstruction("user:alice", "agent:coder", "hello from hub")
-	msg.Metadata = map[string]string{"telegram_chat_id": "-300"}
 	g.armed.Store(true)
 	published := make(chan error, 1)
 	go func() {

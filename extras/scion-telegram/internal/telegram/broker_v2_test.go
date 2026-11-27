@@ -1370,19 +1370,36 @@ func TestV2_HandleGroupMessage_ReplyConversationContextFallback(t *testing.T) {
 func TestV2_Publish_DirectChatID(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	b := newTestBrokerV2(t, tgSrv)
+	ctx := context.Background()
 
+	// Metadata telegram_chat_id is ignored when no group link exists.
 	msg := messages.NewInstruction("user:alice", "agent:coder", "hello from hub")
 	msg.Metadata = map[string]string{
 		"telegram_chat_id": "-300",
 	}
 
-	err := b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages", msg)
+	err := b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg)
+	require.NoError(t, err)
+	assert.Empty(t, tgSrv.getSentMessages(), "metadata telegram_chat_id must be ignored")
+
+	// With an active GroupLink for proj-1, delivery uses the linked group and ignores metadata.
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:    -100,
+		ProjectID: "proj-1",
+		LinkedAt:  time.Now().UTC(),
+		Active:    true,
+	}))
+	msg2 := messages.NewInstruction("user:alice", "agent:coder", "hello via link")
+	msg2.Metadata = map[string]string{
+		"telegram_chat_id": "-300",
+	}
+	err = b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg2)
 	require.NoError(t, err)
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
-	assert.Equal(t, int64(-300), sent[0].ChatID)
-	assert.Contains(t, sent[0].Text, "hello from hub")
+	assert.Equal(t, int64(-100), sent[0].ChatID)
+	assert.Contains(t, sent[0].Text, "hello via link")
 }
 
 func TestV2_Publish_ConversationContextRouting(t *testing.T) {
@@ -1492,6 +1509,14 @@ func TestV2_Publish_Dedup(t *testing.T) {
 func TestV2_Publish_InputNeeded(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	b := newTestBrokerV2(t, tgSrv)
+	ctx := context.Background()
+
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:    -200,
+		ProjectID: "proj-1",
+		LinkedAt:  time.Now().UTC(),
+		Active:    true,
+	}))
 
 	msg := &messages.StructuredMessage{
 		Version: messages.Version,
@@ -1499,12 +1524,11 @@ func TestV2_Publish_InputNeeded(t *testing.T) {
 		Msg:     "Do you want to proceed?",
 		Type:    messages.TypeInputNeeded,
 		Metadata: map[string]string{
-			"telegram_chat_id": "-200",
-			"choices":          `["Yes","No","Skip"]`,
+			"choices": `["Yes","No","Skip"]`,
 		},
 	}
 
-	err := b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages", msg)
+	err := b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg)
 	require.NoError(t, err)
 
 	sent := tgSrv.getSentMessages()
@@ -1530,6 +1554,14 @@ func TestV2_Publish_Closed(t *testing.T) {
 func TestV2_Publish_ReplyToMessageID(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	b := newTestBrokerV2(t, tgSrv)
+	ctx := context.Background()
+
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:    -200,
+		ProjectID: "proj-1",
+		LinkedAt:  time.Now().UTC(),
+		Active:    true,
+	}))
 
 	msg := &messages.StructuredMessage{
 		Version: messages.Version,
@@ -1537,16 +1569,16 @@ func TestV2_Publish_ReplyToMessageID(t *testing.T) {
 		Msg:     "reply message",
 		Type:    messages.TypeInstruction,
 		Metadata: map[string]string{
-			"telegram_chat_id":    "-200",
 			"telegram_message_id": "42",
 		},
 	}
 
-	err := b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages", msg)
+	err := b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg)
 	require.NoError(t, err)
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
+	assert.Equal(t, int64(-200), sent[0].ChatID)
 	assert.Equal(t, int64(42), sent[0].ReplyToMessageID)
 }
 
@@ -3848,9 +3880,15 @@ func TestV2_ResolveAttachmentPath_UntranslatableIsError(t *testing.T) {
 				return nil, os.ErrNotExist
 			}
 
+			require.NoError(t, b.store.SaveGroupLink(context.Background(), &GroupLink{
+				ChatID:    -300,
+				ProjectID: tt.projectID,
+				LinkedAt:  time.Now().UTC(),
+				Active:    true,
+			}))
+
 			msg := messages.NewInstruction("agent:coder", "user:alice", "report attached")
 			msg.Attachments = []string{tt.path}
-			msg.Metadata = map[string]string{"telegram_chat_id": "-300"}
 			require.NoError(t, b.Publish(context.Background(), "scion.project."+tt.projectID+".agent.coder.messages", msg))
 
 			assert.Empty(t, opened, "no attachment path may be opened")
@@ -3944,7 +3982,13 @@ func TestV2_ResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 func TestV2_Publish_DiscardsRetiredAssistantReply(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	b := newTestBrokerV2(t, tgSrv)
-	meta := map[string]string{"telegram_chat_id": "-200", "telegram_message_id": "42"}
+	require.NoError(t, b.store.SaveGroupLink(context.Background(), &GroupLink{
+		ChatID:    -200,
+		ProjectID: "proj-1",
+		LinkedAt:  time.Now().UTC(),
+		Active:    true,
+	}))
+	meta := map[string]string{"telegram_message_id": "42"}
 
 	require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages",
 		&messages.StructuredMessage{Version: messages.Version, Sender: "agent:coder", Msg: "turn text",
