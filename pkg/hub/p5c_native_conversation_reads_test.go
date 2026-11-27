@@ -220,14 +220,15 @@ func TestP5c_WriteGapAndRecentMessages(t *testing.T) {
 	assert.False(t, ok, "unresolvable non-broadcast message must be refused")
 	assert.Empty(t, storeMsg.ConversationID)
 
-	// Non-broadcast with empty sender/recipient IDs and no thread/conversation
+	// Native web message with empty sender/recipient IDs and no thread/conversation
 	// must also be refused.
 	ok = proxy.resolveUserMessageConversation(ctx, uuid.NewString(), &store.Message{ID: uuid.NewString()}, &messages.StructuredMessage{
+		Channel:   "web",
 		Sender:    "user:a",
 		Recipient: "user:b",
 		Msg:       "hello",
 	})
-	assert.False(t, ok, "missing IDs with no conversation must be refused")
+	assert.False(t, ok, "native web message missing IDs with no conversation must be refused")
 
 	// Broadcasts are still allowed without a conversation.
 	ok = proxy.resolveUserMessageConversation(ctx, uuid.NewString(), &store.Message{ID: uuid.NewString()}, &messages.StructuredMessage{
@@ -255,4 +256,93 @@ func TestP5c_WriteGapAndRecentMessages(t *testing.T) {
 	msgs, err := srv.conversationRecentMessages(ctx, topicID, false, nil, 10)
 	require.NoError(t, err)
 	assert.Nil(t, msgs, "topic branch with no resolved conversation must return nil")
+}
+
+// TestP5c_HeldWebMentionsOriginMarker verifies the chat_v2_origin marker for
+// held-message mention translation:
+//  1. A chat-v2 held row with thread_id nulled still translates via the marker.
+//  2. A POST /agents/{id}/message held row with thread_id nulled (no marker)
+//     stays verbatim.
+//  3. A pre-upgrade held row without the marker still translates via the
+//     read-only thread_id fallback (to be removed in P6).
+func TestP5c_HeldWebMentionsOriginMarker(t *testing.T) {
+	srv, s, wcs, proj, db := setupSendTest(t)
+	ctx := context.Background()
+
+	aliceID := uuid.NewString()
+	createTestUserWithProjectRole(t, s, aliceID, "alice.smith@test.com", proj.ID, store.ProjectRoleMember)
+	alice, err := s.GetUser(ctx, aliceID)
+	require.NoError(t, err)
+	alice.DisplayName = "Alice Smith"
+	require.NoError(t, s.UpdateUser(ctx, alice))
+
+	topicID := uuid.NewString()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: proj.ID,
+		Name:      "origin-marker-topic",
+		CreatedBy: DevUserID,
+		CreatedAt: time.Now().UTC(),
+	}))
+	setTopicConversationID(t, db, s, topicID, proj.ID)
+	topicConvID := topicConversationID(t, wcs, topicID)
+	require.NotEmpty(t, topicConvID)
+
+	// 1. Chat-v2 row with thread_id empty and chat_v2_origin marker set -> translates.
+	chatV2ID := uuid.NewString()
+	require.NoError(t, wcs.SetMessageChatV2Origin(ctx, chatV2ID))
+	row1 := &store.Message{
+		ID:             chatV2ID,
+		ProjectID:      proj.ID,
+		Sender:         "user:dev",
+		SenderID:       DevUserID,
+		Recipient:      "agent:bot",
+		Channel:        "web",
+		ThreadID:       "",
+		ConversationID: topicConvID,
+		Msg:            "Ping @alice-smith please",
+		Type:           messages.TypeInstruction,
+	}
+	sm1 := &messages.StructuredMessage{Msg: row1.Msg}
+	require.True(t, shouldTranslateHeldWebMentions(row1))
+	require.NoError(t, srv.enrichHeldWebMentions(ctx, row1, sm1, newHeldWebMentionCache()))
+	assert.Equal(t, "Ping @alice.smith@test.com please", sm1.Msg, "marked chat-v2 row without thread_id must translate")
+
+	// 2. /agents/{id}/message row with thread_id empty and no marker -> stays verbatim.
+	directID := uuid.NewString()
+	row2 := &store.Message{
+		ID:             directID,
+		ProjectID:      proj.ID,
+		Sender:         "user:dev",
+		SenderID:       DevUserID,
+		Recipient:      "agent:bot",
+		Channel:        "web",
+		ThreadID:       "",
+		ConversationID: topicConvID,
+		Msg:            "Ping @alice-smith please",
+		Type:           messages.TypeInstruction,
+	}
+	sm2 := &messages.StructuredMessage{Msg: row2.Msg}
+	require.True(t, shouldTranslateHeldWebMentions(row2))
+	require.NoError(t, srv.enrichHeldWebMentions(ctx, row2, sm2, newHeldWebMentionCache()))
+	assert.Equal(t, "Ping @alice-smith please", sm2.Msg, "unmarked row without thread_id must stay verbatim")
+
+	// 3. Pre-upgrade held row without marker (thread_id still set) -> fallback translates.
+	legacyID := uuid.NewString()
+	row3 := &store.Message{
+		ID:             legacyID,
+		ProjectID:      proj.ID,
+		Sender:         "user:dev",
+		SenderID:       DevUserID,
+		Recipient:      "agent:bot",
+		Channel:        "web",
+		ThreadID:       topicID,
+		ConversationID: topicConvID,
+		Msg:            "Ping @alice-smith please",
+		Type:           messages.TypeInstruction,
+	}
+	sm3 := &messages.StructuredMessage{Msg: row3.Msg}
+	require.True(t, shouldTranslateHeldWebMentions(row3))
+	require.NoError(t, srv.enrichHeldWebMentions(ctx, row3, sm3, newHeldWebMentionCache()))
+	assert.Equal(t, "Ping @alice.smith@test.com please", sm3.Msg, "pre-upgrade unmarked row must translate via fallback")
 }

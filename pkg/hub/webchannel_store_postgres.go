@@ -210,12 +210,13 @@ CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_message
 CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_attachment
     ON webchat_message_attachment (attachment_id);
 
--- Phase-3: message extension data (reply-to, edit, delete)
+-- Phase-3: message extension data (reply-to, edit, delete, chat-v2 origin)
 CREATE TABLE IF NOT EXISTS webchat_message_ext (
     message_id TEXT PRIMARY KEY,
     reply_to_id TEXT,
     edited_at TIMESTAMPTZ,
-    deleted_at TIMESTAMPTZ
+    deleted_at TIMESTAMPTZ,
+    chat_v2_origin BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 -- Per-recipient mention records: one row per (message, mentioned user).
@@ -1647,6 +1648,9 @@ func (s *pgWebChatStore) runMigrations() error {
 	if err := s.addUserPrefsThreadGroupsMigratedAt(); err != nil {
 		return fmt.Errorf("user prefs thread_groups_migrated_at column: %w", err)
 	}
+	if err := s.addMessageExtChatV2Origin(); err != nil {
+		return fmt.Errorf("message ext chat_v2_origin column: %w", err)
+	}
 	return nil
 }
 
@@ -1814,6 +1818,21 @@ func (s *pgWebChatStore) backfillNativeMessageConversations() error {
 	}
 	if !tableExists {
 		slog.Debug("Webchat native message conversation backfill deferred: messages table does not exist yet")
+		return nil
+	}
+	schema, err := s.currentSchema(context.Background())
+	if err != nil {
+		return err
+	}
+	var hasConvCol bool
+	if err := s.db.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = 'messages' AND column_name = 'conversation_id'
+	)`, schema).Scan(&hasConvCol); err != nil {
+		return fmt.Errorf("check messages.conversation_id column: %w", err)
+	}
+	if !hasConvCol {
+		slog.Debug("Webchat native message conversation backfill deferred: messages.conversation_id column does not exist yet")
 		return nil
 	}
 	messagesTable, err := s.table(context.Background(), "messages")
@@ -2305,13 +2324,47 @@ DO UPDATE SET reply_to_id = EXCLUDED.reply_to_id
 	return nil
 }
 
+// SetMessageChatV2Origin records that messageID originated from chat-v2.
+func (s *pgWebChatStore) SetMessageChatV2Origin(ctx context.Context, messageID string) error {
+	const query = `
+INSERT INTO webchat_message_ext (message_id, chat_v2_origin)
+VALUES ($1, TRUE)
+ON CONFLICT (message_id)
+DO UPDATE SET chat_v2_origin = TRUE
+`
+	_, err := s.db.ExecContext(ctx, query, messageID)
+	if err != nil {
+		return fmt.Errorf("webchat store: set message chat_v2_origin: %w", err)
+	}
+	return nil
+}
+
+// addMessageExtChatV2Origin adds the chat_v2_origin column to
+// webchat_message_ext for existing databases that lack it. Older binaries do
+// not select this column and ignore it safely.
+func (s *pgWebChatStore) addMessageExtChatV2Origin() error {
+	const migrationName = "add_message_ext_chat_v2_origin"
+	done, err := s.migrationCompleted(migrationName)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+	_, err = s.db.Exec("ALTER TABLE webchat_message_ext ADD COLUMN IF NOT EXISTS chat_v2_origin BOOLEAN NOT NULL DEFAULT FALSE")
+	if err != nil {
+		return err
+	}
+	return s.markMigrationCompleted(migrationName)
+}
+
 // GetMessageExt returns the extension row for a single message.
 func (s *pgWebChatStore) GetMessageExt(ctx context.Context, messageID string) (*WebChatMessageExt, error) {
-	const query = `SELECT message_id, reply_to_id, edited_at, deleted_at FROM webchat_message_ext WHERE message_id = $1`
+	const query = `SELECT message_id, reply_to_id, edited_at, deleted_at, COALESCE(chat_v2_origin, FALSE) FROM webchat_message_ext WHERE message_id = $1`
 	var ext WebChatMessageExt
 	var replyToID sql.NullString
 	var editedAt, deletedAt sql.NullTime
-	err := s.db.QueryRowContext(ctx, query, messageID).Scan(&ext.MessageID, &replyToID, &editedAt, &deletedAt)
+	err := s.db.QueryRowContext(ctx, query, messageID).Scan(&ext.MessageID, &replyToID, &editedAt, &deletedAt, &ext.ChatV2Origin)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -2339,7 +2392,7 @@ func (s *pgWebChatStore) GetMessageExts(ctx context.Context, messageIDs []string
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = id
 	}
-	query := `SELECT message_id, reply_to_id, edited_at, deleted_at FROM webchat_message_ext WHERE message_id IN (` + strings.Join(placeholders, ",") + `)`
+	query := `SELECT message_id, reply_to_id, edited_at, deleted_at, COALESCE(chat_v2_origin, FALSE) FROM webchat_message_ext WHERE message_id IN (` + strings.Join(placeholders, ",") + `)`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: get message exts: %w", err)
@@ -2351,7 +2404,7 @@ func (s *pgWebChatStore) GetMessageExts(ctx context.Context, messageIDs []string
 		var ext WebChatMessageExt
 		var replyToID sql.NullString
 		var editedAt, deletedAt sql.NullTime
-		if err := rows.Scan(&ext.MessageID, &replyToID, &editedAt, &deletedAt); err != nil {
+		if err := rows.Scan(&ext.MessageID, &replyToID, &editedAt, &deletedAt, &ext.ChatV2Origin); err != nil {
 			return nil, fmt.Errorf("webchat store: scan message ext: %w", err)
 		}
 		ext.ReplyToID = replyToID.String

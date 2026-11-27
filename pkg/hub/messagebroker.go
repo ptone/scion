@@ -1264,7 +1264,7 @@ func (p *MessageBrokerProxy) resolveUserMessageConversation(ctx context.Context,
 				p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
 				return false
 			}
-		} else {
+		} else if msg.Type != messages.TypeSystem {
 			messaging.WriteDenialMetrics.Inc("mb.user.dm")
 			p.log.Error("cannot resolve DM conversation: principal kind undetermined, message not persisted",
 				"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
@@ -1274,9 +1274,9 @@ func (p *MessageBrokerProxy) resolveUserMessageConversation(ctx context.Context,
 	if convResult != nil && storeMsg.ConversationID == "" {
 		storeMsg.ConversationID = convResult.ConversationID
 	}
-	if storeMsg.ConversationID == "" {
+	if msg.Channel == "web" && storeMsg.ConversationID == "" {
 		messaging.WriteDenialMetrics.Inc("mb.user.unresolved")
-		p.log.Error("conversation could not be resolved, message not persisted",
+		p.log.Error("native web message conversation could not be resolved, message not persisted",
 			"sender", msg.Sender, "sender_id", msg.SenderID,
 			"recipient", msg.Recipient, "recipient_id", msg.RecipientID)
 		return false
@@ -1559,7 +1559,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
 					return
 				}
-			} else {
+			} else if msg.Type != messages.TypeSystem {
 				messaging.WriteDenialMetrics.Inc("mb.agent.dm")
 				p.log.Error("cannot resolve DM conversation: sender kind undetermined, message not persisted",
 					"sender", msg.Sender, "sender_id", msg.SenderID)
@@ -1569,9 +1569,9 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
 		}
-		if storeMsg.ConversationID == "" {
+		if msg.Channel == "web" && storeMsg.ConversationID == "" {
 			messaging.WriteDenialMetrics.Inc("mb.agent.unresolved")
-			p.log.Error("conversation could not be resolved, message not persisted",
+			p.log.Error("native web message conversation could not be resolved, message not persisted",
 				"sender", msg.Sender, "sender_id", msg.SenderID, "agent_id", agent.ID)
 			return
 		}

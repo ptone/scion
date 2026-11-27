@@ -2124,6 +2124,14 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)
 		return nil, prePersistErr(newChatSendError(http.StatusInternalServerError, "INTERNAL", "failed to persist message", nil))
 	}
+	s.mu.RLock()
+	originWcs := s.webChatStore
+	s.mu.RUnlock()
+	if originWcs != nil {
+		if err := originWcs.SetMessageChatV2Origin(ctx, storeMsg.ID); err != nil {
+			s.messageLog.Error("Failed to mark chat_v2_origin on message", "messageId", storeMsg.ID, "error", err)
+		}
+	}
 	if opts.OnPersisted != nil {
 		opts.OnPersisted(storeMsg.ID)
 	}
@@ -2542,9 +2550,12 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 						continue
 					}
 				}
-				if convResult != nil {
-					mentionStoreMsg.ConversationID = convResult.ConversationID
+				if convResult == nil || convResult.ConversationID == "" {
+					messaging.WriteDenialMetrics.Inc("chat_v2.mention.unresolved")
+					s.messageLog.Error("conversation resolution returned empty result for mention", "slug", mentionAgent.Slug)
+					continue
 				}
+				mentionStoreMsg.ConversationID = convResult.ConversationID
 				mentionConvResult = convResult
 			}
 			// The primary's attachments stored as artifacts go with this copy
@@ -2563,6 +2574,11 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				s.messageLog.Error("Failed to persist mention message", "slug", mentionAgent.Slug, "error", err)
 				mentionPersisted = false
 			} else {
+				if affinityWcs != nil {
+					if err := affinityWcs.SetMessageChatV2Origin(ctx, mentionStoreMsg.ID); err != nil {
+						s.messageLog.Error("Failed to mark chat_v2_origin on mention message", "messageId", mentionStoreMsg.ID, "error", err)
+					}
+				}
 				if affinityWcs != nil && user.ID() != "" && mentionAgent.ProjectID != "" && mentionAgent.ID != "" {
 					if err := affinityWcs.RecordChannel(ctx, user.ID(), mentionAgent.ProjectID, mentionAgent.ID, "web", now); err != nil {
 						s.messageLog.Error("Failed to record web channel affinity for mentioned agent",
@@ -3066,6 +3082,16 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 		return
 	}
 
+	// A token is re-checked against the conversation the message is in.
+	if !s.authorizeChatTokenMessageTarget(w, r, token, wcs, key) {
+		return
+	}
+
+	// Then what the caller may do in a topic (edit_own, chatThreadAccess).
+	if !s.requireChatMessageAction(w, r, user, wcs, key, ChatActionEditOwn) {
+		return
+	}
+
 	// Verify message belongs to this conversation.
 	convID, err := s.conversationIDForKey(ctx, wcs, key)
 	if err != nil {
@@ -3074,16 +3100,6 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 	}
 	if !sameConversation(msg, convID) {
 		BadRequest(w, "message does not belong to this conversation")
-		return
-	}
-
-	// A token is re-checked against the conversation the message is in.
-	if !s.authorizeChatTokenMessageTarget(w, r, token, wcs, key) {
-		return
-	}
-
-	// Then what the caller may do in a topic (edit_own, chatThreadAccess).
-	if !s.requireChatMessageAction(w, r, user, wcs, key, ChatActionEditOwn) {
 		return
 	}
 
@@ -3198,6 +3214,16 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 		return
 	}
 
+	// A token is re-checked against the conversation the message is in.
+	if !s.authorizeChatTokenMessageTarget(w, r, token, wcs, key) {
+		return
+	}
+
+	// Then what the caller may do in a topic (delete_own, chatThreadAccess).
+	if !s.requireChatMessageAction(w, r, user, wcs, key, ChatActionDeleteOwn) {
+		return
+	}
+
 	// Verify message belongs to this conversation.
 	convID, err := s.conversationIDForKey(ctx, wcs, key)
 	if err != nil {
@@ -3206,16 +3232,6 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 	}
 	if !sameConversation(msg, convID) {
 		BadRequest(w, "message does not belong to this conversation")
-		return
-	}
-
-	// A token is re-checked against the conversation the message is in.
-	if !s.authorizeChatTokenMessageTarget(w, r, token, wcs, key) {
-		return
-	}
-
-	// Then what the caller may do in a topic (delete_own, chatThreadAccess).
-	if !s.requireChatMessageAction(w, r, user, wcs, key, ChatActionDeleteOwn) {
 		return
 	}
 

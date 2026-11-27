@@ -2149,18 +2149,23 @@ func noRecipientSetupProject(t *testing.T) (*Server, store.Store, string, *store
 // so a later reply can reference it via reply_to_id. Returns the message ID.
 func seedAgentMessage(t *testing.T, s store.Store, proj *store.Project, topicID string, agent *store.Agent, content string) string {
 	t.Helper()
+	var convID string
+	if conv, err := s.GetConversationByExternalRef(t.Context(), "native", fmt.Sprintf("thread:%s:%s", proj.ID, topicID)); err == nil && conv != nil {
+		convID = conv.ID
+	}
 	id := api.NewUUID()
 	if err := s.CreateMessage(t.Context(), &store.Message{
-		ID:        id,
-		ProjectID: proj.ID,
-		Sender:    "agent:" + agent.Slug,
-		SenderID:  agent.ID,
-		Recipient: "thread:" + topicID,
-		Msg:       content,
-		Type:      "chat",
-		AgentID:   agent.ID,
-		ThreadID:  topicID,
-		CreatedAt: time.Now().UTC(),
+		ID:             id,
+		ProjectID:      proj.ID,
+		Sender:         "agent:" + agent.Slug,
+		SenderID:       agent.ID,
+		Recipient:      "thread:" + topicID,
+		Msg:            content,
+		Type:           "chat",
+		AgentID:        agent.ID,
+		ThreadID:       topicID,
+		ConversationID: convID,
+		CreatedAt:      time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seedAgentMessage: %v", err)
 	}
@@ -2171,17 +2176,22 @@ func seedAgentMessage(t *testing.T, s store.Store, proj *store.Project, topicID 
 // topicID, for the "reply to a human message" case.
 func seedHumanMessage(t *testing.T, s store.Store, proj *store.Project, topicID, senderID, content string) string {
 	t.Helper()
+	var convID string
+	if conv, err := s.GetConversationByExternalRef(t.Context(), "native", fmt.Sprintf("thread:%s:%s", proj.ID, topicID)); err == nil && conv != nil {
+		convID = conv.ID
+	}
 	id := api.NewUUID()
 	if err := s.CreateMessage(t.Context(), &store.Message{
-		ID:        id,
-		ProjectID: proj.ID,
-		Sender:    "user:" + senderID,
-		SenderID:  senderID,
-		Recipient: "thread:" + topicID,
-		Msg:       content,
-		Type:      "chat",
-		ThreadID:  topicID,
-		CreatedAt: time.Now().UTC(),
+		ID:             id,
+		ProjectID:      proj.ID,
+		Sender:         "user:" + senderID,
+		SenderID:       senderID,
+		Recipient:      "thread:" + topicID,
+		Msg:            content,
+		Type:           "chat",
+		ThreadID:       topicID,
+		ConversationID: convID,
+		CreatedAt:      time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seedHumanMessage: %v", err)
 	}

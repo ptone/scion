@@ -189,6 +189,7 @@ func (s *rsWebChatStore) ListMessageIDsForAttachment(context.Context, string, in
 	return nil, nil
 }
 func (s *rsWebChatStore) SetMessageReplyTo(context.Context, string, string) error { return nil }
+func (s *rsWebChatStore) SetMessageChatV2Origin(context.Context, string) error    { return nil }
 func (s *rsWebChatStore) GetMessageExt(context.Context, string) (*WebChatMessageExt, error) {
 	return nil, nil
 }
