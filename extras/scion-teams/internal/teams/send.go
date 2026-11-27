@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/teamshosts"
@@ -54,7 +55,7 @@ type Sender struct {
 	tokenProvider     *TokenProvider
 	httpClient        *http.Client
 	log               *slog.Logger
-	extraServiceHosts []string
+	extraServiceHosts atomic.Pointer[[]string]
 }
 
 // NewSender creates a new Sender.
@@ -71,15 +72,22 @@ func NewSender(tokenProvider *TokenProvider, log *slog.Logger) *Sender {
 
 // SetExtraServiceHosts extends the built-in Bot Framework service URL host
 // allowlist with additional hostnames (for sovereign clouds or local emulators).
-// It never replaces or empties the built-in allowlist.
+// It never replaces or empties the built-in allowlist. Safe for concurrent use.
 func (s *Sender) SetExtraServiceHosts(hosts []string) {
 	if len(hosts) == 0 {
-		s.extraServiceHosts = nil
+		s.extraServiceHosts.Store(nil)
 		return
 	}
 	cp := make([]string, len(hosts))
 	copy(cp, hosts)
-	s.extraServiceHosts = cp
+	s.extraServiceHosts.Store(&cp)
+}
+
+func (s *Sender) getExtraServiceHosts() []string {
+	if p := s.extraServiceHosts.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // sendActivity sends a new Activity to a conversation.
@@ -189,7 +197,7 @@ func (s *Sender) doWithRetry(ctx context.Context, method, apiURL string, body []
 // acquires a token, and executes an authorized HTTP request without following
 // redirects.
 func (s *Sender) doRequest(ctx context.Context, method, rawURL string, body []byte) (*http.Response, error) {
-	if err := teamshosts.ValidateServiceURL(rawURL, s.extraServiceHosts...); err != nil {
+	if err := teamshosts.ValidateServiceURL(rawURL, s.getExtraServiceHosts()...); err != nil {
 		var denied *teamshosts.ServiceURLDeniedError
 		if errors.As(err, &denied) {
 			s.log.Warn("teams service URL denied",

@@ -125,6 +125,25 @@ func TestTeamsBroker_TargetAuthz_CrossProjectDeniedAndFallsThrough(t *testing.T)
 				}
 			},
 		},
+		{
+			name:    "Conversation.ParentRef fallback to foreign project",
+			wantSrc: string(plugin.TargetSourceConversation),
+			buildMsg: func() *messages.StructuredMessage {
+				return &messages.StructuredMessage{
+					Version:   messages.Version,
+					Sender:    "agent:coder",
+					Recipient: "user:alice@example.com",
+					Msg:       "parent ref fallback attempt",
+					Type:      messages.TypeInstruction,
+					Channel:   "teams",
+					Conversation: &messages.Conversation{
+						Surface:     "teams",
+						ExternalRef: "19:proj-a@thread.tacv2;messageid=unseen",
+						ParentRef:   "19:proj-b@thread.tacv2;messageid=99",
+					},
+				}
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -596,7 +615,7 @@ func TestSender_ServiceURLAllowlistAndNoRedirects(t *testing.T) {
 		defer redirectTarget.Close()
 
 		redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, redirectTarget.URL+"/steal", http.StatusFound)
+			http.Redirect(w, r, redirectTarget.URL+"/redirected", http.StatusFound)
 		}))
 		defer redirector.Close()
 
@@ -809,7 +828,8 @@ func TestTeamsBroker_PreExistingBadStoredServiceURLRefused(t *testing.T) {
 	require.NotEmpty(t, denied)
 }
 
-// A13: Observer filter (agent-to-agent and state-change) fails closed.
+// A13: Observer filter (agent-to-agent) fails closed across no-link,
+// ShowAgentToAgent=false, and store lookup errors.
 func TestTeamsBroker_ObserverFilterFailsClosed(t *testing.T) {
 	var mu sync.Mutex
 	var deliveredPaths []string
@@ -831,14 +851,12 @@ func TestTeamsBroker_ObserverFilterFailsClosed(t *testing.T) {
 		ProjectID:        "proj-a",
 		Active:           true,
 		ShowAgentToAgent: false,
-		ShowStateChanges: false,
 	}))
 	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
 		ConversationID:   "19:verbose@thread.tacv2",
 		ProjectID:        "proj-a",
 		Active:           true,
 		ShowAgentToAgent: true,
-		ShowStateChanges: true,
 	}))
 	for _, id := range []string{"19:quiet@thread.tacv2", "19:verbose@thread.tacv2"} {
 		require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
@@ -857,12 +875,26 @@ func TestTeamsBroker_ObserverFilterFailsClosed(t *testing.T) {
 		Type:      messages.TypeInstruction,
 	}))
 
-	// State-change notification must only reach verbose channel.
-	require.NoError(t, broker.Publish(ctx, "scion.project.proj-a.agent.coder.messages", &messages.StructuredMessage{
-		Version: messages.Version,
-		Sender:  "system:hub",
-		Msg:     "agent started",
-		Type:    messages.TypeStateChange,
+	// Unlinked container (e.g. via ConversationContext) must not receive agent-to-agent.
+	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
+		ConversationID: "19:unlinked-ctx@thread.tacv2",
+		ServiceURL:     serviceURL,
+		UpdatedAt:      time.Now(),
+	}))
+	require.NoError(t, broker.store.SetConversationContext(ctx, &ConversationContext{
+		TeamsUserID:        "agent:reviewer",
+		ProjectID:          "proj-a",
+		AgentSlug:          "reviewer",
+		LastConversationID: "19:unlinked-ctx@thread.tacv2",
+		LastMessageAt:      time.Now(),
+	}))
+	require.NoError(t, broker.Publish(ctx, "scion.project.proj-a.agent.reviewer.messages", &messages.StructuredMessage{
+		Version:     messages.Version,
+		Sender:      "agent:coder",
+		Recipient:   "agent:reviewer",
+		RecipientID: "agent:reviewer",
+		Msg:         "context-routed observer copy",
+		Type:        messages.TypeInstruction,
 	}))
 
 	broker.mu.Lock()
@@ -874,8 +906,75 @@ func TestTeamsBroker_ObserverFilterFailsClosed(t *testing.T) {
 	defer mu.Unlock()
 	assert.Equal(t, []string{
 		"/amer/v3/conversations/19:verbose@thread.tacv2/activities",
-		"/amer/v3/conversations/19:verbose@thread.tacv2/activities",
 	}, deliveredPaths)
+}
+
+// Regression test (R1): TypeStateChange user subscription notifications from
+// messages.NewNotification continue to deliver to active Teams channel links
+// with default flags (ShowStateChanges=false, ShowAgentToAgent=false).
+func TestTeamsBroker_Publish_StateChangeNotificationDeliveredWithDefaultFlags(t *testing.T) {
+	var mu sync.Mutex
+	var deliveredPaths []string
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		deliveredPaths = append(deliveredPaths, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ActivityResponse{ID: "resp-1"})
+	}))
+
+	broker := NewBroker(slog.Default())
+	configureBrokerWithBotClient(t, broker, client)
+
+	ctx := context.Background()
+	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+		ConversationID: "19:default-flags@thread.tacv2",
+		ProjectID:      "proj-a",
+		Active:         true,
+	}))
+	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
+		ConversationID: "19:default-flags@thread.tacv2",
+		ServiceURL:     serviceURL,
+		UpdatedAt:      time.Now(),
+	}))
+
+	notif := messages.NewNotification("agent:coder", "user:u1", "Agent coder completed", messages.TypeStateChange)
+	require.NoError(t, broker.Publish(ctx, "scion.project.proj-a.user.u1.messages", notif))
+
+	broker.mu.Lock()
+	sq := broker.sendQueue
+	broker.mu.Unlock()
+	sq.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []string{
+		"/amer/v3/conversations/19:default-flags@thread.tacv2/activities",
+	}, deliveredPaths)
+}
+
+// O1: Direct HandleActivity / upsertConversationRef with a non-allowlisted
+// ServiceURL must not write a ConversationReference row.
+func TestTeamsBroker_HandleActivity_DisallowedServiceURLNotStored(t *testing.T) {
+	logBuf := &lockedBuffer{}
+	broker := NewBroker(slog.New(slog.NewJSONHandler(logBuf, nil)))
+	configureBrokerForPublish(t, broker)
+
+	_, err := broker.HandleActivity(context.Background(), &Activity{
+		Type:         "conversationUpdate",
+		ID:           "act-direct-bad-url",
+		Conversation: ConversationAccount{ID: "19:direct-bad@thread.tacv2"},
+		ServiceURL:   "https://unlisted.example/amer/",
+	})
+	require.NoError(t, err)
+
+	ref, err := broker.store.GetConversationReference(context.Background(), "19:direct-bad@thread.tacv2")
+	require.NoError(t, err)
+	assert.Nil(t, ref, "disallowed ServiceURL must not be stored by upsertConversationRef")
+
+	denied := findLogEvent(logBuf.Entries(t), "teams_service_url_denied")
+	require.Len(t, denied, 1)
+	assert.Equal(t, "host_not_allowed", denied[0]["reason"])
 }
 
 // A13b: Input-needed with cross-project explicit target never posts card or stores PendingAskUser for proj-b.

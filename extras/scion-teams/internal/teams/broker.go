@@ -399,10 +399,7 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	// ParentRef, falling back to legacy ThreadID), gated by authorizeExplicitTarget.
 	convTarget := plugin.ResolveConversationTarget(msg)
 	if convTarget.ExternalRef != "" {
-		targetSrc := plugin.TargetSourceThreadID
-		if msg.Conversation != nil && msg.Conversation.Surface != "native" && msg.Conversation.ExternalRef != "" {
-			targetSrc = plugin.TargetSourceConversation
-		}
+		targetSrc := plugin.ConversationTargetSource(msg)
 		if ok, reason := b.authorizeExplicitTarget(ctx, projectID, agentSlug, msg, convTarget.ExternalRef); !ok {
 			plugin.LogTargetDenied(b.log, "teams", projectID, targetSrc, convTarget.ExternalRef, reason)
 		} else {
@@ -494,12 +491,12 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		}
 	}
 
-	// Observer and state-change filtering (fail-closed): agent-to-agent
-	// observer messages and state-change notifications are only delivered to
-	// containers with an active ChannelLink that opts in.
+	// Observer filtering (fail-closed): agent-to-agent observer messages are
+	// only delivered to containers with an active ChannelLink where
+	// ShowAgentToAgent is true. TypeStateChange notifications are left
+	// unfiltered so user subscription notifications continue to deliver.
 	isAgentToAgent := strings.HasPrefix(msg.Sender, "agent:") && strings.HasPrefix(msg.Recipient, "agent:")
-	isStateChange := msg.Type == messages.TypeStateChange
-	if (isAgentToAgent || isStateChange) && len(targets) > 0 {
+	if isAgentToAgent && len(targets) > 0 {
 		filtered := make([]sendTarget, 0, len(targets))
 		for _, target := range targets {
 			if store == nil {
@@ -511,15 +508,8 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 					"conversation_id", plugin.TruncateTargetID(target.conversationID), "error", linkErr)
 				continue
 			}
-			showAgentToAgent := link != nil && link.Active && link.ShowAgentToAgent
-			showStateChanges := link != nil && link.Active && link.ShowStateChanges
-			if isAgentToAgent && !showAgentToAgent {
+			if link == nil || !link.Active || !link.ShowAgentToAgent {
 				b.log.Debug("Filtering agent-to-agent message",
-					"conversation_id", plugin.TruncateTargetID(target.conversationID), "linked", link != nil)
-				continue
-			}
-			if isStateChange && !showStateChanges {
-				b.log.Debug("Filtering state change notification",
 					"conversation_id", plugin.TruncateTargetID(target.conversationID), "linked", link != nil)
 				continue
 			}
