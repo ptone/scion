@@ -44,12 +44,17 @@ func TestPublish_DiscardsRetiredAssistantReply(t *testing.T) {
 
 	b := NewBroker(nil)
 	b.client = slackapi.New("xoxb-test", slackapi.OptionAPIURL(srv.URL+"/"))
+	b.store = newTestStore(t)
+	require.NoError(t, b.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ChannelID: "C1",
+		ProjectID: "p1",
+		Active:    true,
+	}))
 	msg := &messages.StructuredMessage{
-		Version:  messages.Version,
-		Sender:   "agent:coder",
-		Msg:      "turn text",
-		Type:     messages.TypeAssistantReply,
-		Metadata: map[string]string{"slack_channel_id": "C1"},
+		Version: messages.Version,
+		Sender:  "agent:coder",
+		Msg:     "turn text",
+		Type:    messages.TypeAssistantReply,
 	}
 	require.NoError(t, b.Publish(context.Background(), "scion.project.p1.agent.coder.messages", msg))
 	assert.Zero(t, posts.Load(), "assistant-reply must not be posted")

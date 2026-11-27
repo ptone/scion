@@ -426,6 +426,7 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	}
 
 	projectID, agentSlug := parseTopicComponents(topic)
+	authzProjectID := canonicalTopicProjectID(topic)
 
 	// Discard the retired end-of-turn assistant-reply mirror; an older hub
 	// may still forward it.
@@ -443,31 +444,36 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		parts := strings.SplitN(convTarget.ExternalRef, ":", 2)
 		switch {
 		case len(parts) == 2 && isSlackChannelID(parts[0]):
-			channelIDs = append(channelIDs, parts[0])
-			threadTSs = append(threadTSs, parts[1])
+			if ch, ok, reason := b.authorizeExplicitTargetChannel(ctx, store, authzProjectID, agentSlug, msg, convTarget.ExternalRef); !ok {
+				plugin.LogTargetDenied(b.log, "slack", authzProjectID, plugin.ConversationTargetSource(msg), convTarget.ExternalRef, reason)
+			} else {
+				channelIDs = append(channelIDs, ch)
+				threadTSs = append(threadTSs, parts[1])
+			}
 		case convTarget.ParentRef != "" && isSlackChannelID(convTarget.ParentRef):
 			// Compose (ParentRef, ExternalRef) when ExternalRef is a bare thread_ts.
-			channelIDs = append(channelIDs, convTarget.ParentRef)
-			threadTSs = append(threadTSs, convTarget.ExternalRef)
+			if ch, ok, reason := b.authorizeExplicitTargetChannel(ctx, store, authzProjectID, agentSlug, msg, convTarget.ParentRef); !ok {
+				plugin.LogTargetDenied(b.log, "slack", authzProjectID, plugin.ConversationParentTargetSource(msg), convTarget.ParentRef, reason)
+			} else {
+				channelIDs = append(channelIDs, ch)
+				threadTSs = append(threadTSs, convTarget.ExternalRef)
+			}
 		case isSlackChannelID(convTarget.ExternalRef):
-			channelIDs = append(channelIDs, convTarget.ExternalRef)
-			threadTSs = append(threadTSs, "")
+			if ch, ok, reason := b.authorizeExplicitTargetChannel(ctx, store, authzProjectID, agentSlug, msg, convTarget.ExternalRef); !ok {
+				plugin.LogTargetDenied(b.log, "slack", authzProjectID, plugin.ConversationTargetSource(msg), convTarget.ExternalRef, reason)
+			} else {
+				channelIDs = append(channelIDs, ch)
+				threadTSs = append(threadTSs, "")
+			}
 		case isSlackTimestamp(convTarget.ExternalRef):
 			// Legacy pre-P4 row stored bare thread_ts without a channel ID; never
-			// post to the timestamp as a channel. Fall through to metadata /
-			// recipient / project channel links and attach the thread_ts there.
+			// post to the timestamp as a channel. Fall through to recipient /
+			// project channel links and attach the thread_ts there.
 			fallbackThreadTS = convTarget.ExternalRef
-		}
-	}
-
-	if len(channelIDs) == 0 && msg.Metadata != nil {
-		if chID, ok := msg.Metadata["slack_channel_id"]; ok && chID != "" {
-			channelIDs = append(channelIDs, chID)
-			ts := ""
-			if threadTS, ok := msg.Metadata["slack_thread_ts"]; ok {
-				ts = threadTS
+		default:
+			if _, ok, reason := b.authorizeExplicitTargetChannel(ctx, store, authzProjectID, agentSlug, msg, convTarget.ExternalRef); !ok {
+				plugin.LogTargetDenied(b.log, "slack", authzProjectID, plugin.ConversationTargetSource(msg), convTarget.ExternalRef, reason)
 			}
-			threadTSs = append(threadTSs, ts)
 		}
 	}
 
@@ -476,7 +482,7 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		if ccSlug == "" && strings.HasPrefix(msg.Sender, "agent:") {
 			ccSlug = strings.TrimPrefix(msg.Sender, "agent:")
 		}
-		channelIDs, threadTSs = b.resolveRecipientChannels(ctx, msg.Recipient, projectID, ccSlug)
+		channelIDs, threadTSs = b.resolveRecipientChannels(ctx, store, msg.Recipient, projectID, ccSlug)
 	}
 
 	if len(channelIDs) == 0 && projectID != "" && store != nil {
@@ -526,15 +532,24 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 
 	var errs []error
 	for i, channelID := range channelIDs {
-		if store != nil && (isAgentToAgent || isStateChange) {
+		if isAgentToAgent || isStateChange {
+			if store == nil {
+				continue
+			}
 			link, linkErr := store.GetChannelLink(ctx, channelID)
-			if linkErr == nil && link != nil {
-				if isAgentToAgent && !link.ShowAgentToAgent {
-					continue
-				}
-				if isStateChange && !link.ShowStateChanges {
-					continue
-				}
+			if linkErr != nil {
+				b.log.Warn("Failed to look up channel link; applying fail-closed filter",
+					"channel_id", plugin.TruncateTargetID(channelID), "error", linkErr)
+				continue
+			}
+			if link == nil || !link.Active {
+				continue
+			}
+			if isAgentToAgent && !link.ShowAgentToAgent {
+				continue
+			}
+			if isStateChange && !link.ShowStateChanges {
+				continue
 			}
 		}
 
@@ -952,15 +967,11 @@ func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *
 
 // --- Routing helpers ---
 
-func (b *SlackBroker) resolveRecipientChannels(ctx context.Context, recipient, projectID, agentSlug string) ([]string, []string) {
+func (b *SlackBroker) resolveRecipientChannels(ctx context.Context, store Store, recipient, projectID, agentSlug string) ([]string, []string) {
 	email := strings.TrimPrefix(recipient, "user:")
 	if email == recipient {
 		return nil, nil
 	}
-
-	b.mu.RLock()
-	store := b.store
-	b.mu.RUnlock()
 
 	if store == nil {
 		return nil, nil
