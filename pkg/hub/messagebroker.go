@@ -555,17 +555,40 @@ func (p *MessageBrokerProxy) enrichConversation(ctx context.Context, msg *messag
 	return &cp
 }
 
+// prepareOutboundMessage prepares a message for publication on the broker bus
+// by enriching Conversation metadata and stripping any caller-supplied
+// chat-surface metadata keys. It never mutates msg or msg.Metadata.
+func (p *MessageBrokerProxy) prepareOutboundMessage(ctx context.Context, msg *messages.StructuredMessage) *messages.StructuredMessage {
+	if msg == nil {
+		return nil
+	}
+	out := p.enrichConversation(ctx, msg)
+	if len(out.Metadata) == 0 {
+		return out
+	}
+	stripped := messaging.StripChatSurfaceMetadata(out.Metadata)
+	if len(stripped) == len(out.Metadata) {
+		return out
+	}
+	if out == msg {
+		cp := *msg
+		out = &cp
+	}
+	out.Metadata = stripped
+	return out
+}
+
 // PublishMessage publishes a message to the appropriate broker topic based on
 // the message's recipient. This is the entry point for Hub handlers to route
 // messages through the broker instead of direct dispatch.
 func (p *MessageBrokerProxy) PublishMessage(ctx context.Context, projectID string, msg *messages.StructuredMessage) error {
 	topic := eventbus.TopicAgentMessages(projectID, recipientSlug(msg.Recipient))
-	return p.bus.Publish(ctx, topic, p.enrichConversation(ctx, msg))
+	return p.bus.Publish(ctx, topic, p.prepareOutboundMessage(ctx, msg))
 }
 
 // PublishBroadcast publishes a broadcast message to the project or global broadcast topic.
 func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, projectID string, msg *messages.StructuredMessage) error {
-	msg = p.enrichConversation(ctx, msg)
+	msg = p.prepareOutboundMessage(ctx, msg)
 	if projectID == "" {
 		return p.bus.Publish(ctx, eventbus.TopicGlobalBroadcast(), msg)
 	}
@@ -578,7 +601,7 @@ func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, projectID str
 // here to avoid double-delivery.
 func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, projectID, userID string, msg *messages.StructuredMessage) error {
 	topic := eventbus.TopicUserMessages(projectID, userID)
-	return p.bus.Publish(ctx, topic, p.enrichConversation(ctx, msg))
+	return p.bus.Publish(ctx, topic, p.prepareOutboundMessage(ctx, msg))
 }
 
 // PublishToGroup fans out a message to a parsed set of recipients, delegating
