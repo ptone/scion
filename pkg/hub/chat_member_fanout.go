@@ -18,11 +18,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -200,12 +200,10 @@ func (s *Server) recordThreadMembersThenFanOutStagedAsync(
 	}
 }
 
-// isWebThreadMessage reports whether msg is a web chat message in a project
-// topic thread: the messages PublishUserMessage sends on
-// project.<id>.chat.message.
+// isWebThreadMessage reports whether msg is a web chat message with a
+// project and conversation that may belong to a project topic thread.
 func isWebThreadMessage(msg *store.Message) bool {
-	return msg != nil && msg.Channel == "web" && msg.ProjectID != "" && msg.ThreadID != "" &&
-		!strings.HasPrefix(msg.ThreadID, "dm:") && !strings.HasPrefix(msg.ThreadID, "agent:")
+	return msg != nil && msg.Channel == "web" && msg.ProjectID != "" && msg.ConversationID != ""
 }
 
 // fanOutThreadMessageToMembers publishes a thread message on
@@ -230,30 +228,31 @@ func (s *Server) fanOutThreadMessageToMembers(ctx context.Context, msg *store.Me
 		return
 	}
 
-	// GetTopic excludes soft-deleted topics.
-	topic, err := wcs.GetTopic(ctx, msg.ThreadID)
-	if err != nil || topic == nil {
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			s.messageLog.Warn("chat member fan-out: topic lookup failed",
-				"thread", msg.ThreadID, "error", err)
-		}
-		return
-	}
-	if topic.DeletedAt != nil || topic.ProjectID != msg.ProjectID || topic.ConversationID == "" {
-		return
-	}
-	if msg.ConversationID != "" && msg.ConversationID != topic.ConversationID {
-		return
-	}
-	conv, err := s.store.GetConversation(ctx, topic.ConversationID)
+	conv, err := s.store.GetConversation(ctx, msg.ConversationID)
 	if err != nil || conv == nil {
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			s.messageLog.Warn("chat member fan-out: conversation lookup failed",
-				"thread", msg.ThreadID, "error", err)
+				"conversation", msg.ConversationID, "error", err)
 		}
 		return
 	}
 	if conv.Kind != "group" || conv.ProjectID == nil || *conv.ProjectID != msg.ProjectID || conv.DeletedAt != nil {
+		return
+	}
+	_, topicID, parseErr := messaging.ParseThreadConversationExternalRef(conv.ExternalRef)
+	if parseErr != nil || topicID == "" {
+		return
+	}
+	// GetTopic excludes soft-deleted topics.
+	topic, err := wcs.GetTopic(ctx, topicID)
+	if err != nil || topic == nil {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			s.messageLog.Warn("chat member fan-out: topic lookup failed",
+				"topic", topicID, "error", err)
+		}
+		return
+	}
+	if topic.DeletedAt != nil || topic.ProjectID != msg.ProjectID || topic.ConversationID != conv.ID {
 		return
 	}
 

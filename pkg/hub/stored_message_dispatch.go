@@ -84,7 +84,6 @@ func storedMessageDispatch(ctx context.Context, row *store.Message) (context.Con
 		Urgent:               row.Urgent,
 		Broadcasted:          row.Broadcasted,
 		Channel:              row.Channel,
-		ThreadID:             row.ThreadID,
 		ConversationID:       row.ConversationID,
 		ConversationAsserted: false,
 		StoredMessageID:      row.ID,

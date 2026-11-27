@@ -308,12 +308,19 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 	messageID, _ := parseUUID(in.Message.ID)
 	projectID, _ := parseUUID(in.Message.ProjectID)
 	var conversationID *uuid.UUID
+	var chatKey string
 	if in.Message.ConversationID != "" {
 		cid, err := parseUUID(in.Message.ConversationID)
 		if err != nil {
 			return nil, err
 		}
 		conversationID = &cid
+		if conv, err := client.Conversation.Get(ctx, cid); err == nil && conv != nil {
+			chatKey = decisionChatKeyFromConversation(string(conv.Kind), conv.ExternalRef)
+		}
+	}
+	if chatKey == "" {
+		chatKey = in.Message.ThreadID
 	}
 
 	// 7. The decision rows.
@@ -323,7 +330,7 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 			SetID(rowIDs[i]).
 			SetProjectID(projectID).
 			SetNillableConversationID(conversationID).
-			SetNillableChatKey(nullableString(in.Message.ThreadID)).
+			SetNillableChatKey(nullableString(chatKey)).
 			SetMessageID(messageID).
 			SetPosition(i).
 			SetAskerAgentID(agentID).
@@ -352,10 +359,10 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 	if _, err := client.Decision.CreateBulk(creates...).Save(ctx); err != nil {
 		return nil, markMessageActionRace(err)
 	}
-	if in.Message.ThreadID != "" {
+	if chatKey != "" {
 		if err := applyDecisionFacetDeltas(ctx, client, []facetEntryDelta{{
 			ProjectID: projectID,
-			ChatKey:   in.Message.ThreadID,
+			ChatKey:   chatKey,
 			Kind:      decisionfacetentry.KindAsker,
 			ActorID:   agentID.String(),
 			Name:      in.AskerAgentName,
@@ -366,6 +373,20 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 		}
 	}
 	return &store.DecisionPromptResult{Decisions: results, IntroLength: introLen}, nil
+}
+
+// decisionChatKeyFromConversation derives the web chat key (topic ID or dm:
+// key) from a conversation's kind and external_ref.
+func decisionChatKeyFromConversation(kind, externalRef string) string {
+	if kind == "direct" && strings.HasPrefix(externalRef, "dm:") {
+		return externalRef
+	}
+	if rest, ok := strings.CutPrefix(externalRef, "thread:"); ok {
+		if _, topicID, ok := strings.Cut(rest, ":"); ok && topicID != "" {
+			return topicID
+		}
+	}
+	return ""
 }
 
 // reserveDecisionNumbers takes need numbers from the agent's counter and

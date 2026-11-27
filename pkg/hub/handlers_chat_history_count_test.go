@@ -207,10 +207,21 @@ func TestHasAgentReplyAfter_SkipsTotalCount(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 	threadID := tid("reply-guard-skip-count-thread")
+	convID := tid("reply-guard-skip-count-conv")
+	if err := s.CreateConversation(ctx, &store.Conversation{
+		ID:          convID,
+		ProjectID:   &proj.ID,
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: fmt.Sprintf("thread:%s:%s", proj.ID, threadID),
+		DriftState:  "active",
+	}); err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
 	seedHistoryMessages(t, s, proj.ID, threadID, 60)
 
 	rs := &listOptsRecordingStore{Store: s}
-	if hasAgentReplyAfter(ctx, rs, threadID, time.Now().Add(-time.Hour)) {
+	if hasAgentReplyAfter(ctx, rs, convID, time.Now().Add(-time.Hour)) {
 		t.Fatal("hasAgentReplyAfter = true, want false: no agent sent a message")
 	}
 

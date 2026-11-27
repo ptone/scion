@@ -448,20 +448,7 @@ func CheckConversationConsistency(
 
 	// Every lookup below reads only Items, so each one passes SkipTotalCount:
 	// otherwise the store runs a COUNT of the matching messages per call.
-	if threadID != "" {
-		// Look up prior messages with the same ThreadID.
-		result, err := msgStore.ListMessages(ctx, store.MessageFilter{
-			ThreadID: threadID,
-		}, store.ListOptions{Limit: 50, SkipTotalCount: true})
-		if err != nil {
-			log.Warn("conversation consistency check: failed to query by thread_id",
-				"thread_id", threadID, "error", err)
-			return failOpen() // fail open on query errors
-		}
-		if result != nil {
-			messages = result.Items
-		}
-	} else if senderID != "" && recipientID != "" {
+	if senderID != "" && recipientID != "" && threadID == "" {
 		// Look up prior DM messages between the same two principals.
 		// Query both directions: sender→recipient and recipient→sender.
 		dmOpts := store.ListOptions{Limit: 25, SkipTotalCount: true}
@@ -490,8 +477,18 @@ func CheckConversationConsistency(
 			messages = append(messages, result2.Items...)
 		}
 	} else {
-		// Not enough info to look up prior messages.
-		return true
+		// Look up prior messages in the resolved conversation.
+		result, err := msgStore.ListMessages(ctx, store.MessageFilter{
+			ConversationID: resolvedConvID,
+		}, store.ListOptions{Limit: 50, SkipTotalCount: true})
+		if err != nil {
+			log.Warn("conversation consistency check: failed to query by conversation_id",
+				"conversation_id", resolvedConvID, "error", err)
+			return failOpen() // fail open on query errors
+		}
+		if result != nil {
+			messages = result.Items
+		}
 	}
 
 	for _, msg := range messages {

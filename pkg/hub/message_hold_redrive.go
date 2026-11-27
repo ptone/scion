@@ -1062,25 +1062,10 @@ func shouldTranslateHeldWebMentions(row *store.Message) bool {
 	if row.ProjectID == "" || row.ProjectID == uuid.Nil.String() {
 		return false
 	}
-	if !hasCandidateChatV2Key(row.ThreadID, row.SenderID) {
+	if row.ConversationID == "" {
 		return false
 	}
 	return strings.Contains(row.Msg, "@")
-}
-
-// hasCandidateChatV2Key mirrors chatKeyReadAudience + authorizeDMKeyParticipant
-// + authorizeDMPeer (handlers_chat_send.go) and isWebThreadMessage
-// (chat_member_fanout.go / events.go) on pure row fields: either a canonical
-// chat-v2 agent DM key naming senderID, or a valid non-"agent:" candidate
-// topic key to be verified against WebChatStore.
-func hasCandidateChatV2Key(key, senderID string) bool {
-	if !validChatTopicKey(key) {
-		return false
-	}
-	if strings.HasPrefix(key, "dm:") {
-		return isCanonicalChatAgentDMKey(key, senderID)
-	}
-	return !strings.HasPrefix(key, "agent:")
 }
 
 func isCanonicalChatAgentDMKey(key, senderID string) bool {
@@ -1101,14 +1086,35 @@ func (s *Server) enrichHeldWebMentions(
 	sm *messages.StructuredMessage,
 	cache *heldWebMentionCache,
 ) error {
-	if !strings.HasPrefix(row.ThreadID, "dm:") {
-		isTopic, err := s.isProjectChatV2Topic(ctx, row.ProjectID, row.ThreadID, cache)
+	conv, err := s.store.GetConversation(ctx, row.ConversationID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("held mention conversation lookup: %w", err)
+	}
+	if conv == nil || (conv.Surface != "" && conv.Surface != "native") {
+		return nil
+	}
+	switch conv.Kind {
+	case "direct":
+		if !isCanonicalChatAgentDMKey(conv.ExternalRef, row.SenderID) {
+			return nil
+		}
+	case "group":
+		_, topicID, parseErr := messaging.ParseThreadConversationExternalRef(conv.ExternalRef)
+		if parseErr != nil || topicID == "" {
+			return nil
+		}
+		isTopic, err := s.isProjectChatV2Topic(ctx, row.ProjectID, topicID, cache)
 		if err != nil {
 			return err
 		}
 		if !isTopic {
 			return nil
 		}
+	default:
+		return nil
 	}
 
 	var (

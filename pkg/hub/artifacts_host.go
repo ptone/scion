@@ -1050,31 +1050,7 @@ func (h *artifactHost) MessageRoute(ctx context.Context, messageID string) (arti
 	}
 	s := h.server
 	msg, ok := s.liveMessageForAttachments(ctx, messageID)
-	if !ok {
-		return artifacts.SourceMessageRoute{}, false
-	}
-	if msg.ThreadID != "" {
-		if strings.HasPrefix(msg.ThreadID, "dm:") {
-			return artifacts.SourceMessageRoute{ConversationKey: msg.ThreadID}, true
-		}
-		projectID := msg.ProjectID
-		s.mu.RLock()
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if wcs != nil {
-			if topic, err := wcs.GetTopic(ctx, msg.ThreadID); err == nil && topic != nil && topic.ProjectID != "" {
-				projectID = topic.ProjectID
-			}
-		}
-		if projectID == "" {
-			return artifacts.SourceMessageRoute{}, false
-		}
-		return artifacts.SourceMessageRoute{
-			ConversationKey: msg.ThreadID,
-			ProjectID:       projectID,
-		}, true
-	}
-	if msg.ConversationID == "" {
+	if !ok || msg.ConversationID == "" {
 		return artifacts.SourceMessageRoute{}, false
 	}
 	conv, err := s.store.GetConversation(ctx, msg.ConversationID)
@@ -1232,16 +1208,11 @@ func (s *Server) tokenMayReadAttachmentMessage(ctx context.Context, msg *store.M
 	return true
 }
 
-// attachmentMessageConversation returns the conversation of msg: its
-// stored conversation, or for a message without one in a DM thread, a
-// direct conversation of the thread's key. It returns nil when neither
-// applies.
+// attachmentMessageConversation returns the stored conversation of msg, or nil
+// when msg has no ConversationID.
 func (s *Server) attachmentMessageConversation(ctx context.Context, msg *store.Message) (*store.Conversation, error) {
 	if msg.ConversationID != "" {
 		return s.store.GetConversation(ctx, msg.ConversationID)
-	}
-	if strings.HasPrefix(msg.ThreadID, "dm:") {
-		return &store.Conversation{Kind: "direct", ExternalRef: msg.ThreadID}, nil
 	}
 	return nil, nil
 }

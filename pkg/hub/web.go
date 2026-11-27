@@ -2788,10 +2788,11 @@ func sseUserMessageSubject(subject string) (subjectAgentID string, agentSubject,
 // sseUserMessage holds the UserMessageEvent fields the visibility rules
 // read.
 type sseUserMessage struct {
-	ThreadID    string `json:"threadId"`
-	AgentID     string `json:"agentId"`
-	SenderID    string `json:"senderId"`
-	RecipientID string `json:"recipientId"`
+	ThreadID       string `json:"threadId"`
+	ConversationID string `json:"conversationId"`
+	AgentID        string `json:"agentId"`
+	SenderID       string `json:"senderId"`
+	RecipientID    string `json:"recipientId"`
 }
 
 // decodeSSEUserMessage decodes a user message payload. ok is false when it
@@ -2801,8 +2802,10 @@ func decodeSSEUserMessage(data []byte) (msg sseUserMessage, ok bool) {
 	return msg, json.Unmarshal(data, &msg) == nil
 }
 
-// sseDMRuleAllows applies the DM rule: a "dm:" thread goes only to users
-// named in the DM key; any other thread passes.
+// sseDMRuleAllows applies the DM rule for events without a conversationId:
+// a "dm:" thread goes only to users named in the DM key; any other thread
+// passes. When conversationId is present, sseMessageViewer.dmAllows resolves
+// the conversation and checks its kind and participants instead.
 func sseDMRuleAllows(msg sseUserMessage, userID string) bool {
 	if !strings.HasPrefix(msg.ThreadID, "dm:") {
 		return true
@@ -2832,10 +2835,17 @@ type sseMessageViewer struct {
 	// attach anywhere.
 	decideAttach func(agentID string) (allowed, cacheable bool)
 	attach       map[string]bool
+	// decideDM reports whether the caller passes the DM privacy rule for
+	// conversationID and whether that answer may be cached.
+	decideDM  func(conversationID string) (allowed, cacheable bool)
+	dmAllowed map[string]bool
 }
 
 func (ws *WebServer) newSSEMessageViewer(r *http.Request) *sseMessageViewer {
-	v := &sseMessageViewer{attach: map[string]bool{}}
+	v := &sseMessageViewer{
+		attach:    map[string]bool{},
+		dmAllowed: map[string]bool{},
+	}
 	su := getWebSessionUser(r.Context())
 	if su == nil {
 		return v
@@ -2855,6 +2865,31 @@ func (ws *WebServer) newSSEMessageViewer(r *http.Request) *sseMessageViewer {
 		}
 		return agentFullHistoryDecide(ctx, ws.authzService, identity, agent).Allowed, true
 	}
+	v.decideDM = func(conversationID string) (bool, bool) {
+		conv, err := ws.store.GetConversation(ctx, conversationID)
+		if err != nil || conv == nil {
+			return false, errors.Is(err, store.ErrNotFound)
+		}
+		if conv.Kind != "direct" {
+			return true, true
+		}
+		if v.userID == "" {
+			return false, true
+		}
+		if isDMParticipant(conv.ExternalRef, v.userID) {
+			return true, true
+		}
+		participants, err := ws.store.ListParticipants(ctx, conv.ID)
+		if err != nil {
+			return false, false
+		}
+		for _, p := range participants {
+			if p.PrincipalKind == "user" && p.PrincipalID == v.userID && p.LeftAt == nil {
+				return true, true
+			}
+		}
+		return false, true
+	}
 	return v
 }
 
@@ -2868,7 +2903,7 @@ func (v *sseMessageViewer) visible(evt Event) bool {
 		return true
 	}
 	msg, ok := decodeSSEUserMessage(evt.Data)
-	if !ok || !sseDMRuleAllows(msg, v.userID) {
+	if !ok || !v.dmAllows(msg) {
 		return false
 	}
 	if v.userID != "" && (msg.SenderID == v.userID || msg.RecipientID == v.userID) {
@@ -2883,6 +2918,26 @@ func (v *sseMessageViewer) visible(evt Event) bool {
 		agentID = subjectAgentID
 	}
 	return agentID != "" && v.hasAttach(agentID)
+}
+
+func (v *sseMessageViewer) dmAllows(msg sseUserMessage) bool {
+	if msg.ConversationID == "" {
+		return sseDMRuleAllows(msg, v.userID)
+	}
+	if allowed, ok := v.dmAllowed[msg.ConversationID]; ok {
+		return allowed
+	}
+	if v.decideDM == nil {
+		return false
+	}
+	allowed, cacheable := v.decideDM(msg.ConversationID)
+	if cacheable {
+		if v.dmAllowed == nil {
+			v.dmAllowed = map[string]bool{}
+		}
+		v.dmAllowed[msg.ConversationID] = allowed
+	}
+	return allowed
 }
 
 func (v *sseMessageViewer) hasAttach(agentID string) bool {

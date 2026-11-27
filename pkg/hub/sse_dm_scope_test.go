@@ -113,6 +113,95 @@ func TestSSEHandler_DMMessagesScopedToParticipants(t *testing.T) {
 	}
 }
 
+// TestSSEHandler_DMMessagesScopedByConversationIDWithoutThreadID verifies P5c
+// SSE privacy: when DM messages carry only ConversationID (empty ThreadID),
+// sseMessageViewer resolves the conversation, detects kind=="direct", and
+// delivers only to DM participants (even when a non-participant holds attach
+// on the agent). Non-DM group conversations with empty ThreadID still reach
+// attach holders.
+func TestSSEHandler_DMMessagesScopedByConversationIDWithoutThreadID(t *testing.T) {
+	agentID, projectID := tid("sse-conv-dm-agent"), tid("sse-conv-dm-project")
+	dmConvID, groupConvID := tid("sse-conv-dm-id"), tid("sse-conv-group-id")
+	const participant, member, owner = "user-conv-participant", "user-conv-member", "user-conv-owner"
+	dmKey := "dm:agent:" + agentID + ":user:" + participant
+
+	msgs := []*store.Message{
+		// DM reply with empty ThreadID, only ConversationID set.
+		{ID: "dm-reply", ProjectID: projectID, AgentID: agentID, Channel: "web", ConversationID: dmConvID,
+			Sender: "agent:a", SenderID: agentID, Recipient: "user:" + participant, RecipientID: participant, Msg: "private reply"},
+		// DM prompt with empty ThreadID, only ConversationID set.
+		{ID: "dm-prompt", ProjectID: projectID, AgentID: agentID, Channel: "web", ConversationID: dmConvID,
+			Sender: "user:" + participant, SenderID: participant, Recipient: "agent:a", RecipientID: agentID, Msg: "private prompt"},
+		// Group conversation message with empty ThreadID, only ConversationID set.
+		{ID: "group-reply", ProjectID: projectID, AgentID: agentID, Channel: "web", ConversationID: groupConvID,
+			Sender: "agent:a", SenderID: agentID, Recipient: "user:" + member, RecipientID: member, Msg: "group reply"},
+	}
+
+	convs := map[string]*store.Conversation{
+		dmConvID:    {ID: dmConvID, Kind: "direct", Surface: "native", ExternalRef: dmKey},
+		groupConvID: {ID: groupConvID, ProjectID: &projectID, Kind: "group", Surface: "native", ExternalRef: "thread:" + projectID + ":t1"},
+	}
+
+	for _, tc := range []struct {
+		user    string
+		subject string
+		want    []string
+	}{
+		{participant, "agent." + agentID + ".message", []string{"dm-reply", "dm-prompt"}},
+		{participant, "project." + projectID + ".user.message", []string{"dm-reply"}},
+		{member, "agent." + agentID + ".message", []string{"group-reply"}},
+		{member, "project." + projectID + ".user.message", []string{"group-reply"}},
+		// Owner holds attach on the agent: sees group-reply, must NOT see DM.
+		{owner, "agent." + agentID + ".message", []string{"group-reply"}},
+		{owner, "project." + projectID + ".user.message", []string{"group-reply"}},
+	} {
+		t.Run(tc.user+"/"+tc.subject, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ms := &mockAuthzStore{
+					projects: []store.Project{{ID: projectID, OwnerID: owner}},
+					projectMemberships: map[string]*store.ProjectMembership{
+						projectID + ":" + participant: {ProjectID: projectID, UserID: participant, Role: store.ProjectRoleMember},
+						projectID + ":" + member:      {ProjectID: projectID, UserID: member, Role: store.ProjectRoleMember},
+						projectID + ":" + owner:       {ProjectID: projectID, UserID: owner, Role: store.ProjectRoleMember},
+					},
+				}
+				s := &sseAgentStore{
+					mockAuthzStore: ms,
+					agents: map[string]*store.Agent{
+						agentID: {ID: agentID, ProjectID: projectID, OwnerID: owner},
+					},
+					conversations: convs,
+				}
+				pub := NewChannelEventPublisher()
+				defer pub.Close()
+				ws := &WebServer{store: s, events: pub, authzService: NewAuthzService(s, slog.Default())}
+
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				w := httptest.NewRecorder()
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					ws.handleSSE(w, sseAgentRequest(ctx, tc.user, "user", tc.subject))
+				}()
+				synctest.Wait()
+				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+				for _, msg := range msgs {
+					msg.CreatedAt = time.Unix(0, 0)
+					pub.PublishUserMessage(ctx, msg, nil, nil)
+				}
+				synctest.Wait()
+				cancel()
+				<-done
+
+				assert.Equal(t, tc.want, sseMessageIDs(t, w.Body.String()))
+				assertNoSSESubscribers(t, pub)
+			})
+		})
+	}
+}
+
 func TestSSEEventVisible(t *testing.T) {
 	agentDM := `{"id":"m","threadId":"dm:agent:agent-1:user:user-a"}`
 	userDM := `{"id":"m","threadId":"dm:user:user-a:user:user-b"}`

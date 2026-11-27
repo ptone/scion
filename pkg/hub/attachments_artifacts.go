@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -349,23 +348,7 @@ func (s *Server) messageProjectForBind(ctx context.Context, msg *store.Message) 
 		}
 		return agent.ProjectID, nil
 	}
-	if msg.ThreadID == "" || strings.HasPrefix(msg.ThreadID, "dm:") {
-		return "", nil
-	}
-	s.mu.RLock()
-	wcs := s.webChatStore
-	s.mu.RUnlock()
-	if wcs == nil {
-		return "", nil
-	}
-	topic, err := wcs.GetTopic(ctx, msg.ThreadID)
-	if errors.Is(err, store.ErrNotFound) || (err == nil && topic == nil) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("topic lookup: %w", err)
-	}
-	return topic.ProjectID, nil
+	return "", nil
 }
 
 // dmAgentParties returns the agent ids named in the key of direct

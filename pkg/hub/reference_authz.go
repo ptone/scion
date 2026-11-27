@@ -64,22 +64,13 @@ func externalRefOfOtherProject(err error) bool {
 	return errors.Is(err, store.ErrConversationProjectMismatch)
 }
 
-// sameConversation reports whether msg belongs to the current conversation.
-// A match on either field is enough:
-//
-//   - convID != "" && msg.ConversationID == convID (history lists by
-//     conversation, and a visible row's ThreadID may differ from the key)
-//   - msg.ThreadID == threadKey (rows matched by thread key)
-//
-// A message of another conversation matches neither. Pure; no store access.
-func sameConversation(msg *store.Message, threadKey, convID string) bool {
-	if msg == nil {
+// sameConversation reports whether msg belongs to the conversation identified
+// by convID. Pure; no store access.
+func sameConversation(msg *store.Message, convID string) bool {
+	if msg == nil || convID == "" {
 		return false
 	}
-	if threadKey != "" && msg.ThreadID == threadKey {
-		return true
-	}
-	return convID != "" && msg.ConversationID == convID
+	return msg.ConversationID == convID
 }
 
 // attachmentUsableIn reports whether an attachment of the AttachmentStore
@@ -148,8 +139,7 @@ func (s *Server) conversationIDForKey(ctx context.Context, wcs WebChatStore, key
 
 // messageInChatConversation reports whether messageID names a stored message
 // of the conversation key. A missing message is (false, nil); a store error
-// is (false, err). The conversation ID is resolved only when the thread key
-// does not already match and the message carries a conversation ID.
+// is (false, err).
 func (s *Server) messageInChatConversation(ctx context.Context, wcs WebChatStore, key, messageID string) (bool, error) {
 	msg, err := s.store.GetMessage(ctx, messageID)
 	if err != nil {
@@ -158,20 +148,14 @@ func (s *Server) messageInChatConversation(ctx context.Context, wcs WebChatStore
 		}
 		return false, err
 	}
-	if msg == nil {
-		return false, nil
-	}
-	if sameConversation(msg, key, "") {
-		return true, nil
-	}
-	if msg.ConversationID == "" {
+	if msg == nil || msg.ConversationID == "" {
 		return false, nil
 	}
 	convID, err := s.conversationIDForKey(ctx, wcs, key)
 	if err != nil {
 		return false, err
 	}
-	return sameConversation(msg, key, convID), nil
+	return sameConversation(msg, convID), nil
 }
 
 // attachmentLinkScanLimit bounds how many linked messages the download check
@@ -249,33 +233,15 @@ func (s *Server) canReadAttachment(ctx context.Context, user UserIdentity, meta 
 
 // tokenMayReadNativeMessage applies the token rule for reading a
 // conversation (tokenMayReadConversation) to the conversation of a native
-// chat message user can already read: the message's conversation when it
-// has one, otherwise the conversation its thread key names (a DM, or a
-// topic's project group). check must be the inbox:read self-scope check of
-// token. Any store error answers false.
-func (s *Server) tokenMayReadNativeMessage(ctx context.Context, wcs WebChatStore, token *ScopedUserIdentity, check *selfScopeCheck, msg *store.Message) bool {
-	var conv *store.Conversation
-	switch {
-	case msg.ConversationID != "":
-		c, err := s.store.GetConversation(ctx, msg.ConversationID)
-		if err != nil || c == nil {
-			slog.WarnContext(ctx, "tokenMayReadNativeMessage: conversation lookup failed", "message", msg.ID, "error", err)
-			return false
-		}
-		conv = c
-	case strings.HasPrefix(msg.ThreadID, "dm:"):
-		conv = chatConversationRecord(msg.ThreadID, "")
-	case msg.ThreadID != "":
-		topic, err := wcs.GetTopic(ctx, msg.ThreadID)
-		if err != nil {
-			slog.WarnContext(ctx, "tokenMayReadNativeMessage: topic lookup failed", "message", msg.ID, "error", err)
-			return false
-		}
-		if topic == nil {
-			return false
-		}
-		conv = chatConversationRecord(msg.ThreadID, topic.ProjectID)
-	default:
+// chat message user can already read. check must be the inbox:read self-scope
+// check of token. Any store error or missing conversation answers false.
+func (s *Server) tokenMayReadNativeMessage(ctx context.Context, _ WebChatStore, token *ScopedUserIdentity, check *selfScopeCheck, msg *store.Message) bool {
+	if msg == nil || msg.ConversationID == "" {
+		return false
+	}
+	conv, err := s.store.GetConversation(ctx, msg.ConversationID)
+	if err != nil || conv == nil {
+		slog.WarnContext(ctx, "tokenMayReadNativeMessage: conversation lookup failed", "message", msg.ID, "error", err)
 		return false
 	}
 	ok, err := s.tokenMayReadConversation(ctx, token, check, conv)
@@ -286,37 +252,14 @@ func (s *Server) tokenMayReadNativeMessage(ctx context.Context, wcs WebChatStore
 	return ok
 }
 
-// canReadNativeMessage reports whether user may read a native chat message:
-// through its conversation when it has one (canUserReadMessage), otherwise
-// by its thread key — a DM key by its user slot, a topic by read access to
-// the topic's project. Any store or authorization error answers false.
+// canReadNativeMessage reports whether user may read a native chat message
+// through its conversation (canUserReadMessage). Any store or authorization
+// error or missing conversation answers false.
 func (s *Server) canReadNativeMessage(ctx context.Context, user UserIdentity, msg *store.Message) bool {
-	if user == nil || msg == nil {
+	if user == nil || msg == nil || msg.ConversationID == "" {
 		return false
 	}
-	if msg.ConversationID != "" {
-		return s.canUserReadMessage(ctx, user, msg)
-	}
-	if msg.ThreadID == "" {
-		return false
-	}
-	if strings.HasPrefix(msg.ThreadID, "dm:") {
-		return isDMParticipant(msg.ThreadID, user.ID())
-	}
-	s.mu.RLock()
-	wcs := s.webChatStore
-	s.mu.RUnlock()
-	if wcs == nil {
-		return false
-	}
-	topic, err := wcs.GetTopic(ctx, msg.ThreadID)
-	if err != nil || topic == nil {
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			slog.WarnContext(ctx, "canReadNativeMessage: topic lookup failed", "message", msg.ID, "error", err)
-		}
-		return false
-	}
-	return s.canReadProject(ctx, user, topic.ProjectID)
+	return s.canUserReadMessage(ctx, user, msg)
 }
 
 // stripClientAttachmentRefs returns md without the hub's attachments
