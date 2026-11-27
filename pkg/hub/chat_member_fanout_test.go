@@ -90,8 +90,17 @@ func TestThreadMessageFanOut_ScopeChecks(t *testing.T) {
 	notWeb.Channel = "telegram"
 	f.srv.fanOutThreadMessageToMembers(ctx, notWeb, nil, nil)
 
+	dmKey := "dm:user:" + f.alice.ID + ":user:" + f.carol.ID
+	dmConv, err := f.s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
 	dm := f.threadMessage("x")
-	dm.ThreadID = "dm:user:" + f.alice.ID + ":user:" + f.carol.ID
+	dm.ThreadID = dmKey
+	dm.ConversationID = dmConv.ID
 	f.srv.fanOutThreadMessageToMembers(ctx, dm, nil, nil)
 
 	assert.Empty(t, memberMessageRecipients(collectEvents(events)))

@@ -1409,11 +1409,11 @@ func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSear
 	// patterns.
 	if filter.ConversationKey == "" {
 		if filter.DMParticipantUserID == "" {
-			conditions = append(conditions, "(c.id IS NULL OR (c.kind <> 'direct' AND left(COALESCE(c.external_ref, ''), 3) <> 'dm:'))")
+			conditions = append(conditions, "(c.id IS NOT NULL AND c.kind <> 'direct' AND left(COALESCE(c.external_ref, ''), 3) <> 'dm:')")
 		} else {
 			prefix, suffix := dmParticipantBounds(filter.DMParticipantUserID)
 			conditions = append(conditions, fmt.Sprintf(
-				"(c.id IS NULL OR (c.kind <> 'direct' AND left(COALESCE(c.external_ref, ''), 3) <> 'dm:') OR left(COALESCE(c.external_ref, ''), length($%d::text)) = $%d::text OR right(COALESCE(c.external_ref, ''), length($%d::text)) = $%d::text)",
+				"(c.id IS NOT NULL AND ((c.kind <> 'direct' AND left(COALESCE(c.external_ref, ''), 3) <> 'dm:') OR left(COALESCE(c.external_ref, ''), length($%d::text)) = $%d::text OR right(COALESCE(c.external_ref, ''), length($%d::text)) = $%d::text))",
 				argIdx, argIdx, argIdx+1, argIdx+1))
 			args = append(args, prefix, suffix)
 			argIdx += 2

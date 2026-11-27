@@ -1910,11 +1910,11 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 	// patterns.
 	if filter.ConversationKey == "" {
 		if filter.DMParticipantUserID == "" {
-			conditions = append(conditions, "(c.id IS NULL OR (c.kind <> 'direct' AND substr(COALESCE(c.external_ref, ''), 1, 3) <> 'dm:'))")
+			conditions = append(conditions, "(c.id IS NOT NULL AND c.kind <> 'direct' AND substr(COALESCE(c.external_ref, ''), 1, 3) <> 'dm:')")
 		} else {
 			prefix, suffix := dmParticipantBounds(filter.DMParticipantUserID)
-			conditions = append(conditions, "(c.id IS NULL OR (c.kind <> 'direct' AND substr(COALESCE(c.external_ref, ''), 1, 3) <> 'dm:')"+
-				" OR substr(COALESCE(c.external_ref, ''), 1, length(?)) = ? OR substr(COALESCE(c.external_ref, ''), -length(?)) = ?)")
+			conditions = append(conditions, "(c.id IS NOT NULL AND ((c.kind <> 'direct' AND substr(COALESCE(c.external_ref, ''), 1, 3) <> 'dm:')"+
+				" OR substr(COALESCE(c.external_ref, ''), 1, length(?)) = ? OR substr(COALESCE(c.external_ref, ''), -length(?)) = ?))")
 			args = append(args, prefix, prefix, suffix, suffix)
 		}
 	}
