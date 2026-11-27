@@ -493,6 +493,7 @@ type UsageCoverageBucket struct {
 	IsPastGrace         bool
 	HasSchemaDrift      bool
 	HasUsageData        bool
+	HasLegacyOnly       bool
 	AgentCount          int
 }
 
