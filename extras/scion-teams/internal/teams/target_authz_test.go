@@ -144,6 +144,25 @@ func TestTeamsBroker_TargetAuthz_CrossProjectDeniedAndFallsThrough(t *testing.T)
 				}
 			},
 		},
+		{
+			name:    "ThreadID ExternalRef with foreign Conversation.ParentRef logs conversation source",
+			wantSrc: string(plugin.TargetSourceConversation),
+			buildMsg: func() *messages.StructuredMessage {
+				return &messages.StructuredMessage{
+					Version:   messages.Version,
+					Sender:    "agent:coder",
+					Recipient: "user:alice@example.com",
+					Msg:       "mixed source parent ref attempt",
+					Type:      messages.TypeInstruction,
+					Channel:   "teams",
+					ThreadID:  "19:proj-a@thread.tacv2;messageid=unseen",
+					Conversation: &messages.Conversation{
+						Surface:   "teams",
+						ParentRef: "19:proj-b@thread.tacv2;messageid=99",
+					},
+				}
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -353,7 +372,7 @@ func TestTeamsBroker_TargetAuthz_FailClosedReasons(t *testing.T) {
 		broker := NewBroker(slog.New(slog.NewJSONHandler(logBuf, nil)))
 		configureBrokerForPublish(t, broker)
 
-		ok, reason := broker.authorizeExplicitTarget(context.Background(), "", "coder", &messages.StructuredMessage{}, "19:any@thread.tacv2")
+		ok, reason := broker.authorizeExplicitTarget(context.Background(), broker.store, "", "coder", &messages.StructuredMessage{}, "19:any@thread.tacv2")
 		assert.False(t, ok)
 		assert.Equal(t, plugin.DenyNoProject, reason)
 	})
@@ -467,12 +486,24 @@ func TestTeamsBroker_TargetAuthz_PersonalDM(t *testing.T) {
 		LastMessageAt:      time.Now(),
 	}))
 
-	// 1. Alice addressed with her own personal DM -> allowed.
+	// 1. Alice addressed with her own personal DM (per-slug context match) -> allowed.
 	require.NoError(t, broker.Publish(ctx, "scion.project.proj-a.user.u-alice.messages", &messages.StructuredMessage{
 		Version:   messages.Version,
 		Sender:    "agent:coder",
 		Recipient: "user:alice@example.com",
 		Msg:       "for alice",
+		Type:      messages.TypeInstruction,
+		Channel:   "teams",
+		ThreadID:  "a:dm-alice",
+	}))
+
+	// 1b. Different agent slug with no per-slug context falls back to Alice's
+	// latest project ConversationContext -> allowed without denial.
+	require.NoError(t, broker.Publish(ctx, "scion.project.proj-a.user.u-alice.messages", &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:reviewer",
+		Recipient: "user:alice@example.com",
+		Msg:       "for alice via latest context",
 		Type:      messages.TypeInstruction,
 		Channel:   "teams",
 		ThreadID:  "a:dm-alice",
@@ -497,6 +528,7 @@ func TestTeamsBroker_TargetAuthz_PersonalDM(t *testing.T) {
 
 	mu.Lock()
 	assert.Equal(t, []string{
+		"/amer/v3/conversations/a:dm-alice/activities",
 		"/amer/v3/conversations/a:dm-alice/activities",
 		"/amer/v3/conversations/a:dm-alice/activities",
 	}, deliveredPaths)
@@ -895,6 +927,18 @@ func TestTeamsBroker_ObserverFilterFailsClosed(t *testing.T) {
 		RecipientID: "agent:reviewer",
 		Msg:         "context-routed observer copy",
 		Type:        messages.TypeInstruction,
+	}))
+
+	// Store lookup error during observer filter must fail closed (no delivery).
+	broker.mu.Lock()
+	broker.store = lookupErrorStore{Store: broker.store}
+	broker.mu.Unlock()
+	require.NoError(t, broker.Publish(ctx, "scion.project.proj-a.agent.reviewer.messages", &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		Recipient: "agent:reviewer",
+		Msg:       "lookup-error observer copy",
+		Type:      messages.TypeInstruction,
 	}))
 
 	broker.mu.Lock()

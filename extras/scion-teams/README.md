@@ -354,7 +354,7 @@ These keys go in `plugins.broker.teams.config` in `settings.yaml`:
 | `send_min_delay` | No | `200ms` | Minimum delay between sends (rate-limit protection) |
 | `service_url_hosts` | No | -- | Comma-separated additional allowed Bot Framework service URL hostnames (extends, and cannot replace, the built-in Microsoft Teams service host list) |
 
-> **Note:** Inbound webhook requests require the Bot Framework JWT's `serviceurl` claim to match the activity's `serviceUrl` and its host to be in the allowlist.
+> **Note:** Inbound webhook requests require the Bot Framework JWT's `serviceurl` claim to match the activity's `serviceUrl` and its host to be in the allowlist. Agent-to-agent observer copies are not posted to Teams channels (there is no per-link toggle yet).
 
 ### Secrets
 

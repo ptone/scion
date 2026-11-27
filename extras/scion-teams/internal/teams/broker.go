@@ -400,7 +400,7 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	convTarget := plugin.ResolveConversationTarget(msg)
 	if convTarget.ExternalRef != "" {
 		targetSrc := plugin.ConversationTargetSource(msg)
-		if ok, reason := b.authorizeExplicitTarget(ctx, projectID, agentSlug, msg, convTarget.ExternalRef); !ok {
+		if ok, reason := b.authorizeExplicitTarget(ctx, store, projectID, agentSlug, msg, convTarget.ExternalRef); !ok {
 			plugin.LogTargetDenied(b.log, "teams", projectID, targetSrc, convTarget.ExternalRef, reason)
 		} else {
 			ref, err := store.GetConversationReference(ctx, convTarget.ExternalRef)
@@ -408,8 +408,9 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 				b.log.Warn("Error looking up conversation reference", "external_ref", convTarget.ExternalRef, "error", err)
 			}
 			if ref == nil && convTarget.ParentRef != "" && convTarget.ParentRef != convTarget.ExternalRef {
-				if parentOK, parentReason := b.authorizeExplicitTarget(ctx, projectID, agentSlug, msg, convTarget.ParentRef); !parentOK {
-					plugin.LogTargetDenied(b.log, "teams", projectID, targetSrc, convTarget.ParentRef, parentReason)
+				parentSrc := plugin.ConversationParentTargetSource(msg)
+				if parentOK, parentReason := b.authorizeExplicitTarget(ctx, store, projectID, agentSlug, msg, convTarget.ParentRef); !parentOK {
+					plugin.LogTargetDenied(b.log, "teams", projectID, parentSrc, convTarget.ParentRef, parentReason)
 				} else {
 					ref, err = store.GetConversationReference(ctx, convTarget.ParentRef)
 					if err != nil {

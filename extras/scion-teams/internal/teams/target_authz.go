@@ -32,15 +32,11 @@ import (
 // stored ConversationReference with ConversationType == "personal", the email
 // maps to Teams user T, and container matches T's ConversationContext for
 // (projectID, agentSlug) or latest ConversationContext for projectID.
-func (b *TeamsBroker) authorizeExplicitTarget(ctx context.Context, projectID, agentSlug string,
+func (b *TeamsBroker) authorizeExplicitTarget(ctx context.Context, store Store, projectID, agentSlug string,
 	msg *messages.StructuredMessage, container string) (bool, plugin.TargetDenyReason) {
 	if projectID == "" {
 		return false, plugin.DenyNoProject
 	}
-
-	b.mu.Lock()
-	store := b.store
-	b.mu.Unlock()
 
 	if store == nil {
 		return false, plugin.DenyNoStore
