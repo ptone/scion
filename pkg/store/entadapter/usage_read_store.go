@@ -693,11 +693,18 @@ scoped_agents AS (
 		args = append(args, runningPhase, staleCutoff, graceCutoff)
 	}
 	rdFlagCond := "rd.agent_id = am.agent_id_text AND rd.bucket_start >= ? AND rd.bucket_start <= ?"
-	args = append(args, sinceDay, untilDay)
+	rdFlagArgs := []any{sinceDay, untilDay}
 	if filter.BillingUserID != "" {
 		rdFlagCond += " AND rd.billing_user_id = ?"
-		args = append(args, filter.BillingUserID)
+		rdFlagArgs = append(rdFlagArgs, filter.BillingUserID)
 	}
+	// Args for has_usage_data (rdFlagCond) and has_legacy_only (ue =, ue <>, rd =, rd <>):
+	args = append(args, rdFlagArgs...)
+	args = append(args, store.UsageSourceLegacySessionMetrics, store.UsageSourceLegacySessionMetrics)
+	args = append(args, rdFlagArgs...)
+	args = append(args, store.UsageSourceLegacySessionMetrics)
+	args = append(args, rdFlagArgs...)
+	args = append(args, store.UsageSourceLegacySessionMetrics)
 
 	query := fmt.Sprintf(`
 WITH %s,
@@ -761,6 +768,22 @@ agent_flags AS (
 			) THEN 1
 			ELSE 0
 		END AS has_usage_data,
+		CASE
+			WHEN am.run_id <> '' THEN
+				CASE WHEN EXISTS (
+					SELECT 1 FROM usage_events ue
+					WHERE ue.agent_id = am.agent_id_text AND ue.run_id = am.run_id AND ue.usage_source = ?
+				) AND NOT EXISTS (
+					SELECT 1 FROM usage_events ue
+					WHERE ue.agent_id = am.agent_id_text AND ue.run_id = am.run_id AND ue.usage_source <> ?
+				) THEN 1 ELSE 0 END
+			WHEN EXISTS (
+				SELECT 1 FROM usage_rollups_daily rd WHERE %s AND rd.events > 0 AND rd.usage_source = ?
+			) AND NOT EXISTS (
+				SELECT 1 FROM usage_rollups_daily rd WHERE %s AND rd.events > 0 AND rd.usage_source <> ?
+			) THEN 1
+			ELSE 0
+		END AS has_legacy_only,
 		am.latest_receipt_at AS latest_receipt_at
 	FROM agent_mh am
 )
@@ -775,14 +798,17 @@ SELECT
 	is_past_grace,
 	has_schema_drift,
 	has_usage_data,
+	has_legacy_only,
 	CAST(COUNT(*) AS BIGINT) AS agent_count,
 	MAX(latest_receipt_at) AS max_last_receipt_at
 FROM agent_flags
-GROUP BY harness_config, harness, capability_project_id, is_running, has_meter_health, latest_final_state, is_receipt_stale, is_past_grace, has_schema_drift, has_usage_data`,
+GROUP BY harness_config, harness, capability_project_id, is_running, has_meter_health, latest_final_state, is_receipt_stale, is_past_grace, has_schema_drift, has_usage_data, has_legacy_only`,
 		fmt.Sprintf(scopedAgentsCTE, strings.Join(scopeWhere, " AND ")),
 		isRunningExpr,
 		isStaleExpr,
 		isPastGraceExpr,
+		rdFlagCond,
+		rdFlagCond,
 		rdFlagCond,
 	)
 
@@ -805,6 +831,7 @@ GROUP BY harness_config, harness, capability_project_id, is_running, has_meter_h
 			isPastGrace         int
 			hasSchemaDrift      int
 			hasUsageData        int
+			hasLegacyOnly       int
 			agentCount          int64
 			rawLastReceipt      any
 		)
@@ -819,6 +846,7 @@ GROUP BY harness_config, harness, capability_project_id, is_running, has_meter_h
 			&isPastGrace,
 			&hasSchemaDrift,
 			&hasUsageData,
+			&hasLegacyOnly,
 			&agentCount,
 			&rawLastReceipt,
 		); err != nil {
@@ -835,6 +863,7 @@ GROUP BY harness_config, harness, capability_project_id, is_running, has_meter_h
 			IsPastGrace:         isPastGrace != 0,
 			HasSchemaDrift:      hasSchemaDrift != 0,
 			HasUsageData:        hasUsageData != 0,
+			HasLegacyOnly:       hasLegacyOnly != 0,
 			AgentCount:          int(agentCount),
 		})
 		if rawLastReceipt != nil {
