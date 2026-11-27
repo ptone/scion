@@ -17,13 +17,18 @@ package teams
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin/teamshosts"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // ActivityHandler processes Bot Framework Activities received by the webhook server.
@@ -33,12 +38,25 @@ type ActivityHandler interface {
 
 // WebhookServer receives HTTP POST requests from the Bot Framework Service.
 type WebhookServer struct {
-	server    *http.Server
-	validator *JWTValidator
-	handler   ActivityHandler
-	log       *slog.Logger
-	addr      string
-	listener  net.Listener
+	server            *http.Server
+	validator         *JWTValidator
+	handler           ActivityHandler
+	log               *slog.Logger
+	addr              string
+	listener          net.Listener
+	extraServiceHosts []string
+}
+
+// SetExtraServiceHosts extends the built-in Bot Framework service URL host
+// allowlist used when validating inbound activities.
+func (ws *WebhookServer) SetExtraServiceHosts(hosts []string) {
+	if len(hosts) == 0 {
+		ws.extraServiceHosts = nil
+		return
+	}
+	cp := make([]string, len(hosts))
+	copy(cp, hosts)
+	ws.extraServiceHosts = cp
 }
 
 // NewWebhookServer creates a new WebhookServer that validates JWT tokens
@@ -116,7 +134,7 @@ func (ws *WebhookServer) handleMessages(w http.ResponseWriter, r *http.Request) 
 
 	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 
-	_, err := ws.validator.ValidateToken(r.Context(), tokenString)
+	token, err := ws.validator.ValidateToken(r.Context(), tokenString)
 	if err != nil {
 		ws.log.Warn("JWT validation failed", "error", err)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -135,6 +153,18 @@ func (ws *WebhookServer) handleMessages(w http.ResponseWriter, r *http.Request) 
 	if err := json.Unmarshal(body, &activity); err != nil {
 		ws.log.Warn("Failed to parse Activity JSON", "error", err)
 		http.Error(w, "invalid Activity JSON", http.StatusBadRequest)
+		return
+	}
+
+	// 2b. Bind activity.ServiceURL to the JWT serviceurl claim and verify the
+	// host against the Bot Framework service URL allowlist.
+	if reason, ok := validateInboundServiceURL(token, activity.ServiceURL, ws.extraServiceHosts); !ok {
+		ws.log.Warn("inbound teams service URL denied",
+			"event", "teams_service_url_denied",
+			"direction", "inbound",
+			"reason", reason,
+		)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -191,4 +221,63 @@ func (ws *WebhookServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// validateInboundServiceURL checks that the JWT carries a non-empty
+// "serviceurl" claim matching activityServiceURL and that the URL passes
+// the Bot Framework service URL allowlist.
+func validateInboundServiceURL(token *jwt.Token, activityServiceURL string, extraHosts []string) (string, bool) {
+	if token == nil {
+		return "missing_token", false
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return "invalid_claims", false
+	}
+	claimVal, exists := claims["serviceurl"]
+	if !exists {
+		return "missing_serviceurl_claim", false
+	}
+	claimServiceURL, ok := claimVal.(string)
+	if !ok || strings.TrimSpace(claimServiceURL) == "" {
+		return "missing_serviceurl_claim", false
+	}
+	if err := teamshosts.ValidateServiceURL(activityServiceURL, extraHosts...); err != nil {
+		var denied *teamshosts.ServiceURLDeniedError
+		if errors.As(err, &denied) {
+			return denied.Reason, false
+		}
+		return "invalid_service_url", false
+	}
+	if !serviceURLsEqual(claimServiceURL, activityServiceURL) {
+		return "serviceurl_claim_mismatch", false
+	}
+	return "", true
+}
+
+func serviceURLsEqual(a, b string) bool {
+	ua, errA := url.Parse(a)
+	ub, errB := url.Parse(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if !strings.EqualFold(ua.Scheme, ub.Scheme) {
+		return false
+	}
+	if !strings.EqualFold(ua.Hostname(), ub.Hostname()) {
+		return false
+	}
+	portA := ua.Port()
+	if portA == "443" {
+		portA = ""
+	}
+	portB := ub.Port()
+	if portB == "443" {
+		portB = ""
+	}
+	if portA != portB {
+		return false
+	}
+	return strings.TrimRight(ua.Path, "/") == strings.TrimRight(ub.Path, "/") &&
+		ua.RawQuery == ub.RawQuery
 }

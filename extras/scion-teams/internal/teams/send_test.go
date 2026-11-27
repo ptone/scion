@@ -95,17 +95,16 @@ func TestSender_SendActivity(t *testing.T) {
 	var receivedMethod string
 	var receivedPath string
 
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAuth = r.Header.Get("Authorization")
 		receivedMethod = r.Method
 		receivedPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ActivityResponse{ID: "response-act-1"})
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	activity := &Activity{
 		Type: "message",
@@ -113,13 +112,13 @@ func TestSender_SendActivity(t *testing.T) {
 	}
 
 	activityID, err := sender.sendActivity(context.Background(),
-		apiServer.URL, "conv-1", activity)
+		serviceURL, "conv-1", activity)
 
 	require.NoError(t, err)
 	assert.Equal(t, "response-act-1", activityID)
 	assert.Equal(t, "Bearer test-token-123", receivedAuth)
 	assert.Equal(t, "POST", receivedMethod)
-	assert.Equal(t, "/v3/conversations/conv-1/activities", receivedPath)
+	assert.Equal(t, "/amer/v3/conversations/conv-1/activities", receivedPath)
 }
 
 func TestSender_ReplyToActivity(t *testing.T) {
@@ -127,15 +126,14 @@ func TestSender_ReplyToActivity(t *testing.T) {
 	defer tokenServer.Close()
 
 	var receivedBody Activity
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&receivedBody)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ActivityResponse{ID: "reply-act-1"})
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	activity := &Activity{
 		Type: "message",
@@ -143,7 +141,7 @@ func TestSender_ReplyToActivity(t *testing.T) {
 	}
 
 	activityID, err := sender.replyToActivity(context.Background(),
-		apiServer.URL, "conv-1", "original-act-1", activity)
+		serviceURL, "conv-1", "original-act-1", activity)
 
 	require.NoError(t, err)
 	assert.Equal(t, "reply-act-1", activityID)
@@ -156,16 +154,15 @@ func TestSender_UpdateActivity(t *testing.T) {
 
 	var receivedMethod string
 	var receivedPath string
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedMethod = r.Method
 		receivedPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ActivityResponse{ID: "updated-act"})
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	activity := &Activity{
 		Type: "message",
@@ -173,11 +170,11 @@ func TestSender_UpdateActivity(t *testing.T) {
 	}
 
 	err := sender.updateActivity(context.Background(),
-		apiServer.URL, "conv-1", "act-1", activity)
+		serviceURL, "conv-1", "act-1", activity)
 
 	require.NoError(t, err)
 	assert.Equal(t, "PUT", receivedMethod)
-	assert.Equal(t, "/v3/conversations/conv-1/activities/act-1", receivedPath)
+	assert.Equal(t, "/amer/v3/conversations/conv-1/activities/act-1", receivedPath)
 }
 
 func TestSender_DeleteActivity(t *testing.T) {
@@ -186,22 +183,21 @@ func TestSender_DeleteActivity(t *testing.T) {
 
 	var receivedMethod string
 	var receivedPath string
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedMethod = r.Method
 		receivedPath = r.URL.Path
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	err := sender.deleteActivity(context.Background(),
-		apiServer.URL, "conv-1", "act-1")
+		serviceURL, "conv-1", "act-1")
 
 	require.NoError(t, err)
 	assert.Equal(t, "DELETE", receivedMethod)
-	assert.Equal(t, "/v3/conversations/conv-1/activities/act-1", receivedPath)
+	assert.Equal(t, "/amer/v3/conversations/conv-1/activities/act-1", receivedPath)
 }
 
 func TestSender_TokenRefreshOn401(t *testing.T) {
@@ -229,7 +225,7 @@ func TestSender_TokenRefreshOn401(t *testing.T) {
 	tp.httpClient = tokenServer.Client()
 
 	var requestCount int32
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&requestCount, 1)
 		if count == 1 {
 			// First request: return 401.
@@ -242,14 +238,13 @@ func TestSender_TokenRefreshOn401(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ActivityResponse{ID: "retry-act"})
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	activity := &Activity{Type: "message", Text: "test"}
 	activityID, err := sender.sendActivity(context.Background(),
-		apiServer.URL, "conv-1", activity)
+		serviceURL, "conv-1", activity)
 
 	require.NoError(t, err)
 	assert.Equal(t, "retry-act", activityID)
@@ -260,18 +255,17 @@ func TestSender_RateLimitError(t *testing.T) {
 	tp, tokenServer := newTestTokenProvider(t)
 	defer tokenServer.Close()
 
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "5")
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	activity := &Activity{Type: "message", Text: "test"}
 	_, err := sender.sendActivity(context.Background(),
-		apiServer.URL, "conv-1", activity)
+		serviceURL, "conv-1", activity)
 
 	require.Error(t, err)
 	var retryErr *RetryAfterError
@@ -283,18 +277,17 @@ func TestSender_APIError(t *testing.T) {
 	tp, tokenServer := newTestTokenProvider(t)
 	defer tokenServer.Close()
 
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{"error": "bad request"}`))
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	activity := &Activity{Type: "message", Text: "test"}
 	_, err := sender.sendActivity(context.Background(),
-		apiServer.URL, "conv-1", activity)
+		serviceURL, "conv-1", activity)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "400")
@@ -317,7 +310,7 @@ func TestSender_401RetryNetworkFailure_NoPanic(t *testing.T) {
 	tp.tokenEndpoint = tokenServer.URL
 	tp.httpClient = tokenServer.Client()
 
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&requestCount, 1)
 		if count == 1 {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -331,14 +324,13 @@ func TestSender_401RetryNetworkFailure_NoPanic(t *testing.T) {
 		conn, _, _ := hj.Hijack()
 		conn.Close()
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	activity := &Activity{Type: "message", Text: "test"}
 	_, err := sender.sendActivity(context.Background(),
-		apiServer.URL, "conv-1", activity)
+		serviceURL, "conv-1", activity)
 
 	// Should return an error, not panic.
 	assert.Error(t, err)
@@ -363,7 +355,7 @@ func TestSender_DeleteActivity_401Retry(t *testing.T) {
 	tp.httpClient = tokenServer.Client()
 
 	var apiRequestCount int32
-	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		count := atomic.AddInt32(&apiRequestCount, 1)
 		if count == 1 {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -372,13 +364,12 @@ func TestSender_DeleteActivity_401Retry(t *testing.T) {
 		assert.Equal(t, "DELETE", r.Method)
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer apiServer.Close()
 
 	sender := NewSender(tp, slog.Default())
-	sender.httpClient = apiServer.Client()
+	sender.httpClient = client
 
 	err := sender.deleteActivity(context.Background(),
-		apiServer.URL, "conv-1", "act-1")
+		serviceURL, "conv-1", "act-1")
 
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), atomic.LoadInt32(&apiRequestCount))

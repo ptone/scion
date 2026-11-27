@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin/teamshosts"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
@@ -42,14 +44,15 @@ const (
 // Config holds the parsed configuration for the Teams broker.
 type Config struct {
 	// Phase 1: Azure credentials and local settings.
-	AppID          string
-	AppSecret      string
-	TenantID       string
-	ListenAddress  string
-	DBPath         string
-	DBType         string // "sqlite" (default) or "postgres"
-	DBDSN          string // PostgreSQL DSN (required when DBType=postgres)
-	MentionRouting bool
+	AppID           string
+	AppSecret       string
+	TenantID        string
+	ListenAddress   string
+	DBPath          string
+	DBType          string // "sqlite" (default) or "postgres"
+	DBDSN           string // PostgreSQL DSN (required when DBType=postgres)
+	MentionRouting  bool
+	ServiceURLHosts []string // optional additional allowed Bot Framework service URL hosts
 
 	// Phase 2: Hub connection.
 	HubURL                 string
@@ -148,6 +151,15 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 	if v, ok := config["mention_routing"]; ok {
 		b.config.MentionRouting = v != "false"
 	}
+	if v, ok := config["service_url_hosts"]; ok {
+		b.config.ServiceURLHosts = teamshosts.ParseExtraHosts(v)
+		if b.sender != nil {
+			b.sender.SetExtraServiceHosts(b.config.ServiceURLHosts)
+		}
+		if b.webhookServer != nil {
+			b.webhookServer.SetExtraServiceHosts(b.config.ServiceURLHosts)
+		}
+	}
 
 	// Phase 1 requires Azure credentials.
 	// NOTE: Re-calling Configure with different Phase 1 credentials does not
@@ -231,6 +243,7 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 
 			// Initialize outbound messaging components.
 			b.sender = NewSender(b.tokenProvider, b.log)
+			b.sender.SetExtraServiceHosts(b.config.ServiceURLHosts)
 			b.sendQueue = NewSendQueue(b.sender, b.config.SendQueueSize, b.config.SendMinDelay, b.log)
 
 			// Initialize command and callback handlers (Phase 4).
@@ -270,6 +283,7 @@ func (b *TeamsBroker) Subscribe(pattern string) error {
 
 	// Create and start the webhook server.
 	b.webhookServer = NewWebhookServer(b.config.ListenAddress, b.jwtValidator, b, b.log)
+	b.webhookServer.SetExtraServiceHosts(b.config.ServiceURLHosts)
 
 	go func() {
 		if err := b.webhookServer.Start(); err != nil {
@@ -306,10 +320,10 @@ func (b *TeamsBroker) Unsubscribe(pattern string) error {
 
 // Publish implements MessageBrokerPluginInterface.Publish.
 // Routes outbound messages to Teams conversations using the priority chain:
-//  1. Resolved Conversation ExternalRef (or ParentRef / legacy ThreadID) match — look up conversation reference.
-//  2. Metadata teams_conversation_id — explicit target.
-//  3. ConversationContext — last context for sender+project+agent.
-//  4. ChannelLinks broadcast — all channels linked to the project.
+//  1. Resolved Conversation ExternalRef (or ParentRef / legacy ThreadID) match —
+//     authorized against active project ChannelLink or recipient personal DM.
+//  2. ConversationContext — last context for recipient+project+agent.
+//  3. ChannelLinks broadcast — all channels linked to the project.
 func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	if msg == nil {
 		return fmt.Errorf("message is nil")
@@ -382,51 +396,40 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	b.mu.Unlock()
 
 	// Priority 1: Resolved conversation target (Conversation.ExternalRef /
-	// ParentRef, falling back to legacy ThreadID).
+	// ParentRef, falling back to legacy ThreadID), gated by authorizeExplicitTarget.
 	convTarget := plugin.ResolveConversationTarget(msg)
-	if convTarget.ExternalRef != "" && store != nil {
-		ref, err := store.GetConversationReference(ctx, convTarget.ExternalRef)
-		if err != nil {
-			b.log.Warn("Error looking up conversation reference", "external_ref", convTarget.ExternalRef, "error", err)
+	if convTarget.ExternalRef != "" {
+		targetSrc := plugin.TargetSourceThreadID
+		if msg.Conversation != nil && msg.Conversation.Surface != "native" && msg.Conversation.ExternalRef != "" {
+			targetSrc = plugin.TargetSourceConversation
 		}
-		if ref == nil && convTarget.ParentRef != "" && convTarget.ParentRef != convTarget.ExternalRef {
-			ref, err = store.GetConversationReference(ctx, convTarget.ParentRef)
+		if ok, reason := b.authorizeExplicitTarget(ctx, projectID, agentSlug, msg, convTarget.ExternalRef); !ok {
+			plugin.LogTargetDenied(b.log, "teams", projectID, targetSrc, convTarget.ExternalRef, reason)
+		} else {
+			ref, err := store.GetConversationReference(ctx, convTarget.ExternalRef)
 			if err != nil {
-				b.log.Warn("Error looking up parent conversation reference", "parent_ref", convTarget.ParentRef, "error", err)
+				b.log.Warn("Error looking up conversation reference", "external_ref", convTarget.ExternalRef, "error", err)
 			}
-		}
-		if ref != nil {
-			targets = append(targets, sendTarget{
-				conversationID: ref.ConversationID,
-				serviceURL:     ref.ServiceURL,
-			})
-		}
-	}
-
-	// Priority 2: Metadata teams_conversation_id.
-	if len(targets) == 0 && msg.Metadata != nil {
-		if convID, ok := msg.Metadata["teams_conversation_id"]; ok && convID != "" {
-			serviceURL := msg.Metadata["teams_service_url"]
-			if serviceURL == "" && store != nil {
-				ref, err := store.GetConversationReference(ctx, convID)
-				if err != nil {
-					b.log.Warn("Error looking up conversation reference", "conversation_id", convID, "error", err)
-				}
-				if ref != nil {
-					serviceURL = ref.ServiceURL
+			if ref == nil && convTarget.ParentRef != "" && convTarget.ParentRef != convTarget.ExternalRef {
+				if parentOK, parentReason := b.authorizeExplicitTarget(ctx, projectID, agentSlug, msg, convTarget.ParentRef); !parentOK {
+					plugin.LogTargetDenied(b.log, "teams", projectID, targetSrc, convTarget.ParentRef, parentReason)
+				} else {
+					ref, err = store.GetConversationReference(ctx, convTarget.ParentRef)
+					if err != nil {
+						b.log.Warn("Error looking up parent conversation reference", "parent_ref", convTarget.ParentRef, "error", err)
+					}
 				}
 			}
-			if serviceURL != "" {
+			if ref != nil && ref.ServiceURL != "" {
 				targets = append(targets, sendTarget{
-					conversationID: convID,
-					serviceURL:     serviceURL,
-					replyToID:      msg.Metadata["teams_reply_to_id"],
+					conversationID: ref.ConversationID,
+					serviceURL:     ref.ServiceURL,
 				})
 			}
 		}
 	}
 
-	// Priority 3: ConversationContext — last context for recipient+project+agent.
+	// Priority 2: ConversationContext — last context for recipient+project+agent.
 	if len(targets) == 0 && msg.Recipient != "" && projectID != "" && store != nil {
 		ccSlug := agentSlug
 		if ccSlug == "" && strings.HasPrefix(msg.Sender, "agent:") {
@@ -489,6 +492,40 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 				}
 			}
 		}
+	}
+
+	// Observer and state-change filtering (fail-closed): agent-to-agent
+	// observer messages and state-change notifications are only delivered to
+	// containers with an active ChannelLink that opts in.
+	isAgentToAgent := strings.HasPrefix(msg.Sender, "agent:") && strings.HasPrefix(msg.Recipient, "agent:")
+	isStateChange := msg.Type == messages.TypeStateChange
+	if (isAgentToAgent || isStateChange) && len(targets) > 0 {
+		filtered := make([]sendTarget, 0, len(targets))
+		for _, target := range targets {
+			if store == nil {
+				continue
+			}
+			link, linkErr := store.GetChannelLink(ctx, stripThreadSuffix(target.conversationID))
+			if linkErr != nil {
+				b.log.Warn("Failed to look up channel link; applying fail-closed filter",
+					"conversation_id", plugin.TruncateTargetID(target.conversationID), "error", linkErr)
+				continue
+			}
+			showAgentToAgent := link != nil && link.Active && link.ShowAgentToAgent
+			showStateChanges := link != nil && link.Active && link.ShowStateChanges
+			if isAgentToAgent && !showAgentToAgent {
+				b.log.Debug("Filtering agent-to-agent message",
+					"conversation_id", plugin.TruncateTargetID(target.conversationID), "linked", link != nil)
+				continue
+			}
+			if isStateChange && !showStateChanges {
+				b.log.Debug("Filtering state change notification",
+					"conversation_id", plugin.TruncateTargetID(target.conversationID), "linked", link != nil)
+				continue
+			}
+			filtered = append(filtered, target)
+		}
+		targets = filtered
 	}
 
 	if len(targets) == 0 {
@@ -1109,8 +1146,37 @@ func isValidAgentSlug(s string) bool {
 	return true
 }
 
-// upsertConversationRef persists the conversation reference via the store.
+// upsertConversationRef persists the conversation reference via the store
+// after verifying that activity.ServiceURL passes the Bot Framework host
+// allowlist.
 func (b *TeamsBroker) upsertConversationRef(activity *Activity) {
+	b.mu.Lock()
+	store := b.store
+	var extraHosts []string
+	if b.config != nil {
+		extraHosts = b.config.ServiceURLHosts
+	}
+	b.mu.Unlock()
+
+	if err := teamshosts.ValidateServiceURL(activity.ServiceURL, extraHosts...); err != nil {
+		var denied *teamshosts.ServiceURLDeniedError
+		if errors.As(err, &denied) {
+			b.log.Warn("Refusing to store conversation reference with disallowed service URL",
+				"event", "teams_service_url_denied",
+				"direction", "inbound",
+				"reason", denied.Reason,
+				"host", denied.Host,
+			)
+		} else {
+			b.log.Warn("Refusing to store conversation reference with disallowed service URL",
+				"event", "teams_service_url_denied",
+				"direction", "inbound",
+				"error", err,
+			)
+		}
+		return
+	}
+
 	ref := &ConversationReference{
 		ConversationID:   activity.Conversation.ID,
 		ServiceURL:       activity.ServiceURL,
@@ -1135,10 +1201,6 @@ func (b *TeamsBroker) upsertConversationRef(activity *Activity) {
 			ref.TeamID = activity.ChannelData.Team.ID
 		}
 	}
-
-	b.mu.Lock()
-	store := b.store
-	b.mu.Unlock()
 
 	if store != nil {
 		if err := store.UpsertConversationReference(context.Background(), ref); err != nil {
