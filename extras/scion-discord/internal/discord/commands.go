@@ -2097,9 +2097,18 @@ func threadParentID(s *discordgo.Session, channelID string) (string, bool) {
 // resolveChannelLink looks up a ChannelLink for channelID. If no active link
 // is found and the channel is a thread, it falls back to the parent channel.
 func resolveChannelLink(ctx context.Context, s *discordgo.Session, store Store, channelID string) (*ChannelLink, error) {
-	link, err := store.GetChannelLink(ctx, channelID)
+	link, _, err := resolveChannelLinkDetailed(ctx, s, store, channelID)
+	return link, err
+}
+
+// resolveChannelLinkDetailed resolves a ChannelLink for channelID (falling back
+// to a thread's parent channel when channelID has no active link) and reports
+// whether a Discord API thread-parent lookup failed so fail-closed callers can
+// distinguish lookup errors from unlinked channels.
+func resolveChannelLinkDetailed(ctx context.Context, s *discordgo.Session, store Store, channelID string) (link *ChannelLink, parentLookupFailed bool, err error) {
+	link, err = store.GetChannelLink(ctx, channelID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if link == nil || !link.Active {
 		threadParentsMu.Lock()
@@ -2107,23 +2116,31 @@ func resolveChannelLink(ctx context.Context, s *discordgo.Session, store Store, 
 		threadParentsMu.Unlock()
 
 		if !cached {
+			if s == nil {
+				return link, true, nil
+			}
 			var ok bool
 			parentID, ok = threadParentID(s, channelID)
-			if ok {
-				// Only cache when the lookup succeeded. On failure (!ok)
-				// we leave the entry absent so the next call retries,
-				// avoiding negative-cache poisoning from transient errors.
-				threadParentsMu.Lock()
-				threadParents[channelID] = parentID
-				threadParentsMu.Unlock()
+			if !ok {
+				return link, true, nil
 			}
+			// Only cache when the lookup succeeded. On failure (!ok)
+			// we leave the entry absent so the next call retries,
+			// avoiding negative-cache poisoning from transient errors.
+			threadParentsMu.Lock()
+			threadParents[channelID] = parentID
+			threadParentsMu.Unlock()
 		}
 
 		if parentID != "" {
-			return store.GetChannelLink(ctx, parentID)
+			parentLink, parentErr := store.GetChannelLink(ctx, parentID)
+			if parentErr != nil {
+				return nil, false, parentErr
+			}
+			return parentLink, false, nil
 		}
 	}
-	return link, nil
+	return link, false, nil
 }
 
 // agentStatusEmoji returns an icon based on the agent's activity and phase.

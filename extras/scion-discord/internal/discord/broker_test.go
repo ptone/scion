@@ -635,17 +635,26 @@ func TestPublish_ForumChannelWithoutThreadID_ReturnsError(t *testing.T) {
 		{ID: "forum123", Type: discordgo.ChannelTypeGuildForum},
 	})
 	b := testBroker(session)
+	b.store = newTestBrokerStore(t)
+	require.NoError(t, b.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ChannelID:   "forum123",
+		GuildID:     testGuildID,
+		ProjectID:   "proj-1",
+		ProjectSlug: "proj-1",
+		LinkedBy:    "test",
+		LinkedAt:    time.Now(),
+		Active:      true,
+	}))
 
 	msg := &messages.StructuredMessage{
-		Version:  messages.Version,
-		Channel:  "discord",
-		Sender:   "agent:test",
-		Msg:      "hello",
-		Type:     messages.TypeInstruction,
-		Metadata: map[string]string{"discord_channel_id": "forum123"},
+		Version: messages.Version,
+		Channel: "discord",
+		Sender:  "agent:test",
+		Msg:     "hello",
+		Type:    messages.TypeInstruction,
 	}
 
-	err := b.Publish(context.Background(), "test-topic", msg)
+	err := b.Publish(context.Background(), "scion.project.proj-1.agent.test.messages", msg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "forum/media channel")
 	assert.Contains(t, err.Error(), "thread ID is required")
@@ -660,18 +669,27 @@ func TestPublish_DiscardsRetiredAssistantReply(t *testing.T) {
 		{ID: "forum123", Type: discordgo.ChannelTypeGuildForum},
 	})
 	b := testBroker(session)
+	b.store = newTestBrokerStore(t)
+	require.NoError(t, b.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ChannelID:   "forum123",
+		GuildID:     testGuildID,
+		ProjectID:   "proj-1",
+		ProjectSlug: "proj-1",
+		LinkedBy:    "test",
+		LinkedAt:    time.Now(),
+		Active:      true,
+	}))
 	msg := &messages.StructuredMessage{
-		Version:  messages.Version,
-		Channel:  "discord",
-		Sender:   "agent:test",
-		Msg:      "turn text",
-		Type:     messages.TypeAssistantReply,
-		Metadata: map[string]string{"discord_channel_id": "forum123"},
+		Version: messages.Version,
+		Channel: "discord",
+		Sender:  "agent:test",
+		Msg:     "turn text",
+		Type:    messages.TypeAssistantReply,
 	}
-	require.NoError(t, b.Publish(context.Background(), "test-topic", msg))
+	require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.test.messages", msg))
 
 	msg.Type = messages.TypeInstruction
-	require.Error(t, b.Publish(context.Background(), "test-topic", msg), "control: an instruction is attempted")
+	require.Error(t, b.Publish(context.Background(), "scion.project.proj-1.agent.test.messages", msg), "control: an instruction is attempted")
 }
 
 func TestPublish_MediaChannelWithoutThreadID_ReturnsError(t *testing.T) {
@@ -679,17 +697,26 @@ func TestPublish_MediaChannelWithoutThreadID_ReturnsError(t *testing.T) {
 		{ID: "media123", Type: discordgo.ChannelTypeGuildMedia},
 	})
 	b := testBroker(session)
+	b.store = newTestBrokerStore(t)
+	require.NoError(t, b.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ChannelID:   "media123",
+		GuildID:     testGuildID,
+		ProjectID:   "proj-1",
+		ProjectSlug: "proj-1",
+		LinkedBy:    "test",
+		LinkedAt:    time.Now(),
+		Active:      true,
+	}))
 
 	msg := &messages.StructuredMessage{
-		Version:  messages.Version,
-		Channel:  "discord",
-		Sender:   "agent:test",
-		Msg:      "hello",
-		Type:     messages.TypeInstruction,
-		Metadata: map[string]string{"discord_channel_id": "media123"},
+		Version: messages.Version,
+		Channel: "discord",
+		Sender:  "agent:test",
+		Msg:     "hello",
+		Type:    messages.TypeInstruction,
 	}
 
-	err := b.Publish(context.Background(), "test-topic", msg)
+	err := b.Publish(context.Background(), "scion.project.proj-1.agent.test.messages", msg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "forum/media channel")
 }
@@ -1358,7 +1385,7 @@ func TestPublish_ObserveFilter_ThreadResolvesParentLink(t *testing.T) {
 				ThreadID:  threadID,
 			}
 
-			require.NoError(t, b.Publish(ctx, "proj-1.agent.alice", msg))
+			require.NoError(t, b.Publish(ctx, "scion.project.proj-1.agent.alice.messages", msg))
 
 			delivered := len(rt.paths) > 0
 			assert.Equal(t, tt.wantDelivered, delivered, tt.wantDeliveredMsg)
@@ -1418,7 +1445,7 @@ func TestPublish_ObserveFilter_StateChangeThreadResolvesParentLink(t *testing.T)
 				ThreadID: threadID,
 			}
 
-			require.NoError(t, b.Publish(ctx, "proj-1.agent.alice", msg))
+			require.NoError(t, b.Publish(ctx, "scion.project.proj-1.agent.alice.messages", msg))
 
 			assert.Equal(t, showStateChanges, len(rt.paths) > 0,
 				"state change delivery must follow the parent link's ShowStateChanges flag")
