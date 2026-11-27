@@ -295,6 +295,39 @@ func outboundThreadConversationState(
 	return outboundThreadExists, nil
 }
 
+// outboundExternalThreadConversationState is the external-surface sibling of
+// outboundThreadConversationState. It performs a strictly read-only lookup for
+// an existing group conversation keyed by (surface, extRef) owned by projectID
+// without consulting webchat topics or creating any row. Missing rows and rows
+// belonging to another (or unset) project report outboundThreadMissing;
+// soft-deleted rows report outboundThreadDeleted.
+func outboundExternalThreadConversationState(
+	ctx context.Context,
+	cr messaging.ConversationReader,
+	surface, projectID, extRef string,
+) (*store.Conversation, outboundThreadState, error) {
+	conv, err := cr.GetConversationByExternalRef(ctx, surface, extRef)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, outboundThreadMissing, nil
+		}
+		return nil, outboundThreadMissing, fmt.Errorf("conversation lookup: %w", err)
+	}
+	if conv == nil {
+		return nil, outboundThreadMissing, nil
+	}
+	if conv.DeletedAt != nil {
+		return nil, outboundThreadDeleted, nil
+	}
+	const zeroUUID = "00000000-0000-0000-0000-000000000000"
+	if projectID == "" || projectID == zeroUUID ||
+		conv.ProjectID == nil || *conv.ProjectID == "" || *conv.ProjectID == zeroUUID ||
+		*conv.ProjectID != projectID {
+		return nil, outboundThreadMissing, nil
+	}
+	return conv, outboundThreadExists, nil
+}
+
 // resolveOutboundRouting consolidates recipient resolution, conversation
 // authorization, and transport selection into a single routing decision.
 // Returns a routingResult that the handler uses to build the message envelope
@@ -704,11 +737,10 @@ func (s *Server) resolveOutboundRouting(
 			s.mu.RUnlock()
 			// #2026: on native delivery (web or no channel), a free-text
 			// (non-dm:) thread_id may only address a thread conversation that
-			// already exists and is visible. Minting one here would create a
-			// participant-less group conversation that the recipient never
-			// sees, while the sender is told "sent". Reject instead, before
-			// any conversation or message row is written. External channels
-			// are exempt: their plugin delivers to the ThreadID itself.
+			// already exists and is visible. External surfaces (slack, discord,
+			// teams, telegram, gchat) enforce the same read-only existing-thread
+			// requirement on their own surface and never mint a row here.
+			extSurface := outboundThreadSurface(kind, req.Channel)
 			if kind == "group" && outboundThreadGateApplies(req.Channel) {
 				var tl messaging.TopicConversationLookup
 				if wcs != nil {
@@ -736,22 +768,47 @@ func (s *Server) resolveOutboundRouting(
 							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
 					return nil, fmt.Errorf("thread %q refers to a deleted conversation", req.ThreadID)
 				}
+			} else if extSurface != "" {
+				existingConv, state, stateErr := outboundExternalThreadConversationState(ctx, s.store, extSurface, agent.ProjectID, extRef)
+				if stateErr != nil {
+					s.messageLog.Error("external thread conversation lookup failed",
+						"surface", extSurface, "thread_id", req.ThreadID, "agent_id", agent.ID, "error", stateErr)
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						"thread conversation lookup failed", nil)
+					return nil, stateErr
+				}
+				switch state {
+				case outboundThreadMissing:
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
+						fmt.Sprintf("thread_id %q does not match an existing conversation; "+
+							"address the conversation with conv:<uuid> (see 'scion conversation list'), "+
+							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
+					return nil, fmt.Errorf("thread %q does not resolve to an existing conversation", req.ThreadID)
+				case outboundThreadDeleted:
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
+						fmt.Sprintf("thread_id %q refers to a deleted conversation; "+
+							"address an active conversation with conv:<uuid> (see 'scion conversation list'), "+
+							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
+					return nil, fmt.Errorf("thread %q refers to a deleted conversation", req.ThreadID)
+				}
+				convResult = &messaging.ConversationResult{
+					ConversationID: existingConv.ID,
+					ExternalRef:    existingConv.ExternalRef,
+					Kind:           existingConv.Kind,
+					Surface:        existingConv.Surface,
+					DisplayName:    existingConv.DisplayName,
+				}
 			}
-			if wcs != nil {
-				keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
-			}
-			// A thread on an external channel is stored under that
-			// channel's surface, the same key the inbound path uses for
-			// replies on the thread, so both directions share one
-			// conversation.
-			if surface := outboundThreadSurface(kind, req.Channel); surface != "" {
-				keyOpts = append(keyOpts, messaging.WithSurface(surface))
-			}
-			// A25.6 F1/F3: register both DM principals as participants so
-			// the conversation is discoverable via `conversation list`.
-			keyOpts = append(keyOpts, messaging.WithParticipants(s.store))
 			var convErr error
-			convResult, convErr = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
+			if convResult == nil {
+				if wcs != nil {
+					keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
+				}
+				// A25.6 F1/F3: register both DM principals as participants so
+				// the conversation is discoverable via `conversation list`.
+				keyOpts = append(keyOpts, messaging.WithParticipants(s.store))
+				convResult, convErr = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
+			}
 			if convErr != nil {
 				messaging.WriteDenialMetrics.Inc("outbound.resolve")
 				s.messageLog.Error("conversation resolution failed", "error", convErr)
@@ -900,6 +957,11 @@ func (s *Server) resolveOutboundRouting(
 							"thread_key", threadID, "conversation_id", convResult.ConversationID)
 					}
 
+					// A supplied thread_id must match the conversation's own thread key.
+					if err := s.checkGroupThreadIDMatchesKey(w, convResult.ConversationID, threadID, req.ThreadID); err != nil {
+						return nil, err
+					}
+
 					// Overwrite recipient with the thread key.
 					recipient = "thread:" + threadID
 					recipientID = threadID
@@ -909,8 +971,11 @@ func (s *Server) resolveOutboundRouting(
 					}
 				} else if convResult.ExternalRef == "" {
 					// Native path: the conversation was created via the native
-					// conversation API and has no legacy thread key. Routing is
-					// by ConversationID (already set in S4). Discard any
+					// conversation API and has no legacy thread key.
+					if err := s.checkGroupThreadIDMatchesKey(w, convResult.ConversationID, "", req.ThreadID); err != nil {
+						return nil, err
+					}
+					// Routing is by ConversationID (already set in S4). Discard any
 					// caller-supplied user recipient — the conversation is the
 					// address, same as the legacy path (DEF-161).
 					if recipient != "" || recipientID != "" {
@@ -1034,6 +1099,26 @@ func (s *Server) resolveOutboundRouting(
 			recipient = resolvedRecipient
 			recipientID = resolvedID
 			userResolved = true
+		}
+	}
+
+	if !convRefResolved && asserted && convResult.Kind == "group" && req.ThreadID != "" {
+		if strings.HasPrefix(convResult.ExternalRef, "thread:") {
+			_, threadID, parseErr := messaging.ParseThreadConversationExternalRef(convResult.ExternalRef)
+			if parseErr != nil {
+				s.messageLog.Error("DEF-160: cannot parse thread external_ref",
+					"external_ref", convResult.ExternalRef, "error", parseErr)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"conversation has unparseable external_ref", nil)
+				return nil, parseErr
+			}
+			if err := s.checkGroupThreadIDMatchesKey(w, convResult.ConversationID, threadID, req.ThreadID); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := s.checkGroupThreadIDMatchesKey(w, convResult.ConversationID, "", req.ThreadID); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -1197,6 +1282,26 @@ func (s *Server) checkDirectThreadIDMatchesDMKey(w http.ResponseWriter, conversa
 			"thread_id does not match the direct conversation's key — "+
 				"omit thread_id or use the conversation's own dm: key", nil)
 		return fmt.Errorf("thread_id does not match DM key")
+	}
+	return nil
+}
+
+// checkGroupThreadIDMatchesKey verifies that a caller-supplied thread_id
+// alongside an asserted group conversation matches the conversation's own
+// thread key. An empty thread_id is allowed (and backfilled when the
+// conversation has a thread key). For native group conversations with no
+// thread key (expectedThreadKey == ""), any non-empty thread_id is rejected.
+// Shared by both the conversation_ref and raw conversation_id paths.
+func (s *Server) checkGroupThreadIDMatchesKey(w http.ResponseWriter, conversationID, expectedThreadKey, threadID string) error {
+	if threadID == "" {
+		return nil
+	}
+	if threadID != expectedThreadKey {
+		s.messageLog.Warn("supplied thread_id does not match the group conversation",
+			"thread_id", threadID, "expected_thread_key", expectedThreadKey, "conversation_id", conversationID)
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"thread_id does not match the conversation", nil)
+		return fmt.Errorf("thread_id does not match the conversation")
 	}
 	return nil
 }
