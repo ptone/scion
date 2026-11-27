@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/teamshosts"
@@ -44,19 +45,26 @@ type WebhookServer struct {
 	log               *slog.Logger
 	addr              string
 	listener          net.Listener
-	extraServiceHosts []string
+	extraServiceHosts atomic.Pointer[[]string]
 }
 
 // SetExtraServiceHosts extends the built-in Bot Framework service URL host
-// allowlist used when validating inbound activities.
+// allowlist used when validating inbound activities. Safe for concurrent use.
 func (ws *WebhookServer) SetExtraServiceHosts(hosts []string) {
 	if len(hosts) == 0 {
-		ws.extraServiceHosts = nil
+		ws.extraServiceHosts.Store(nil)
 		return
 	}
 	cp := make([]string, len(hosts))
 	copy(cp, hosts)
-	ws.extraServiceHosts = cp
+	ws.extraServiceHosts.Store(&cp)
+}
+
+func (ws *WebhookServer) getExtraServiceHosts() []string {
+	if p := ws.extraServiceHosts.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // NewWebhookServer creates a new WebhookServer that validates JWT tokens
@@ -158,7 +166,7 @@ func (ws *WebhookServer) handleMessages(w http.ResponseWriter, r *http.Request) 
 
 	// 2b. Bind activity.ServiceURL to the JWT serviceurl claim and verify the
 	// host against the Bot Framework service URL allowlist.
-	if reason, ok := validateInboundServiceURL(token, activity.ServiceURL, ws.extraServiceHosts); !ok {
+	if reason, ok := validateInboundServiceURL(token, activity.ServiceURL, ws.getExtraServiceHosts()); !ok {
 		ws.log.Warn("inbound teams service URL denied",
 			"event", "teams_service_url_denied",
 			"direction", "inbound",

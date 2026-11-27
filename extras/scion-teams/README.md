@@ -352,6 +352,9 @@ These keys go in `plugins.broker.teams.config` in `settings.yaml`:
 | `mention_routing` | No | `true` | Enable @-mention routing for messages |
 | `send_queue_size` | No | `100` | Max queued outbound messages per conversation |
 | `send_min_delay` | No | `200ms` | Minimum delay between sends (rate-limit protection) |
+| `service_url_hosts` | No | -- | Comma-separated additional allowed Bot Framework service URL hostnames (extends, and cannot replace, the built-in Microsoft Teams service host list) |
+
+> **Note:** Inbound webhook requests require the Bot Framework JWT's `serviceurl` claim to match the activity's `serviceUrl` and its host to be in the allowlist.
 
 ### Secrets
 
