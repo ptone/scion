@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -62,4 +63,44 @@ func TestTruncateTargetID(t *testing.T) {
 
 	over := strings.Repeat("x", maxLoggedTargetLen+1)
 	assert.Equal(t, exact+"...", TruncateTargetID(over))
+}
+
+func TestConversationTargetSource(t *testing.T) {
+	assert.Equal(t, TargetSource(""), ConversationTargetSource(nil))
+	assert.Equal(t, TargetSource(""), ConversationTargetSource(&messages.StructuredMessage{}))
+
+	assert.Equal(t, TargetSourceThreadID, ConversationTargetSource(&messages.StructuredMessage{
+		ThreadID: "19:chan@thread.tacv2",
+	}))
+
+	assert.Equal(t, TargetSourceConversation, ConversationTargetSource(&messages.StructuredMessage{
+		ThreadID: "legacy-id",
+		Conversation: &messages.Conversation{
+			Surface:     "teams",
+			ExternalRef: "19:chan@thread.tacv2",
+		},
+	}))
+
+	// Native conversation falls back to ThreadID (or "" if empty).
+	assert.Equal(t, TargetSourceThreadID, ConversationTargetSource(&messages.StructuredMessage{
+		ThreadID: "19:chan@thread.tacv2",
+		Conversation: &messages.Conversation{
+			Surface:     "native",
+			ExternalRef: "thread:p1:123",
+		},
+	}))
+	assert.Equal(t, TargetSource(""), ConversationTargetSource(&messages.StructuredMessage{
+		Conversation: &messages.Conversation{
+			Surface:     "native",
+			ExternalRef: "thread:p1:123",
+		},
+	}))
+
+	// Non-native conversation with empty ExternalRef falls back to ThreadID.
+	assert.Equal(t, TargetSourceThreadID, ConversationTargetSource(&messages.StructuredMessage{
+		ThreadID: "19:chan@thread.tacv2",
+		Conversation: &messages.Conversation{
+			Surface: "teams",
+		},
+	}))
 }
