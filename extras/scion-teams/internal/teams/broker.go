@@ -367,6 +367,7 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 
 	// Extract project and agent from topic.
 	projectID, agentSlug := parsePublishTopic(topic)
+	authzProjectID := canonicalTopicProjectID(topic)
 	if msg.Metadata["project_id"] == "" && projectID != "" {
 		msg.Metadata["project_id"] = projectID
 	}
@@ -400,8 +401,8 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	convTarget := plugin.ResolveConversationTarget(msg)
 	if convTarget.ExternalRef != "" {
 		targetSrc := plugin.ConversationTargetSource(msg)
-		if ok, reason := b.authorizeExplicitTarget(ctx, store, projectID, agentSlug, msg, convTarget.ExternalRef); !ok {
-			plugin.LogTargetDenied(b.log, "teams", projectID, targetSrc, convTarget.ExternalRef, reason)
+		if ok, reason := b.authorizeExplicitTarget(ctx, store, authzProjectID, agentSlug, msg, convTarget.ExternalRef); !ok {
+			plugin.LogTargetDenied(b.log, "teams", authzProjectID, targetSrc, convTarget.ExternalRef, reason)
 		} else {
 			ref, err := store.GetConversationReference(ctx, convTarget.ExternalRef)
 			if err != nil {
@@ -409,8 +410,8 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 			}
 			if ref == nil && convTarget.ParentRef != "" && convTarget.ParentRef != convTarget.ExternalRef {
 				parentSrc := plugin.ConversationParentTargetSource(msg)
-				if parentOK, parentReason := b.authorizeExplicitTarget(ctx, store, projectID, agentSlug, msg, convTarget.ParentRef); !parentOK {
-					plugin.LogTargetDenied(b.log, "teams", projectID, parentSrc, convTarget.ParentRef, parentReason)
+				if parentOK, parentReason := b.authorizeExplicitTarget(ctx, store, authzProjectID, agentSlug, msg, convTarget.ParentRef); !parentOK {
+					plugin.LogTargetDenied(b.log, "teams", authzProjectID, parentSrc, convTarget.ParentRef, parentReason)
 				} else {
 					ref, err = store.GetConversationReference(ctx, convTarget.ParentRef)
 					if err != nil {
