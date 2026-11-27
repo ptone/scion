@@ -33,10 +33,13 @@ import (
 func TestChatReply_TargetMustBeInSameConversation(t *testing.T) {
 	f := newRefFixture(t)
 
-	otherProjectMsg := f.seedMessage(t, f.projB.ID, f.topicB, "", "in project B")
+	convA := topicConversationID(t, f.wcs, f.topicA)
+	convB := topicConversationID(t, f.wcs, f.topicB)
+	otherProjectMsg := f.seedMessage(t, f.projB.ID, f.topicB, convB, "in project B")
 	otherDM := dmKeyFor(t, "user", f.ub.ID, "user", f.uc.ID)
-	otherDMMsg := f.seedMessage(t, f.projB.ID, otherDM, "", "in another DM")
-	sameTopicMsg := f.seedMessage(t, f.projA.ID, f.topicA, "", "in topic A")
+	otherDMConv := seedConversation(t, f.st, "native", otherDM, "direct")
+	otherDMMsg := f.seedMessage(t, f.projB.ID, otherDM, otherDMConv, "in another DM")
+	sameTopicMsg := f.seedMessage(t, f.projA.ID, f.topicA, convA, "in topic A")
 
 	before := f.threadMessageCount(t, f.topicA)
 
@@ -150,8 +153,10 @@ func TestChatDMHistory_StaysReadableAfterProjectAccessEnds(t *testing.T) {
 
 func TestChatRead_WatermarkMustBeInConversation(t *testing.T) {
 	f := newRefFixture(t)
-	other := f.seedMessage(t, f.projB.ID, f.topicB, "", "in project B")
-	local := f.seedMessage(t, f.projA.ID, f.topicA, "", "in topic A")
+	convA := topicConversationID(t, f.wcs, f.topicA)
+	convB := topicConversationID(t, f.wcs, f.topicB)
+	other := f.seedMessage(t, f.projB.ID, f.topicB, convB, "in project B")
+	local := f.seedMessage(t, f.projA.ID, f.topicA, convA, "in topic A")
 
 	mark := func(id string) refAnswer {
 		rec := doRequestAsUser(t, f.srv, f.ua, http.MethodPost,
@@ -327,21 +332,11 @@ func TestAttachmentDownload_StoreErrorAnswersAsUnknown(t *testing.T) {
 	requireSameAnswer(t, missing, f.download(t, f.uc, file))
 }
 
-// getTopicFaultWCS fails GetTopic.
-type getTopicFaultWCS struct {
-	WebChatStore
-}
-
-func (getTopicFaultWCS) GetTopic(context.Context, string) (*WebChatTopic, error) {
-	return nil, errRefStoreFault
-}
-
 // Each lookup canReadNativeMessage makes denies on its own when it fails.
 func TestCanReadNativeMessage_StoreErrorDenies(t *testing.T) {
-	// setup returns alice, a message of topic A linked to the topic's
-	// conversation, and one with no conversation (resolved by topic); both
-	// are readable while the store works.
-	setup := func(t *testing.T) (*refFixture, UserIdentity, *store.Message, *store.Message) {
+	// setup returns alice and a message of topic A linked to the topic's
+	// conversation; it is readable while the store works.
+	setup := func(t *testing.T) (*refFixture, UserIdentity, *store.Message) {
 		t.Helper()
 		f := newRefFixture(t)
 		ctx := context.Background()
@@ -351,31 +346,30 @@ func TestCanReadNativeMessage_StoreErrorDenies(t *testing.T) {
 		require.NotEmpty(t, convID)
 		inConversation, err := f.st.GetMessage(ctx, f.seedMessage(t, f.projA.ID, f.topicA, convID, "with conversation"))
 		require.NoError(t, err)
-		byTopic, err := f.st.GetMessage(ctx, f.seedMessage(t, f.projA.ID, f.topicA, "", "by topic"))
-		require.NoError(t, err)
 		require.True(t, f.srv.canReadNativeMessage(ctx, alice, inConversation), "readable while the store works")
-		require.True(t, f.srv.canReadNativeMessage(ctx, alice, byTopic), "readable while the store works")
-		return f, alice, inConversation, byTopic
+		return f, alice, inConversation
 	}
 
+	t.Run("missing conversation_id denied", func(t *testing.T) {
+		f, alice, _ := setup(t)
+		ctx := context.Background()
+		noConv, err := f.st.GetMessage(ctx, f.seedMessage(t, f.projA.ID, f.topicA, "", "without conversation"))
+		require.NoError(t, err)
+		assert.False(t, f.srv.canReadNativeMessage(ctx, alice, noConv))
+	})
+
 	t.Run("conversation lookup", func(t *testing.T) {
-		f, alice, inConversation, _ := setup(t)
+		f, alice, inConversation := setup(t)
 		f.faults.failGetConversation = true
 		f.fault.Arm()
 		assert.False(t, f.srv.canReadNativeMessage(context.Background(), alice, inConversation))
 	})
 
-	t.Run("topic lookup", func(t *testing.T) {
-		f, alice, _, byTopic := setup(t)
-		f.srv.SetWebChatStore(getTopicFaultWCS{WebChatStore: f.wcs})
-		assert.False(t, f.srv.canReadNativeMessage(context.Background(), alice, byTopic))
-	})
-
 	t.Run("project lookup", func(t *testing.T) {
-		f, alice, _, byTopic := setup(t)
+		f, alice, inConversation := setup(t)
 		f.faults.failGetProject = true
 		f.fault.Arm()
-		assert.False(t, f.srv.canReadNativeMessage(context.Background(), alice, byTopic))
+		assert.False(t, f.srv.canReadNativeMessage(context.Background(), alice, inConversation))
 	})
 }
 
@@ -386,8 +380,9 @@ func TestAttachmentDownload_AgentDMFileReadableAfterProjectAccessEnds(t *testing
 	// A file agent aa sent in its DM with alice: a file of project A,
 	// uploaded by the agent, linked to the DM message.
 	dm := dmKeyFor(t, "agent", f.aa.ID, "user", f.ua.ID)
+	dmConv := f.legacyConversation(t, "direct", dm, [2]string{"user", f.ua.ID}, [2]string{"agent", f.aa.ID})
 	file := f.attach(t, f.projA.ID, f.aa.ID, "report.txt")
-	msgID := f.seedMessage(t, f.projA.ID, dm, "", "here is the report")
+	msgID := f.seedMessage(t, f.projA.ID, dm, dmConv.ID, "here is the report")
 	require.NoError(t, f.wcs.LinkAttachmentToMessage(ctx, msgID, file))
 
 	require.Equal(t, http.StatusOK, f.download(t, f.ua, file).status)

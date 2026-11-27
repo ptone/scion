@@ -1264,11 +1264,9 @@ func (p *MessageBrokerProxy) resolveUserMessageConversation(ctx context.Context,
 				p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
 				return false
 			}
-		} else if msg.Type != messages.TypeSystem {
-			messaging.WriteDenialMetrics.Inc("mb.user.dm")
-			p.log.Error("cannot resolve DM conversation: principal kind undetermined, message not persisted",
+		} else {
+			p.log.Warn("cannot resolve DM conversation: principal kind undetermined",
 				"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
-			return false
 		}
 	}
 	if convResult != nil && storeMsg.ConversationID == "" {
