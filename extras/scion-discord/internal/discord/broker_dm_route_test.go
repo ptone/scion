@@ -190,9 +190,18 @@ func TestPublish_DirectMessage_OpenDMChannelFails_ReturnsErrorAndSendsNothing(t 
 	assert.Empty(t, sentChannelIDs(f.transport))
 }
 
-// Control: a Discord channel ID in ThreadID is still used as-is.
+// Control: an authorized Discord channel ID in ThreadID is still used directly.
 func TestPublish_DiscordThreadID_StillRoutesDirectly(t *testing.T) {
 	f := newDMRouteFixture(t)
+	require.NoError(t, f.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ChannelID:   "600000000000000001",
+		GuildID:     testGuildID,
+		ProjectID:   dmTestProjectID,
+		ProjectSlug: dmTestProjectID,
+		LinkedBy:    "test",
+		LinkedAt:    time.Now(),
+		Active:      true,
+	}))
 	msg := directMessage(t, dmTestEmail, dmTestUserID)
 	msg.ThreadID = "600000000000000001"
 
