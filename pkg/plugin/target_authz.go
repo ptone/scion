@@ -14,7 +14,11 @@
 
 package plugin
 
-import "log/slog"
+import (
+	"log/slog"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+)
 
 // TargetSource records where an explicit outbound target originated.
 type TargetSource string
@@ -38,6 +42,23 @@ const (
 	DenyForeignProject TargetDenyReason = "foreign_project"
 	DenyNotRecipientDM TargetDenyReason = "not_recipient_dm"
 )
+
+// ConversationTargetSource reports where ResolveConversationTarget(msg).ExternalRef
+// originated: TargetSourceConversation when msg.Conversation supplies a non-native
+// ExternalRef, TargetSourceThreadID when falling back to msg.ThreadID, or "" when
+// neither supplies an explicit target.
+func ConversationTargetSource(msg *messages.StructuredMessage) TargetSource {
+	if msg == nil {
+		return ""
+	}
+	if msg.Conversation != nil && msg.Conversation.Surface != "native" && msg.Conversation.ExternalRef != "" {
+		return TargetSourceConversation
+	}
+	if msg.ThreadID != "" {
+		return TargetSourceThreadID
+	}
+	return ""
+}
 
 const maxLoggedTargetLen = 64
 

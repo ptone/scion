@@ -56,7 +56,7 @@ func TestValidateServiceURL(t *testing.T) {
 		{"userinfo", "https://user:pass@smba.trafficmanager.net/amer/", "userinfo_not_allowed"},
 		{"non-443 port", "https://smba.trafficmanager.net:8443/amer/", "invalid_port"},
 		{"unlisted host", "https://unlisted.example/amer/", "host_not_allowed"},
-		{"subdomain spoofing", "https://smba.trafficmanager.net.evil.example/amer/", "host_not_allowed"},
+		{"subdomain suffix mismatch", "https://smba.trafficmanager.net.unlisted.example/amer/", "host_not_allowed"},
 		{"missing host", "https:///amer/", "empty_host"},
 	}
 	for _, tc := range rejected {
