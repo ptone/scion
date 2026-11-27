@@ -451,7 +451,7 @@ func (b *TelegramBroker) parseOutboundRoutes(routesJSON string) error {
 
 // Publish sends a message to Telegram chats matching the topic. Messages are
 // routed to chats via:
-//  1. Direct chat ID from message metadata (telegram_chat_id)
+//  1. Explicit conversation target authorized against chat_routes for topic
 //  2. Topic-to-chat mapping configured via chat_routes
 func (b *TelegramBroker) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
 	b.mu.RLock()
@@ -492,45 +492,23 @@ func (b *TelegramBroker) Publish(ctx context.Context, topic string, msg *message
 	// Collect target chat IDs
 	var chatIDs []int64
 
-	// Priority 0: Conversation external_ref (Phase 11).
-	// When chatRoutes or topicChats are configured, only post to the
-	// conversation's chat if it is registered in the broker's routes;
-	// otherwise fall back to the pre-P4 routing path.
+	// Priority 0: Explicit conversation target (Conversation.ExternalRef /
+	// ParentRef, or legacy ThreadID), gated by authorizeExplicitTarget.
 	if convChatID, ok, _ := parseTelegramConversationTarget(msg); ok {
-		allowConvChat := true
-		if len(chatRoutes) > 0 || len(topicChats) > 0 {
-			allowConvChat = false
-			if _, exists := chatRoutes[convChatID]; exists {
-				allowConvChat = true
-			} else {
-				for _, chats := range topicChats {
-					for _, cid := range chats {
-						if cid == convChatID {
-							allowConvChat = true
-							break
-						}
-					}
-					if allowConvChat {
-						break
-					}
-				}
-			}
+		container := strconv.FormatInt(convChatID, 10)
+		targetSrc := plugin.ConversationTargetSource(msg)
+		if targetSrc == "" {
+			targetSrc = plugin.ConversationParentTargetSource(msg)
 		}
-		if allowConvChat {
-			chatIDs = append(chatIDs, convChatID)
+		authzProjectID := canonicalTopicProjectID(topic)
+		if authorizedChatID, allowed, reason := b.authorizeExplicitTarget(chatRoutes, topic, container); !allowed {
+			plugin.LogTargetDenied(b.log, "telegram", authzProjectID, targetSrc, container, reason)
+		} else {
+			chatIDs = append(chatIDs, authorizedChatID)
 		}
 	}
 
-	// Priority 1: Direct routing via metadata
-	if len(chatIDs) == 0 && msg != nil && msg.Metadata != nil {
-		if chatIDStr, ok := msg.Metadata["telegram_chat_id"]; ok {
-			if chatID, err := strconv.ParseInt(chatIDStr, 10, 64); err == nil {
-				chatIDs = append(chatIDs, chatID)
-			}
-		}
-	}
-
-	// Priority 2: Topic-to-chat mapping
+	// Priority 1: Topic-to-chat mapping
 	if len(chatIDs) == 0 {
 		// Try exact match first
 		if chats, ok := topicChats[topic]; ok {

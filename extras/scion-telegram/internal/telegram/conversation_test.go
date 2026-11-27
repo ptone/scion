@@ -35,14 +35,31 @@ func TestTelegramBrokerV2_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	defer tgSrv.srv.Close()
 
+	st, err := NewSQLiteStore(filepath.Join(t.TempDir(), "tg-conv.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	ctx := context.Background()
+	require.NoError(t, st.SaveGroupLink(ctx, &GroupLink{
+		ChatID:    -100123456,
+		ProjectID: "p1",
+		Active:    true,
+	}))
+	require.NoError(t, st.SaveGroupLink(ctx, &GroupLink{
+		ChatID:    -100555666,
+		ProjectID: "p1",
+		Active:    true,
+	}))
+
 	b := NewV2(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	b.api = NewAPIClient("test-token", tgSrv.srv.URL)
+	b.store = st
 
 	topic := "scion.project.p1.user.u1.messages"
 
 	// 1a. Phase 11 Conversation with threaded ExternalRef ("<chatID>:<threadID>"),
 	// empty legacy Channel/ThreadID/Metadata.
-	err := b.Publish(context.Background(), topic, &messages.StructuredMessage{
+	err = b.Publish(ctx, topic, &messages.StructuredMessage{
 		Version:        messages.Version,
 		Sender:         "agent:coder",
 		Recipient:      "user:alice",
@@ -64,7 +81,7 @@ func TestTelegramBrokerV2_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	tgSrv.mu.Unlock()
 
 	// 1b. Phase 11 Conversation with non-threaded ExternalRef ("<chatID>").
-	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
+	err = b.Publish(ctx, topic, &messages.StructuredMessage{
 		Version:        messages.Version,
 		Sender:         "agent:coder",
 		Recipient:      "user:alice",
@@ -83,10 +100,17 @@ func TestTelegramBrokerV2_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	assert.Equal(t, int64(0), tgSrv.sentMessages[1].MessageThreadID)
 	tgSrv.mu.Unlock()
 
+	// Deactivate -100555666 so implicit fallback routes deterministically to -100123456.
+	require.NoError(t, st.SaveGroupLink(ctx, &GroupLink{
+		ChatID:    -100555666,
+		ProjectID: "p1",
+		Active:    false,
+	}))
+
 	// 2. Defeat scenario (c): Channel:"web" user DM with native DM conversation
 	// is relayed by Telegram v2 (matching pre-P4 no-filter behavior) via
-	// metadata/recipient routing without parsing "dm:..." as a Telegram chat ID.
-	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
+	// project link routing without parsing "dm:..." as a Telegram chat ID.
+	err = b.Publish(ctx, topic, &messages.StructuredMessage{
 		Version:        messages.Version,
 		Sender:         "agent:coder",
 		Recipient:      "user:alice",
@@ -99,20 +123,17 @@ func TestTelegramBrokerV2_Publish_ConversationRoutingAndFallback(t *testing.T) {
 			Surface:     "native",
 			ExternalRef: "dm:agent:a1:user:u1",
 		},
-		Metadata: map[string]string{
-			"telegram_chat_id": "-100777888",
-		},
 	})
 	require.NoError(t, err)
 	tgSrv.mu.Lock()
 	require.Len(t, tgSrv.sentMessages, 3)
-	assert.Equal(t, int64(-100777888), tgSrv.sentMessages[2].ChatID)
+	assert.Equal(t, int64(-100123456), tgSrv.sentMessages[2].ChatID)
 	assert.Equal(t, int64(0), tgSrv.sentMessages[2].MessageThreadID)
 	tgSrv.mu.Unlock()
 
 	// 3. Foreign-surface ExternalRef (e.g. Discord snowflake) is never parsed
-	// as a Telegram chat ID.
-	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
+	// as a Telegram chat ID (with no links for p2, nothing is sent).
+	err = b.Publish(ctx, "scion.project.p2.user.u1.messages", &messages.StructuredMessage{
 		Version:   messages.Version,
 		Sender:    "agent:coder",
 		Recipient: "user:alice",
@@ -128,8 +149,8 @@ func TestTelegramBrokerV2_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	assert.Len(t, tgSrv.sentMessages, 3)
 	tgSrv.mu.Unlock()
 
-	// 4. Legacy fallback (older hub sends Channel/ThreadID/Metadata without Conversation).
-	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
+	// 4. Legacy fallback (older hub sends Channel/ThreadID without Conversation).
+	err = b.Publish(ctx, topic, &messages.StructuredMessage{
 		Version:   messages.Version,
 		Sender:    "agent:coder",
 		Recipient: "user:alice",
@@ -137,14 +158,11 @@ func TestTelegramBrokerV2_Publish_ConversationRoutingAndFallback(t *testing.T) {
 		Type:      messages.TypeInstruction,
 		Channel:   "telegram",
 		ThreadID:  "77",
-		Metadata: map[string]string{
-			"telegram_chat_id": "-100999888",
-		},
 	})
 	require.NoError(t, err)
 	tgSrv.mu.Lock()
 	require.Len(t, tgSrv.sentMessages, 4)
-	assert.Equal(t, int64(-100999888), tgSrv.sentMessages[3].ChatID)
+	assert.Equal(t, int64(-100123456), tgSrv.sentMessages[3].ChatID)
 	assert.Equal(t, int64(77), tgSrv.sentMessages[3].MessageThreadID)
 	tgSrv.mu.Unlock()
 }
@@ -157,8 +175,10 @@ func TestTelegramBrokerV1_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	b.api = NewAPIClient("test-token", tgSrv.srv.URL)
 
 	topic := "scion.project.p1.user.u1.messages"
+	b.chatRoutes[-100111222] = "scion.project.p1.>"
+	b.topicChats[topic] = []int64{-100333444}
 
-	// 1. Conversation only routes to chat ID from ExternalRef.
+	// 1. Conversation routes to chat ID from ExternalRef when authorized by chatRoutes.
 	err := b.Publish(context.Background(), topic, &messages.StructuredMessage{
 		Version:   messages.Version,
 		Sender:    "agent:coder",
@@ -177,7 +197,7 @@ func TestTelegramBrokerV1_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	tgSrv.mu.Unlock()
 
 	// 2. Defeat scenario (c): Channel:"web" user DM with native conversation
-	// is relayed by Telegram v1 (no channel filter, matching pre-P4 behavior).
+	// is relayed by Telegram v1 via topicChats (no channel filter, matching pre-P4 behavior).
 	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
 		Version:   messages.Version,
 		Sender:    "agent:coder",
@@ -190,9 +210,6 @@ func TestTelegramBrokerV1_Publish_ConversationRoutingAndFallback(t *testing.T) {
 			Surface:     "native",
 			ExternalRef: "dm:agent:a1:user:u1",
 		},
-		Metadata: map[string]string{
-			"telegram_chat_id": "-100333444",
-		},
 	})
 	require.NoError(t, err)
 	tgSrv.mu.Lock()
@@ -200,7 +217,7 @@ func TestTelegramBrokerV1_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	assert.Equal(t, int64(-100333444), tgSrv.sentMessages[1].ChatID)
 	tgSrv.mu.Unlock()
 
-	// 3. Legacy fallback via metadata.
+	// 3. Fallback via topicChats without Conversation.
 	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
 		Version:   messages.Version,
 		Sender:    "agent:coder",
@@ -208,9 +225,6 @@ func TestTelegramBrokerV1_Publish_ConversationRoutingAndFallback(t *testing.T) {
 		Msg:       "v1 legacy message",
 		Type:      messages.TypeInstruction,
 		Channel:   "telegram",
-		Metadata: map[string]string{
-			"telegram_chat_id": "-100333444",
-		},
 	})
 	require.NoError(t, err)
 	tgSrv.mu.Lock()
@@ -328,12 +342,38 @@ func TestTelegramBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	defer tgSrv.srv.Close()
 
+	st, err := NewSQLiteStore(filepath.Join(t.TempDir(), "tg-option-a.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	ctx := context.Background()
+	require.NoError(t, st.SaveGroupLink(ctx, &GroupLink{
+		ChatID:    -100123456,
+		ProjectID: "p1",
+		Active:    true,
+	}))
+	require.NoError(t, st.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "998877",
+		ScionEmail:     "alice@example.com",
+	}))
+	require.NoError(t, st.SaveConversationContext(ctx, &ConversationContext{
+		TelegramUserID: "998877",
+		ProjectID:      "p1",
+		AgentSlug:      "",
+		LastChatID:     998877,
+	}))
+
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "p1", Slug: "p1"}}
+
 	b := NewV2(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	b.api = NewAPIClient("test-token", tgSrv.srv.URL)
+	b.store = st
+	b.hubClient = hub
 	topic := "scion.project.p1.user.u1.messages"
 
 	// 1. Outbound `--channel telegram --thread-id -100123456:42` after Option A translation.
-	err := b.Publish(context.Background(), topic, &messages.StructuredMessage{
+	err = b.Publish(ctx, topic, &messages.StructuredMessage{
 		Version:        messages.Version,
 		Sender:         "agent:coder",
 		Recipient:      "user:alice",
@@ -352,9 +392,9 @@ func TestTelegramBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 
 	// 2. Outbound `--channel telegram --thread-id 42` (bare topic ID) and
 	// conv:<id> reply into a pre-upgrade thread:p:42 row (empty ThreadID, empty
-	// ParentRef): never posts to chat ID 42; resolves chat via metadata/links
+	// ParentRef): never posts to chat ID 42; resolves chat via project link
 	// with MessageThreadID=42.
-	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
+	err = b.Publish(ctx, topic, &messages.StructuredMessage{
 		Version:        messages.Version,
 		Sender:         "agent:coder",
 		Recipient:      "user:alice",
@@ -366,14 +406,11 @@ func TestTelegramBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 			Surface:     "telegram",
 			ExternalRef: "42",
 		},
-		Metadata: map[string]string{
-			"telegram_chat_id": "-100123456",
-		},
 	})
 	require.NoError(t, err)
 
 	// 2b. Composed (ParentRef, ExternalRef) form from new inbound forum topics.
-	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
+	err = b.Publish(ctx, topic, &messages.StructuredMessage{
 		Version:        messages.Version,
 		Sender:         "agent:coder",
 		Recipient:      "user:alice",
@@ -390,19 +427,16 @@ func TestTelegramBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	require.NoError(t, err)
 
 	// 3. Outbound DM reply with Conversation omitted (nil) and affinity Channel:"telegram".
-	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
+	err = b.Publish(ctx, topic, &messages.StructuredMessage{
 		Version:        messages.Version,
 		Sender:         "agent:coder",
-		Recipient:      "user:alice",
+		Recipient:      "user:alice@example.com",
 		Msg:            "dm reply via telegram",
 		Type:           messages.TypeInstruction,
 		Channel:        "telegram",
 		ThreadID:       "dm:agent:a1:user:u1",
 		ConversationID: "conv-dm-1",
 		Conversation:   nil,
-		Metadata: map[string]string{
-			"telegram_chat_id": "998877",
-		},
 	})
 	require.NoError(t, err)
 
