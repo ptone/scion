@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -38,6 +39,26 @@ import (
 func TestDiscordBroker_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	f := newDMRouteFixture(t)
 	topic := "scion.project.p1.user.u1.messages"
+	t.Cleanup(func() {
+		threadParentsMu.Lock()
+		delete(threadParents, "555555555555555555")
+		delete(threadParents, "666666666666666666")
+		threadParentsMu.Unlock()
+	})
+	// Register 555555555555555555 and 666666666666666666 as threads of linked
+	// parent 200000000000000001 so explicit targets authorize under project p1.
+	require.NoError(t, f.broker.session.State.ChannelAdd(&discordgo.Channel{
+		ID:       "555555555555555555",
+		GuildID:  testGuildID,
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+		ParentID: dmTestLinkedCh,
+	}))
+	require.NoError(t, f.broker.session.State.ChannelAdd(&discordgo.Channel{
+		ID:       "666666666666666666",
+		GuildID:  testGuildID,
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+		ParentID: dmTestLinkedCh,
+	}))
 
 	// 1. Conversation field (Phase 11) with empty legacy Channel/ThreadID routes to Discord.
 	err := f.broker.Publish(context.Background(), topic, &messages.StructuredMessage{
@@ -240,6 +261,17 @@ func TestDiscordBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 func TestDiscordBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	f := newDMRouteFixture(t)
 	topic := "scion.project.p1.user.u1.messages"
+	t.Cleanup(func() {
+		threadParentsMu.Lock()
+		delete(threadParents, "777777777777777777")
+		threadParentsMu.Unlock()
+	})
+	require.NoError(t, f.broker.session.State.ChannelAdd(&discordgo.Channel{
+		ID:       "777777777777777777",
+		GuildID:  testGuildID,
+		Type:     discordgo.ChannelTypeGuildPublicThread,
+		ParentID: dmTestLinkedCh,
+	}))
 
 	// 1. Outbound `--channel discord --thread-id 777777777777777777` after
 	// Option A translation (thread:<proj>: stripped).

@@ -128,6 +128,15 @@ func newAskUserFixture(t *testing.T, channelID string) (*DiscordBroker, *askUser
 	b.hubClient = &askUserHubClient{
 		projects: []ProjectOption{{ID: "proj-1", Slug: "proj-1"}},
 	}
+	require.NoError(t, b.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ChannelID:   channelID,
+		GuildID:     testGuildID,
+		ProjectID:   "proj-1",
+		ProjectSlug: "proj-1",
+		LinkedBy:    "u-1",
+		LinkedAt:    time.Now(),
+		Active:      true,
+	}))
 	require.NoError(t, b.store.CreateUserMapping(context.Background(), &DiscordUserMapping{
 		DiscordUserID:   "u-1",
 		DiscordUsername: "alice",
@@ -549,34 +558,35 @@ func TestFormatAskResponded(t *testing.T) {
 	assert.Equal(t, "✅ Responded: **"+fits+"**", formatAskResponded(fits))
 }
 
-// TestAskUser_FallbackPostsPlainText checks that a question with no store
-// or no sender slug is posted as plain text without buttons.
+// TestAskUser_FallbackPostsPlainText checks that a question with no sender slug
+// is posted as plain text without buttons, and that a broker with no store fails
+// closed rather than delivering to an unverified explicit ThreadID.
 func TestAskUser_FallbackPostsPlainText(t *testing.T) {
-	tests := []struct {
-		name    string
-		noStore bool
-		sender  string
-	}{
-		{name: "no store", noStore: true, sender: "agent:coder"},
-		{name: "no sender slug", sender: "user:bob@example.com"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
-			const channelID = "930000000000000001"
-			b, rt, _, _ := newAskUserFixture(t, channelID)
-			if tt.noStore {
-				b.store = nil
-			}
-			msg := askUserQuestion("Deploy now?", `["yes","no"]`)
-			msg.Sender = tt.sender
+	t.Run("no store fails closed", func(t *testing.T) {
+		ctx := context.Background()
+		const channelID = "930000000000000001"
+		b, rt, _, _ := newAskUserFixture(t, channelID)
+		b.store = nil
+		msg := askUserQuestion("Deploy now?", `["yes","no"]`)
 
-			require.NoError(t, b.Publish(ctx, projectkeys.UserTopic("proj-1", "alice"), msg))
+		require.NoError(t, b.Publish(ctx, projectkeys.UserTopic("proj-1", "alice"), msg))
 
-			assert.Equal(t, 1, rt.channelPosts(channelID), "the question should be posted")
-			assert.Empty(t, rt.postedButtons(t, channelID), "the question should have no buttons")
-		})
-	}
+		assert.Equal(t, 0, rt.channelPosts(channelID), "explicit target must fail closed when store is nil")
+		assert.Empty(t, rt.postedButtons(t, channelID))
+	})
+
+	t.Run("no sender slug", func(t *testing.T) {
+		ctx := context.Background()
+		const channelID = "930000000000000001"
+		b, rt, _, _ := newAskUserFixture(t, channelID)
+		msg := askUserQuestion("Deploy now?", `["yes","no"]`)
+		msg.Sender = "user:bob@example.com"
+
+		require.NoError(t, b.Publish(ctx, projectkeys.UserTopic("proj-1", "alice"), msg))
+
+		assert.Equal(t, 1, rt.channelPosts(channelID), "the question should be posted")
+		assert.Empty(t, rt.postedButtons(t, channelID), "the question should have no buttons")
+	})
 }
 
 // cleanupCountingStore wraps a Store and counts expired ask-user cleanups

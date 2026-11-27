@@ -610,8 +610,10 @@ func (b *DiscordBroker) Unsubscribe(pattern string) error {
 
 // Publish sends a message to Discord channels using dynamic routing.
 // Routing priority:
-//  1. Direct channel ID from metadata (discord_channel_id)
-//  2. ConversationContext for recipient
+//  0. Explicit conversation target (Conversation.ExternalRef / legacy ThreadID)
+//     — authorized against active project ChannelLink or recipient DM/context
+//  1. ConversationContext for recipient
+//  2. Recipient DM channel (for recipient-routed direct messages)
 //  3. Broadcast to all ChannelLinks for project
 //
 // A direct message to a user is never broadcast: with no stored channel it
@@ -659,6 +661,7 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 
 	// Determine the project and agent from the topic.
 	projectID, agentSlug := parseTopicComponents(topic)
+	authzProjectID := canonicalTopicProjectID(topic)
 
 	// Discard the retired end-of-turn assistant-reply mirror; an older hub
 	// may still forward it.
@@ -722,17 +725,17 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 	// Collect target channel IDs via dynamic routing.
 	var channelIDs []string
 
-	// Priority 0: Thread routing — ThreadID maps directly to a Discord
-	// channel or thread snowflake. This takes precedence over all other
-	// routing so replies land in the same channel/thread as the original.
+	// Priority 0: Explicit conversation target — a Discord channel or thread
+	// snowflake from Conversation.ExternalRef (or legacy ThreadID), gated by
+	// authorizeExplicitTarget. On denial, log and fall through to implicit
+	// routing.
 	if discordThreadID != "" {
-		channelIDs = append(channelIDs, discordThreadID)
-	}
-
-	// Priority 1: Direct channel ID from metadata.
-	if len(channelIDs) == 0 && msg != nil && msg.Metadata != nil {
-		if chID, ok := msg.Metadata["discord_channel_id"]; ok && chID != "" {
-			channelIDs = append(channelIDs, chID)
+		targetSrc := plugin.ConversationTargetSource(msg)
+		if ok, reason := b.authorizeExplicitTarget(ctx, store, authzProjectID, agentSlug, msg, discordThreadID); !ok {
+			plugin.LogTargetDenied(b.log, "discord", authzProjectID, targetSrc, discordThreadID, reason)
+			discordThreadID = ""
+		} else {
+			channelIDs = append(channelIDs, discordThreadID)
 		}
 	}
 
@@ -840,17 +843,21 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 			continue
 		}
 
-		if needsFilter && store != nil {
+		if needsFilter {
 			// Use resolveChannelLink so threads fall back to their parent
 			// channel's link. Links are only ever stored on parent channels
 			// (saveChannelLink rewrites thread IDs to the parent), so a direct
 			// GetChannelLink on a thread snowflake always returns nil and would
 			// filter out every message in every thread.
-			link, linkErr := resolveChannelLink(ctx, session, store, channelID)
-			if linkErr != nil {
-				b.log.Warn("Failed to look up channel link; applying fail-closed filter",
-					"channel_id", channelID, "error", linkErr)
-				link = nil
+			var link *ChannelLink
+			if store != nil {
+				var linkErr error
+				link, linkErr = resolveChannelLink(ctx, session, store, channelID)
+				if linkErr != nil {
+					b.log.Warn("Failed to look up channel link; applying fail-closed filter",
+						"channel_id", channelID, "error", linkErr)
+					link = nil
+				}
 			}
 			// Fail closed: a missing link, an inactive link, or a failed lookup
 			// is treated the same as a link with observe settings disabled.
@@ -2635,12 +2642,21 @@ func (b *DiscordBroker) resolveRecipientDMChannel(ctx context.Context, recipient
 		return "", fmt.Errorf("user has no linked Discord account")
 	}
 
+	return openRecipientDMChannel(ctx, session, createDM, mapping.DiscordUserID)
+}
+
+func openRecipientDMChannel(
+	ctx context.Context,
+	session *discordgo.Session,
+	createDM func(discordUserID string) (string, error),
+	discordUserID string,
+) (string, error) {
 	if createDM == nil {
 		if session == nil {
 			return "", fmt.Errorf("discord session not configured")
 		}
-		createDM = func(discordUserID string) (string, error) {
-			ch, err := session.UserChannelCreate(discordUserID, discordgo.WithContext(ctx))
+		createDM = func(uid string) (string, error) {
+			ch, err := session.UserChannelCreate(uid, discordgo.WithContext(ctx))
 			if err != nil {
 				return "", err
 			}
@@ -2648,7 +2664,7 @@ func (b *DiscordBroker) resolveRecipientDMChannel(ctx context.Context, recipient
 		}
 	}
 
-	channelID, err := createDM(mapping.DiscordUserID)
+	channelID, err := createDM(discordUserID)
 	if err != nil {
 		return "", fmt.Errorf("opening Discord DM channel: %w", err)
 	}
