@@ -376,6 +376,67 @@ func TestTeamsBroker_TargetAuthz_FailClosedReasons(t *testing.T) {
 		assert.False(t, ok)
 		assert.Equal(t, plugin.DenyNoProject, reason)
 	})
+
+	t.Run("no_project_non_canonical_topic", func(t *testing.T) {
+		var mu sync.Mutex
+		var deliveredPaths []string
+		serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			deliveredPaths = append(deliveredPaths, r.URL.Path)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ActivityResponse{ID: "resp-1"})
+		}))
+
+		logBuf := &lockedBuffer{}
+		broker := NewBroker(slog.New(slog.NewJSONHandler(logBuf, nil)))
+		configureBrokerWithBotClient(t, broker, client)
+
+		ctx := context.Background()
+		// Even if a link exists under the fallback-parsed "scion" prefix,
+		// a non-canonical topic like scion.global.broadcast must yield
+		// projectID="" for explicit-target authorization (DenyNoProject).
+		require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+			ConversationID: "19:scion@thread.tacv2",
+			ProjectID:      "scion",
+			Active:         true,
+		}))
+		require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
+			ConversationID: "19:scion@thread.tacv2",
+			ServiceURL:     serviceURL,
+			UpdatedAt:      time.Now(),
+		}))
+		require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
+			ConversationID: "19:scion@thread.tacv2;messageid=99",
+			ServiceURL:     serviceURL,
+			UpdatedAt:      time.Now(),
+		}))
+
+		require.NoError(t, broker.Publish(ctx, "scion.global.broadcast", &messages.StructuredMessage{
+			Version:  messages.Version,
+			Sender:   "agent:coder",
+			Msg:      "broadcast message",
+			Type:     messages.TypeInstruction,
+			Channel:  "teams",
+			ThreadID: "19:scion@thread.tacv2;messageid=99",
+		}))
+
+		broker.mu.Lock()
+		sq := broker.sendQueue
+		broker.mu.Unlock()
+		sq.Close()
+
+		// Explicit thread target must be denied with no_project and never sent to;
+		// implicit routing remains unaffected.
+		denied := findLogEvent(logBuf.Entries(t), "outbound_target_denied")
+		require.Len(t, denied, 1)
+		assert.Equal(t, "", denied[0]["project_id"])
+		assert.Equal(t, string(plugin.DenyNoProject), denied[0]["reason"])
+
+		mu.Lock()
+		assert.Equal(t, []string{"/amer/v3/conversations/19:scion@thread.tacv2/activities"}, deliveredPaths)
+		mu.Unlock()
+	})
 }
 
 // A6: Active link for proj-a with ";messageid=" thread suffix delivers to exact thread.

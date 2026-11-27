@@ -20,7 +20,20 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
+
+// canonicalTopicProjectID extracts the project ID from a canonical
+// scion.project.<id>.... topic. Non-canonical topics (such as
+// scion.global.broadcast or legacy dot-separated topics) return "" so
+// explicit-target authorization fails closed with DenyNoProject.
+func canonicalTopicProjectID(topic string) string {
+	parsed, err := projectkeys.ParseTopic(topic)
+	if err != nil {
+		return ""
+	}
+	return parsed.ProjectID
+}
 
 // authorizeExplicitTarget reports whether container (a Teams conversation ID,
 // optionally carrying a ";messageid=" thread suffix) may receive a message on
