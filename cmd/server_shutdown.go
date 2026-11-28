@@ -467,18 +467,32 @@ func (b *colocatedBrokerStop) beforeHTTPDrain(clk clock.Clock, fallback time.Dur
 	}
 }
 
+// mcpStopWaitFallback bounds the hub front's wait for the embedded MCP
+// listener when neither teardown ctx nor httpDrainContext carries a deadline
+// (default config with no server.hub.conduit.shutdown_grace): MCP's 10s
+// default drain timeout plus margin (R3).
+const mcpStopWaitFallback = 15 * time.Second
+
 // embeddedMCPStop tracks the embedded MCP HTTP listener so the Hub front
 // waits for MCP to finish draining (within the HTTP-drain budget) before
 // proceeding to Hub teardown.
 type embeddedMCPStop struct {
-	mu      sync.Mutex
-	started bool
-	stopped chan struct{}
-	once    sync.Once
+	mu       sync.Mutex
+	started  bool
+	stopped  chan struct{}
+	once     sync.Once
+	fallback time.Duration // optional override for tests; defaults to mcpStopWaitFallback
 }
 
 func newEmbeddedMCPStop() *embeddedMCPStop {
 	return &embeddedMCPStop{stopped: make(chan struct{})}
+}
+
+func (m *embeddedMCPStop) fallbackTimeout() time.Duration {
+	if m.fallback > 0 {
+		return m.fallback
+	}
+	return mcpStopWaitFallback
 }
 
 func (m *embeddedMCPStop) markStarted() {
@@ -498,8 +512,9 @@ func (m *embeddedMCPStop) markStopped() {
 }
 
 // waitBeforeHubTeardown waits for the embedded MCP listener to finish
-// draining, bounded by ctx (teardown context) and drainCtx (the HTTP-drain
-// phase of the shutdown plan). If MCP was not started it returns immediately.
+// draining, bounded by ctx (teardown context), drainCtx (the HTTP-drain
+// phase of the shutdown plan), and fallbackTimeout when neither carries a
+// deadline (R3). If MCP was not started it returns immediately.
 func (m *embeddedMCPStop) waitBeforeHubTeardown(ctx context.Context, drainCtx func(context.Context) (context.Context, context.CancelFunc)) {
 	if m == nil {
 		return
@@ -511,16 +526,43 @@ func (m *embeddedMCPStop) waitBeforeHubTeardown(ctx context.Context, drainCtx fu
 		return
 	}
 	dctx := ctx
+	var cancels []context.CancelFunc
 	if drainCtx != nil {
-		var cancel context.CancelFunc
-		dctx, cancel = drainCtx(ctx)
-		defer cancel()
+		var c context.CancelFunc
+		dctx, c = drainCtx(ctx)
+		cancels = append(cancels, c)
 	}
+	if _, hasDeadline := dctx.Deadline(); !hasDeadline {
+		var c context.CancelFunc
+		dctx, c = context.WithTimeout(dctx, m.fallbackTimeout())
+		cancels = append(cancels, c)
+	}
+	defer func() {
+		for i := len(cancels) - 1; i >= 0; i-- {
+			cancels[i]()
+		}
+	}()
 	select {
 	case <-m.stopped:
 	case <-dctx.Done():
 		log.Printf("HTTP drain deadline reached while waiting for embedded MCP server to stop")
 	case <-ctx.Done():
 		log.Printf("Shutdown deadline reached while waiting for embedded MCP server to stop")
+	}
+}
+
+// composeBeforeHTTPDrain builds the Hub front's BeforeHTTPDrain hook so the
+// co-located Runtime Broker and embedded MCP listener both finish draining
+// before the Hub closes its listener and runs background teardown.
+func composeBeforeHTTPDrain(
+	brokerBeforeDrain func(context.Context),
+	mcpStop *embeddedMCPStop,
+	httpDrainCtx func(context.Context) (context.Context, context.CancelFunc),
+) func(context.Context) {
+	return func(drainParent context.Context) {
+		if brokerBeforeDrain != nil {
+			brokerBeforeDrain(drainParent)
+		}
+		mcpStop.waitBeforeHubTeardown(drainParent, httpDrainCtx)
 	}
 }

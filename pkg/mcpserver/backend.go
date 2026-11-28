@@ -220,12 +220,16 @@ func (b *hubBackend) SendToAgent(ctx context.Context, c Credential, project, age
 		// project, include candidate agents from list_agents when readable.
 		var apiErr *apiclient.APIError
 		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusConflict) {
-			if candidates, listErr := b.ListAgents(ctx, c, projectID); listErr == nil && len(candidates) > 0 {
+			candidates, listErr := b.ListAgents(ctx, c, projectID)
+			if listErr == nil && len(candidates) > 0 {
 				names := make([]string, 0, len(candidates))
 				for _, cand := range candidates {
 					names = append(names, fmt.Sprintf("%s (%s)", cand.Name, cand.ID))
 				}
 				return SendResult{}, fmt.Errorf("%s; available agents in project: %s", formatHubToolError(err), strings.Join(names, ", "))
+			}
+			if listErr != nil {
+				return SendResult{}, fmt.Errorf("%s (could not list candidate agents; listing agents requires the agent:list scope)", formatHubToolError(err))
 			}
 		}
 		return SendResult{}, err
@@ -262,47 +266,59 @@ func (b *hubBackend) SendToConversation(ctx context.Context, c Credential, convI
 		return SendResult{}, err
 	}
 
-	// For a direct conversation with an agent, deliver via the agent message
-	// endpoint so the Hub enforces agent:message and allocates the cursor
-	// atomically with the persisted message.
+	// For a direct conversation between the caller (user) and an agent,
+	// deliver via the agent message endpoint so the Hub enforces agent:message
+	// and allocates the cursor atomically with the persisted message.
+	// Only take this shortcut when the DM key is strictly user<->agent AND the
+	// user side matches the authenticated caller (O1): an agent<->agent DM or
+	// another user's DM must never silently land in the caller's own DM.
 	if conv.Kind == "direct" {
-		if agentID := dmAgentID(conv); agentID != "" {
-			msg := &messages.StructuredMessage{
-				Version: messages.Version,
-				Msg:     text,
-				Type:    messages.TypeInstruction,
+		if userID, agentID, ok := parseUserAgentDM(conv.ExternalRef); ok {
+			caller, meErr := b.Me(ctx, c)
+			if meErr == nil && caller.ID != "" && caller.ID == userID {
+				msg := &messages.StructuredMessage{
+					Version: messages.Version,
+					Msg:     text,
+					Type:    messages.TypeInstruction,
+				}
+				var resp *hubclient.MessageResponse
+				if conv.ProjectID != nil && *conv.ProjectID != "" {
+					resp, err = cl.ProjectAgents(*conv.ProjectID).SendStructuredMessageWithOptions(ctx, agentID, msg, hubclient.SendMessageOptions{})
+				} else {
+					resp, err = cl.Agents().SendStructuredMessageWithOptions(ctx, agentID, msg, hubclient.SendMessageOptions{})
+				}
+				if err != nil {
+					return SendResult{}, err
+				}
+				if resp.ConversationID != "" && resp.ConversationID != convID {
+					return SendResult{}, fmt.Errorf("refused conversation target mismatch: requested %q but Hub routed to %q", convID, resp.ConversationID)
+				}
+				res := SendResult{
+					MessageID:      resp.MessageID,
+					ConversationID: resp.ConversationID,
+					Status:         resp.Status,
+					Deferred:       resp.Deferred,
+					Cursor:         resp.Cursor,
+				}
+				if res.ConversationID == "" {
+					res.ConversationID = convID
+				}
+				if res.Cursor == "" {
+					res.Warning = "delivered but not recorded in conversation history; replies cannot be read via this conversation; do not resend"
+				}
+				return res, nil
 			}
-			var resp *hubclient.MessageResponse
-			if conv.ProjectID != nil && *conv.ProjectID != "" {
-				resp, err = cl.ProjectAgents(*conv.ProjectID).SendStructuredMessageWithOptions(ctx, agentID, msg, hubclient.SendMessageOptions{})
-			} else {
-				resp, err = cl.Agents().SendStructuredMessageWithOptions(ctx, agentID, msg, hubclient.SendMessageOptions{})
-			}
-			if err != nil {
-				return SendResult{}, err
-			}
-			res := SendResult{
-				MessageID:      resp.MessageID,
-				ConversationID: resp.ConversationID,
-				Status:         resp.Status,
-				Deferred:       resp.Deferred,
-				Cursor:         resp.Cursor,
-			}
-			if res.ConversationID == "" {
-				res.ConversationID = convID
-			}
-			if res.Cursor == "" {
-				res.Warning = "delivered but not recorded in conversation history; replies cannot be read via this conversation; do not resend"
-			}
-			return res, nil
 		}
 	}
 
-	// For group conversations (topics) or non-agent DMs, post through the Hub
-	// chat conversation endpoint and obtain the watch cursor via Watch(AfterMessage).
-	chatKey := conv.ExternalRef
-	if chatKey == "" {
-		chatKey = conv.ID
+	// Derive the chat conversation key for POST /api/v1/chat/conversations/{key}/messages:
+	// - group conversations carry ExternalRef = "thread:<projectID>:<threadID>";
+	//   the chat route expects the bare <threadID> (R1).
+	// - direct conversations carry ExternalRef = "dm:<kindA>:<idA>:<kindB>:<idB>";
+	//   the chat route expects the dm: key and enforces authorizeDMKeyParticipant (O1).
+	chatKey, err := chatSendKeyForConversation(conv)
+	if err != nil {
+		return SendResult{}, err
 	}
 	msgID, status, err := b.postChatConversationMessage(ctx, c, chatKey, text)
 	if err != nil {
@@ -330,28 +346,53 @@ func (b *hubBackend) SendToConversation(ctx context.Context, c Credential, convI
 	return res, nil
 }
 
-// dmAgentID extracts the peer agent ID from a direct conversation's canonical
-// DM key (dm:user:<uid>:agent:<aid>) or participant list.
-func dmAgentID(conv *hubclient.ConversationDetail) string {
+// parseUserAgentDM returns (userID, agentID, true) when externalRef is a
+// canonical DM key between a user and an agent.
+func parseUserAgentDM(externalRef string) (userID, agentID string, ok bool) {
+	if externalRef == "" {
+		return "", "", false
+	}
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(externalRef)
+	if err != nil {
+		return "", "", false
+	}
+	if kindA == "user" && kindB == "agent" && idA != "" && idB != "" {
+		return idA, idB, true
+	}
+	if kindA == "agent" && kindB == "user" && idA != "" && idB != "" {
+		return idB, idA, true
+	}
+	return "", "", false
+}
+
+// chatSendKeyForConversation derives the {key} segment for
+// POST /api/v1/chat/conversations/{key}/messages.
+func chatSendKeyForConversation(conv *hubclient.ConversationDetail) (string, error) {
 	if conv == nil {
-		return ""
+		return "", errors.New("conversation not found")
 	}
-	if conv.ExternalRef != "" {
-		if kindA, idA, kindB, idB, err := messages.ParseDMKey(conv.ExternalRef); err == nil {
-			if kindA == "agent" && idA != "" {
-				return idA
+	switch conv.Kind {
+	case "group":
+		// Native group conversations use ExternalRef = "thread:<projectID>:<threadID>".
+		parts := strings.SplitN(conv.ExternalRef, ":", 3)
+		if len(parts) == 3 && parts[0] == "thread" && parts[1] != "" && parts[2] != "" {
+			if err := validatePathSegment("thread_id", parts[2]); err != nil {
+				return "", err
 			}
-			if kindB == "agent" && idB != "" {
-				return idB
+			return parts[2], nil
+		}
+		return "", fmt.Errorf("sending to group conversation %q (surface=%q) is not supported via MCP: no native chat thread reference", conv.ID, conv.Surface)
+	case "direct":
+		if strings.HasPrefix(conv.ExternalRef, "dm:") {
+			if err := validatePathSegment("dm_key", conv.ExternalRef); err != nil {
+				return "", err
 			}
+			return conv.ExternalRef, nil
 		}
+		return "", fmt.Errorf("sending to direct conversation %q is not supported via MCP: missing canonical DM reference", conv.ID)
+	default:
+		return "", fmt.Errorf("sending to conversation %q of kind %q is not supported via MCP", conv.ID, conv.Kind)
 	}
-	for _, p := range conv.Participants {
-		if strings.EqualFold(p.PrincipalKind, "agent") && p.PrincipalID != "" {
-			return p.PrincipalID
-		}
-	}
-	return ""
 }
 
 func (b *hubBackend) postChatConversationMessage(ctx context.Context, c Credential, key, text string) (messageID, status string, err error) {
@@ -374,17 +415,13 @@ func (b *hubBackend) postChatConversationMessage(ctx context.Context, c Credenti
 	if err != nil {
 		return "", "", err
 	}
-	if err := apiclient.CheckResponse(resp); err != nil {
-		return "", "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	var decoded struct {
+	type chatSendResp struct {
 		ID            string `json:"id"`
 		DispatchState string `json:"dispatchState"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		return "", "", fmt.Errorf("decoding chat send response: %w", err)
+	decoded, err := apiclient.DecodeRequired[chatSendResp](resp)
+	if err != nil {
+		return "", "", err
 	}
 	st := decoded.DispatchState
 	if st == "" {
@@ -417,7 +454,13 @@ func (b *hubBackend) ListConversations(ctx context.Context, c Credential, opts L
 		return ConvPage{}, err
 	}
 	if listRes == nil || len(listRes.Conversations) == 0 {
-		return ConvPage{Conversations: []ConversationSummary{}}, nil
+		total := 0
+		truncated := false
+		if listRes != nil {
+			total = listRes.Total
+			truncated = listRes.Truncated
+		}
+		return ConvPage{Conversations: []ConversationSummary{}, Total: total, Truncated: truncated}, nil
 	}
 	items := make([]ConversationSummary, 0, len(listRes.Conversations))
 	for _, conv := range listRes.Conversations {
@@ -425,7 +468,8 @@ func (b *hubBackend) ListConversations(ctx context.Context, c Credential, opts L
 	}
 	return ConvPage{
 		Conversations: items,
-		NextPageToken: listRes.Cursor,
+		Total:         listRes.Total,
+		Truncated:     listRes.Truncated,
 	}, nil
 }
 

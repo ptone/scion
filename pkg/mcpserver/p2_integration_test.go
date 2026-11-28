@@ -18,6 +18,7 @@ package mcpserver_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -41,6 +42,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	_ "modernc.org/sqlite"
 )
 
 func TestIntegration_P2_ToolsResourcesStreamCapAndAuthz(t *testing.T) {
@@ -264,6 +266,19 @@ func TestIntegration_P2_ToolsResourcesStreamCapAndAuthz(t *testing.T) {
 	for _, name := range []string{"send_message", "list_conversations", "read_messages", "wait_for_messages"} {
 		if !strings.Contains(strings.ToLower(toolMap[name].Description), "untrusted") {
 			t.Errorf("tool %q description missing untrusted-content wording: %q", name, toolMap[name].Description)
+		}
+	}
+	// O3: list_agents documents agent:list requirement.
+	if !strings.Contains(toolMap["list_agents"].Description, "agent:list") {
+		t.Errorf("list_agents description should mention agent:list: %q", toolMap["list_agents"].Description)
+	}
+	// O4 & R2: list_conversations documents DM exclusion, empty participants, and no page_token.
+	if !strings.Contains(strings.ToLower(toolMap["list_conversations"].Description), "excludes dms") {
+		t.Errorf("list_conversations description should note project filter excludes DMs: %q", toolMap["list_conversations"].Description)
+	}
+	if schemaBytes, err := json.Marshal(toolMap["list_conversations"].InputSchema); err == nil {
+		if strings.Contains(string(schemaBytes), "page_token") {
+			t.Errorf("list_conversations input schema must not advertise unsupported page_token: %s", string(schemaBytes))
 		}
 	}
 
@@ -821,5 +836,322 @@ func TestIntegration_P2_ShutdownDrainsInFlightWaitForMessages(t *testing.T) {
 	}
 	if !drainCtxUsed {
 		t.Fatal("expected ShutdownContext hook to be used during Serve shutdown")
+	}
+}
+
+// TestIntegration_P2_GroupConversationSendAndWait exercises:
+//   - R1: send_message{conversation_id} to a project group conversation backed
+//     by a real WebChatStore (both user JWT and UAT), read_messages sees it,
+//     and wait_for_messages from the returned cursor sees only later messages.
+//   - R2: list_conversations surfaces Hub truncated=true and total when > limit.
+//   - O1: send_message{conversation_id} to an agent<->agent DM fails rather
+//     than silently landing in the caller's own DM with either agent.
+func TestIntegration_P2_GroupConversationSendAndWait(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	dbPath := filepath.Join(t.TempDir(), "hub-webchat.db")
+	entClient, err := entc.OpenSQLite(dbPath, entc.PoolConfig{MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("entc.OpenSQLite: %v", err)
+	}
+	if err := entc.AutoMigrate(ctx, entClient); err != nil {
+		t.Fatalf("entc.AutoMigrate: %v", err)
+	}
+	st := entadapter.NewCompositeStore(entClient)
+	t.Cleanup(func() { _ = st.Close() })
+
+	hubSrv, err := hub.New(hub.ServerConfig{Host: "127.0.0.1", Port: 0}, st)
+	if err != nil {
+		t.Fatalf("hub.New: %v", err)
+	}
+	hubSrv.SetDispatcher(&noopMessageDispatcher{})
+
+	chatDB, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("sql.Open chatDB: %v", err)
+	}
+	chatDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = chatDB.Close() })
+	wcs := hub.NewWebChatStore(chatDB, "sqlite")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("wcs.Init: %v", err)
+	}
+	hubSrv.SetWebChatStore(wcs)
+
+	alice := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "alice-grp@example.com",
+		DisplayName: "Alice Group",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	if err := st.CreateUser(ctx, alice); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	hubMemberRole, err := st.GetRoleDefinitionByName(ctx, "hub-member", store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("GetRoleDefinitionByName: %v", err)
+	}
+	if _, err := st.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               uuid.NewString(),
+		PrincipalType:    "user",
+		PrincipalID:      alice.ID,
+		RoleDefinitionID: hubMemberRole.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        alice.ID,
+	}); err != nil {
+		t.Fatalf("CreateRoleBinding: %v", err)
+	}
+
+	userJWT, _, err := hubSrv.GetUserTokenService().MintAccessToken(hub.UserTokenSubject{
+		UserID:      alice.ID,
+		Email:       alice.Email,
+		DisplayName: alice.DisplayName,
+		Role:        alice.Role,
+		ClientType:  hub.ClientTypeCLI,
+	})
+	if err != nil {
+		t.Fatalf("MintAccessToken: %v", err)
+	}
+	hc := &http.Client{Transport: &mcpserver.InProcessTransport{Handler: hubSrv.Handler()}}
+	aliceHub, err := hubclient.New("http://in-process",
+		hubclient.WithHTTPClient(hc),
+		hubclient.WithBearerToken(userJWT),
+		hubclient.WithTransportAuth(nil, 0),
+	)
+	if err != nil {
+		t.Fatalf("hubclient.New: %v", err)
+	}
+
+	proj, err := aliceHub.Projects().Create(ctx, &hubclient.CreateProjectRequest{
+		Name: "Group Test Project",
+		Slug: "grp-test",
+	})
+	if err != nil {
+		t.Fatalf("Projects.Create: %v", err)
+	}
+
+	// Create two group conversations (so limit=1 triggers truncation for R2).
+	conv1, err := aliceHub.Conversations().Create(ctx, &hubclient.CreateConversationRequest{
+		DisplayName: "group-alpha",
+		ProjectID:   proj.ID,
+		Kind:        "group",
+	})
+	if err != nil {
+		t.Fatalf("Conversations.Create(group-alpha): %v", err)
+	}
+	if _, err := aliceHub.Conversations().Create(ctx, &hubclient.CreateConversationRequest{
+		DisplayName: "group-beta",
+		ProjectID:   proj.ID,
+		Kind:        "group",
+	}); err != nil {
+		t.Fatalf("Conversations.Create(group-beta): %v", err)
+	}
+
+	// Create two agents and an agent<->agent DM conversation for O1.
+	ag1 := &store.Agent{
+		ID: uuid.NewString(), Slug: "ag-one", Name: "ag-one",
+		ProjectID: proj.ID, OwnerID: alice.ID, CreatedBy: alice.ID,
+		RuntimeBrokerID: uuid.NewString(), Phase: "running", MessageMode: "project", RunID: "r1",
+	}
+	ag2 := &store.Agent{
+		ID: uuid.NewString(), Slug: "ag-two", Name: "ag-two",
+		ProjectID: proj.ID, OwnerID: alice.ID, CreatedBy: alice.ID,
+		RuntimeBrokerID: uuid.NewString(), Phase: "running", MessageMode: "project", RunID: "r2",
+	}
+	for _, a := range []*store.Agent{ag1, ag2} {
+		if err := st.CreateAgent(ctx, a); err != nil {
+			t.Fatalf("CreateAgent(%s): %v", a.Slug, err)
+		}
+	}
+	a1, a2 := ag1.ID, ag2.ID
+	if a1 > a2 {
+		a1, a2 = a2, a1
+	}
+	agentAgentDM := &store.Conversation{
+		ID:          uuid.NewString(),
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: fmt.Sprintf("dm:agent:%s:agent:%s", a1, a2),
+		DriftState:  "active",
+	}
+	if err := st.CreateConversation(ctx, agentAgentDM); err != nil {
+		t.Fatalf("CreateConversation(agent-agent DM): %v", err)
+	}
+
+	uat, err := aliceHub.Tokens().Create(ctx, &hubclient.CreateTokenRequest{
+		Name:      "grp-uat",
+		ProjectID: proj.ID,
+		Scopes:    []string{"project:read", "agent:list", "agent:read", "agent:message", "inbox:read", "inbox:write"},
+	})
+	if err != nil {
+		t.Fatalf("Tokens.Create: %v", err)
+	}
+
+	backend := mcpserver.NewBackend(mcpserver.BackendOptions{
+		HubBaseURL: "http://in-process",
+		Transport:  &mcpserver.InProcessTransport{Handler: hubSrv.Handler()},
+		Version:    "grp-test",
+		ExperimentChecker: func(_ context.Context, _ mcpserver.Credential, _ string) (bool, error) {
+			return true, nil
+		},
+		DisableTransportAuth: true,
+	})
+	mcpSrv, err := mcpserver.New(mcpserver.Options{Version: "grp-test", Backend: backend})
+	if err != nil {
+		t.Fatalf("mcpserver.New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	srvCtx, srvCancel := context.WithCancel(ctx)
+	srvDone := make(chan error, 1)
+	go func() { srvDone <- mcpSrv.Serve(srvCtx, ln) }()
+	defer func() {
+		srvCancel()
+		if err := <-srvDone; err != nil {
+			t.Errorf("mcpSrv.Serve shutdown error: %v", err)
+		}
+	}()
+
+	connect := func(token string) *mcp.ClientSession {
+		cl := mcp.NewClient(&mcp.Implementation{Name: "grp-client", Version: "1.0"}, nil)
+		sess, err := cl.Connect(ctx, &mcp.StreamableClientTransport{
+			Endpoint: "http://" + ln.Addr().String() + "/mcp",
+			HTTPClient: &http.Client{
+				Transport: &headerRoundTripper{
+					base:    &http.Transport{DisableKeepAlives: true},
+					headers: map[string]string{"Authorization": "Bearer " + token},
+				},
+			},
+		}, nil)
+		if err != nil {
+			t.Fatalf("Connect: %v", err)
+		}
+		t.Cleanup(func() { _ = sess.Close() })
+		return sess
+	}
+
+	// R1: send_message{conversation_id} to a group conversation succeeds for both JWT and UAT.
+	uatSess := connect(uat.Token)
+	sendRes, err := uatSess.CallTool(ctx, &mcp.CallToolParams{
+		Name: "send_message",
+		Arguments: map[string]any{
+			"conversation_id": conv1.ID,
+			"text":            "hello-group-first",
+		},
+	})
+	if err != nil || sendRes.IsError {
+		t.Fatalf("UAT group send_message failed: err=%v res=%+v", err, sendRes)
+	}
+	var firstOut mcpserver.SendResult
+	if err := json.Unmarshal([]byte(sendRes.Content[0].(*mcp.TextContent).Text), &firstOut); err != nil {
+		t.Fatalf("unmarshal firstOut: %v", err)
+	}
+	if firstOut.MessageID == "" || firstOut.ConversationID != conv1.ID || firstOut.Cursor == "" {
+		t.Fatalf("unexpected group send result: %+v", firstOut)
+	}
+
+	// Verify read_messages sees "hello-group-first".
+	readRes, err := uatSess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "read_messages",
+		Arguments: map[string]any{"conversation_id": conv1.ID},
+	})
+	if err != nil || readRes.IsError {
+		t.Fatalf("read_messages(group) failed: err=%v res=%+v", err, readRes)
+	}
+	var readOut mcpserver.ReadMessagesOutput
+	if err := json.Unmarshal([]byte(readRes.Content[0].(*mcp.TextContent).Text), &readOut); err != nil {
+		t.Fatalf("unmarshal readOut: %v", err)
+	}
+	if len(readOut.Messages) != 1 || readOut.Messages[0].Text != "hello-group-first" {
+		t.Fatalf("read_messages(group) = %+v, want [hello-group-first]", readOut.Messages)
+	}
+
+	// Verify wait_for_messages from firstOut.Cursor returns ONLY a subsequent message.
+	jwtSess := connect(userJWT)
+	type waitRes struct {
+		res *mcp.CallToolResult
+		err error
+	}
+	waitCh := make(chan waitRes, 1)
+	go func() {
+		r, e := uatSess.CallTool(ctx, &mcp.CallToolParams{
+			Name: "wait_for_messages",
+			Arguments: map[string]any{
+				"conversation_id": conv1.ID,
+				"cursor":          firstOut.Cursor,
+				"timeout_seconds": 10,
+				"filter":          "all",
+			},
+		})
+		waitCh <- waitRes{r, e}
+	}()
+	time.Sleep(150 * time.Millisecond)
+
+	secondRes, err := jwtSess.CallTool(ctx, &mcp.CallToolParams{
+		Name: "send_message",
+		Arguments: map[string]any{
+			"conversation_id": conv1.ID,
+			"text":            "hello-group-second",
+		},
+	})
+	if err != nil || secondRes.IsError {
+		t.Fatalf("JWT group send_message failed: err=%v res=%+v", err, secondRes)
+	}
+
+	wr := <-waitCh
+	if wr.err != nil || wr.res.IsError {
+		t.Fatalf("wait_for_messages(group) failed: err=%v res=%+v", wr.err, wr.res)
+	}
+	var waitOut mcpserver.WaitForMessagesOutput
+	if err := json.Unmarshal([]byte(wr.res.Content[0].(*mcp.TextContent).Text), &waitOut); err != nil {
+		t.Fatalf("unmarshal waitOut: %v", err)
+	}
+	if len(waitOut.Messages) != 1 || waitOut.Messages[0].Text != "hello-group-second" {
+		t.Fatalf("wait_for_messages(group) = %+v, want [hello-group-second]", waitOut.Messages)
+	}
+
+	// R2: list_conversations with limit=1 reports truncated=true and total >= 2.
+	listRes, err := uatSess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "list_conversations",
+		Arguments: map[string]any{"limit": 1},
+	})
+	if err != nil || listRes.IsError {
+		t.Fatalf("list_conversations(limit=1) failed: err=%v res=%+v", err, listRes)
+	}
+	var listOut mcpserver.ListConversationsOutput
+	if err := json.Unmarshal([]byte(listRes.Content[0].(*mcp.TextContent).Text), &listOut); err != nil {
+		t.Fatalf("unmarshal listOut: %v", err)
+	}
+	if len(listOut.Conversations) != 1 || !listOut.Truncated || listOut.Total < 2 {
+		t.Fatalf("list_conversations(limit=1) = %+v, want len=1 truncated=true total>=2", listOut)
+	}
+
+	// O1: sending to an agent<->agent DM must fail and must NOT create a message in alice's own DM.
+	badDMRes, err := jwtSess.CallTool(ctx, &mcp.CallToolParams{
+		Name: "send_message",
+		Arguments: map[string]any{
+			"conversation_id": agentAgentDM.ID,
+			"text":            "must-not-reroute",
+		},
+	})
+	if err != nil {
+		t.Fatalf("send_message(agent-agent DM) protocol error: %v", err)
+	}
+	if !badDMRes.IsError {
+		t.Fatalf("expected tool error sending to agent<->agent DM, got success: %+v", badDMRes.Content)
+	}
+	// Confirm alice has no DM conversation with ag1 or ag2.
+	aliceConvs, err := st.GetConversationsForPrincipal(ctx, "user", alice.ID)
+	if err != nil {
+		t.Fatalf("GetConversationsForPrincipal: %v", err)
+	}
+	for _, c := range aliceConvs {
+		if c.Kind == "direct" {
+			t.Fatalf("O1 regression: agent<->agent DM send silently created/landed in alice's DM %q (%s)", c.ID, c.ExternalRef)
+		}
 	}
 }

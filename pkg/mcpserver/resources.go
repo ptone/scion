@@ -34,6 +34,12 @@ const (
 	resourceTemplateConversation = "scion://conversations/{conversation_id}"
 	resourceTemplateMessage      = "scion://conversations/{conversation_id}/messages/{message_id}"
 	resourcePrefixConversations  = "scion://conversations/"
+
+	// JSON-RPC server error codes for Hub auth/authz denials on resources/read,
+	// keeping them distinct from -32603 Internal error and outside go-sdk's
+	// grandfathered -32000..-32019 range (review nit).
+	CodeResourceUnauthorized = -32021
+	CodeResourceForbidden    = -32023
 )
 
 func (s *Server) registerResources(mcpSrv *mcp.Server) {
@@ -171,8 +177,26 @@ func parseMessageResourceURI(uri string) (convID, msgID string, err error) {
 
 func mapHubResourceError(uri string, err error) error {
 	var apiErr *apiclient.APIError
-	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-		return mcp.ResourceNotFoundError(uri)
+	if errors.As(err, &apiErr) {
+		switch apiErr.StatusCode {
+		case http.StatusNotFound:
+			return mcp.ResourceNotFoundError(uri)
+		case http.StatusBadRequest:
+			return &jsonrpc.Error{
+				Code:    jsonrpc.CodeInvalidParams,
+				Message: formatHubToolError(err),
+			}
+		case http.StatusUnauthorized:
+			return &jsonrpc.Error{
+				Code:    CodeResourceUnauthorized,
+				Message: formatHubToolError(err),
+			}
+		case http.StatusForbidden:
+			return &jsonrpc.Error{
+				Code:    CodeResourceForbidden,
+				Message: formatHubToolError(err),
+			}
+		}
 	}
 	return &jsonrpc.Error{
 		Code:    jsonrpc.CodeInternalError,

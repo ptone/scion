@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -652,3 +653,349 @@ func TestMessageDTO_Hardening(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// TestServer_ShutdownBoundedWhenShutdownContextHasNoDeadline covers R3:
+// when ShutdownContext returns an un-deadlined context (default config with
+// no shutdown_grace) and an in-flight handler blocks without observing ctx,
+// Serve must still bound httpSrv.Shutdown by ShutdownTimeout.
+func TestServer_ShutdownBoundedWhenShutdownContextHasNoDeadline(t *testing.T) {
+	reqEntered := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	defer close(releaseHandler)
+
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/auth/me" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "u-r3", "email": "r3@example.com"})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/agents") {
+			close(reqEntered)
+			<-releaseHandler
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	backend := NewBackend(BackendOptions{
+		HubBaseURL: "http://in-process",
+		Transport:  &InProcessTransport{Handler: fakeHub},
+		ExperimentChecker: func(_ context.Context, _ Credential, _ string) (bool, error) {
+			return true, nil
+		},
+		DisableTransportAuth: true,
+	})
+	srv, err := New(Options{
+		Backend:         backend,
+		ShutdownTimeout: 150 * time.Millisecond,
+		// No deadline — matches serverShutdownPlan.httpDrainContext when shutdown_grace is unset.
+		ShutdownContext: func(parent context.Context) (context.Context, context.CancelFunc) {
+			return parent, func() {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	srvCtx, srvCancel := context.WithCancel(context.Background())
+	srvDone := make(chan error, 1)
+	go func() { srvDone <- srv.Serve(srvCtx, ln) }()
+
+	// Launch a blocking MCP request that ignores cancellation.
+	reqBody := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_agents","arguments":{"project":"11111111-1111-1111-1111-111111111111"}}}`
+	req, _ := http.NewRequest(http.MethodPost, "http://"+ln.Addr().String()+"/mcp", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Authorization", "Bearer scion_pat_r3")
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil && resp != nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	select {
+	case <-reqEntered:
+	case <-time.After(3 * time.Second):
+		srvCancel()
+		t.Fatal("blocking handler was not reached")
+	}
+
+	start := time.Now()
+	srvCancel()
+	select {
+	case err := <-srvDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Serve err = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("R3 regression: Serve hung indefinitely when ShutdownContext had no deadline")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Serve took %s, expected ~150ms bound", elapsed)
+	}
+}
+
+// TestWaitForMessages_CursorExpiredAndInvalidCursor covers O2:
+// Hub 410 (ErrCursorExpired) restarts from head with truncated=true, and Hub
+// 400 (ErrInvalidCursor) maps to JSON-RPC -32602.
+func TestWaitForMessages_CursorExpiredAndInvalidCursor(t *testing.T) {
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/auth/me" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "u-cur", "email": "cur@example.com"})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/watch") {
+			cur := r.URL.Query().Get("cursor")
+			switch cur {
+			case "expired-cursor":
+				w.WriteHeader(http.StatusGone)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{"code": "cursor_expired", "message": "cursor ahead of head"},
+				})
+				return
+			case "bad-cursor":
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{"code": "invalid_cursor", "message": "malformed cursor"},
+				})
+				return
+			default:
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"events":     []any{},
+					"nextCursor": "v1.conv-1.99",
+					"hasMore":    false,
+					"truncated":  false,
+					"timedOut":   false,
+				})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	backend := NewBackend(BackendOptions{
+		HubBaseURL: "http://in-process",
+		Transport:  &InProcessTransport{Handler: fakeHub},
+		ExperimentChecker: func(_ context.Context, _ Credential, _ string) (bool, error) {
+			return true, nil
+		},
+		DisableTransportAuth: true,
+	})
+	srv, err := New(Options{Backend: backend})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx := context.Background()
+	cl := mcp.NewClient(&mcp.Implementation{Name: "cur-test", Version: "1.0"}, nil)
+	sess, err := cl.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint: ts.URL + "/mcp",
+		HTTPClient: &http.Client{
+			Transport: &staticHeaderTransport{
+				base:    &http.Transport{DisableKeepAlives: true},
+				headers: map[string]string{"Authorization": "Bearer scion_pat_cur"},
+			},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	// 1. 410 cursor_expired -> truncated: true + restarted head next_cursor.
+	res, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name: "wait_for_messages",
+		Arguments: map[string]any{
+			"conversation_id": "conv-1",
+			"cursor":          "expired-cursor",
+			"timeout_seconds": 5,
+		},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("expired cursor wait failed: err=%v res=%+v", err, res)
+	}
+	var out WaitForMessagesOutput
+	if err := json.Unmarshal([]byte(res.Content[0].(*mcp.TextContent).Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !out.Truncated || out.NextCursor != "v1.conv-1.99" {
+		t.Fatalf("expired cursor result = %+v, want Truncated=true NextCursor=v1.conv-1.99", out)
+	}
+
+	// 2. 400 invalid_cursor -> JSON-RPC -32602.
+	_, err = sess.CallTool(ctx, &mcp.CallToolParams{
+		Name: "wait_for_messages",
+		Arguments: map[string]any{
+			"conversation_id": "conv-1",
+			"cursor":          "bad-cursor",
+			"timeout_seconds": 5,
+		},
+	})
+	var rpcErr *jsonrpc.Error
+	if !errors.As(err, &rpcErr) || rpcErr.Code != jsonrpc.CodeInvalidParams {
+		t.Fatalf("invalid cursor err = %v, want JSON-RPC %d", err, jsonrpc.CodeInvalidParams)
+	}
+}
+
+// TestResources_ErrorCodeMapping covers the resource error-code nit:
+// 400 -> -32602, 401 -> CodeResourceUnauthorized, 403 -> CodeResourceForbidden,
+// 404 -> ResourceNotFoundError (-32002).
+func TestResources_ErrorCodeMapping(t *testing.T) {
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/auth/me" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "u-res", "email": "res@example.com"})
+			return
+		}
+		switch r.URL.Path {
+		case "/api/v1/conversations/bad":
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "bad_request", "message": "bad id"}})
+		case "/api/v1/conversations/unauth":
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "unauthorized", "message": "token expired"}})
+		case "/api/v1/conversations/forbid":
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "forbidden", "message": "missing inbox:read"}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "not_found", "message": "not found"}})
+		}
+	})
+
+	backend := NewBackend(BackendOptions{
+		HubBaseURL: "http://in-process",
+		Transport:  &InProcessTransport{Handler: fakeHub},
+		ExperimentChecker: func(_ context.Context, _ Credential, _ string) (bool, error) {
+			return true, nil
+		},
+		DisableTransportAuth: true,
+	})
+	srv, err := New(Options{Backend: backend})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx := context.Background()
+	cl := mcp.NewClient(&mcp.Implementation{Name: "res-err-test", Version: "1.0"}, nil)
+	sess, err := cl.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint: ts.URL + "/mcp",
+		HTTPClient: &http.Client{
+			Transport: &staticHeaderTransport{
+				base:    &http.Transport{DisableKeepAlives: true},
+				headers: map[string]string{"Authorization": "Bearer scion_pat_res"},
+			},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	cases := []struct {
+		uri      string
+		wantCode int64
+	}{
+		{"scion://conversations/bad", jsonrpc.CodeInvalidParams},
+		{"scion://conversations/unauth", CodeResourceUnauthorized},
+		{"scion://conversations/forbid", CodeResourceForbidden},
+		{"scion://conversations/missing", jsonrpc.CodeInvalidParams},
+	}
+	for _, tc := range cases {
+		_, err := sess.ReadResource(ctx, &mcp.ReadResourceParams{URI: tc.uri})
+		var rpcErr *jsonrpc.Error
+		if !errors.As(err, &rpcErr) || rpcErr.Code != tc.wantCode {
+			t.Errorf("ReadResource(%q) err = %v, want JSON-RPC code %d", tc.uri, err, tc.wantCode)
+		}
+	}
+}
+
+// TestAuditL1_BackendDirectDotSegments exercises the backend-layer
+// validatePathSegment guard directly (without going through tool handlers).
+func TestAuditL1_BackendDirectDotSegments(t *testing.T) {
+	var hubTouched atomic.Bool
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubTouched.Store(true)
+		w.WriteHeader(http.StatusOK)
+	})
+	backend := NewBackend(BackendOptions{
+		HubBaseURL:           "http://in-process",
+		Transport:            &InProcessTransport{Handler: fakeHub},
+		DisableTransportAuth: true,
+	})
+	ctx := context.Background()
+	cred := Credential{Bearer: "scion_pat_direct"}
+
+	for _, seg := range []string{"", ".", ".."} {
+		if _, err := backend.ListAgents(ctx, cred, seg); err == nil {
+			t.Errorf("ListAgents(%q): expected error", seg)
+		}
+		if _, err := backend.SendToAgent(ctx, cred, seg, "a", "hi"); err == nil {
+			t.Errorf("SendToAgent(project=%q): expected error", seg)
+		}
+		if _, err := backend.SendToAgent(ctx, cred, "11111111-1111-1111-1111-111111111111", seg, "hi"); err == nil {
+			t.Errorf("SendToAgent(agent=%q): expected error", seg)
+		}
+		if _, err := backend.SendToConversation(ctx, cred, seg, "hi"); err == nil {
+			t.Errorf("SendToConversation(%q): expected error", seg)
+		}
+		if _, err := backend.GetConversation(ctx, cred, seg); err == nil {
+			t.Errorf("GetConversation(%q): expected error", seg)
+		}
+		if _, err := backend.GetMessage(ctx, cred, seg, "m1"); err == nil {
+			t.Errorf("GetMessage(conv=%q): expected error", seg)
+		}
+		if _, err := backend.GetMessage(ctx, cred, "c1", seg); err == nil {
+			t.Errorf("GetMessage(msg=%q): expected error", seg)
+		}
+		if _, err := backend.Watch(ctx, cred, seg, hubclient.WatchOptions{Immediate: true}); err == nil {
+			t.Errorf("Watch(%q): expected error", seg)
+		}
+		if seg != "" {
+			if _, err := backend.ListConversations(ctx, cred, ListConvOpts{Project: seg}); err == nil {
+				t.Errorf("ListConversations(project=%q): expected error", seg)
+			}
+		}
+	}
+	if hubTouched.Load() {
+		t.Fatal("direct backend dot-segment call reached Hub transport")
+	}
+}
+
+// TestSendToConversation_UnsupportedExternalGroup verifies that a group
+// conversation without a native thread:<proj>:<thread> reference returns a
+// clear unsupported error rather than a misleading 404 (R1).
+func TestSendToConversation_UnsupportedExternalGroup(t *testing.T) {
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/conversations/conv-slack" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":          "conv-slack",
+				"kind":        "group",
+				"surface":     "slack",
+				"externalRef": "slack:C12345",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	backend := NewBackend(BackendOptions{
+		HubBaseURL:           "http://in-process",
+		Transport:            &InProcessTransport{Handler: fakeHub},
+		DisableTransportAuth: true,
+	})
+	_, err := backend.SendToConversation(context.Background(), Credential{Bearer: "scion_pat_ext"}, "conv-slack", "hello")
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("err = %v, want clear 'not supported' error", err)
+	}
+}

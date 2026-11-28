@@ -91,9 +91,8 @@ type AgentRef struct {
 
 // ListConvOpts configures HubBackend.ListConversations.
 type ListConvOpts struct {
-	Project   string
-	Limit     int
-	PageToken string
+	Project string
+	Limit   int
 }
 
 // ConversationParticipantDTO is a participant summary in a conversation listing
@@ -117,7 +116,8 @@ type ConversationSummary struct {
 // ConvPage is returned by HubBackend.ListConversations.
 type ConvPage struct {
 	Conversations []ConversationSummary `json:"conversations"`
-	NextPageToken string                `json:"next_page_token,omitempty"`
+	Total         int                   `json:"total"`
+	Truncated     bool                  `json:"truncated"`
 	NotAvailable  bool                  `json:"not_available,omitempty"`
 	Reason        string                `json:"reason,omitempty"`
 }

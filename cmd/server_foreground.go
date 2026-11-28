@@ -431,10 +431,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	frontShutdownHooks := hub.ShutdownHooks{
 		Context:          shutdownPlan.teardownContext,
 		HTTPDrainContext: shutdownPlan.httpDrainContext,
-		BeforeHTTPDrain: func(drainParent context.Context) {
-			brokerBeforeDrain(drainParent)
-			mcpStop.waitBeforeHubTeardown(drainParent, shutdownPlan.httpDrainContext)
-		},
+		BeforeHTTPDrain:  composeBeforeHTTPDrain(brokerBeforeDrain, mcpStop, shutdownPlan.httpDrainContext),
 	}
 
 	var wg sync.WaitGroup

@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,4 +117,56 @@ func TestLoadGlobalConfig_MCPStreamWaitValidation(t *testing.T) {
 			t.Fatalf("valid MCP config rejected: %v", err)
 		}
 	})
+}
+
+// TestEmbeddedMCPStop_BoundedWithoutDeadline covers R3:
+// when neither teardown ctx nor httpDrainContext has a deadline (default config
+// with no shutdown_grace), waitBeforeHubTeardown must still return within its
+// fallback bound rather than blocking Hub teardown forever.
+func TestEmbeddedMCPStop_BoundedWithoutDeadline(t *testing.T) {
+	mcpStop := &embeddedMCPStop{
+		stopped:  make(chan struct{}),
+		fallback: 120 * time.Millisecond,
+	}
+	mcpStop.markStarted()
+
+	unboundedDrain := func(parent context.Context) (context.Context, context.CancelFunc) {
+		return parent, func() {}
+	}
+	start := time.Now()
+	mcpStop.waitBeforeHubTeardown(context.Background(), unboundedDrain)
+	elapsed := time.Since(start)
+	if elapsed < 80*time.Millisecond || elapsed > 2*time.Second {
+		t.Fatalf("waitBeforeHubTeardown elapsed = %s, want ~120ms fallback bound", elapsed)
+	}
+}
+
+// TestComposeBeforeHTTPDrain_OrdersBrokerThenMCPBeforeHubTeardown tests the
+// real BeforeHTTPDrain composition used by runServerStart: broker drain runs
+// first, then MCP drain is awaited before BeforeHTTPDrain returns to let Hub
+// teardown proceed.
+func TestComposeBeforeHTTPDrain_OrdersBrokerThenMCPBeforeHubTeardown(t *testing.T) {
+	var events []string
+	mcpStop := newEmbeddedMCPStop()
+	mcpStop.markStarted()
+
+	brokerDrain := func(_ context.Context) {
+		events = append(events, "broker_drained")
+		go func() {
+			time.Sleep(40 * time.Millisecond)
+			events = append(events, "mcp_drained")
+			mcpStop.markStopped()
+		}()
+	}
+
+	hook := composeBeforeHTTPDrain(brokerDrain, mcpStop, func(parent context.Context) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(parent, 2*time.Second)
+	})
+	hook(context.Background())
+	events = append(events, "hub_teardown")
+
+	want := "broker_drained,mcp_drained,hub_teardown"
+	if got := strings.Join(events, ","); got != want {
+		t.Fatalf("drain order = %q, want %q", got, want)
+	}
 }

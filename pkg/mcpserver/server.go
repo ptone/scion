@@ -229,14 +229,26 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		return err
 	case <-ctx.Done():
 		s.BeginShutdown()
-		var shutCtx context.Context
-		var cancel context.CancelFunc
+		shutCtx := context.Background()
+		var cancels []context.CancelFunc
 		if s.opts.ShutdownContext != nil {
-			shutCtx, cancel = s.opts.ShutdownContext(context.Background())
-		} else {
-			shutCtx, cancel = context.WithTimeout(context.Background(), s.opts.ShutdownTimeout)
+			var c context.CancelFunc
+			shutCtx, c = s.opts.ShutdownContext(shutCtx)
+			cancels = append(cancels, c)
 		}
-		defer cancel()
+		// R3: always bound httpSrv.Shutdown by ShutdownTimeout when the
+		// caller-supplied ShutdownContext carries no deadline (e.g. default
+		// server config with no shutdown_grace).
+		if _, hasDeadline := shutCtx.Deadline(); !hasDeadline {
+			var c context.CancelFunc
+			shutCtx, c = context.WithTimeout(shutCtx, s.opts.ShutdownTimeout)
+			cancels = append(cancels, c)
+		}
+		defer func() {
+			for i := len(cancels) - 1; i >= 0; i-- {
+				cancels[i]()
+			}
+		}()
 		shutErr := httpSrv.Shutdown(shutCtx)
 		if shutErr != nil {
 			_ = httpSrv.Close()
