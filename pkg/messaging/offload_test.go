@@ -92,6 +92,7 @@ func TestStripReservedMetadata_NewMapWhenReservedPresent(t *testing.T) {
 		MetaBodyChars:                      "123",
 		MetaBodySHA256:                     "deadbeef",
 		messages.MetadataDecisionOtherText: "forged-other-text",
+		messages.MetadataDecisionComment:   "forged-comment",
 	}
 	original := map[string]string{}
 	for k, v := range md {

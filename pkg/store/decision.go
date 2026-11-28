@@ -614,6 +614,7 @@ type DecisionAnswer struct {
 	ChoiceID     string
 	ChoiceLabel  string
 	OtherText    string // non-empty iff ChoiceID == messages.ChoiceIDOther
+	Comment      string // optional single-line plain text (<= 200 runes)
 
 	// AnsweredByUserID is empty after the user is deleted; the name and
 	// email snapshots stay.
@@ -707,6 +708,7 @@ type RecordAnswerInput struct {
 	DecisionRowID string
 	ChoiceID      string
 	OtherText     string // required iff ChoiceID == messages.ChoiceIDOther; trimmed by store
+	Comment       string // optional single-line plain text (<= 200 runes); trimmed by store
 
 	AnsweredByUserID string
 	AnsweredByName   string

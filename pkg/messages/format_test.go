@@ -405,10 +405,14 @@ func TestFormatForDelivery_ForwardsDecisionOtherText(t *testing.T) {
 			MetadataChoiceID:           ChoiceIDOther,
 			MetadataDecisionProvenance: "direct",
 			MetadataDecisionOtherText:  "europe-west4",
+			MetadataDecisionComment:    "skip load test",
 		},
 	}
 	result := FormatForDelivery(msg)
 	if !strings.Contains(result, `"decision_other_text": "europe-west4"`) {
 		t.Errorf("delivery lacks decision_other_text:\n%s", result)
+	}
+	if !strings.Contains(result, `"decision_comment": "skip load test"`) {
+		t.Errorf("delivery lacks decision_comment:\n%s", result)
 	}
 }

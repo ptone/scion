@@ -86,6 +86,7 @@ type AnswerView struct {
 	ChoiceID             string `json:"choiceId"`
 	Label                string `json:"label"`
 	OtherText            string `json:"otherText,omitempty"`
+	Comment              string `json:"comment,omitempty"`
 	AnsweredByUserID     string `json:"answeredByUserId,omitempty"`
 	AnsweredByName       string `json:"answeredByName,omitempty"`
 	AnsweredByEmail      string `json:"answeredByEmail,omitempty"`
@@ -174,6 +175,7 @@ type DecisionResponseView struct {
 	ChoiceID             string `json:"choiceId"`
 	Label                string `json:"label"`
 	OtherText            string `json:"otherText,omitempty"`
+	Comment              string `json:"comment,omitempty"`
 	Provenance           string `json:"provenance"`
 	Outcome              string `json:"outcome,omitempty"`
 	DismissReason        string `json:"dismissReason,omitempty"`
@@ -195,6 +197,7 @@ func answerView(a *store.DecisionAnswer) *AnswerView {
 		ChoiceID:             a.ChoiceID,
 		Label:                a.ChoiceLabel,
 		OtherText:            a.OtherText,
+		Comment:              a.Comment,
 		AnsweredByUserID:     a.AnsweredByUserID,
 		AnsweredByName:       a.AnsweredByName,
 		AnsweredByEmail:      a.AnsweredByEmail,
@@ -517,6 +520,7 @@ func decisionResponseViewOf(a *store.DecisionAnswer, d *store.Decision) Decision
 		ChoiceID:             a.ChoiceID,
 		Label:                a.ChoiceLabel,
 		OtherText:            a.OtherText,
+		Comment:              a.Comment,
 		Provenance:           a.Provenance,
 		Outcome:              a.Outcome,
 		DismissReason:        a.DismissReason,

@@ -1563,15 +1563,15 @@ func init() {
 		}
 	}()
 	// decisionanswerDescAnsweredByName is the schema descriptor for answered_by_name field.
-	decisionanswerDescAnsweredByName := decisionanswerFields[11].Descriptor()
+	decisionanswerDescAnsweredByName := decisionanswerFields[12].Descriptor()
 	// decisionanswer.DefaultAnsweredByName holds the default value on creation for the answered_by_name field.
 	decisionanswer.DefaultAnsweredByName = decisionanswerDescAnsweredByName.Default.(string)
 	// decisionanswerDescAnsweredByEmail is the schema descriptor for answered_by_email field.
-	decisionanswerDescAnsweredByEmail := decisionanswerFields[12].Descriptor()
+	decisionanswerDescAnsweredByEmail := decisionanswerFields[13].Descriptor()
 	// decisionanswer.DefaultAnsweredByEmail holds the default value on creation for the answered_by_email field.
 	decisionanswer.DefaultAnsweredByEmail = decisionanswerDescAnsweredByEmail.Default.(string)
 	// decisionanswerDescIdempotencyKey is the schema descriptor for idempotency_key field.
-	decisionanswerDescIdempotencyKey := decisionanswerFields[22].Descriptor()
+	decisionanswerDescIdempotencyKey := decisionanswerFields[23].Descriptor()
 	// decisionanswer.IdempotencyKeyValidator is a validator for the "idempotency_key" field. It is called by the builders before save.
 	decisionanswer.IdempotencyKeyValidator = func() func(string) error {
 		validators := decisionanswerDescIdempotencyKey.Validators
@@ -1589,15 +1589,15 @@ func init() {
 		}
 	}()
 	// decisionanswerDescMatchedDefault is the schema descriptor for matched_default field.
-	decisionanswerDescMatchedDefault := decisionanswerFields[24].Descriptor()
+	decisionanswerDescMatchedDefault := decisionanswerFields[25].Descriptor()
 	// decisionanswer.DefaultMatchedDefault holds the default value on creation for the matched_default field.
 	decisionanswer.DefaultMatchedDefault = decisionanswerDescMatchedDefault.Default.(bool)
 	// decisionanswerDescFacetIndexed is the schema descriptor for facet_indexed field.
-	decisionanswerDescFacetIndexed := decisionanswerFields[25].Descriptor()
+	decisionanswerDescFacetIndexed := decisionanswerFields[26].Descriptor()
 	// decisionanswer.DefaultFacetIndexed holds the default value on creation for the facet_indexed field.
 	decisionanswer.DefaultFacetIndexed = decisionanswerDescFacetIndexed.Default.(bool)
 	// decisionanswerDescCreatedAt is the schema descriptor for created_at field.
-	decisionanswerDescCreatedAt := decisionanswerFields[26].Descriptor()
+	decisionanswerDescCreatedAt := decisionanswerFields[27].Descriptor()
 	// decisionanswer.DefaultCreatedAt holds the default value on creation for the created_at field.
 	decisionanswer.DefaultCreatedAt = decisionanswerDescCreatedAt.Default.(func() time.Time)
 	// decisionanswerDescID is the schema descriptor for id field.

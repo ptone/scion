@@ -3690,3 +3690,77 @@ func TestDismissDecisions_MinAgeOverride(t *testing.T) {
 	require.Len(t, res.Dismissed, 1)
 	assert.Equal(t, store.DecisionStatusDismissed, res.Dismissed[0].Status)
 }
+
+func TestRecordAnswer_CommentStorageAndReplay(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	// 1. Empty / whitespace-only comment stores SQL NULL.
+	rNull := f.create(t, false, yesNo("cmt-null", "Null comment?"))
+	inNull := f.answer(rNull.Decisions[0].RowID, "1", "user-1", "idem-null")
+	inNull.Comment = "   "
+	ansNull, replayed, err := f.cs.RecordAnswer(ctx, inNull)
+	require.NoError(t, err)
+	assert.False(t, replayed)
+	assert.Empty(t, ansNull.Comment)
+	entNull, err := f.cs.client.DecisionAnswer.Get(ctx, uuid.MustParse(ansNull.ID))
+	require.NoError(t, err)
+	assert.Nil(t, entNull.Comment, "empty/whitespace comment must store NULL")
+
+	// 2. Replay with same key + absent comment succeeds; different comment conflicts.
+	inNullReplay := f.answer(rNull.Decisions[0].RowID, "1", "user-1", "idem-null")
+	ansNullReplay, replayed, err := f.cs.RecordAnswer(ctx, inNullReplay)
+	require.NoError(t, err)
+	assert.True(t, replayed)
+	assert.Equal(t, ansNull.ID, ansNullReplay.ID)
+
+	inNullMismatch := f.answer(rNull.Decisions[0].RowID, "1", "user-1", "idem-null")
+	inNullMismatch.Comment = "added later"
+	_, _, err = f.cs.RecordAnswer(ctx, inNullMismatch)
+	assert.ErrorIs(t, err, store.ErrDecisionAnswerConflict)
+
+	// 3. Invalid comment is rejected before storing anything.
+	rCmt := f.create(t, false, yesNo("cmt-ok", "With comment?"))
+	inBad := f.answer(rCmt.Decisions[0].RowID, "1", "user-1", "idem-bad")
+	inBad.Comment = "line1\nline2"
+	_, _, err = f.cs.RecordAnswer(ctx, inBad)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+
+	inTooLong := f.answer(rCmt.Decisions[0].RowID, "1", "user-1", "idem-long")
+	inTooLong.Comment = strings.Repeat("a", messages.MaxDecisionCommentLen+1)
+	_, _, err = f.cs.RecordAnswer(ctx, inTooLong)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+
+	// 4. Valid comment is trimmed, stored, returned, and compared on replay.
+	inOk := f.answer(rCmt.Decisions[0].RowID, "1", "user-1", "idem-cmt")
+	inOk.Comment = "  Staging, skip load test  "
+	ansOk, replayed, err := f.cs.RecordAnswer(ctx, inOk)
+	require.NoError(t, err)
+	assert.False(t, replayed)
+	assert.Equal(t, "Staging, skip load test", ansOk.Comment)
+
+	entOk, err := f.cs.client.DecisionAnswer.Get(ctx, uuid.MustParse(ansOk.ID))
+	require.NoError(t, err)
+	require.NotNil(t, entOk.Comment)
+	assert.Equal(t, "Staging, skip load test", *entOk.Comment)
+
+	// Replay with same comment (different surrounding whitespace) succeeds.
+	inReplaySame := f.answer(rCmt.Decisions[0].RowID, "1", "user-1", "idem-cmt")
+	inReplaySame.Comment = "Staging, skip load test"
+	ansReplaySame, replayed, err := f.cs.RecordAnswer(ctx, inReplaySame)
+	require.NoError(t, err)
+	assert.True(t, replayed)
+	assert.Equal(t, ansOk.ID, ansReplaySame.ID)
+	assert.Equal(t, "Staging, skip load test", ansReplaySame.Comment)
+
+	// Replay with different comment conflicts.
+	inReplayDiff := f.answer(rCmt.Decisions[0].RowID, "1", "user-1", "idem-cmt")
+	inReplayDiff.Comment = "different comment"
+	_, _, err = f.cs.RecordAnswer(ctx, inReplayDiff)
+	assert.ErrorIs(t, err, store.ErrDecisionAnswerConflict)
+
+	// Replay with empty comment when original had one conflicts.
+	inReplayEmpty := f.answer(rCmt.Decisions[0].RowID, "1", "user-1", "idem-cmt")
+	_, _, err = f.cs.RecordAnswer(ctx, inReplayEmpty)
+	assert.ErrorIs(t, err, store.ErrDecisionAnswerConflict)
+}

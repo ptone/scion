@@ -76,6 +76,7 @@ const USED_ICONS = [
   'chat-dots',
   'chat-left-text',
   'chat-square',
+  'chat-square-text',
   'chat-text',
   'check',
   'check-circle',

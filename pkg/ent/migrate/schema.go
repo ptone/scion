@@ -1553,6 +1553,7 @@ var (
 		{Name: "choice_id", Type: field.TypeString, Size: 32},
 		{Name: "choice_label", Type: field.TypeString},
 		{Name: "other_text", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "comment", Type: field.TypeString, Nullable: true, Size: 2147483647},
 		{Name: "answered_by_user_id", Type: field.TypeString, Nullable: true},
 		{Name: "answered_by_name", Type: field.TypeString, Default: ""},
 		{Name: "answered_by_email", Type: field.TypeString, Default: ""},
@@ -1580,37 +1581,37 @@ var (
 			{
 				Name:    "decisionanswer_decision_row_id_provenance",
 				Unique:  true,
-				Columns: []*schema.Column{DecisionAnswersColumns[1], DecisionAnswersColumns[13]},
+				Columns: []*schema.Column{DecisionAnswersColumns[1], DecisionAnswersColumns[14]},
 			},
 			{
 				Name:    "decisionanswer_decision_row_id_idempotency_key",
 				Unique:  true,
-				Columns: []*schema.Column{DecisionAnswersColumns[1], DecisionAnswersColumns[22]},
+				Columns: []*schema.Column{DecisionAnswersColumns[1], DecisionAnswersColumns[23]},
 			},
 			{
 				Name:    "decisionanswer_project_id_created_at",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[26]},
+				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[27]},
 			},
 			{
 				Name:    "decisionanswer_project_id_asker_agent_id_created_at",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[3], DecisionAnswersColumns[26]},
+				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[3], DecisionAnswersColumns[27]},
 			},
 			{
 				Name:    "decisionanswer_response_message_id",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionAnswersColumns[19]},
+				Columns: []*schema.Column{DecisionAnswersColumns[20]},
 			},
 			{
 				Name:    "decisionanswer_answered_by_user_id",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionAnswersColumns[10]},
+				Columns: []*schema.Column{DecisionAnswersColumns[11]},
 			},
 			{
 				Name:    "decisionanswer_batch_id",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionAnswersColumns[23]},
+				Columns: []*schema.Column{DecisionAnswersColumns[24]},
 			},
 			{
 				Name:    "decisionanswer_project_id",
