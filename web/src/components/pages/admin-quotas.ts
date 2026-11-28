@@ -24,6 +24,16 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import {
+  DEFAULT_TOKEN_ACTION,
+  isLLMTokensResourceType,
+  isPooledGroupLimit,
+  tokenActionBadgeVariant,
+  tokenActionLabel,
+  type TokenAction,
+} from '../../shared/usage-budgets.js';
+import { FEATURE_FLAGS_CHANGED_EVENT, tokenBudgetsEnabled } from '../../utils/feature-flags.js';
+import { formatNumber } from '../../utils/format-number.js';
 import { formatRelative } from '../../utils/time.js';
 
 // ---------------------------------------------------------------------------
@@ -50,6 +60,7 @@ interface EntitlementBinding {
   scopeType: string;
   scopeId: string;
   value: number;
+  tokenAction?: string | null;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -149,14 +160,28 @@ export class ScionPageAdminQuotas extends LitElement {
   @state() private limitDialogError: string | null = null;
   @state() private limitDialogSaving = false;
 
-  // --- Create entitlement dialog ---
+  // --- Feature flag ---
+  @state() private tokenBudgetsFlagEnabled = tokenBudgetsEnabled();
+
+  // --- Create/Edit entitlement dialog ---
   @state() private showEntitlementDialog = false;
-  @state() private entitlementForm = {
+  @state() private editingEntitlement: EntitlementBinding | null = null;
+  @state() private editingEntitlementEtag: string | null = null;
+  @state() private entitlementDialogConflict = false;
+  @state() private entitlementForm: {
+    subjectType: string;
+    subjectId: string;
+    scopeType: string;
+    scopeId: string;
+    value: number;
+    tokenAction: TokenAction;
+  } = {
     subjectType: 'user',
     subjectId: '',
     scopeType: 'system',
     scopeId: '',
     value: 0,
+    tokenAction: DEFAULT_TOKEN_ACTION,
   };
   @state() private entitlementDialogError: string | null = null;
   @state() private entitlementDialogSaving = false;
@@ -271,6 +296,11 @@ export class ScionPageAdminQuotas extends LitElement {
     .type-badge.group_member {
       background: var(--sl-color-warning-100, #fef3c7);
       color: var(--sl-color-warning-700, #a16207);
+    }
+
+    .type-badge.llm_tokens {
+      background: var(--sl-color-purple-100);
+      color: var(--sl-color-purple-700);
     }
 
     .type-badge.default {
@@ -549,9 +579,23 @@ export class ScionPageAdminQuotas extends LitElement {
   // Lifecycle
   // ---------------------------------------------------------------------------
 
+  private boundOnFeatureFlagsChanged = (): void => {
+    const next = tokenBudgetsEnabled();
+    if (next !== this.tokenBudgetsFlagEnabled) {
+      this.tokenBudgetsFlagEnabled = next;
+    }
+  };
+
   override connectedCallback(): void {
     super.connectedCallback();
+    this.tokenBudgetsFlagEnabled = tokenBudgetsEnabled();
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
     void this.loadData();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
   }
 
   // ---------------------------------------------------------------------------
@@ -710,51 +754,183 @@ export class ScionPageAdminQuotas extends LitElement {
   // Entitlement CRUD
   // ---------------------------------------------------------------------------
 
-  private openCreateEntitlement(): void {
+  private getExpandedLimit(): LimitDefinition | undefined {
+    return this.limits.find((l) => l.id === this.expandedLimitId);
+  }
+
+  private normalizeTokenAction(action: string | null | undefined): TokenAction {
+    if (action === 'suspend_and_pause' || action === 'notify_only' || action === 'pause_new') {
+      return action;
+    }
+    return DEFAULT_TOKEN_ACTION;
+  }
+
+  private openCreateEntitlement(limit: LimitDefinition): void {
+    this.editingEntitlement = null;
+    this.editingEntitlementEtag = null;
+    this.entitlementDialogConflict = false;
+    const isPooled = isPooledGroupLimit(limit.name);
+    const isProjectScopedDefault =
+      limit.name === 'llm_tokens_per_project_day' || limit.name === 'llm_tokens_per_project_month';
     this.entitlementForm = {
-      subjectType: 'user',
+      subjectType: isPooled ? 'group' : isProjectScopedDefault ? 'system_default' : 'user',
       subjectId: '',
-      scopeType: 'system',
+      scopeType: isProjectScopedDefault ? 'project' : 'system',
       scopeId: '',
       value: 0,
+      tokenAction: DEFAULT_TOKEN_ACTION,
     };
     this.entitlementDialogError = null;
     this.showEntitlementDialog = true;
   }
 
+  private openEditEntitlement(binding: EntitlementBinding): void {
+    this.editingEntitlement = binding;
+    this.editingEntitlementEtag = null;
+    this.entitlementDialogConflict = false;
+    this.entitlementForm = {
+      subjectType: binding.subjectType,
+      subjectId: binding.subjectId,
+      scopeType: binding.scopeType,
+      scopeId: binding.scopeId,
+      value: binding.value,
+      tokenAction: this.normalizeTokenAction(binding.tokenAction),
+    };
+    this.entitlementDialogError = null;
+    this.showEntitlementDialog = true;
+    void this.fetchEntitlementRevision(binding.id);
+  }
+
+  private async fetchEntitlementRevision(bindingId: string): Promise<void> {
+    try {
+      const res = await apiFetch(`/api/v1/admin/entitlements/${encodeURIComponent(bindingId)}`);
+      if (!res.ok) return;
+      if (this.editingEntitlement?.id !== bindingId) return;
+      const etag = res.headers.get('ETag');
+      if (etag) {
+        this.editingEntitlementEtag = etag;
+      }
+      const latest = (await res.json()) as EntitlementBinding;
+      if (this.editingEntitlement?.id !== bindingId) return;
+      this.editingEntitlement = latest;
+      this.entitlementForm = {
+        subjectType: latest.subjectType,
+        subjectId: latest.subjectId,
+        scopeType: latest.scopeType,
+        scopeId: latest.scopeId,
+        value: latest.value,
+        tokenAction: this.normalizeTokenAction(latest.tokenAction),
+      };
+    } catch {
+      // Best-effort revision fetch; PUT still works unconditionally when ETag is absent.
+    }
+  }
+
   private async saveEntitlement(): Promise<void> {
-    if (!this.entitlementForm.subjectId.trim()) {
+    const limit = this.getExpandedLimit();
+    const isTokenLimit = Boolean(limit && isLLMTokensResourceType(limit.resourceType));
+    const isPooled = Boolean(limit && isPooledGroupLimit(limit.name));
+
+    const subjectType = isPooled ? 'group' : this.entitlementForm.subjectType;
+    const subjectId = subjectType === 'system_default' ? '' : this.entitlementForm.subjectId.trim();
+    const scopeType = this.entitlementForm.scopeType;
+    const scopeId = scopeType === 'project' ? this.entitlementForm.scopeId.trim() : '';
+
+    if (isPooled) {
+      if (!subjectId) {
+        this.entitlementDialogError = 'Group ID is required for pooled group token limits';
+        return;
+      }
+      if (scopeType !== 'system' && scopeType !== 'project') {
+        this.entitlementDialogError = 'Pooled group bindings must use system or project scope';
+        return;
+      }
+      if (scopeType === 'project' && !scopeId) {
+        this.entitlementDialogError = 'Project ID is required when scope is project';
+        return;
+      }
+    } else if (subjectType !== 'system_default' && !subjectId) {
       this.entitlementDialogError = 'Subject ID is required';
+      return;
+    }
+
+    if (isTokenLimit && scopeType === 'project' && !scopeId) {
+      this.entitlementDialogError = 'Project ID is required when scope is project';
+      return;
+    }
+
+    const numericValue = Number(this.entitlementForm.value);
+    if (!Number.isInteger(numericValue) || numericValue < 0) {
+      this.entitlementDialogError = 'Value must be a non-negative integer (0 = unlimited)';
       return;
     }
 
     this.entitlementDialogSaving = true;
     this.entitlementDialogError = null;
+    this.entitlementDialogConflict = false;
 
     try {
-      const res = await apiFetch(`/api/v1/admin/limits/${this.expandedLimitId}/entitlements`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          subjectType: this.entitlementForm.subjectType,
-          subjectId: this.entitlementForm.subjectId.trim(),
-          scopeType: this.entitlementForm.scopeType,
-          scopeId: this.entitlementForm.scopeId.trim(),
-          value: Number(this.entitlementForm.value) || 0,
-        }),
-      });
+      const payload: Record<string, unknown> = {
+        subjectType,
+        subjectId,
+        scopeType,
+        scopeId,
+        value: numericValue,
+      };
+      // PUT replaces tokenAction when omitted, so always send an explicit
+      // tokenAction for llm_tokens limits (defaulting to pause_new).
+      if (isTokenLimit) {
+        payload.tokenAction = this.normalizeTokenAction(this.entitlementForm.tokenAction);
+      }
+
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      let res: Response;
+      if (this.editingEntitlement) {
+        if (this.editingEntitlementEtag) {
+          headers['If-Match'] = this.editingEntitlementEtag;
+        }
+        res = await apiFetch(
+          `/api/v1/admin/entitlements/${encodeURIComponent(this.editingEntitlement.id)}`,
+          {
+            method: 'PUT',
+            headers,
+            body: JSON.stringify(payload),
+          }
+        );
+        if (res.status === 412) {
+          this.entitlementDialogConflict = true;
+          this.entitlementDialogError =
+            'This entitlement binding was modified concurrently (412 precondition failed). Bindings have been refreshed — close and re-open Edit to retry.';
+          if (this.expandedLimitId) {
+            await this.loadEntitlements(this.expandedLimitId);
+          }
+          return;
+        }
+      } else {
+        res = await apiFetch(`/api/v1/admin/limits/${this.expandedLimitId}/entitlements`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload),
+        });
+      }
 
       if (!res.ok) {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
 
       this.showEntitlementDialog = false;
+      this.editingEntitlement = null;
+      this.editingEntitlementEtag = null;
       if (this.expandedLimitId) {
         await this.loadEntitlements(this.expandedLimitId);
       }
     } catch (err) {
       this.entitlementDialogError =
-        err instanceof Error ? err.message : 'Failed to create entitlement';
+        err instanceof Error
+          ? err.message
+          : this.editingEntitlement
+            ? 'Failed to update entitlement'
+            : 'Failed to create entitlement';
     } finally {
       this.entitlementDialogSaving = false;
     }
@@ -847,11 +1023,16 @@ export class ScionPageAdminQuotas extends LitElement {
     if (rt === 'agent') return 'agent';
     if (rt === 'project') return 'project';
     if (rt === 'group_member') return 'group_member';
+    if (rt === 'llm_tokens') return 'llm_tokens';
     return 'default';
   }
 
-  private formatValue(value: number): string {
-    return value === 0 ? 'unlimited' : String(value);
+  private formatValue(value: number, resourceType?: string): string {
+    if (value === 0) return 'unlimited';
+    if (resourceType && isLLMTokensResourceType(resourceType)) {
+      return formatNumber(value);
+    }
+    return String(value);
   }
 
   // ---------------------------------------------------------------------------
@@ -864,9 +1045,12 @@ export class ScionPageAdminQuotas extends LitElement {
         <h1>Quotas</h1>
         <div class="header-right">
           ${!this.loading && !this.error
-            ? html`<span class="item-count"
-                >${this.limits.length} limit${this.limits.length !== 1 ? 's' : ''}</span
-              >`
+            ? (() => {
+                const count = this.getVisibleLimits().length;
+                return html`<span class="item-count"
+                  >${count} limit${count !== 1 ? 's' : ''}</span
+                >`;
+              })()
             : ''}
           <sl-button variant="primary" size="small" @click=${this.openCreateLimit}>
             <sl-icon slot="prefix" name="plus-lg"></sl-icon>
@@ -904,8 +1088,14 @@ export class ScionPageAdminQuotas extends LitElement {
     `;
   }
 
+  private getVisibleLimits(): LimitDefinition[] {
+    if (this.tokenBudgetsFlagEnabled) return this.limits;
+    return this.limits.filter((l) => !isLLMTokensResourceType(l.resourceType));
+  }
+
   private renderLimits() {
-    if (this.limits.length === 0) {
+    const visibleLimits = this.getVisibleLimits();
+    if (visibleLimits.length === 0) {
       return html`
         <div class="empty-state">
           <sl-icon name="speedometer2"></sl-icon>
@@ -930,13 +1120,13 @@ export class ScionPageAdminQuotas extends LitElement {
             </tr>
           </thead>
           <tbody>
-            ${this.limits.map((limit) => this.renderLimitRow(limit))}
+            ${visibleLimits.map((limit) => this.renderLimitRow(limit))}
           </tbody>
         </table>
       </div>
       ${this.expandedLimitId
         ? (() => {
-            const limit = this.limits.find((l) => l.id === this.expandedLimitId);
+            const limit = visibleLimits.find((l) => l.id === this.expandedLimitId);
             return limit ? this.renderDetailPanel(limit) : nothing;
           })()
         : nothing}
@@ -959,13 +1149,15 @@ export class ScionPageAdminQuotas extends LitElement {
     // resolved cap), so it gets the same count-only rendering
     // (ptone/scion#6033).
     const isPerProjectLimit = limit.name === 'max_agents_per_project';
+    const isTokenLimit = isLLMTokensResourceType(limit.resourceType);
+    const isPooledGroup = isPooledGroupLimit(limit.name);
     const usageMeta = isPerBrokerLimit
       ? 'across all brokers; cap is per broker'
       : isPerProjectLimit
         ? "across all projects; cap applies per project (creator's resolved cap)"
         : '';
     const pct =
-      !usageMeta && limit.defaultValue > 0
+      !usageMeta && !isTokenLimit && limit.defaultValue > 0
         ? Math.min(100, Math.round((activeCount / limit.defaultValue) * 100))
         : 0;
 
@@ -978,6 +1170,9 @@ export class ScionPageAdminQuotas extends LitElement {
           <span style="font-weight: 500">${limit.name}</span>
           ${limit.system
             ? html`<span class="system-badge" style="margin-left: 0.5rem">system</span>`
+            : nothing}
+          ${isPooledGroup
+            ? html`<span class="system-badge" style="margin-left: 0.375rem">pooled</span>`
             : nothing}
           ${limit.description
             ? html`<br /><span class="meta-text">${limit.description}</span>`
@@ -992,23 +1187,31 @@ export class ScionPageAdminQuotas extends LitElement {
           <span class="mono">${limit.unit || '—'}</span>
         </td>
         <td class="hide-mobile">
-          <span class="mono">${this.formatValue(limit.defaultValue)}</span>
+          <span class="mono">${this.formatValue(limit.defaultValue, limit.resourceType)}</span>
         </td>
         <td class="hide-mobile usage-bar-cell">
           <div class="usage-info">
-            ${usageMeta
-              ? html`
-                  <span>${activeCount}</span>
-                  <span class="meta-text" style="font-size: 0.75rem">${usageMeta}</span>
-                `
-              : html`
-                  <span
-                    >${activeCount}${limit.defaultValue > 0 ? ` / ${limit.defaultValue}` : ''}</span
-                  >
-                  ${limit.defaultValue > 0
-                    ? html`<sl-progress-bar value=${pct}></sl-progress-bar>`
-                    : nothing}
-                `}
+            ${isTokenLimit
+              ? html`<span class="meta-text" style="font-size: 0.75rem"
+                  >${isPooledGroup
+                    ? 'Pooled across group (non-additive)'
+                    : 'Tracked per UTC window'}</span
+                >`
+              : usageMeta
+                ? html`
+                    <span>${activeCount}</span>
+                    <span class="meta-text" style="font-size: 0.75rem">${usageMeta}</span>
+                  `
+                : html`
+                    <span
+                      >${activeCount}${limit.defaultValue > 0
+                        ? ` / ${limit.defaultValue}`
+                        : ''}</span
+                    >
+                    ${limit.defaultValue > 0
+                      ? html`<sl-progress-bar value=${pct}></sl-progress-bar>`
+                      : nothing}
+                  `}
           </div>
         </td>
         <td class="hide-mobile">
@@ -1039,13 +1242,20 @@ export class ScionPageAdminQuotas extends LitElement {
   }
 
   private renderDetailPanel(limit: LimitDefinition) {
+    const isTokenLimit = isLLMTokensResourceType(limit.resourceType);
+    const isPooledGroup = isPooledGroupLimit(limit.name);
+
     return html`
       <div class="detail-panel">
         <!-- Entitlements section -->
         <div class="detail-section">
           <div class="detail-section-header">
             <h3>Entitlement Bindings</h3>
-            <sl-button size="small" @click=${this.openCreateEntitlement}>
+            <sl-button
+              size="small"
+              data-testid="add-entitlement-btn"
+              @click=${() => this.openCreateEntitlement(limit)}
+            >
               <sl-icon slot="prefix" name="plus-lg"></sl-icon>
               Add Binding
             </sl-button>
@@ -1061,7 +1271,8 @@ export class ScionPageAdminQuotas extends LitElement {
               : this.entitlements.length === 0
                 ? html`<div class="inline-empty">
                     No entitlement bindings for this limit. The default value
-                    (${this.formatValue(limit.defaultValue)}) applies to all subjects.
+                    (${this.formatValue(limit.defaultValue, limit.resourceType)}) applies to all
+                    subjects.
                   </div>`
                 : html`
                     <table class="entitlement-table">
@@ -1071,6 +1282,7 @@ export class ScionPageAdminQuotas extends LitElement {
                           <th>Subject ID</th>
                           <th>Scope</th>
                           <th>Value</th>
+                          ${isTokenLimit ? html`<th>Token Action</th>` : nothing}
                           <th class="hide-mobile">Created By</th>
                           <th class="hide-mobile">Created</th>
                           <th></th>
@@ -1079,15 +1291,31 @@ export class ScionPageAdminQuotas extends LitElement {
                       <tbody>
                         ${this.entitlements.map(
                           (b) => html`
-                            <tr>
+                            <tr data-testid="entitlement-row" data-binding-id=${b.id}>
                               <td><span class="type-badge default">${b.subjectType}</span></td>
-                              <td><span class="mono">${b.subjectId}</span></td>
+                              <td><span class="mono">${b.subjectId || '—'}</span></td>
                               <td>
                                 <span class="mono"
                                   >${b.scopeType}${b.scopeId ? `:${b.scopeId}` : ''}</span
                                 >
                               </td>
-                              <td><span class="mono">${this.formatValue(b.value)}</span></td>
+                              <td>
+                                <span class="mono"
+                                  >${this.formatValue(b.value, limit.resourceType)}</span
+                                >
+                              </td>
+                              ${isTokenLimit
+                                ? html`
+                                    <td>
+                                      <sl-badge
+                                        variant=${tokenActionBadgeVariant(b.tokenAction)}
+                                        data-testid="entitlement-token-action"
+                                      >
+                                        ${tokenActionLabel(b.tokenAction)}
+                                      </sl-badge>
+                                    </td>
+                                  `
+                                : nothing}
                               <td class="hide-mobile">
                                 <span class="meta-text">${b.createdBy || '—'}</span>
                               </td>
@@ -1095,6 +1323,12 @@ export class ScionPageAdminQuotas extends LitElement {
                                 <span class="meta-text">${formatRelative(b.createdAt)}</span>
                               </td>
                               <td class="actions-cell">
+                                <sl-icon-button
+                                  name="pencil"
+                                  label="Edit"
+                                  data-testid="edit-entitlement-btn"
+                                  @click=${() => this.openEditEntitlement(b)}
+                                ></sl-icon-button>
                                 <sl-icon-button
                                   name="trash"
                                   label="Delete"
@@ -1112,73 +1346,81 @@ export class ScionPageAdminQuotas extends LitElement {
         <!-- Usage detail section -->
         <div class="detail-section">
           <div class="detail-section-header">
-            <h3>Active Usage</h3>
+            <h3>${isTokenLimit ? 'Budget Window Tracking' : 'Active Usage'}</h3>
           </div>
-          ${this.entitlementsLoading
-            ? html`<div class="loading-state" style="padding: 1.5rem">
-                <sl-spinner></sl-spinner>
+          ${isTokenLimit
+            ? html`<div class="inline-empty">
+                ${isPooledGroup
+                  ? 'Pooled group budgets are tracked per UTC window on each group detail page and are non-additive across overlapping groups.'
+                  : 'Raw-token budgets are evaluated per UTC day/month window and displayed on Project Settings, Profile Budgets, and Group Detail pages.'}
               </div>`
-            : this.entitlementsError
-              ? nothing
-              : !this.usageDetail || this.usageDetail.reservations.length === 0
-                ? html`<div class="inline-empty">No active usage reservations.</div>`
-                : html`
-                    <div style="margin-bottom: 0.75rem">
-                      <span class="meta-text"
-                        >Total active: <strong>${this.usageDetail.totalActive}</strong></span
-                      >
-                    </div>
-                    <div class="usage-detail-grid">
-                      ${this.usageDetail.reservations.map(
-                        (r) => html`
-                          <div class="usage-card">
-                            <div class="usage-card-header">
-                              <span class="usage-card-subject" title=${r.subjectId}
-                                >${r.subjectId}</span
-                              >
-                              <span class="usage-card-count">${r.reserved} reserved</span>
+            : this.entitlementsLoading
+              ? html`<div class="loading-state" style="padding: 1.5rem">
+                  <sl-spinner></sl-spinner>
+                </div>`
+              : this.entitlementsError
+                ? nothing
+                : !this.usageDetail || this.usageDetail.reservations.length === 0
+                  ? html`<div class="inline-empty">No active usage reservations.</div>`
+                  : html`
+                      <div style="margin-bottom: 0.75rem">
+                        <span class="meta-text"
+                          >Total active: <strong>${this.usageDetail.totalActive}</strong></span
+                        >
+                      </div>
+                      <div class="usage-detail-grid">
+                        ${this.usageDetail.reservations.map(
+                          (r) => html`
+                            <div class="usage-card">
+                              <div class="usage-card-header">
+                                <span class="usage-card-subject" title=${r.subjectId}
+                                  >${r.subjectId}</span
+                                >
+                                <span class="usage-card-count">${r.reserved} reserved</span>
+                              </div>
+                              <div class="meta-text" style="font-size: 0.75rem">
+                                Resource: <span class="mono">${r.resourceId}</span>
+                              </div>
+                              ${r.brokerAgentLimitSource
+                                ? html`
+                                    <div class="meta-text" style="font-size: 0.75rem">
+                                      Broker cap:
+                                      <span class="mono"
+                                        >${r.brokerAgentLimit != null
+                                          ? this.formatValue(r.brokerAgentLimit)
+                                          : 'unlimited'}</span
+                                      >
+                                      <!-- Defensive: brokerAgentLimitSource is
+                                      "unlimited" only when no limit definition
+                                      or quota service is configured hub-wide,
+                                      a state this reservation (which requires
+                                      quota enforcement to have run) can't
+                                      actually reach — kept to avoid ever
+                                      rendering the redundant "(unlimited)".
+                                      "not_enforced" is suppressed here too: the
+                                      ".not-enforced-marker" pill below already
+                                      says "not enforced", so showing the raw
+                                      "(not_enforced)" token alongside it would
+                                      render the same fact twice. -->
+                                      ${r.brokerAgentLimitSource === 'unlimited' ||
+                                      r.brokerAgentLimitSource === 'not_enforced'
+                                        ? nothing
+                                        : html`<span title="Precedence source"
+                                            >(${r.brokerAgentLimitSource})</span
+                                          >`}
+                                      ${r.brokerAgentLimitSource === 'not_enforced'
+                                        ? html`<span class="not-enforced-marker"
+                                            >not enforced</span
+                                          >`
+                                        : nothing}
+                                    </div>
+                                  `
+                                : nothing}
                             </div>
-                            <div class="meta-text" style="font-size: 0.75rem">
-                              Resource: <span class="mono">${r.resourceId}</span>
-                            </div>
-                            ${r.brokerAgentLimitSource
-                              ? html`
-                                  <div class="meta-text" style="font-size: 0.75rem">
-                                    Broker cap:
-                                    <span class="mono"
-                                      >${r.brokerAgentLimit != null
-                                        ? this.formatValue(r.brokerAgentLimit)
-                                        : 'unlimited'}</span
-                                    >
-                                    <!-- Defensive: brokerAgentLimitSource is
-                                    "unlimited" only when no limit definition
-                                    or quota service is configured hub-wide,
-                                    a state this reservation (which requires
-                                    quota enforcement to have run) can't
-                                    actually reach — kept to avoid ever
-                                    rendering the redundant "(unlimited)".
-                                    "not_enforced" is suppressed here too: the
-                                    ".not-enforced-marker" pill below already
-                                    says "not enforced", so showing the raw
-                                    "(not_enforced)" token alongside it would
-                                    render the same fact twice. -->
-                                    ${r.brokerAgentLimitSource === 'unlimited' ||
-                                    r.brokerAgentLimitSource === 'not_enforced'
-                                      ? nothing
-                                      : html`<span title="Precedence source"
-                                          >(${r.brokerAgentLimitSource})</span
-                                        >`}
-                                    ${r.brokerAgentLimitSource === 'not_enforced'
-                                      ? html`<span class="not-enforced-marker">not enforced</span>`
-                                      : nothing}
-                                  </div>
-                                `
-                              : nothing}
-                          </div>
-                        `
-                      )}
-                    </div>
-                  `}
+                          `
+                        )}
+                      </div>
+                    `}
         </div>
       </div>
     `;
@@ -1248,6 +1490,9 @@ export class ScionPageAdminQuotas extends LitElement {
             <sl-option value="project">project</sl-option>
             <sl-option value="group">group</sl-option>
             <sl-option value="group_member">group_member</sl-option>
+            ${this.tokenBudgetsFlagEnabled || this.limitForm.resourceType === 'llm_tokens'
+              ? html`<sl-option value="llm_tokens">llm_tokens</sl-option>`
+              : nothing}
           </sl-select>
         </div>
 
@@ -1317,50 +1562,89 @@ export class ScionPageAdminQuotas extends LitElement {
   }
 
   private renderEntitlementDialog() {
+    const limit = this.getExpandedLimit();
+    const isTokenLimit = Boolean(limit && isLLMTokensResourceType(limit.resourceType));
+    const isPooled = Boolean(limit && isPooledGroupLimit(limit.name));
+    const isEdit = Boolean(this.editingEntitlement);
+    const isSystemDefault = !isPooled && this.entitlementForm.subjectType === 'system_default';
+
     return html`
       <sl-dialog
-        label="Create Entitlement Binding"
+        label=${isEdit ? 'Edit Entitlement Binding' : 'Create Entitlement Binding'}
         ?open=${this.showEntitlementDialog}
+        data-testid="entitlement-dialog"
         @sl-hide=${(e: Event) => {
           if (e.target !== e.currentTarget) return;
           this.showEntitlementDialog = false;
+          this.editingEntitlement = null;
+          this.editingEntitlementEtag = null;
+          this.entitlementDialogConflict = false;
         }}
       >
         ${this.entitlementDialogError
-          ? html`<sl-alert variant="danger" open class="dialog-error"
+          ? html`<sl-alert
+              variant="danger"
+              open
+              class="dialog-error"
+              data-testid="entitlement-dialog-error"
               >${this.entitlementDialogError}</sl-alert
+            >`
+          : nothing}
+        ${isPooled
+          ? html`<sl-alert
+              variant="primary"
+              open
+              class="dialog-error"
+              data-testid="pooled-group-binding-notice"
+              >Pooled group token bindings apply to an explicit user group (system-wide or scoped to
+              a single project). Overlapping group pools are non-additive.</sl-alert
             >`
           : nothing}
 
         <div class="form-row">
           <sl-select
             label="Subject Type"
-            value=${this.entitlementForm.subjectType}
+            value=${isPooled ? 'group' : this.entitlementForm.subjectType}
+            ?disabled=${isPooled}
+            data-testid="entitlement-subject-type"
             @sl-change=${(e: Event) => {
+              const nextSubjectType = (e.target as HTMLSelectElement).value;
               this.entitlementForm = {
                 ...this.entitlementForm,
-                subjectType: (e.target as HTMLSelectElement).value,
+                subjectType: nextSubjectType,
+                subjectId:
+                  nextSubjectType === 'system_default' ? '' : this.entitlementForm.subjectId,
               };
             }}
           >
-            <sl-option value="user">user</sl-option>
-            <sl-option value="group">group</sl-option>
-            <sl-option value="system_default">system_default</sl-option>
+            ${isPooled
+              ? html`<sl-option value="group">group</sl-option>`
+              : html`
+                  <sl-option value="user">user</sl-option>
+                  <sl-option value="group">group</sl-option>
+                  <sl-option value="system_default">system_default</sl-option>
+                `}
           </sl-select>
         </div>
 
         <div class="form-row">
           <sl-input
-            label="Subject ID"
-            placeholder="User or group ID"
-            value=${this.entitlementForm.subjectId}
+            label=${isPooled ? 'Group ID' : 'Subject ID'}
+            placeholder=${isSystemDefault
+              ? 'Not used for system_default'
+              : isPooled
+                ? 'Explicit group ID'
+                : 'User or group ID'}
+            value=${isSystemDefault ? '' : this.entitlementForm.subjectId}
+            ?disabled=${isSystemDefault}
+            ?required=${!isSystemDefault}
+            data-testid="entitlement-subject-id"
             @sl-input=${(e: Event) => {
               this.entitlementForm = {
                 ...this.entitlementForm,
                 subjectId: (e.target as HTMLInputElement).value,
               };
             }}
-            required
           ></sl-input>
         </div>
 
@@ -1368,10 +1652,13 @@ export class ScionPageAdminQuotas extends LitElement {
           <sl-select
             label="Scope Type"
             value=${this.entitlementForm.scopeType}
+            data-testid="entitlement-scope-type"
             @sl-change=${(e: Event) => {
+              const nextScopeType = (e.target as HTMLSelectElement).value;
               this.entitlementForm = {
                 ...this.entitlementForm,
-                scopeType: (e.target as HTMLSelectElement).value,
+                scopeType: nextScopeType,
+                scopeId: nextScopeType === 'project' ? this.entitlementForm.scopeId : '',
               };
             }}
           >
@@ -1387,6 +1674,8 @@ export class ScionPageAdminQuotas extends LitElement {
                   label="Scope ID (Project ID)"
                   placeholder="Project ID"
                   value=${this.entitlementForm.scopeId}
+                  ?required=${isTokenLimit}
+                  data-testid="entitlement-scope-id"
                   @sl-input=${(e: Event) => {
                     this.entitlementForm = {
                       ...this.entitlementForm,
@@ -1404,7 +1693,9 @@ export class ScionPageAdminQuotas extends LitElement {
             type="number"
             min="0"
             placeholder="0 = unlimited"
+            help-text="Use 0 for unlimited."
             value=${String(this.entitlementForm.value)}
+            data-testid="entitlement-value"
             @sl-input=${(e: Event) => {
               this.entitlementForm = {
                 ...this.entitlementForm,
@@ -1414,18 +1705,46 @@ export class ScionPageAdminQuotas extends LitElement {
           ></sl-input>
         </div>
 
+        ${isTokenLimit && this.tokenBudgetsFlagEnabled
+          ? html`
+              <div class="form-row">
+                <sl-select
+                  label="Token Breach Action"
+                  value=${this.normalizeTokenAction(this.entitlementForm.tokenAction)}
+                  help-text="Action taken when token usage reaches 100% of cap."
+                  data-testid="entitlement-token-action-select"
+                  @sl-change=${(e: Event) => {
+                    this.entitlementForm = {
+                      ...this.entitlementForm,
+                      tokenAction: this.normalizeTokenAction((e.target as HTMLSelectElement).value),
+                    };
+                  }}
+                >
+                  <sl-option value="pause_new">Pause new launches (default)</sl-option>
+                  <sl-option value="suspend_and_pause">Suspend running &amp; pause new</sl-option>
+                  <sl-option value="notify_only">Notify only (shadow)</sl-option>
+                </sl-select>
+              </div>
+            `
+          : nothing}
+
         <sl-button
           slot="footer"
           variant="primary"
           ?loading=${this.entitlementDialogSaving}
+          ?disabled=${this.entitlementDialogConflict}
+          data-testid="entitlement-submit-btn"
           @click=${this.saveEntitlement}
         >
-          Create
+          ${isEdit ? 'Update' : 'Create'}
         </sl-button>
         <sl-button
           slot="footer"
           @click=${() => {
             this.showEntitlementDialog = false;
+            this.editingEntitlement = null;
+            this.editingEntitlementEtag = null;
+            this.entitlementDialogConflict = false;
           }}
         >
           Cancel

@@ -50,6 +50,7 @@ import {
   decisionsEnabled,
   isFeatureEnabled,
   isInboxDashboardEnabled,
+  tokenBudgetsEnabled,
 } from '../../utils/feature-flags.js';
 import { showToast } from '../../utils/toast.js';
 
@@ -161,6 +162,10 @@ export class ScionProfileNav extends LitElement {
   @state()
   private inboxEnabled = false;
 
+  /** Whether `tokenomics.token_budgets` (and `usage_ledger`) is enabled. */
+  @state()
+  private tokenBudgetsFlagEnabled = false;
+
   /** Formatted total badge for the Inbox nav link (`N` / `N+` / null). */
   @state()
   private inboxBadge: string | null = null;
@@ -239,6 +244,10 @@ export class ScionProfileNav extends LitElement {
       } else {
         this.inboxBadge = null;
       }
+    }
+    const nextTokenBudgets = tokenBudgetsEnabled();
+    if (nextTokenBudgets !== this.tokenBudgetsFlagEnabled) {
+      this.tokenBudgetsFlagEnabled = nextTokenBudgets;
     }
   };
 
@@ -762,6 +771,7 @@ export class ScionProfileNav extends LitElement {
     this.agentSecretsFlagEnabled = agentSecretsEnabled();
     this.commandRequestsFlagEnabled = commandRequestsEnabled();
     this.inboxEnabled = isInboxDashboardEnabled();
+    this.tokenBudgetsFlagEnabled = tokenBudgetsEnabled();
     if (this.decisionsEnabled || this.inboxEnabled) {
       this.ensureProfileStateScope();
     }
@@ -1084,6 +1094,25 @@ export class ScionProfileNav extends LitElement {
             </div>
           `
         )}
+        ${this.tokenBudgetsFlagEnabled
+          ? html`
+              <div class="nav-section" data-token-budgets-nav-section>
+                <div class="nav-section-title">Usage</div>
+                <ul class="nav-list">
+                  <li class="nav-item">
+                    <a
+                      href="/profile/budgets"
+                      data-token-budgets-nav-link
+                      class="nav-link ${this.isActive('/profile/budgets') ? 'active' : ''}"
+                    >
+                      <sl-icon name="speedometer2"></sl-icon>
+                      <span class="nav-link-text">My Budgets</span>
+                    </a>
+                  </li>
+                </ul>
+              </div>
+            `
+          : nothing}
       </nav>
 
       ${renderAttribution('sidebar-attribution')}

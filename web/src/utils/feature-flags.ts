@@ -493,6 +493,21 @@ export function usageLedgerEnabled(): boolean {
 }
 
 /**
+ * Tokenomics raw-token budgets (tokenomics.token_budgets, ptone/scion#9243):
+ * shows raw-token limits/entitlements in Admin Quotas, project/user/group
+ * budget status and override controls, and the project unmeasured-harness
+ * policy setting. Requires `tokenomics.usage_ledger` as well: the hub enforces
+ * both experiments on every budget route and settings field (404 while off).
+ * Presentation only. Default OFF.
+ */
+export const TOKENOMICS_TOKEN_BUDGETS_FLAG = 'tokenomics.token_budgets';
+
+/** Whether Tokenomics raw-token budget UI surfaces are enabled in this session. */
+export function tokenBudgetsEnabled(): boolean {
+  return usageLedgerEnabled() && isFeatureEnabled(TOKENOMICS_TOKEN_BUDGETS_FLAG);
+}
+
+/**
  * Tokenomics Track 2 trajectory capture (tokenomics.trajectory_capture,
  * ptone/scion#9250): shows trajectory capture policy controls in project
  * settings, the Hub opt-out lock toggle in admin server configuration, and
