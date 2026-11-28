@@ -51,6 +51,12 @@ const (
 //
 // Dynamic choice sets are omitted (P2 refuses them). Nothing from the trigger
 // definition, endpoint secret, action payload, or authority is exposed.
+//
+// Note on event.attributes (L2): event.attributes contains hub-set transport
+// and sender metadata, including the client IP (`remote_ip`) and sender
+// attribution (for example `sender: agent:<id>` on hub_token endpoints). When
+// a System One element selects `event.attributes` in its `inputs`, those values
+// are sent to the external model provider.
 func SystemOneContentEnv() spec.ContentEnvironment {
 	return spec.ContentEnvironment{
 		Name:    triggerrule.EnvironmentName,

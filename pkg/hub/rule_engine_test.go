@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
@@ -94,8 +95,8 @@ func TestRuleEngine_NewRuleEngineAndPureRegistration(t *testing.T) {
 		require.True(t, ok)
 		trigEnv, hasEnv := soDial.Environment(triggerrule.EnvironmentName)
 		require.True(t, hasEnv)
-		assert.Equal(t, 1, trigEnv.Version)
-		assert.Equal(t, 32*1024, trigEnv.MaxTotalBytes)
+		assert.Equal(t, trigger.SystemOneContentEnv(), trigEnv,
+			"registered trigger System One content environment must match trigger.SystemOneContentEnv() exactly (R1)")
 		// Unregistered/ungranted dialect on "trigger" is still refused.
 		otherD, otherErr := eng.DialectFor(triggerrule.ConsumerName, "rego")
 		assert.Nil(t, otherD)

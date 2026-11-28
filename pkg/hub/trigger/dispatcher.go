@@ -77,6 +77,8 @@ const (
 	ErrFireRuleUncertain                 = "rule uncertain"
 	ErrFireRuleNoLongerCompiles          = "rule no longer compiles"
 	ErrFireGitHubAssociationUnauthorized = "github association not authorized"
+	ErrFireRecordedAuthorityRefused      = "recorded authority refused"
+	AuditReasonInitiatorNotAuthorized    = "initiator_not_authorized"
 	ErrFireSubjectBusy                   = "subject busy"
 	ErrFireSubjectDispatchInProgress     = "subject dispatch in progress"
 	ErrFireCoalesced                     = "coalesced"
@@ -238,6 +240,17 @@ type FireAdmitter interface {
 // retryable internal error rather than firing.
 type SourceAuthorizer interface {
 	AuthorizeEventSource(ctx context.Context, ev *store.TriggerEvent) (authorized bool, err error)
+}
+
+// RecordedAuthorityChecker is an optional interface Core implementations may
+// satisfy to verify a System One-bearing trigger's recorded authorizing
+// principal before any model evaluation or egress (T2 M1). Returning a
+// non-empty refusal with err == nil records a zero-I/O refused fire; returning
+// a non-nil err retries the queue item with backoff without recording a
+// terminal refusal and with zero provider I/O. Never called for CEL-only
+// triggers.
+type RecordedAuthorityChecker interface {
+	CheckRecordedAuthority(ctx context.Context, tr *store.Trigger) (refusal string, err error)
 }
 
 // EventEvaluationOutcome summarizes the candidate-loop outcome for an event
@@ -914,6 +927,32 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
 				}
 				continue
+			}
+
+			// M1: for System One-bearing triggers, re-verify the recorded user
+			// authority before any model evaluation or egress (zero I/O on
+			// refusal or transient lookup error). CEL-only triggers bypass this
+			// check and keep Stage 1 fire-time timing unchanged.
+			if hasSystemOne {
+				if ra, ok := d.core.(RecordedAuthorityChecker); ok {
+					refusal, authErr := ra.CheckRecordedAuthority(ctx, tr)
+					if authErr != nil {
+						d.logger.Warn("trigger: recorded authority check failed",
+							"eventID", ev.ID, "projectID", ev.ProjectID, "triggerID", tr.ID, "error", authErr)
+						return durablequeue.Result{Err: errors.New("trigger: authority check failed")}
+					}
+					if refusal != "" {
+						hadAnyFire = true
+						if rErr := d.recordDirectFire(
+							ctx, tr, ev, deriveFireSubject(ev.Subject),
+							store.TriggerFireStatusRefused, refusal,
+							"0/0", systemone.DialectName, "", AuditReasonInitiatorNotAuthorized,
+						); rErr != nil {
+							return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
+						}
+						continue
+					}
+				}
 			}
 
 			// SEC-3b1rw-01 & SEC-3b2-01: ALWAYS pass WithBudget(budget) and

@@ -602,6 +602,10 @@ func TestDispatcherSystemOne_ZeroIORefusalsWithPositiveControl(t *testing.T) {
 	require.NotNil(t, f1)
 	assert.Equal(t, store.TriggerFireStatusSkipped, f1.Status)
 	assert.Equal(t, trigger.ErrFireRuleEvaluationFailed, f1.Error)
+	var notAllowTrace triggerrule.RuleTrace
+	require.NoError(t, json.Unmarshal([]byte(f1.RuleTrace), &notAllowTrace))
+	require.Len(t, notAllowTrace.Elements, 1)
+	assert.Equal(t, string(provider.FailNoEligibleInstance), notAllowTrace.Elements[0].Reason)
 
 	// Refusal 2: disabled instance.
 	h.setAllowed(projID, "primary")
@@ -750,6 +754,11 @@ func TestDispatcherSystemOne_BudgetValidationAndCancelInFlight(t *testing.T) {
 	assert.False(t, res.Done, "canceled evaluation must not mark event done")
 	assert.Error(t, res.Err)
 	assert.Nil(t, h.findFire(ev.ID, tr.ID), "no fire may be recorded after in-flight cancellation / late success")
+	stats := h.disp.RuleEvalStats()
+	assert.Equal(t, int64(1), stats[trigger.RuleEvalKey{Dialect: "system_one", Class: triggerrule.MatchClassFailed}].Count,
+		"in-flight cancellation must record a terminal failed/canceled rule eval stat")
+	assert.Equal(t, int64(0), stats[trigger.RuleEvalKey{Dialect: "system_one", Class: triggerrule.MatchClassMatched}].Count,
+		"no late matched outcome may be recorded after cancellation")
 }
 
 // Acceptance test 8: 4 KiB rule_trace truncation drops earliest provenance objects first
@@ -836,9 +845,12 @@ func TestDispatcherSystemOne_BudgetExhaustionL1CapacityAndRedelivery(t *testing.
 	res := dispatchOneEvent(t, context.Background(), h, ev)
 	require.True(t, res.Done)
 
-	// Only candidate 1 ran; candidate 2 saw exhausted budget and made 0 calls.
+	// Only candidate 1 ran; candidate 2 saw exhausted budget and made 0 calls (0 secret reads, 0 token mints, 0 HTTP).
 	calls, _ := h.adapter.snapshotCalls()
 	require.Len(t, calls, 1, "candidate 2 must not call provider after budget is exhausted")
+	assert.Equal(t, int32(0), h.secretReads.Load(), "candidate 2 budget-exhausted path must make 0 secret reads")
+	assert.Equal(t, int32(0), h.tokenMints.Load(), "candidate 2 budget-exhausted path must make 0 token mints")
+	assert.Equal(t, int32(0), h.httpReqs.Load(), "candidate 2 budget-exhausted path must make 0 provider requests")
 	f1 := h.findFire(ev.ID, tr1.ID)
 	f2 := h.findFire(ev.ID, tr2.ID)
 	require.NotNil(t, f1)
@@ -895,9 +907,15 @@ func TestDispatcherSystemOne_BudgetExhaustionL1CapacityAndRedelivery(t *testing.
 	}()
 	<-inCall
 
-	// While evHold occupies the sole MaxInFlight=1 slot, evOverflow must fail fast with capacity (0 provider calls).
+	// While evHold occupies the sole MaxInFlight=1 slot, evOverflow must fail fast with capacity (0 secret reads, 0 token mints, 0 provider calls).
+	secBefore := hCap.secretReads.Load()
+	tokBefore := hCap.tokenMints.Load()
+	httpBefore := hCap.httpReqs.Load()
 	resOverflow := dispatchOneEvent(t, context.Background(), hCap, evOverflow)
 	require.True(t, resOverflow.Done)
+	assert.Equal(t, secBefore, hCap.secretReads.Load(), "capacity refusal must make 0 secret reads")
+	assert.Equal(t, tokBefore, hCap.tokenMints.Load(), "capacity refusal must make 0 token mints")
+	assert.Equal(t, httpBefore, hCap.httpReqs.Load(), "capacity refusal must make 0 provider HTTP requests")
 	close(blockCh)
 	<-doneHold
 
@@ -942,4 +960,319 @@ func TestDispatcherSystemOne_BudgetExhaustionL1CapacityAndRedelivery(t *testing.
 	callsR, _ := hRedeliv.adapter.snapshotCalls()
 	assert.Len(t, callsR, 2, "redelivery without memo re-evaluates System One element")
 	assert.Equal(t, int32(1), fireCalls.Load(), "unique fire claim must prevent duplicate Core.Fire")
+}
+
+// R1: Pin trigger content environment v1 exact schema (fields, kinds, MaxBytes,
+// Trust grades including event.type = untrusted, MaxTotalBytes = 32 KiB, empty
+// ChoiceSets), BuildSystemOneInput field grades, and end-to-end trust delivery
+// to the recording adapter.
+func TestSystemOneContentEnv_V1ExactTableAndInputTrust(t *testing.T) {
+	wantEnv := spec.ContentEnvironment{
+		Name:    triggerrule.EnvironmentName,
+		Version: 1,
+		Fields: []spec.FieldDecl{
+			{Name: "event.type", Kind: spec.FieldKindText, MaxBytes: 128, Trust: spec.TrustUntrusted},
+			{Name: "event.source_kind", Kind: spec.FieldKindText, MaxBytes: 32, Trust: spec.TrustTrusted},
+			{Name: "event.subject", Kind: spec.FieldKindText, MaxBytes: 256, Trust: spec.TrustUntrusted},
+			{Name: "event.attributes", Kind: spec.FieldKindJSON, MaxBytes: 8192, Trust: spec.TrustUntrusted},
+			{Name: "event.payload", Kind: spec.FieldKindJSON, MaxBytes: 24576, Trust: spec.TrustUntrusted},
+		},
+		MaxTotalBytes: 32 * 1024,
+	}
+	gotEnv := trigger.SystemOneContentEnv()
+	assert.Equal(t, wantEnv, gotEnv, "trigger SystemOneContentEnv must match §2.1 table exactly")
+	assert.Empty(t, gotEnv.ChoiceSets, "v1 trigger content env must declare no dynamic choice sets")
+
+	// Pin BuildSystemOneInput field kinds and trust grades independently.
+	in := trigger.BuildSystemOneInput(hubfire.FireEvent{
+		Type:       "webhook.push",
+		SourceKind: store.TriggerSourceKindWebhook,
+		Subject:    "pr#42",
+		Attributes: map[string]string{"k": "v"},
+		Payload:    []byte(`{"ok":true}`),
+	})
+	require.Len(t, in.Fields, 5)
+	for i, wantField := range wantEnv.Fields {
+		assert.Equal(t, wantField.Name, in.Fields[i].Name, "field[%d] name", i)
+		assert.Equal(t, wantField.Kind, in.Fields[i].Kind, "field[%d] kind", i)
+		assert.Equal(t, wantField.Trust, in.Fields[i].Trust, "field[%d] trust", i)
+	}
+
+	// End-to-end: recording adapter receives event.type & event.subject as untrusted
+	// and event.source_kind as trusted.
+	h := newSystemOneTestHarness(t, nil)
+	projID := "proj-r1-trust"
+	h.setAllowed(projID, "primary")
+	tr := makeUserTrigger(projID, "src-r1", []store.TriggerMatchRule{
+		{Dialect: "system_one", Expr: makeBinarySystemOneRule("primary", "q_trust", `["event.type","event.source_kind","event.subject"]`, "")},
+	})
+	h.st.triggers = []*store.Trigger{tr}
+	ev := &store.TriggerEvent{
+		ID: uuid.NewString(), ProjectID: projID, SourceKind: store.TriggerSourceKindWebhook,
+		SourceID: "src-r1", Type: "webhook.received", Subject: "caller-subject", Status: store.TriggerEventStatusPending,
+	}
+	res := dispatchOneEvent(t, context.Background(), h, ev)
+	require.True(t, res.Done)
+
+	calls, _ := h.adapter.snapshotCalls()
+	require.Len(t, calls, 1)
+	byName := make(map[string]provider.InputField, len(calls[0].Input))
+	for _, f := range calls[0].Input {
+		byName[f.Name] = f
+	}
+	assert.Equal(t, spec.TrustUntrusted, byName["event.type"].Trust, "event.type must reach provider as untrusted")
+	assert.Equal(t, spec.TrustUntrusted, byName["event.subject"].Trust, "event.subject must reach provider as untrusted")
+	assert.Equal(t, spec.TrustTrusted, byName["event.source_kind"].Trust, "event.source_kind must reach provider as trusted")
+}
+
+// R2: Pin that the System One event allowance (+2s default; configurable up to 5s)
+// is actually applied ONLY when a matching candidate carries a System One element,
+// and NOT applied for CEL-only events or when a System One candidate's MatchTypes
+// excludes the event type.
+func TestDispatcherSystemOne_EventAllowanceAppliedOnlyForMatchingSystemOne(t *testing.T) {
+	projID := "proj-r2-allow"
+
+	// 1. Explicit RuleBudget=80ms + SystemOneAllowance=250ms (330ms total) with
+	// 140ms provider latency honoring ctx -> MUST fire (defeats dropping allowance).
+	h := newSystemOneTestHarness(t, func(cfg *trigger.DispatcherConfig) {
+		cfg.RuleBudget = 80 * time.Millisecond
+		cfg.SystemOneAllowance = 250 * time.Millisecond
+	})
+	h.setAllowed(projID, "primary")
+	h.adapter.invokeFn = func(ctx context.Context, trp provider.Transport, inst provider.InstanceView, req provider.ModelRequest) (provider.ModelResult, error) {
+		select {
+		case <-time.After(140 * time.Millisecond):
+		case <-ctx.Done():
+			return provider.ModelResult{}, ctx.Err()
+		}
+		bTrue := true
+		qID := req.Rule.Questions[0].ID
+		return provider.ModelResult{
+			ResolvedModel: inst.Model,
+			Answers: map[string]provider.Answer{
+				qID: {
+					QuestionID:   qID,
+					Primitive:    spec.PrimitiveBinary,
+					Status:       provider.AnswerStatusAnswered,
+					Bool:         &bTrue,
+					Distribution: map[string]float64{"true": 0.9, "false": 0.1},
+				},
+			},
+		}, nil
+	}
+	trSO := makeUserTrigger(projID, "src-r2", []store.TriggerMatchRule{
+		{Dialect: "system_one", Expr: makeBinarySystemOneRule("primary", "q_r2", `["event.subject"]`, "")},
+	})
+	h.st.triggers = []*store.Trigger{trSO}
+	evSO := &store.TriggerEvent{
+		ID: uuid.NewString(), ProjectID: projID, SourceKind: store.TriggerSourceKindWebhook,
+		SourceID: "src-r2", Type: "webhook.received", Subject: "within-allowance", Status: store.TriggerEventStatusPending,
+	}
+	res := dispatchOneEvent(t, context.Background(), h, evSO)
+	require.True(t, res.Done)
+	fSO := h.findFire(evSO.ID, trSO.ID)
+	require.NotNil(t, fSO)
+	assert.Equal(t, store.TriggerFireStatusFired, fSO.Status, "140ms model call must succeed under 80ms + 250ms allowance")
+
+	// 2. Default SystemOneAllowance (omitted -> 2s) with RuleBudget=80ms and 140ms
+	// provider latency -> MUST fire (pins default +2s allowance).
+	hDef := newSystemOneTestHarness(t, func(cfg *trigger.DispatcherConfig) {
+		cfg.RuleBudget = 80 * time.Millisecond
+		// SystemOneAllowance left 0 -> DefaultSystemOneEventAllowance (2s).
+	})
+	hDef.setAllowed(projID, "primary")
+	hDef.adapter.invokeFn = h.adapter.invokeFn
+	trDef := makeUserTrigger(projID, "src-r2-def", []store.TriggerMatchRule{
+		{Dialect: "system_one", Expr: makeBinarySystemOneRule("primary", "q_r2_def", `["event.subject"]`, "")},
+	})
+	hDef.st.triggers = []*store.Trigger{trDef}
+	evDef := &store.TriggerEvent{
+		ID: uuid.NewString(), ProjectID: projID, SourceKind: store.TriggerSourceKindWebhook,
+		SourceID: "src-r2-def", Type: "webhook.received", Subject: "within-default-2s", Status: store.TriggerEventStatusPending,
+	}
+	require.True(t, dispatchOneEvent(t, context.Background(), hDef, evDef).Done)
+	fDef := hDef.findFire(evDef.ID, trDef.ID)
+	require.NotNil(t, fDef)
+	assert.Equal(t, store.TriggerFireStatusFired, fDef.Status, "140ms call must succeed under 80ms + default 2s allowance")
+
+	// 3. System One candidate whose MatchTypes excludes the event type + matching
+	// CEL-only candidate -> NO allowance applied (budget_remaining_ms <= 80ms).
+	// Defeats removing the MatchTypes filter in anyMatchingCandidateHasSystemOne.
+	trNonMatchSO := makeUserTrigger(projID, "src-r2-excl", []store.TriggerMatchRule{
+		{Dialect: "system_one", Expr: makeBinarySystemOneRule("primary", "q_other", `["event.subject"]`, "")},
+	})
+	trNonMatchSO.MatchTypes = []string{"webhook.other_event"}
+	trCEL := makeUserTrigger(projID, "src-r2-excl", []store.TriggerMatchRule{
+		{Dialect: "cel", Expr: `event.type == "webhook.received"`},
+	})
+	h.st.triggers = []*store.Trigger{trNonMatchSO, trCEL}
+	evCEL := &store.TriggerEvent{
+		ID: uuid.NewString(), ProjectID: projID, SourceKind: store.TriggerSourceKindWebhook,
+		SourceID: "src-r2-excl", Type: "webhook.received", Subject: "cel-only-event", Status: store.TriggerEventStatusPending,
+	}
+	require.True(t, dispatchOneEvent(t, context.Background(), h, evCEL).Done)
+	fCEL := h.findFire(evCEL.ID, trCEL.ID)
+	require.NotNil(t, fCEL)
+	assert.Equal(t, store.TriggerFireStatusFired, fCEL.Status)
+	var celTrace triggerrule.RuleTrace
+	require.NoError(t, json.Unmarshal([]byte(fCEL.RuleTrace), &celTrace))
+	require.NotNil(t, celTrace.BudgetRemainingMs)
+	assert.LessOrEqual(t, *celTrace.BudgetRemainingMs, int64(80),
+		"non-matching System One candidate must NOT grant System One allowance to CEL-only event")
+}
+
+// O2: Pin each D2 predicate branch in IsAgentInitiatedTrigger independently.
+func TestIsAgentInitiatedTrigger_IndependentBranches(t *testing.T) {
+	// Branch 1: InitiatorCredentialKind == agent only (PrincipalKind empty).
+	credOnly := &store.Trigger{
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorCredentialKind: store.InitiatorCredentialKindAgent,
+		},
+	}
+	assert.True(t, trigger.IsAgentInitiatedTrigger(credOnly))
+
+	// Branch 2: InitiatorPrincipalKind == "agent" only (CredentialKind session).
+	princOnly := &store.Trigger{
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  "agent",
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+		},
+	}
+	assert.True(t, trigger.IsAgentInitiatedTrigger(princOnly))
+
+	// Negative control: user session.
+	userTr := &store.Trigger{
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  "user",
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+		},
+	}
+	assert.False(t, trigger.IsAgentInitiatedTrigger(userTr))
+}
+
+type authorityCheckingCore struct {
+	*fakeCore
+	calls   atomic.Int32
+	checkFn func(ctx context.Context, tr *store.Trigger) (string, error)
+}
+
+func (c *authorityCheckingCore) CheckRecordedAuthority(ctx context.Context, tr *store.Trigger) (string, error) {
+	c.calls.Add(1)
+	if c.checkFn != nil {
+		return c.checkFn(ctx, tr)
+	}
+	return "", nil
+}
+
+// M1 dispatcher seam tests:
+// - revoked author -> Refused, 0 secret reads / token mints / provider calls / Core.Fire;
+// - checker transient error -> durablequeue retry (Done=false, Err!=nil), no fire row, 0 calls;
+// - CEL-only -> checker never called;
+// - P9 multi-action -> consistent Refused recording, 0 calls.
+func TestDispatcherSystemOne_RecordedAuthorityCheckerSeam(t *testing.T) {
+	projID := "proj-m1-seam"
+	var authCore *authorityCheckingCore
+	var fireCalls atomic.Int32
+
+	h := newSystemOneTestHarness(t, func(cfg *trigger.DispatcherConfig) {
+		fc := cfg.Core.(*fakeCore)
+		fc.fireFn = func(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+			fireCalls.Add(1)
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+		}
+		authCore = &authorityCheckingCore{fakeCore: fc}
+		cfg.Core = authCore
+	})
+	h.setAllowed(projID, "primary")
+
+	ruleExpr := makeBinarySystemOneRule("primary", "q_m1", `["event.subject"]`, "")
+	newEv := func() *store.TriggerEvent {
+		return &store.TriggerEvent{
+			ID: uuid.NewString(), ProjectID: projID, SourceKind: store.TriggerSourceKindWebhook,
+			SourceID: "src-m1", Type: "webhook.received", Subject: "check-auth", Status: store.TriggerEventStatusPending,
+		}
+	}
+
+	// 1. Revoked author -> Refused, 0 secret reads, 0 token mints, 0 provider HTTP, 0 adapter calls, 0 Core.Fire.
+	trSO := makeUserTrigger(projID, "src-m1", []store.TriggerMatchRule{{Dialect: "system_one", Expr: ruleExpr}})
+	h.st.triggers = []*store.Trigger{trSO}
+	authCore.checkFn = func(context.Context, *store.Trigger) (string, error) {
+		return trigger.ErrFireRecordedAuthorityRefused, nil
+	}
+	h.resetCounters()
+	authCore.calls.Store(0)
+	fireCalls.Store(0)
+
+	ev1 := newEv()
+	res1 := dispatchOneEvent(t, context.Background(), h, ev1)
+	require.True(t, res1.Done)
+	assert.Equal(t, int32(1), authCore.calls.Load())
+	assert.Equal(t, int32(0), h.secretReads.Load())
+	assert.Equal(t, int32(0), h.tokenMints.Load())
+	assert.Equal(t, int32(0), h.httpReqs.Load())
+	calls1, _ := h.adapter.snapshotCalls()
+	assert.Empty(t, calls1)
+	assert.Equal(t, int32(0), fireCalls.Load())
+	f1 := h.findFire(ev1.ID, trSO.ID)
+	require.NotNil(t, f1)
+	assert.Equal(t, store.TriggerFireStatusRefused, f1.Status)
+	assert.Equal(t, trigger.ErrFireRecordedAuthorityRefused, f1.Error)
+	assert.Equal(t, "0/0", f1.MatchedThrough)
+	assert.Equal(t, "system_one", f1.DecidedDialect)
+
+	// 2. Checker transient error -> durablequeue retry (Done=false, Err!=nil), no fire row, 0 calls.
+	authCore.checkFn = func(context.Context, *store.Trigger) (string, error) {
+		return "", context.DeadlineExceeded
+	}
+	h.resetCounters()
+	authCore.calls.Store(0)
+	fireCalls.Store(0)
+
+	ev2 := newEv()
+	res2 := dispatchOneEvent(t, context.Background(), h, ev2)
+	assert.False(t, res2.Done, "transient authority check error must retry, not mark done")
+	assert.Error(t, res2.Err)
+	assert.Equal(t, int32(1), authCore.calls.Load())
+	assert.Equal(t, int32(0), h.secretReads.Load())
+	assert.Equal(t, int32(0), h.tokenMints.Load())
+	assert.Equal(t, int32(0), h.httpReqs.Load())
+	assert.Equal(t, int32(0), fireCalls.Load())
+	assert.Nil(t, h.findFire(ev2.ID, trSO.ID), "transient error must not record a terminal refused fire")
+
+	// 3. CEL-only trigger -> CheckRecordedAuthority is NEVER called.
+	trCEL := makeUserTrigger(projID, "src-m1", []store.TriggerMatchRule{{Dialect: "cel", Expr: `event.type == "webhook.received"`}})
+	h.st.triggers = []*store.Trigger{trCEL}
+	authCore.calls.Store(0)
+	fireCalls.Store(0)
+	ev3 := newEv()
+	res3 := dispatchOneEvent(t, context.Background(), h, ev3)
+	require.True(t, res3.Done)
+	assert.Equal(t, int32(0), authCore.calls.Load(), "CEL-only trigger must never invoke RecordedAuthorityChecker")
+	assert.Equal(t, int32(1), fireCalls.Load())
+
+	// 4. P9 multi-action System One trigger -> consistent Refused recording, 0 provider calls, 0 Core.Fire.
+	trMulti := makeUserTrigger(projID, "src-m1", []store.TriggerMatchRule{{Dialect: "system_one", Expr: ruleExpr}})
+	trMulti.Actions = []store.TriggerAction{
+		{Type: store.TriggerActionMessage, Payload: `{"agentId":"agent-1","message":"a0"}`},
+		{Type: store.TriggerActionMessage, Payload: `{"agentId":"agent-2","message":"a1"}`},
+	}
+	h.st.triggers = []*store.Trigger{trMulti}
+	authCore.checkFn = func(context.Context, *store.Trigger) (string, error) {
+		return trigger.ErrFireRecordedAuthorityRefused, nil
+	}
+	h.resetCounters()
+	authCore.calls.Store(0)
+	fireCalls.Store(0)
+	ev4 := newEv()
+	res4 := dispatchOneEvent(t, context.Background(), h, ev4)
+	require.True(t, res4.Done)
+	assert.Equal(t, int32(1), authCore.calls.Load())
+	assert.Equal(t, int32(0), h.secretReads.Load())
+	assert.Equal(t, int32(0), h.httpReqs.Load())
+	assert.Equal(t, int32(0), fireCalls.Load())
+	f4 := h.findFire(ev4.ID, trMulti.ID)
+	require.NotNil(t, f4)
+	assert.Equal(t, store.TriggerFireStatusRefused, f4.Status)
+	assert.Equal(t, trigger.ErrFireRecordedAuthorityRefused, f4.Error)
+	assert.Equal(t, 0, f4.ActionIndex)
 }

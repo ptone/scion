@@ -20,15 +20,22 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
+	"github.com/GoogleCloudPlatform/scion/pkg/egress"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 )
 
 func enableSystemOneExperimentForTriggerTest(t *testing.T, srv *Server, enabled bool) {
@@ -129,6 +136,21 @@ func TestTriggerAuthoring_SystemOneD1AllowlistAndD2AgentExclusion(t *testing.T) 
 	assert.Equal(t, ErrCodeInvalidRule, ebAgent.Code)
 	assert.Equal(t, "agent_not_allowed", ebAgent.Details["reason"])
 
+	// 3b. O3: Legacy scalar match.dialect: "system_one" is also refused for agent callers.
+	recAgentLegacySO := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "so-agent-denied-legacy-scalar",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Dialect: "system_one",
+			Expr:    soExpr,
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.agentA.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, recAgentLegacySO.Code, recAgentLegacySO.Body.String())
+	ebAgentLegacy := decodeTriggerRuleError(t, recAgentLegacySO)
+	assert.Equal(t, ErrCodeInvalidRule, ebAgentLegacy.Code)
+	assert.Equal(t, "agent_not_allowed", ebAgentLegacy.Details["reason"])
+
 	// 4. User caller with allowlisted instance succeeds (201 Created).
 	recOK := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
 		Name:   "so-owner-ok",
@@ -156,4 +178,240 @@ func TestTriggerAuthoring_SystemOneD1AllowlistAndD2AgentExclusion(t *testing.T) 
 	ebResume := decodeTriggerRuleError(t, resumeRec)
 	assert.Equal(t, ErrCodeInvalidRule, ebResume.Code)
 	assert.Equal(t, "binding", ebResume.Details["category"])
+}
+
+type m1CountingSecretBackend struct {
+	secret.SecretBackend
+	reads *atomic.Int32
+}
+
+func (c *m1CountingSecretBackend) Get(ctx context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+	c.reads.Add(1)
+	return c.SecretBackend.Get(ctx, name, scope, scopeID)
+}
+
+// TestTriggerDispatcher_M1RecordedAuthorityPreEgressProductionWiring proves M1
+// through the real production serverTriggerCore / resolveRecordedAuthority /
+// SystemOneRuntime / SecretBackend wiring:
+//   - authorized author (project-member): secret read + provider call occur;
+//   - de-roled author (downgraded to project-viewer): 0 secret reads, 0 provider
+//     calls, terminal refused fire with ErrFireRecordedAuthorityRefused;
+//   - removed author (project role binding deleted): 0 secret reads, 0 provider
+//     calls, terminal refused fire with ErrFireRecordedAuthorityRefused;
+//   - deleted author (user deleted from store): 0 secret reads, 0 provider calls,
+//     terminal refused fire with ErrFireRecordedAuthorityRefused.
+func TestTriggerDispatcher_M1RecordedAuthorityPreEgressProductionWiring(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+	enableSystemOneExperimentForTriggerTest(t, f.srv, true)
+
+	var providerCalls atomic.Int32
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+		  "results": {
+		    "q1": {"type": "noul", "noul": 0.92}
+		  },
+		  "usage": {"input_tokens": 12, "output_tokens": 2}
+		}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	f.srv.setSystemOneRuntimeOptions(
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+		),
+	)
+
+	var secretReads atomic.Int32
+	f.srv.SetSecretBackend(&m1CountingSecretBackend{
+		SecretBackend: f.srv.secretBackend,
+		reads:         &secretReads,
+	})
+
+	// Create a real enabled typesafe instance via the admin API (stores encrypted API key).
+	superAdmin, err := f.store.GetUser(ctx, hubConfigTokenUser(t, f.store, "m1-s1-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+	createInstRec := doRequestAsUser(t, f.srv, superAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "hub-judge-m1",
+		"adapter": "typesafe",
+		"model":   "jev-1.14.0",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "sk-offline-m1-test-key-0001"},
+	})
+	require.Equal(t, http.StatusCreated, createInstRec.Code, createInstRec.Body.String())
+
+	instRow, err := f.store.GetSystemOneInstanceByName(ctx, "hub-judge-m1")
+	require.NoError(t, err)
+	instRow.Endpoint = tlsSrv.URL
+	require.NoError(t, f.store.UpdateSystemOneInstance(ctx, instRow))
+
+	_, _, err = f.store.SetProjectSystemOneInstances(ctx, f.projectID, []string{"hub-judge-m1"})
+	require.NoError(t, err)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "m1-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	soExpr := `{"inputs":["event.subject"],"spec":{"version":1,"binding":{"instance":"hub-judge-m1"},"questions":[{"id":"q1","type":"binary","instructions":"Is this urgent?"}],"output":{"question":"q1"}}}`
+
+	// Trigger 1 authored by f.member (project-member).
+	tr1Rec := f.doTrigger(t, f.memberAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "m1-member-trig",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: "cel", Expr: `event.type == "webhook.received"`},
+				{Dialect: "system_one", Expr: soExpr},
+			},
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "alert"},
+	})
+	require.Equal(t, http.StatusCreated, tr1Rec.Code, tr1Rec.Body.String())
+	var tr1 TriggerResponse
+	require.NoError(t, json.Unmarshal(tr1Rec.Body.Bytes(), &tr1))
+
+	// Construct the real production dispatcher wired to serverTriggerCore.
+	disp, err := f.srv.newTriggerDispatcher(nil)
+	require.NoError(t, err)
+
+	dispatchAndLoadFire := func(evTag, triggerID string) *store.TriggerFire {
+		t.Helper()
+		ev := &store.TriggerEvent{
+			ID:         tid("m1-ev-" + evTag),
+			ProjectID:  f.projectID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   ep.ID,
+			EventType:  "webhook.received",
+			Subject:    "production outage on auth",
+			ReceivedAt: time.Now().UTC(),
+		}
+		require.NoError(t, f.store.CreateTriggerEvent(ctx, ev))
+		payload, mErr := json.Marshal(trigger.EventQueuePayload{
+			Version: trigger.EventQueuePayloadVersion,
+			EventID: ev.ID,
+		})
+		require.NoError(t, mErr)
+		res := disp.HandleItem(ctx, durablequeue.Item{
+			Kind:     trigger.EventQueueKind,
+			DedupKey: ev.ID,
+			Payload:  payload,
+		}, nil)
+		require.True(t, res.Done, "event %s HandleItem should finish: err=%v retryAt=%v", evTag, res.Err, res.RetryAt)
+
+		fires, lErr := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+			ProjectID: f.projectID,
+			TriggerID: triggerID,
+		}, store.ListOptions{Limit: 20})
+		require.NoError(t, lErr)
+		for i := range fires.Items {
+			if fires.Items[i].EventID == ev.ID {
+				return &fires.Items[i]
+			}
+		}
+		t.Fatalf("no fire recorded for event %s trigger %s", ev.ID, triggerID)
+		return nil
+	}
+
+	// 1. Authorized positive control: f.member has project-member -> secret read & provider call occur.
+	secretReads.Store(0)
+	providerCalls.Store(0)
+	fireOK := dispatchAndLoadFire("authorized", tr1.ID)
+	assert.Equal(t, int32(1), providerCalls.Load(), "authorized author must reach System One provider")
+	assert.GreaterOrEqual(t, secretReads.Load(), int32(1), "authorized author must read provider secret")
+	assert.NotEqual(t, store.TriggerFireStatusRefused, fireOK.Status, "authorized positive control must not be refused (err=%q)", fireOK.Error)
+	assert.NotEqual(t, trigger.ErrFireRecordedAuthorityRefused, fireOK.Error)
+
+	// 2. De-roled author: downgrade f.member from project-member to project-viewer.
+	_, err = f.store.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.member.ID)
+	require.NoError(t, err)
+	viewerRD, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: viewerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      f.member.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.projectID,
+		CreatedBy:        f.owner.ID,
+		CreatedAt:        time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	secretReads.Store(0)
+	providerCalls.Store(0)
+	fireDeroled := dispatchAndLoadFire("deroled", tr1.ID)
+	assert.Equal(t, int32(0), providerCalls.Load(), "de-roled author must cause zero provider calls")
+	assert.Equal(t, int32(0), secretReads.Load(), "de-roled author must cause zero secret reads")
+	assert.Equal(t, store.TriggerFireStatusRefused, fireDeroled.Status)
+	assert.Equal(t, trigger.ErrFireRecordedAuthorityRefused, fireDeroled.Error)
+	assert.Equal(t, "0/0", fireDeroled.MatchedThrough)
+
+	// 3. Removed author: remove all project role bindings for f.member.
+	_, err = f.store.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.member.ID)
+	require.NoError(t, err)
+
+	secretReads.Store(0)
+	providerCalls.Store(0)
+	fireRemoved := dispatchAndLoadFire("removed", tr1.ID)
+	assert.Equal(t, int32(0), providerCalls.Load(), "removed author must cause zero provider calls")
+	assert.Equal(t, int32(0), secretReads.Load(), "removed author must cause zero secret reads")
+	assert.Equal(t, store.TriggerFireStatusRefused, fireRemoved.Status)
+	assert.Equal(t, trigger.ErrFireRecordedAuthorityRefused, fireRemoved.Error)
+	assert.Equal(t, "0/0", fireRemoved.MatchedThrough)
+
+	// Pause tr1 so only tr2 is evaluated for the deleted-author case.
+	pauseRec := f.doTrigger(t, f.ownerAuth, tr1.ID+"/pause", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
+
+	// 4. Deleted author: create a fresh project-member user, author tr2, then delete the user.
+	delUser := &store.User{
+		ID:          tid("m1-del-user"),
+		Email:       "m1-del-user@triggers.example.com",
+		DisplayName: "M1 Deleted Author",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateUser(ctx, delUser))
+	memberRD, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      delUser.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.projectID,
+		CreatedBy:        f.owner.ID,
+		CreatedAt:        time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	delUserAuth := NewAuthenticatedUser(delUser.ID, delUser.Email, delUser.DisplayName, delUser.Role, "api")
+
+	tr2Rec := f.doTrigger(t, delUserAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "m1-deleted-author-trig",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: "system_one", Expr: soExpr},
+			},
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "alert"},
+	})
+	require.Equal(t, http.StatusCreated, tr2Rec.Code, tr2Rec.Body.String())
+	var tr2 TriggerResponse
+	require.NoError(t, json.Unmarshal(tr2Rec.Body.Bytes(), &tr2))
+
+	require.NoError(t, f.store.DeleteUser(ctx, delUser.ID))
+
+	secretReads.Store(0)
+	providerCalls.Store(0)
+	fireDeleted := dispatchAndLoadFire("deleted", tr2.ID)
+	assert.Equal(t, int32(0), providerCalls.Load(), "deleted author must cause zero provider calls")
+	assert.Equal(t, int32(0), secretReads.Load(), "deleted author must cause zero secret reads")
+	assert.Equal(t, store.TriggerFireStatusRefused, fireDeleted.Status)
+	assert.Equal(t, trigger.ErrFireRecordedAuthorityRefused, fireDeleted.Error)
+	assert.Equal(t, "0/0", fireDeleted.MatchedThrough)
 }

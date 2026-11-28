@@ -124,16 +124,70 @@ type serverTriggerCore struct {
 }
 
 var (
-	_ trigger.Core                 = serverTriggerCore{}
-	_ trigger.FireAdmitter         = serverTriggerCore{}
-	_ trigger.SourceAuthorizer     = serverTriggerCore{}
-	_ trigger.SourceEnricher       = serverTriggerCore{}
-	_ trigger.PostEvaluationHook   = serverTriggerCore{}
-	_ trigger.ReuseMessageRenderer = serverTriggerCore{}
-	_ trigger.PreFireRefuser       = serverTriggerCore{}
-	_ trigger.RetryTargetChecker   = serverTriggerCore{}
-	_ trigger.FireOutcomeNotifier  = serverTriggerCore{}
+	_ trigger.Core                     = serverTriggerCore{}
+	_ trigger.FireAdmitter             = serverTriggerCore{}
+	_ trigger.SourceAuthorizer         = serverTriggerCore{}
+	_ trigger.RecordedAuthorityChecker = serverTriggerCore{}
+	_ trigger.SourceEnricher           = serverTriggerCore{}
+	_ trigger.PostEvaluationHook       = serverTriggerCore{}
+	_ trigger.ReuseMessageRenderer     = serverTriggerCore{}
+	_ trigger.PreFireRefuser           = serverTriggerCore{}
+	_ trigger.RetryTargetChecker       = serverTriggerCore{}
+	_ trigger.FireOutcomeNotifier      = serverTriggerCore{}
 )
+
+// CheckRecordedAuthority implements trigger.RecordedAuthorityChecker for System
+// One-bearing triggers before any model evaluation or egress (T2 M1). It reuses
+// resolveRecordedAuthority and checks live trigger.update RBAC admission for
+// the resolved user principal outside any database transaction. Terminal
+// authority denials return (trigger.ErrFireRecordedAuthorityRefused, nil);
+// transient lookup or context errors return ("", err) so the queue retries
+// without recording a terminal refusal and with zero provider I/O.
+func (c serverTriggerCore) CheckRecordedAuthority(ctx context.Context, tr *store.Trigger) (string, error) {
+	if c.srv == nil || tr == nil {
+		return "", errors.New("trigger recorded authority checker unavailable")
+	}
+	const permID = "trigger.update"
+	rec := hubfire.RecordedAuthority{
+		DefinitionKind: hubfire.DefinitionKindTrigger,
+		DefinitionID:   tr.ID,
+		Attribution:    tr.InitiatorAttribution,
+		Ceiling:        tr.AuthorityCeiling,
+	}
+	auth, identity, err := c.srv.resolveRecordedAuthority(ctx, rec, tr.ProjectID, permID)
+	if err != nil {
+		if errors.Is(err, errScheduledAuthorityDenied) || errors.Is(err, errScheduledAuthorityUnrecorded) {
+			return trigger.ErrFireRecordedAuthorityRefused, nil
+		}
+		return "", err
+	}
+	if !EffectCeilingAllows(auth.Ceiling, permID, false) {
+		return trigger.ErrFireRecordedAuthorityRefused, nil
+	}
+	if auth.PrincipalKind == store.DelegationPrincipalUser {
+		userIdent, ok := identity.(UserIdentity)
+		if !ok {
+			return trigger.ErrFireRecordedAuthorityRefused, nil
+		}
+		if c.srv.authzService == nil {
+			return "", errors.New("authorization service is uninitialized")
+		}
+		decision := c.srv.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(userIdent),
+			Credential: credentialContextForIdentity(userIdent),
+			Resource:   triggerResource(tr.ProjectID),
+			Action:     ActionUpdate,
+			Permission: permID,
+		})
+		if !decision.Allowed {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
+			return trigger.ErrFireRecordedAuthorityRefused, nil
+		}
+	}
+	return "", nil
+}
 
 func (c serverTriggerCore) NotifyFireOutcome(ctx context.Context, tr *store.Trigger, fire *store.TriggerFire, outcome hubfire.FireOutcome) {
 	if c.srv == nil {
