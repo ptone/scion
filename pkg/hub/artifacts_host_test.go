@@ -579,16 +579,16 @@ func TestArtifactHostMessageRoute(t *testing.T) {
 		wantOK bool
 	}{
 		{
-			name:   "topic message",
+			name:   "topic message without ConversationID returns false",
 			msgID:  msgTopicID,
-			want:   artifacts.SourceMessageRoute{ConversationKey: topicID, ProjectID: projID},
-			wantOK: true,
+			want:   artifacts.SourceMessageRoute{},
+			wantOK: false,
 		},
 		{
-			name:   "dm thread message",
+			name:   "dm thread message without ConversationID returns false",
 			msgID:  msgDMThreadID,
-			want:   artifacts.SourceMessageRoute{ConversationKey: dmKey},
-			wantOK: true,
+			want:   artifacts.SourceMessageRoute{},
+			wantOK: false,
 		},
 		{
 			name:   "direct conversation without ThreadID",
