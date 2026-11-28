@@ -92,6 +92,11 @@ func deepCopyValue(v any) any {
 //   - message.id and message.created_at are ABSENT in policy scopes (pre-persist)
 //     and present in trigger_chat (post-persist).
 //   - message.body is truncated UTF-8 safely to MaxBodyBytes (16 KiB).
+//   - ScopeTriggerChat: Project(f, ScopeTriggerChat).Map() returns the inner
+//     `event` object ({"actor": ..., "target": ..., "message": {..., "context": ...}}).
+//     Callers evaluating against Declarations(ScopeTriggerChat, NamingTrigger)
+//     (which declares the top-level `event` variable) wrap it as
+//     map[string]any{"event": act.Map()}.
 //   - ScopeLegacyPolicyV1 emits strictly today's frozen message_policy v1 keys
 //     (test/compatibility mirror; production legacy activation stays in
 //     pkg/messagepolicy).
@@ -132,7 +137,7 @@ func projectPolicy(f Facts, scope Scope, visibleEnd *End) map[string]any {
 		"message":      projectMessage(f.Message, scope, visibleEnd),
 		"conversation": projectConversation(f.Conversation, scope),
 		"mentions":     projectMentions(f.Mentions, scope),
-		"delivery":     projectDelivery(f.Delivery),
+		"delivery":     projectDelivery(f.Delivery, scope),
 	}
 	if (scope == ScopePolicyOut || scope == ScopePolicyA2A) && f.Sender != nil {
 		vars["sender"] = projectEnd(*f.Sender)
@@ -148,7 +153,7 @@ func projectTriggerChat(f Facts) map[string]any {
 	msgMap["context"] = map[string]any{
 		"conversation": projectConversation(f.Conversation, ScopeTriggerChat),
 		"mentions":     projectMentions(f.Mentions, ScopeTriggerChat),
-		"delivery":     projectDelivery(f.Delivery),
+		"delivery":     projectDelivery(f.Delivery, ScopeTriggerChat),
 	}
 	eventMap := map[string]any{
 		"message": msgMap,
@@ -465,14 +470,20 @@ func projectMentions(m MentionsFacts, scope Scope) map[string]any {
 	return out
 }
 
-func projectDelivery(d DeliveryFacts) map[string]any {
-	return map[string]any{
-		"surface":       d.Surface,
-		"via":           d.Via,
-		"copy":          d.Copy,
-		"cross_project": d.CrossProject,
-		"delegated":     d.Delegated,
+func projectDelivery(d DeliveryFacts, scope Scope) map[string]any {
+	out := map[string]any{
+		"surface":   d.Surface,
+		"via":       d.Via,
+		"copy":      d.Copy,
+		"delegated": d.Delegated,
 	}
+	// Amendment A2 §2.3: delivery.cross_project is opposite-end-derived
+	// (SenderProjectID != RecipientProjectID) and statically invisible in
+	// policy_out and policy_in; present in policy_a2a and trigger_chat.
+	if scope == ScopePolicyA2A || scope == ScopeTriggerChat {
+		out["cross_project"] = d.CrossProject
+	}
+	return out
 }
 
 func cloneStringsNonNil(in []string) []string {

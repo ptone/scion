@@ -178,7 +178,6 @@
       },
       "delivery": {
         "copy": true,
-        "cross_project": false,
         "delegated": false,
         "surface": "mention_delivery",
         "via": "body-mention"
@@ -233,7 +232,6 @@
       },
       "delivery": {
         "copy": true,
-        "cross_project": false,
         "delegated": false,
         "surface": "mention_delivery",
         "via": "body-mention"

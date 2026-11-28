@@ -587,6 +587,13 @@ func goldenFixtureCases(t *testing.T) []fixtureCase {
 	}
 }
 
+// buildGolden constructs a golden fixture across all 4 canonical scopes.
+// Note (O-6): in production, callers build pre-persist policy Facts (empty ID,
+// BodySourceEvaluatedInput or BodySourceCopyBody) and post-persist trigger Facts
+// (non-empty ID, BodySourcePersisted) separately. Shared kind×origin goldens
+// project one Facts record across all 4 scopes for compact regression pinning
+// (text_agent_instruction uses BodySourceEvaluatedInput and
+// text_agent_mention_copy uses BodySourceCopyBody).
 func buildGolden(t *testing.T, tc fixtureCase) goldenFixture {
 	t.Helper()
 	facts, err := rulefacts.FromMessage(tc.input, tc.conv, tc.deliv)

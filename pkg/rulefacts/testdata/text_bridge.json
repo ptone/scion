@@ -166,7 +166,6 @@
       },
       "delivery": {
         "copy": false,
-        "cross_project": false,
         "delegated": false,
         "surface": "group_post",
         "via": "explicit"
@@ -224,7 +223,6 @@
       },
       "delivery": {
         "copy": false,
-        "cross_project": false,
         "delegated": false,
         "surface": "group_post",
         "via": "explicit"

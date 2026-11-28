@@ -69,6 +69,8 @@ func TestRegistry_IdentityRefComplete(t *testing.T) {
 		{"message.interaction.kind", rulefacts.ScopePolicyOut, rulefacts.IdentityRefNone},
 		{"message.system.category", rulefacts.ScopePolicyOut, rulefacts.IdentityRefNone},
 		{"delivery.surface", rulefacts.ScopePolicyOut, rulefacts.IdentityRefNone},
+		{"delivery.cross_project", rulefacts.ScopePolicyOut, rulefacts.IdentityRefOppositeEnd},
+		{"delivery.cross_project", rulefacts.ScopePolicyIn, rulefacts.IdentityRefOppositeEnd},
 	}
 	for _, tc := range cases {
 		f, ok := rulefacts.Schema.Lookup(tc.path)
@@ -126,11 +128,12 @@ func TestSchema_VisibilityAndValidatePath(t *testing.T) {
 		assert.Error(t, rulefacts.Schema.ValidatePath(sc, "message.nonexistent_field"))
 	}
 
-	// A1 §B.2 static visibility: always-dropped paths must exclude policy_out and policy_in.
+	// A1 §B.2 & A2 §2.3 static visibility: always-dropped paths must exclude policy_out and policy_in.
 	for _, p := range []string{
 		"message.event.subject",
 		"message.event.reason",
 		"message.event.templated_vars",
+		"delivery.cross_project",
 	} {
 		assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopePolicyOut, p))
 		assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopePolicyIn, p))
@@ -148,23 +151,21 @@ func TestSchema_VisibilityAndValidatePath(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, rulefacts.CELKindTimestamp, fireAtField.Type.Kind)
 
-	// Legacy scope must NOT widen the frozen v1 surface.
-	for _, newPath := range []string{
+	// O-2: ScopeLegacyPolicyV1 is mirror-only (uses legacy flat names, not
+	// canonical registry paths), so it has no bit in Schema.Fields and
+	// ValidatePath rejects it for all paths.
+	assert.Equal(t, rulefacts.ScopeSet(0), rulefacts.ScopeLegacyPolicyV1.Bit())
+	assert.Empty(t, rulefacts.Schema.VisibleIn(rulefacts.ScopeLegacyPolicyV1))
+	for _, p := range []string{
 		"message.kind",
 		"message.origin",
-		"message.body_source",
-		"message.event",
-		"message.interaction",
-		"message.system",
+		"message.type",
+		"delivery.surface",
+		"surface",
 		"sender.attributes",
-		"sender.created_by",
-		"sender.root_user_id",
-		"recipient.project_id",
-		"recipient.attributes",
 		"conversation.ref",
-		"conversation.id",
 	} {
-		assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopeLegacyPolicyV1, newPath),
-			"legacy_policy_v1 must not expose new path %q", newPath)
+		assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopeLegacyPolicyV1, p),
+			"legacy_policy_v1 is mirror-only and must not validate path %q in Schema", p)
 	}
 }

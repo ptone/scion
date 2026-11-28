@@ -17,6 +17,7 @@ package rulefacts
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -35,7 +36,10 @@ import (
 // UNTRUNCATED evaluated input (the composite intro+prompt for E1/E2, or the
 // delivered copy body for mention copies) together with BodySource set;
 // FromMessage and Project compute message.bytes and message.body_truncated
-// against MaxBodyBytes (16 KiB).
+// against MaxBodyBytes (16 KiB). Callers build pre-persist policy Facts
+// (empty ID, BodySourceEvaluatedInput or BodySourceCopyBody) and post-persist
+// trigger Facts (non-empty ID, BodySourcePersisted) separately, because
+// BodySource belongs to Facts rather than to the projection scope.
 type MessageInput struct {
 	// Persisted identity (present for post-persist trigger_chat; empty for pre-persist policy scopes).
 	ID        string
@@ -268,7 +272,10 @@ func FromMessage(in MessageInput, conv ConversationInfo, deliv DeliveryInfo) (Fa
 		}
 	}
 
-	origin := deriveOrigin(in, conv.Surface, isHubTrigger, isHubScheduler)
+	origin, err := deriveOrigin(in, conv.Surface, isHubTrigger, isHubScheduler)
+	if err != nil {
+		return Facts{}, err
+	}
 
 	// Body truncation & body_source.
 	truncBody, origBytes, wasTruncated := TruncateBodyUTF8(in.Body, MaxBodyBytes)
@@ -398,33 +405,33 @@ func isHubMintedSchedulerSender(in MessageInput) bool {
 		in.Metadata["system_category"] == "scheduler"
 }
 
-func deriveOrigin(in MessageInput, convSurface string, isHubTrigger, isHubScheduler bool) MessageOrigin {
+func deriveOrigin(in MessageInput, convSurface string, isHubTrigger, isHubScheduler bool) (MessageOrigin, error) {
 	if isHubTrigger {
-		return OriginTrigger
+		return OriginTrigger, nil
 	}
 	if isHubScheduler {
-		return OriginScheduler
+		return OriginScheduler, nil
 	}
 	if in.IsBridgeSender && convSurface != "" && convSurface != "native" {
-		return OriginBridge
+		return OriginBridge, nil
 	}
 	switch {
 	case strings.HasPrefix(in.Sender, "user:"):
-		return OriginUser
+		return OriginUser, nil
 	case strings.HasPrefix(in.Sender, "agent:"):
-		return OriginAgent
+		return OriginAgent, nil
 	case strings.HasPrefix(in.Sender, "system:"):
-		return OriginSystem
+		return OriginSystem, nil
 	}
 	if in.SenderEnd != nil {
 		switch in.SenderEnd.Kind {
 		case EndKindUser:
-			return OriginUser
+			return OriginUser, nil
 		case EndKindAgent:
-			return OriginAgent
+			return OriginAgent, nil
 		}
 	}
-	return OriginSystem
+	return "", fmt.Errorf("rulefacts: unrecognised sender %q", in.Sender)
 }
 
 func mapLegacyType(oldType, systemCategory string, hasAddressee bool) (MessageKind, TextIntent, *EventFacts) {

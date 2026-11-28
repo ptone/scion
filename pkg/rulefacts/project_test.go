@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,11 +41,11 @@ func walkStrings(path string, v any, fn func(path, val string)) {
 		fn(path, x)
 	case []string:
 		for i, s := range x {
-			fn(path+"["+string(rune('0'+i))+"]", s)
+			fn(path+"["+strconv.Itoa(i)+"]", s)
 		}
 	case []any:
 		for i, elem := range x {
-			walkStrings(path+"["+string(rune('0'+i))+"]", elem, fn)
+			walkStrings(path+"["+strconv.Itoa(i)+"]", elem, fn)
 		}
 	case map[string]any:
 		for k, val := range x {
@@ -77,18 +78,25 @@ func walkStrings(path string, v any, fn func(path, val string)) {
 //     source.id equals the visible end's ID.
 //   - policy_a2a and trigger_chat retain the seeded IDs.
 func TestProject_NoOppositeEndLeak(t *testing.T) {
+	// Amendment A2 §3 distinct-id discipline: every principal role carries a
+	// distinct ID so coincidental equality never masks a leak.
 	const (
-		senderID     = "11111111-1111-1111-1111-111111111111"
-		recipientID  = "22222222-2222-2222-2222-222222222222"
-		thirdPartyID = "33333333-3333-3333-3333-333333333333"
+		senderID          = "11111111-1111-1111-1111-111111111111"
+		senderCreatedByID = "11111111-1111-1111-1111-111111111112"
+		senderRootUserID  = "11111111-1111-1111-1111-111111111113"
+		recipientID       = "22222222-2222-2222-2222-222222222222"
+		thirdPartyID      = "33333333-3333-3333-3333-333333333333"
 	)
 
 	sender := rulefacts.EndFromAgentWithLookup(
 		rulefacts.AgentInput{
-			ID:        senderID,
-			Slug:      "sender-agent",
-			Name:      "Sender Agent",
-			ProjectID: "proj-1",
+			ID:            senderID,
+			Slug:          "sender-agent",
+			Name:          "Sender Agent",
+			ProjectID:     "proj-1",
+			CreatedByKind: "user",
+			CreatedByID:   senderCreatedByID,
+			RootUserID:    senderRootUserID,
 		},
 		nil,
 		func() (string, rulefacts.TemplateLookupStatus) { return "developer", rulefacts.TemplateLookupOK },
@@ -97,7 +105,7 @@ func TestProject_NoOppositeEndLeak(t *testing.T) {
 		ID:          recipientID,
 		Slug:        "recipient-user",
 		DisplayName: "Recipient User",
-		ProjectID:   "proj-1",
+		ProjectID:   "proj-2",
 	})
 
 	t.Run("direct_dm_and_seeded_event_fields", func(t *testing.T) {
@@ -149,20 +157,28 @@ func TestProject_NoOppositeEndLeak(t *testing.T) {
 				UserIDs:    []string{recipientID},
 			},
 			Delivery: rulefacts.DeliveryFacts{
-				Surface: "agent_to_user",
-				Via:     "direct",
+				Surface:      "agent_to_user",
+				Via:          "direct",
+				CrossProject: true,
 			},
 		}
 
-		// policy_out: must leak neither recipientID nor thirdPartyID anywhere.
+		// policy_out: must leak neither recipientID nor thirdPartyID anywhere,
+		// and delivery.cross_project must be absent (Amendment A2 §2.3).
 		outMap := rulefacts.Project(facts, rulefacts.ScopePolicyOut).Map()
 		_, hasRecipient := outMap["recipient"]
 		assert.False(t, hasRecipient, "recipient must be absent in policy_out")
+		assert.NotContains(t, outMap["delivery"].(map[string]any), "cross_project", "A2: delivery.cross_project must be absent in policy_out")
 		convOut := outMap["conversation"].(map[string]any)
 		_, hasRef := convOut["ref"]
 		_, hasID := convOut["id"]
 		assert.False(t, hasRef, "D1: conversation.ref must be absent for direct DM in policy_out")
 		assert.False(t, hasID, "D1: conversation.id must be absent for direct DM in policy_out")
+		assert.NotContains(t, convOut, "agent_participant_ids")
+		assert.NotContains(t, convOut, "user_participant_ids")
+		mentionsOut := outMap["mentions"].(map[string]any)
+		assert.NotContains(t, mentionsOut, "agent_ids")
+		assert.NotContains(t, mentionsOut, "user_ids")
 
 		evOut := outMap["message"].(map[string]any)["event"].(map[string]any)
 		assert.NotContains(t, evOut, "subject")
@@ -178,22 +194,28 @@ func TestProject_NoOppositeEndLeak(t *testing.T) {
 			assert.NotContainsf(t, val, thirdPartyID, "policy_out leaked third-party ID at %s", path)
 		})
 
-		// policy_in: must leak neither senderID nor thirdPartyID anywhere.
-		// Note: here event.source.id == recipientID AND source.kind == "agent" -> wait: recipient is user,
-		// so let's verify senderID and thirdPartyID are absent!
+		// policy_in: must leak neither senderID nor thirdPartyID anywhere,
+		// and delivery.cross_project must be absent (Amendment A2 §2.3).
 		inMap := rulefacts.Project(facts, rulefacts.ScopePolicyIn).Map()
 		_, hasSender := inMap["sender"]
 		assert.False(t, hasSender, "sender must be absent in policy_in")
+		assert.NotContains(t, inMap["delivery"].(map[string]any), "cross_project", "A2: delivery.cross_project must be absent in policy_in")
 		convIn := inMap["conversation"].(map[string]any)
 		assert.NotContains(t, convIn, "ref")
 		assert.NotContains(t, convIn, "id")
+		assert.NotContains(t, convIn, "agent_participant_ids")
+		assert.NotContains(t, convIn, "user_participant_ids")
+		mentionsIn := inMap["mentions"].(map[string]any)
+		assert.NotContains(t, mentionsIn, "agent_ids")
+		assert.NotContains(t, mentionsIn, "user_ids")
 		walkStrings("", inMap, func(path, val string) {
 			assert.NotContainsf(t, val, senderID, "policy_in leaked opposite-end ID at %s", path)
 			assert.NotContainsf(t, val, thirdPartyID, "policy_in leaked third-party ID at %s", path)
 		})
 
-		// policy_a2a and trigger_chat: retain seeded IDs.
+		// policy_a2a and trigger_chat: retain seeded IDs and delivery.cross_project.
 		a2aMap := rulefacts.Project(facts, rulefacts.ScopePolicyA2A).Map()
+		assert.Equal(t, true, a2aMap["delivery"].(map[string]any)["cross_project"])
 		evA2A := a2aMap["message"].(map[string]any)["event"].(map[string]any)
 		assert.Equal(t, "agent:"+thirdPartyID, evA2A["subject"])
 		assert.Contains(t, evA2A["reason"], recipientID)
@@ -201,6 +223,8 @@ func TestProject_NoOppositeEndLeak(t *testing.T) {
 		assert.Equal(t, []string{"actor:" + recipientID, "cc:" + thirdPartyID}, evA2A["templated_vars"])
 
 		trigMap := rulefacts.Project(facts, rulefacts.ScopeTriggerChat).Map()
+		trigDelivery := trigMap["message"].(map[string]any)["context"].(map[string]any)["delivery"].(map[string]any)
+		assert.Equal(t, true, trigDelivery["cross_project"])
 		evTrig := trigMap["message"].(map[string]any)["event"].(map[string]any)
 		assert.Equal(t, "agent:"+thirdPartyID, evTrig["subject"])
 		assert.Equal(t, recipientID, evTrig["source"].(map[string]any)["id"])
@@ -281,6 +305,259 @@ func TestProject_OutOfScopeCompileFailsWithLineColumn(t *testing.T) {
 	assert.Equal(t, celengine.CategoryUnknownVariable, ce.Category)
 	assert.GreaterOrEqual(t, ce.Line, 1)
 	assert.GreaterOrEqual(t, ce.Column, 1)
+
+	// Amendment A2 §2.3 / §3.4: delivery.cross_project is statically invisible
+	// in policy_out (and policy_in). In R1 (map declarations + authoring path
+	// check), Schema.ValidatePath rejects it at authoring time and direct CEL
+	// evaluation against Project(policy_out) yields missing_input.
+	assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopePolicyOut, "delivery.cross_project"))
+	assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopePolicyIn, "delivery.cross_project"))
+	cpProg, err := outEng.Compile(`delivery.cross_project`, celengine.Kind{Name: "violation", Result: celengine.Bool()})
+	require.NoError(t, err)
+	_, _, evalErr := cpProg.Eval(context.Background(), rulefacts.Project(rulefacts.Facts{
+		Message:  rulefacts.MessageFacts{Kind: rulefacts.KindText, Type: "chat", Origin: rulefacts.OriginAgent, BodySource: rulefacts.BodySourceEvaluatedInput},
+		Delivery: rulefacts.DeliveryFacts{Surface: "agent_to_user", CrossProject: true},
+	}, rulefacts.ScopePolicyOut).Map())
+	var ee *celengine.EvalError
+	require.True(t, errors.As(evalErr, &ee), "expected *EvalError on delivery.cross_project in policy_out, got %T: %v", evalErr, evalErr)
+	assert.Equal(t, celengine.ReasonMissingInput, ee.Reason)
+}
+
+// TestProject_RecipientInvariance_Out verifies Amendment A2 §2.1 & §3.1:
+// Project(facts, ScopePolicyOut) is byte-identical (JSON-canonical) when only
+// the recipient end varies (id, slug, project_id, all attributes and labels,
+// created_by, root_user_id — including flipping Delivery.CrossProject).
+func TestProject_RecipientInvariance_Out(t *testing.T) {
+	sender := rulefacts.EndFromAgentWithLookup(
+		rulefacts.AgentInput{
+			ID:            "agent-sender-1",
+			Slug:          "dev-worker",
+			Name:          "Dev Worker",
+			ProjectID:     "proj-A",
+			CreatedByKind: "user",
+			CreatedByID:   "user-creator-1",
+			RootUserID:    "user-root-1",
+			Labels:        map[string]string{"role": "developer"},
+		},
+		&rulefacts.AppliedConfigInput{TemplateID: "tmpl-1", TemplateHash: "sha256:v1"},
+		func() (string, rulefacts.TemplateLookupStatus) { return "developer", rulefacts.TemplateLookupOK },
+	)
+
+	recipient1 := rulefacts.EndFromAgentWithLookup(
+		rulefacts.AgentInput{
+			ID:            "agent-recip-1",
+			Slug:          "recip-one",
+			Name:          "Recipient One",
+			ProjectID:     "proj-A",
+			CreatedByKind: "user",
+			CreatedByID:   "user-recip-creator-1",
+			RootUserID:    "user-recip-root-1",
+			Labels:        map[string]string{"tier": "alpha"},
+		},
+		&rulefacts.AppliedConfigInput{TemplateID: "tmpl-r1", TemplateHash: "sha256:r1"},
+		func() (string, rulefacts.TemplateLookupStatus) { return "reviewer", rulefacts.TemplateLookupOK },
+	)
+	recipient2 := rulefacts.EndFromAgentWithLookup(
+		rulefacts.AgentInput{
+			ID:            "agent-recip-2",
+			Slug:          "recip-two",
+			Name:          "Recipient Two",
+			ProjectID:     "proj-B", // differs from sender.ProjectID -> flips CrossProject!
+			CreatedByKind: "agent",
+			CreatedByID:   "agent-recip-creator-2",
+			RootUserID:    "user-recip-root-2",
+			Labels:        map[string]string{"tier": "beta", "extra": "yes"},
+		},
+		&rulefacts.AppliedConfigInput{TemplateID: "tmpl-r2", TemplateHash: "sha256:r2"},
+		func() (string, rulefacts.TemplateLookupStatus) { return "", rulefacts.TemplateLookupNotFound },
+	)
+
+	buildFacts := func(recip *rulefacts.End) rulefacts.Facts {
+		f, err := rulefacts.FromMessage(
+			rulefacts.MessageInput{
+				Type:         messages.TypeInstruction,
+				Sender:       "agent:dev-worker",
+				SenderID:     sender.ID,
+				Recipient:    "agent:" + recip.Slug,
+				Body:         "Status update",
+				BodySource:   rulefacts.BodySourceEvaluatedInput,
+				SenderEnd:    &sender,
+				RecipientEnd: recip,
+			},
+			rulefacts.ConversationInfo{
+				Ref:        "dm:agent:" + sender.ID + ":agent:" + recip.ID,
+				ID:         "conv-dm-" + recip.ID,
+				Kind:       "direct",
+				Surface:    "native",
+				ProjectID:  "proj-A",
+				AgentCount: 2,
+			},
+			rulefacts.DeliveryInfo{
+				Surface: "agent_dm",
+				Via:     "direct",
+			},
+		)
+		require.NoError(t, err)
+		return f
+	}
+
+	f1 := buildFacts(&recipient1)
+	f2 := buildFacts(&recipient2)
+	require.False(t, f1.Delivery.CrossProject)
+	require.True(t, f2.Delivery.CrossProject)
+
+	b1, err := json.Marshal(rulefacts.Project(f1, rulefacts.ScopePolicyOut).Map())
+	require.NoError(t, err)
+	b2, err := json.Marshal(rulefacts.Project(f2, rulefacts.ScopePolicyOut).Map())
+	require.NoError(t, err)
+	assert.Equal(t, string(b1), string(b2), "policy_out projection must be byte-identical when only the recipient end changes")
+}
+
+// TestProject_SenderInvariance_In verifies Amendment A2 §2.1 & §3.1:
+// Project(facts, ScopePolicyIn) is byte-identical (JSON-canonical) when only
+// the sender end varies.
+func TestProject_SenderInvariance_In(t *testing.T) {
+	recipient := rulefacts.EndFromAgentWithLookup(
+		rulefacts.AgentInput{
+			ID:            "agent-recip-1",
+			Slug:          "dev-worker",
+			Name:          "Dev Worker",
+			ProjectID:     "proj-A",
+			CreatedByKind: "user",
+			CreatedByID:   "user-creator-1",
+			RootUserID:    "user-root-1",
+			Labels:        map[string]string{"role": "developer"},
+		},
+		&rulefacts.AppliedConfigInput{TemplateID: "tmpl-1", TemplateHash: "sha256:v1"},
+		func() (string, rulefacts.TemplateLookupStatus) { return "developer", rulefacts.TemplateLookupOK },
+	)
+
+	sender1 := rulefacts.EndFromAgentWithLookup(
+		rulefacts.AgentInput{
+			ID:            "agent-sender-1",
+			Slug:          "sender-one",
+			Name:          "Sender One",
+			ProjectID:     "proj-A",
+			CreatedByKind: "user",
+			CreatedByID:   "user-s1",
+			RootUserID:    "user-sr1",
+			Labels:        map[string]string{"team": "a"},
+		},
+		&rulefacts.AppliedConfigInput{TemplateID: "tmpl-s1", TemplateHash: "sha256:s1"},
+		func() (string, rulefacts.TemplateLookupStatus) { return "lead", rulefacts.TemplateLookupOK },
+	)
+	sender2 := rulefacts.EndFromAgentWithLookup(
+		rulefacts.AgentInput{
+			ID:            "agent-sender-2",
+			Slug:          "sender-two",
+			Name:          "Sender Two",
+			ProjectID:     "proj-B",
+			CreatedByKind: "agent",
+			CreatedByID:   "agent-s2",
+			RootUserID:    "user-sr2",
+			Labels:        map[string]string{"team": "b"},
+		},
+		&rulefacts.AppliedConfigInput{TemplateID: "tmpl-s2", TemplateHash: "sha256:s2"},
+		func() (string, rulefacts.TemplateLookupStatus) { return "", rulefacts.TemplateLookupError },
+	)
+
+	buildFacts := func(s *rulefacts.End) rulefacts.Facts {
+		f, err := rulefacts.FromMessage(
+			rulefacts.MessageInput{
+				Type:         messages.TypeInstruction,
+				Sender:       "agent:" + s.Slug,
+				SenderID:     s.ID,
+				Recipient:    "agent:" + recipient.Slug,
+				Body:         "Inbound task",
+				BodySource:   rulefacts.BodySourceEvaluatedInput,
+				SenderEnd:    s,
+				RecipientEnd: &recipient,
+			},
+			rulefacts.ConversationInfo{
+				Ref:        "dm:agent:" + s.ID + ":agent:" + recipient.ID,
+				ID:         "conv-dm-" + s.ID,
+				Kind:       "direct",
+				Surface:    "native",
+				ProjectID:  "proj-A",
+				AgentCount: 2,
+			},
+			rulefacts.DeliveryInfo{
+				Surface: "agent_dm",
+				Via:     "direct",
+			},
+		)
+		require.NoError(t, err)
+		return f
+	}
+
+	f1 := buildFacts(&sender1)
+	f2 := buildFacts(&sender2)
+	require.False(t, f1.Delivery.CrossProject)
+	require.True(t, f2.Delivery.CrossProject)
+
+	b1, err := json.Marshal(rulefacts.Project(f1, rulefacts.ScopePolicyIn).Map())
+	require.NoError(t, err)
+	b2, err := json.Marshal(rulefacts.Project(f2, rulefacts.ScopePolicyIn).Map())
+	require.NoError(t, err)
+	assert.Equal(t, string(b1), string(b2), "policy_in projection must be byte-identical when only the sender end changes")
+}
+
+// TestProject_SameEndProvenanceKeptWhenEqualToOppositeEnd verifies Amendment A2
+// §2.2 & §3.3 (positive control): when an agent messages its own creator
+// (sender.created_by.id == recipient.id and sender.root_user_id == recipient.id),
+// same-end provenance remains present in policy_out while recipient.* and
+// delivery.cross_project are absent.
+func TestProject_SameEndProvenanceKeptWhenEqualToOppositeEnd(t *testing.T) {
+	const creatorUserID = "user-uuid-creator-42"
+
+	sender := rulefacts.EndFromAgentWithLookup(
+		rulefacts.AgentInput{
+			ID:            "agent-uuid-1",
+			Slug:          "dev-worker",
+			Name:          "Dev Worker",
+			ProjectID:     "proj-1",
+			CreatedByKind: "user",
+			CreatedByID:   creatorUserID,
+			RootUserID:    creatorUserID,
+		},
+		nil,
+		func() (string, rulefacts.TemplateLookupStatus) { return "developer", rulefacts.TemplateLookupOK },
+	)
+	recipient := rulefacts.EndFromUser(rulefacts.UserInput{
+		ID:          creatorUserID,
+		Slug:        "alice",
+		DisplayName: "Alice",
+		ProjectID:   "proj-1",
+	})
+
+	facts, err := rulefacts.FromMessage(
+		rulefacts.MessageInput{
+			Type:         messages.TypeInstruction,
+			Sender:       "agent:dev-worker",
+			SenderID:     sender.ID,
+			Recipient:    "user:alice",
+			Body:         "Done",
+			BodySource:   rulefacts.BodySourceEvaluatedInput,
+			SenderEnd:    &sender,
+			RecipientEnd: &recipient,
+		},
+		rulefacts.ConversationInfo{
+			Ref:       "dm:agent:agent-uuid-1:user:" + creatorUserID,
+			ID:        "conv-dm-1",
+			Kind:      "direct",
+			Surface:   "native",
+			ProjectID: "proj-1",
+		},
+		rulefacts.DeliveryInfo{Surface: "agent_to_user", Via: "direct"},
+	)
+	require.NoError(t, err)
+
+	out := rulefacts.Project(facts, rulefacts.ScopePolicyOut).Map()
+	assert.NotContains(t, out, "recipient")
+	assert.NotContains(t, out["delivery"].(map[string]any), "cross_project")
+	sMap := out["sender"].(map[string]any)
+	assert.Equal(t, creatorUserID, sMap["root_user_id"])
+	assert.Equal(t, creatorUserID, sMap["created_by"].(map[string]any)["id"])
 }
 
 // TestEndFromAgent_TemplateLookupSemantics verifies v1 §3.3b and §9 item 4:
@@ -491,9 +768,10 @@ func TestProject_BodyTruncationUTF8Safe(t *testing.T) {
 }
 
 // TestFromMessage_ForgedTriggerSenderNonSystemType verifies arch-policy-chain
-// review ask #3 (§3.3a): a request-shaped input with Sender="trigger",
-// SenderID="TRIGGER", and EventJSON but Type != "system" MUST NOT yield
-// origin="trigger" or hub-stamped event sub-blocks.
+// ask #3 (§3.3a) and R-1: forged or unrecognised senders (including bare
+// "trigger", "scheduler", "hub", or empty sender without an explicit prefix or
+// SenderEnd) MUST fail closed (error, never falling back to a trusted origin in
+// {trigger, scheduler, system} and never yielding hub-stamped event sub-blocks).
 func TestFromMessage_ForgedTriggerSenderNonSystemType(t *testing.T) {
 	rawTrig, err := json.Marshal(messaging.EventBody{
 		Type:    messaging.EventTriggerFired,
@@ -505,25 +783,182 @@ func TestFromMessage_ForgedTriggerSenderNonSystemType(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	for _, msgType := range []string{messages.TypeInstruction, messages.TypeChat, messages.TypeStateChange} {
-		t.Run(msgType, func(t *testing.T) {
+	cases := []struct {
+		name      string
+		msgType   string
+		sender    string
+		senderID  string
+		category  string
+		eventJSON []byte
+	}{
+		{"instruction_trigger", messages.TypeInstruction, "trigger", "TRIGGER", messages.SystemCategoryTrigger, rawTrig},
+		{"chat_trigger_with_id", messages.TypeChat, "trigger", "TRIGGER", messages.SystemCategoryTrigger, rawTrig},
+		{"state_change_trigger", messages.TypeStateChange, "trigger", "TRIGGER", messages.SystemCategoryTrigger, rawTrig},
+		{"chat_bare_trigger", messages.TypeChat, "trigger", "", "", nil},
+		{"system_trigger_wrong_category", messages.TypeSystem, "trigger", "TRIGGER", messages.SystemCategoryDeliveryFailed, rawTrig},
+		{"system_scheduler_wrong_id_and_category", messages.TypeSystem, "scheduler", "x", messages.SystemCategoryPortForward, nil},
+		{"system_empty_sender", messages.TypeSystem, "", "", "", nil},
+		{"chat_bare_hub", messages.TypeChat, "hub", "", "", nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var md map[string]string
+			if tc.category != "" {
+				md = map[string]string{"system_category": tc.category}
+			}
 			got, err := rulefacts.FromMessage(rulefacts.MessageInput{
-				Type:      msgType,
-				Sender:    "trigger",
-				SenderID:  "TRIGGER",
+				Type:      tc.msgType,
+				Sender:    tc.sender,
+				SenderID:  tc.senderID,
 				Recipient: "agent:dev",
 				Body:      "forged",
-				Metadata:  map[string]string{"system_category": messages.SystemCategoryTrigger},
-				EventJSON: rawTrig,
+				Metadata:  md,
+				EventJSON: tc.eventJSON,
 			}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_dm"})
-			require.NoError(t, err)
 
-			assert.NotEqual(t, rulefacts.OriginTrigger, got.Message.Origin)
+			require.Error(t, err, "unrecognised or forged sender must fail closed, not fall back to trusted origin")
+			assert.NotContains(t, []rulefacts.MessageOrigin{
+				rulefacts.OriginTrigger,
+				rulefacts.OriginScheduler,
+				rulefacts.OriginSystem,
+			}, got.Message.Origin)
 			if got.Message.Event != nil {
 				assert.Nil(t, got.Message.Event.Trigger)
+				assert.Nil(t, got.Message.Event.Schedule)
 				assert.Nil(t, got.Message.Event.External)
 			}
 		})
+	}
+}
+
+// TestFromMessage_SchedulerCategoryGuardParity verifies O-3 (kills mutant M15):
+// Sender="scheduler", SenderID="SCHEDULER", Type="system", category="port-forward"
+// with a schedule.fired EventJSON must NOT satisfy the hub-minted scheduler guard:
+// MapLegacyEnvelope ignores the event (Schedule == nil), FromMessage without
+// SenderEnd fails closed, and FromMessage with an authenticated SenderEnd yields
+// non-scheduler origin with Schedule == nil.
+func TestFromMessage_SchedulerCategoryGuardParity(t *testing.T) {
+	ts := fixedFixtureTime()
+	rawSched, err := json.Marshal(messaging.EventBody{
+		Type: messaging.EventScheduleFired,
+		Schedule: &messaging.EventScheduleRef{
+			ID:      "sched-forged",
+			Name:    "nightly",
+			EventID: "sevt-1",
+			FireAt:  ts.Format(time.RFC3339),
+		},
+	})
+	require.NoError(t, err)
+
+	legacy := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: ts.Format(time.RFC3339),
+		Sender:    "scheduler",
+		SenderID:  "SCHEDULER",
+		Recipient: "agent:dev",
+		Type:      messages.TypeSystem,
+		Metadata:  map[string]string{"system_category": messages.SystemCategoryPortForward},
+		Event:     rawSched,
+	}
+	mapped, _, err := messaging.MapLegacyEnvelope(legacy, messaging.PersistedIdentity{MessageID: "id-sched-mismatch"})
+	require.NoError(t, err)
+	require.NotNil(t, mapped.Event)
+	assert.Equal(t, messaging.EventPortExposed, mapped.Event.Type)
+	assert.Nil(t, mapped.Event.Schedule, "MapLegacyEnvelope must ignore schedule.fired EventJSON when category != scheduler")
+
+	// 1. Without SenderEnd, bare Sender="scheduler" with wrong category fails closed (R-1 + M15).
+	_, err = rulefacts.FromMessage(rulefacts.MessageInput{
+		Type:      legacy.Type,
+		Sender:    legacy.Sender,
+		SenderID:  legacy.SenderID,
+		Recipient: legacy.Recipient,
+		Metadata:  legacy.Metadata,
+		EventJSON: legacy.Event,
+	}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_dm"})
+	require.Error(t, err)
+
+	// 2. With an authenticated agent SenderEnd, origin is agent and Schedule is nil (parity with MapLegacyEnvelope).
+	agentEnd := rulefacts.EndFromAgentWithLookup(
+		rulefacts.AgentInput{ID: "agent-1", Slug: "dev", ProjectID: "proj-1"},
+		nil,
+		func() (string, rulefacts.TemplateLookupStatus) { return "developer", rulefacts.TemplateLookupOK },
+	)
+	got, err := rulefacts.FromMessage(rulefacts.MessageInput{
+		Type:      legacy.Type,
+		Sender:    legacy.Sender,
+		SenderID:  legacy.SenderID,
+		Recipient: legacy.Recipient,
+		Metadata:  legacy.Metadata,
+		EventJSON: legacy.Event,
+		SenderEnd: &agentEnd,
+	}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_dm"})
+	require.NoError(t, err)
+	assert.Equal(t, rulefacts.OriginAgent, got.Message.Origin)
+	require.NotNil(t, got.Message.Event)
+	assert.Equal(t, string(mapped.Event.Type), got.Message.Event.Type)
+	assert.Nil(t, got.Message.Event.Schedule, "FromMessage must ignore schedule.fired EventJSON when category != scheduler")
+}
+
+// TestProject_AllEmittedPathsMatchSchema verifies O-1: every emitted path
+// across all 10 shared golden fixtures and all 4 canonical scopes passes
+// Schema.ValidatePath (mapping trigger_chat outer roots to canonical paths).
+func TestProject_AllEmittedPathsMatchSchema(t *testing.T) {
+	var walkPaths func(prefix string, m map[string]any, visit func(string))
+	walkPaths = func(prefix string, m map[string]any, visit func(string)) {
+		for k, v := range m {
+			p := k
+			if prefix != "" {
+				p = prefix + "." + k
+			}
+			visit(p)
+			switch sub := v.(type) {
+			case map[string]any:
+				walkPaths(p, sub, visit)
+			case map[string]string:
+				for mk := range sub {
+					visit(p + "." + mk)
+				}
+			}
+		}
+	}
+
+	canonicalize := func(sc rulefacts.Scope, p string) (string, bool) {
+		if sc != rulefacts.ScopeTriggerChat {
+			return p, true
+		}
+		switch {
+		case p == "message.context":
+			return "", false // trigger-scope container wrapper for conversation/mentions/delivery
+		case strings.HasPrefix(p, "message.context."):
+			return strings.TrimPrefix(p, "message.context."), true
+		case p == "actor":
+			return "sender", true
+		case strings.HasPrefix(p, "actor."):
+			return "sender." + strings.TrimPrefix(p, "actor."), true
+		case p == "target":
+			return "recipient", true
+		case strings.HasPrefix(p, "target."):
+			return "recipient." + strings.TrimPrefix(p, "target."), true
+		default:
+			return p, true
+		}
+	}
+
+	for _, tc := range goldenFixtureCases(t) {
+		facts, err := rulefacts.FromMessage(tc.input, tc.conv, tc.deliv)
+		require.NoError(t, err, "fixture %s", tc.name)
+		for _, sc := range rulefacts.AllScopes {
+			m := rulefacts.Project(facts, sc).Map()
+			walkPaths("", m, func(rawPath string) {
+				canon, check := canonicalize(sc, rawPath)
+				if !check {
+					return
+				}
+				assert.NoErrorf(t, rulefacts.Schema.ValidatePath(sc, canon),
+					"fixture %s scope %s emitted path %q (canonical %q) not valid in Schema", tc.name, sc, rawPath, canon)
+			})
+		}
 	}
 }
 

@@ -189,7 +189,6 @@
       },
       "delivery": {
         "copy": false,
-        "cross_project": false,
         "delegated": false,
         "surface": "agent_dm",
         "via": "direct"
@@ -247,7 +246,6 @@
       },
       "delivery": {
         "copy": false,
-        "cross_project": false,
         "delegated": false,
         "surface": "agent_dm",
         "via": "direct"

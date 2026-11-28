@@ -134,7 +134,6 @@
       },
       "delivery": {
         "copy": false,
-        "cross_project": false,
         "delegated": false,
         "surface": "web_chat",
         "via": "explicit"
@@ -171,7 +170,6 @@
       },
       "delivery": {
         "copy": false,
-        "cross_project": false,
         "delegated": false,
         "surface": "web_chat",
         "via": "explicit"

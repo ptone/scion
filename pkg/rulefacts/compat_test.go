@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -192,7 +193,7 @@ func TestPolicyMirror_LegacyV1ExactActivationAndDeclParity(t *testing.T) {
 // is declared and eligible in rulefacts.Schema with matching MaxBytes.
 func TestPolicyMirror_SystemOneContentEnvSubset(t *testing.T) {
 	mpContentEnv := messagepolicy.SystemOneContentEnv()
-	rfFields := rulefacts.Schema.ContentInputFields(rulefacts.ScopeLegacyPolicyV1)
+	rfFields := rulefacts.Schema.ContentInputFields(rulefacts.ScopePolicyA2A)
 	byPath := make(map[string]rulefacts.Field, len(rfFields))
 	for _, f := range rfFields {
 		byPath[f.Path] = f
@@ -207,11 +208,98 @@ func TestPolicyMirror_SystemOneContentEnvSubset(t *testing.T) {
 	}
 }
 
-// TestPolicyMirror_LegacyV1AndChainV2RulesCompileAndEval verifies contract v1
-// §4.3 and §9 item 3: every existing policy fixture rule from legacy env
-// message_policy v1 and P1's chain env v2 compiles against rulefacts.Declarations
-// (plus consumer-owned judgment/chain variables) and evaluates identically.
-func TestPolicyMirror_LegacyV1AndChainV2RulesCompileAndEval(t *testing.T) {
+// TestPolicyMirror_LegacyV1ParityAllSharedFixturesAndEdges verifies O-4:
+// ScopeLegacyPolicyV1 matches messagepolicy.NewActivation (minus consumer-owned
+// judgment_* maps) across all 10 shared golden fixtures plus nil-sender,
+// nil-recipient, and >16 KiB UTF-8 truncated-body edge cases.
+func TestPolicyMirror_LegacyV1ParityAllSharedFixturesAndEdges(t *testing.T) {
+	toMPFacts := func(f rulefacts.Facts, rawBody string) messagepolicy.Facts {
+		mp := messagepolicy.Facts{
+			Surface: f.Delivery.Surface,
+			Message: messagepolicy.MessageFacts{
+				Type:            f.Message.Type,
+				Body:            rawBody,
+				HasChoices:      f.Message.HasChoices,
+				Urgent:          f.Message.Urgent,
+				AttachmentCount: int(f.Message.AttachmentCount),
+			},
+			MentionedAgentIDs: f.Mentions.AgentIDs,
+			MentionedUserIDs:  f.Mentions.UserIDs,
+			Conversation: messagepolicy.ConversationFacts{
+				Kind:                  f.Conversation.Kind,
+				AgentParticipantIDs:   f.Conversation.AgentParticipantIDs,
+				UserParticipantIDs:    f.Conversation.UserParticipantIDs,
+				UnmentionedAgentSlugs: f.Conversation.UnmentionedAgentSlugs,
+			},
+		}
+		if f.Sender != nil {
+			mp.Sender = messagepolicy.SenderFacts{
+				Kind:      string(f.Sender.Kind),
+				ID:        f.Sender.ID,
+				Slug:      f.Sender.Slug,
+				ProjectID: f.Sender.ProjectID,
+			}
+		}
+		if f.Recipient != nil {
+			mp.Recipient = messagepolicy.RecipientFacts{
+				Kind: string(f.Recipient.Kind),
+				ID:   f.Recipient.ID,
+				Slug: f.Recipient.Slug,
+			}
+		}
+		return mp
+	}
+
+	assertParity := func(t *testing.T, f rulefacts.Facts, rawBody string) {
+		t.Helper()
+		mpAct := messagepolicy.NewActivation(toMPFacts(f, rawBody)).Map()
+		delete(mpAct, "judgment_flags")
+		delete(mpAct, "judgment_labels")
+		delete(mpAct, "judgment_scores")
+
+		rfLegacy := rulefacts.Project(f, rulefacts.ScopeLegacyPolicyV1).Map()
+		assert.Equal(t, mpAct, rfLegacy)
+	}
+
+	for _, tc := range goldenFixtureCases(t) {
+		t.Run("fixture_"+tc.name, func(t *testing.T) {
+			f, err := rulefacts.FromMessage(tc.input, tc.conv, tc.deliv)
+			require.NoError(t, err)
+			assertParity(t, f, tc.input.Body)
+		})
+	}
+
+	t.Run("edge_nil_sender_and_recipient", func(t *testing.T) {
+		f, err := rulefacts.FromMessage(
+			rulefacts.MessageInput{Type: "chat", Sender: "system:hub", Body: "notice"},
+			rulefacts.ConversationInfo{Kind: "group", ID: "c-1"},
+			rulefacts.DeliveryInfo{Surface: "group_post"},
+		)
+		require.NoError(t, err)
+		assertParity(t, f, "notice")
+	})
+
+	t.Run("edge_truncated_utf8_body", func(t *testing.T) {
+		rawBody := strings.Repeat("a", rulefacts.MaxBodyBytes-2) + "🚀overflow"
+		f, err := rulefacts.FromMessage(
+			rulefacts.MessageInput{Type: "instruction", Sender: "agent:dev", Body: rawBody},
+			rulefacts.ConversationInfo{Kind: "direct", Ref: "dm:a:b"},
+			rulefacts.DeliveryInfo{Surface: "agent_to_user"},
+		)
+		require.NoError(t, err)
+		assertParity(t, f, rawBody)
+	})
+}
+
+// TestPolicyMirror_LegacyV1AndSyntheticChainShapeSmoke verifies contract v1
+// §4.3 and §9 item 3 (legacy-v1 half): existing policy fixture rules from
+// legacy env message_policy v1 compile and evaluate identically against
+// rulefacts.Declarations(ScopeLegacyPolicyV1, NamingLegacyPolicyV1).
+//
+// The second sub-block is a synthetic chain-shape smoke test combining
+// ScopePolicyA2A with a consumer-owned `chain` map; real P1 chain env v2
+// compatibility is deferred until P1's chain env lands on main.
+func TestPolicyMirror_LegacyV1AndSyntheticChainShapeSmoke(t *testing.T) {
 	v1Vars := append(
 		rulefacts.Declarations(rulefacts.ScopeLegacyPolicyV1, rulefacts.NamingLegacyPolicyV1),
 		celengine.Variable{Name: "judgment_flags", Type: celengine.Map(celengine.String(), celengine.Bool())},
