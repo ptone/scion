@@ -756,6 +756,7 @@ type RecordAnswerSetInput struct {
 	Surface          string // DecisionSurface*; empty defaults to DecisionSurfaceNative
 
 	Answers []AnswerSetItem
+	Comment string // optional single-line plain text (<= 200 runes); trimmed by store
 
 	// ResponseMessage is the one decision-response message of the set,
 	// stored in the same transaction (ID and ProjectID required; Type is

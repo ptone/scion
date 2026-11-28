@@ -139,6 +139,7 @@ func decisionAnswerMode(n int) string {
 type DecisionResponseSetView struct {
 	PromptMessageID string                      `json:"promptMessageId,omitempty"`
 	BatchID         string                      `json:"batchId"`
+	Comment         string                      `json:"comment,omitempty"`
 	Answers         []DecisionResponseSetAnswer `json:"answers"`
 }
 
@@ -596,6 +597,9 @@ func decisionResponseSetViewOf(as []*store.DecisionAnswer, prompts map[string]*s
 	v := DecisionResponseSetView{BatchID: sorted[0].BatchID, Answers: make([]DecisionResponseSetAnswer, 0, len(sorted))}
 	multiPrompt := false
 	for _, a := range sorted {
+		if v.Comment == "" && a.Comment != "" {
+			v.Comment = a.Comment
+		}
 		item := decisionResponseSetAnswerOf(a, prompts[a.DecisionRowID])
 		if item.PromptMessageID != "" {
 			if v.PromptMessageID == "" && !multiPrompt {

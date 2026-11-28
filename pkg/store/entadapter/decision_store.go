@@ -980,6 +980,9 @@ func validateRecordAnswerSetInput(in *store.RecordAnswerSetInput) error {
 			return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
 		}
 	}
+	if _, verr := messages.NormalizeDecisionComment(in.Comment); verr != nil {
+		return fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
+	}
 	seen := make(map[string]bool, len(in.Answers))
 	for _, a := range in.Answers {
 		if a.DecisionRowID == "" || a.ChoiceID == "" {
@@ -1164,6 +1167,10 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 	if surface == "" {
 		surface = store.DecisionSurfaceNative
 	}
+	comment, verr := messages.NormalizeDecisionComment(in.Comment)
+	if verr != nil {
+		return nil, fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
+	}
 	res := &store.AnswerSetResult{BatchID: batchID.String()}
 	var facetDeltas []facetEntryDelta
 	for _, r := range rows {
@@ -1181,6 +1188,7 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 			SetChoiceID(a.ChoiceID).
 			SetChoiceLabel(labels[a.DecisionRowID]).
 			SetNillableOtherText(nullableString(otherTexts[a.DecisionRowID])).
+			SetNillableComment(nullableString(comment)).
 			SetAnsweredByUserID(in.AnsweredByUserID).
 			SetAnsweredByName(in.AnsweredByName).
 			SetAnsweredByEmail(in.AnsweredByEmail).
@@ -1300,6 +1308,10 @@ func replayableAnswerSet(ctx context.Context, client *ent.Client, rows []*ent.De
 		}
 		want[a.DecisionRowID] = setAnswerWant{choiceID: a.ChoiceID, otherText: otherText}
 	}
+	comment, verr := messages.NormalizeDecisionComment(in.Comment)
+	if verr != nil {
+		return nil, false, fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
+	}
 	batch := *found[0].BatchID
 	for _, f := range found {
 		if f.AnsweredByUserID == nil || *f.AnsweredByUserID != in.AnsweredByUserID || f.BatchID == nil || *f.BatchID != batch {
@@ -1309,7 +1321,11 @@ func replayableAnswerSet(ctx context.Context, client *ent.Client, rows []*ent.De
 		if f.OtherText != nil {
 			fOther = *f.OtherText
 		}
-		if w, ok := want[f.DecisionRowID.String()]; !ok || w.choiceID != f.ChoiceID || w.otherText != fOther {
+		fComment := ""
+		if f.Comment != nil {
+			fComment = *f.Comment
+		}
+		if w, ok := want[f.DecisionRowID.String()]; !ok || w.choiceID != f.ChoiceID || w.otherText != fOther || fComment != comment {
 			return nil, false, mismatch
 		}
 	}

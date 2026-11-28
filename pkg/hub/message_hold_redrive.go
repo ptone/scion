@@ -1294,6 +1294,9 @@ func (s *Server) enrichHeldDecisionResponse(
 	}
 	sm.Metadata[messages.MetadataDecisionBatch] = batchID
 	sm.Metadata[messages.MetadataDecisionAnswers] = decisionAnswersMetadata(ordered)
+	if setComment := firstSetComment(ordered); setComment != "" {
+		sm.Metadata[messages.MetadataDecisionComment] = setComment
+	}
 	return "", nil
 }
 

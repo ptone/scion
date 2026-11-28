@@ -429,6 +429,8 @@ export class ScionChatDecisionResponse extends LitElement {
     }
     const allConfirm = !interpreted && n > 0 && answers.every((a) => a.outcome === 'confirm');
     const dismissReason = allDismiss ? answers[0]?.dismissReason?.trim() : undefined;
+    const setComment = !interpreted && !allDismiss ? rs.comment?.trim() : undefined;
+    const hasComment = Boolean(setComment);
     const agent = this.agentName || 'the agent';
     const whose = this.own ? 'your' : `${this.who}'s`;
     const pronoun = this.own ? 'your' : 'their';
@@ -469,10 +471,10 @@ export class ScionChatDecisionResponse extends LitElement {
           ? html`<span class="sep" aria-hidden="true">·</span>
               <span class="reason" data-dismiss-reason>${dismissReason}</span>`
           : nothing}
-        ${this.renderTime()}
+        ${this.renderComment(setComment)} ${this.renderTime()}
         ${this.dispatchState === 'failed'
           ? this.renderNotDelivered()
-          : allConfirm
+          : allConfirm && !hasComment
             ? html`<span class="sep" aria-hidden="true">·</span>
                 <span class="muted" data-state="not-sent">not sent to the agent</span>`
             : nothing}

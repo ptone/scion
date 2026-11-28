@@ -219,11 +219,11 @@ export class ScionChatDecisions extends LitElement {
   @state()
   private otherDraft = '';
 
-  /** Single mode: whether the optional comment field is open. */
+  /** Single and set modes: whether the optional comment field is open. */
   @state()
   private commentOpen = false;
 
-  /** Single mode: draft text in the optional comment field (memory only). */
+  /** Single and set modes: draft text in the optional comment field (memory only). */
   @state()
   private commentDraft = '';
 
@@ -1363,6 +1363,26 @@ export class ScionChatDecisions extends LitElement {
       overflow-wrap: anywhere;
     }
 
+    .card-cmt {
+      padding: 0.55rem 0.75rem 0;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+      background: var(--scion-bg, #f8fafc);
+    }
+
+    .card-cmt + .card-foot {
+      border-top: 0;
+    }
+
+    .card-cmt .addc,
+    .card-cmt .cbox {
+      margin-top: 0;
+    }
+
+    .card-foot .cmt {
+      flex-basis: 100%;
+      margin-top: 0;
+    }
+
     @media (max-width: 480px) {
       .editor .ctl sl-input {
         flex-basis: 100%;
@@ -1504,6 +1524,17 @@ export class ScionChatDecisions extends LitElement {
         } else if (this.answerBlocked) {
           this.commentOpen = false;
         }
+      }
+    } else if (
+      this.isSet &&
+      (changed.has('decisions') || changed.has('currentUserId') || changed.has('answerability')) &&
+      (this.commentOpen || this.commentDraft)
+    ) {
+      if (!this.views.some((d) => this.rowActionable(d))) {
+        this.commentOpen = false;
+        this.commentDraft = '';
+      } else if (this.answerBlocked) {
+        this.commentOpen = false;
       }
     }
   }
@@ -2103,6 +2134,16 @@ export class ScionChatDecisions extends LitElement {
   private async openComment(d: DecisionView): Promise<void> {
     if (!this.actionable(d)) return;
     if (d.status !== 'pending' && !this.isActionableInterpreted(d)) return;
+    await this.openCommentField();
+  }
+
+  private async openSetComment(): Promise<void> {
+    if (this.setSubmitting || this.answerBlocked) return;
+    if (!this.views.some((d) => this.rowActionable(d))) return;
+    await this.openCommentField();
+  }
+
+  private async openCommentField(): Promise<void> {
     this.commentOpen = true;
     await this.updateComplete;
     const input = this.shadowRoot?.querySelector<
@@ -2201,10 +2242,16 @@ export class ScionChatDecisions extends LitElement {
    * tells the thread so the asker's other prompts (or the whole read-only
    * thread) show it too.
    */
-  private applyDenied(d: DecisionView, code: string, reason: string | undefined): void {
+  private applyDenied(
+    d: DecisionView,
+    code: string,
+    reason: string | undefined,
+    hadComment = false
+  ): void {
     const answerability = answerabilityFromDenial(code, reason, d.askerAgentName);
     this.denied = answerability;
-    showToast(blockedText(answerability), 'warning');
+    const note = hadComment ? ' Your comment was not sent.' : '';
+    showToast(`${blockedText(answerability)}${note}`, 'warning');
     const detail: DecisionAnswerDeniedDetail = {
       messageId: this.messageId,
       askerAgentId: d.askerAgentId,
@@ -2934,11 +2981,6 @@ export class ScionChatDecisions extends LitElement {
       </button>`;
     }
     const trimmed = this.commentDraft.trim();
-    const trimmedLen = [...trimmed].length;
-    const showCounter = trimmedLen >= 160;
-    const warnCounter = trimmedLen >= 180 && trimmedLen <= 200;
-    const overCounter = trimmedLen > 200;
-    const announceCounter = warnCounter || overCounter;
     const isInterpretedConfirm =
       this.isActionableInterpreted(d) &&
       this.pendingChange?.rowId !== d.rowId &&
@@ -2949,6 +2991,15 @@ export class ScionChatDecisions extends LitElement {
       isInterpretedConfirm && trimmed.length > 0
         ? `Confirming with a comment sends it to ${d.askerAgentName || 'the agent'}.`
         : 'Sent with the choice you click.';
+    return this.renderCommentBox({ disabled: !!this.submitting, subText });
+  }
+
+  private renderCommentBox(opts: { disabled: boolean; subText: string }): TemplateResult {
+    const trimmedLen = [...this.commentDraft.trim()].length;
+    const showCounter = trimmedLen >= 160;
+    const warnCounter = trimmedLen >= 180 && trimmedLen <= 200;
+    const overCounter = trimmedLen > 200;
+    const announceCounter = warnCounter || overCounter;
     return html`<div class="cbox" data-comment-editor>
       <span class="lab">
         <sl-icon name="chat-square-text" aria-hidden="true"></sl-icon>
@@ -2968,7 +3019,7 @@ export class ScionChatDecisions extends LitElement {
         label="Comment (optional)"
         maxlength="200"
         .value=${this.commentDraft}
-        ?disabled=${!!this.submitting}
+        ?disabled=${opts.disabled}
         @sl-input=${(e: Event) => {
           this.commentDraft = (e.target as HTMLInputElement).value ?? '';
         }}
@@ -2983,7 +3034,7 @@ export class ScionChatDecisions extends LitElement {
           }
         }}
       >
-        <span slot="help-text" class="sub">${subText}</span>
+        ${opts.subText ? html`<span slot="help-text" class="sub">${opts.subText}</span>` : nothing}
       </sl-input>
     </div>`;
   }
@@ -3386,6 +3437,8 @@ export class ScionChatDecisions extends LitElement {
       }
     }
     if (answers.length === 0) return;
+    const trimmedComment = this.commentDraft.trim();
+    if ([...trimmedComment].length > 200) return;
     this.changedAlert = null;
     this.setSubmitting = true;
     try {
@@ -3393,11 +3446,14 @@ export class ScionChatDecisions extends LitElement {
         this.messageId,
         answers,
         crypto.randomUUID(),
-        this.surface
+        this.surface,
+        trimmedComment || undefined
       );
       if (res.ok) {
         this.picked = new Map();
         this.setOtherDrafts = new Map();
+        this.commentOpen = false;
+        this.commentDraft = '';
         this.applyOwnViews(res.decisions, res.responseMessageId);
         return;
       }
@@ -3406,9 +3462,10 @@ export class ScionChatDecisions extends LitElement {
         return;
       }
       if (res.status === 403 && actionable[0]) {
-        // Same authoritative handling as a single click; local selections
-        // stay, nothing was recorded.
-        this.applyDenied(actionable[0], res.code, res.reason);
+        const hadComment = this.commentDraft.trim().length > 0;
+        this.commentOpen = false;
+        this.commentDraft = '';
+        this.applyDenied(actionable[0], res.code, res.reason, hadComment);
         return;
       }
       showToast(res.message, 'danger');
@@ -3438,6 +3495,15 @@ export class ScionChatDecisions extends LitElement {
       }
     }
     this.setOtherDrafts = keptDrafts;
+    const stillActionable = fresh.some((d) => this.rowActionable(d));
+    if (!stillActionable && (this.commentOpen || this.commentDraft)) {
+      const hadComment = this.commentDraft.trim().length > 0;
+      this.commentOpen = false;
+      this.commentDraft = '';
+      if (hadComment) {
+        showToast('Your comment was not sent.', 'warning');
+      }
+    }
     const changed: { key: string; phrase: string }[] = [];
     for (const d of fresh) {
       const reason = reasons[d.rowId];
@@ -4023,6 +4089,41 @@ export class ScionChatDecisions extends LitElement {
     );
   }
 
+  private renderSetCommentControl(actionable: DecisionView[]): TemplateResult {
+    if (!this.commentOpen) {
+      return html`<div class="card-cmt">
+        <button
+          type="button"
+          class="addc"
+          data-action="add-comment"
+          ?disabled=${this.setSubmitting}
+          @click=${() => void this.openSetComment()}
+        >
+          <sl-icon name="chat-square-text" aria-hidden="true"></sl-icon>Add comment
+        </button>
+      </div>`;
+    }
+    const trimmed = this.commentDraft.trim();
+    const allConfirm =
+      actionable.length > 0 &&
+      actionable.every((d) => {
+        if (d.decision?.provenance !== 'agent_interpreted') return false;
+        const sel = this.selectionOf(d);
+        if (sel !== d.decision.choiceId) return false;
+        if (sel === OTHER_CHOICE_ID) {
+          return this.setRowOtherDraft(d).trim() === (d.decision.otherText ?? '');
+        }
+        return true;
+      });
+    const subText =
+      allConfirm && trimmed.length > 0
+        ? `Confirming with a comment sends it to ${actionable[0]?.askerAgentName || 'the agent'}.`
+        : '';
+    return html`<div class="card-cmt">
+      ${this.renderCommentBox({ disabled: this.setSubmitting, subText })}
+    </div>`;
+  }
+
   private renderSetFoot(views: DecisionView[]): TemplateResult | typeof nothing {
     const actionable = views.filter((d) => this.rowActionable(d));
     if (actionable.length === 0) return this.renderSetDoneFoot(views);
@@ -4033,6 +4134,7 @@ export class ScionChatDecisions extends LitElement {
     const missingKeys = missing.map((d) => d.key || d.ref).join(', ');
     const onlyOverLimit = remaining > 0 && missing.every((d) => this.setRowOverLimit(d));
     const hasOtherMissing = missing.some((d) => !!d.other);
+    const commentOverLimit = [...this.commentDraft.trim()].length > 200;
     const hint =
       remaining > 0
         ? onlyOverLimit
@@ -4040,8 +4142,10 @@ export class ScionChatDecisions extends LitElement {
           : hasOtherMissing
             ? `Choose or type an answer for ${missingKeys} first`
             : `Choose an answer for ${missingKeys} first`
-        : '';
-    const disabled = remaining > 0;
+        : commentOverLimit
+          ? 'Shorten the comment'
+          : '';
+    const disabled = remaining > 0 || commentOverLimit;
     const submit = html`<sl-button
       class="submit"
       size="small"
@@ -4053,16 +4157,17 @@ export class ScionChatDecisions extends LitElement {
       @click=${() => void this.submitSet()}
       >Submit answers</sl-button
     >`;
-    return html`<div class="card-foot">
-      <span class="counter${remaining > 0 ? ' missing' : ''}" role="status"
-        >${this.renderSetCounterContent(views, actionable, remaining)}</span
-      >
-      <span class="spacer"></span>
-      ${disabled
-        ? html`<span class="sr-only" id=${this.submitHintId}>${hint}</span>
-            <sl-tooltip content=${hint}>${submit}</sl-tooltip>`
-        : submit}
-    </div>`;
+    return html`${this.renderSetCommentControl(actionable)}
+      <div class="card-foot">
+        <span class="counter${remaining > 0 ? ' missing' : ''}" role="status"
+          >${this.renderSetCounterContent(views, actionable, remaining)}</span
+        >
+        <span class="spacer"></span>
+        ${disabled
+          ? html`<span class="sr-only" id=${this.submitHintId}>${hint}</span>
+              <sl-tooltip content=${hint}>${submit}</sl-tooltip>`
+          : submit}
+      </div>`;
   }
 
   /**
@@ -4087,8 +4192,18 @@ export class ScionChatDecisions extends LitElement {
     const batch = decided[0]?.decision?.batchId;
     const oneBatch = !!batch && decided.every((d) => d.decision?.batchId === batch);
     const first = decided[0];
+    const setComment = oneBatch
+      ? decided.find((d) => d.decision?.provenance === 'direct' && d.decision.comment)?.decision
+          ?.comment
+      : undefined;
     const others = [...new Set(this.answeredElsewhere.values())];
     return html`<div class="card-foot">
+        ${setComment
+          ? html`<div class="cmt" data-decision-comment>
+              <sl-icon name="chat-square-text" aria-hidden="true"></sl-icon>
+              <span class="t">${setComment}</span>
+            </div>`
+          : nothing}
         <span class="counter" role="status"
           >${oneBatch && first
             ? html`<sl-icon class="ok" name="check-circle-fill"></sl-icon> Submitted by

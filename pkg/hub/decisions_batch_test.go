@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1160,4 +1161,332 @@ func TestDecisionSetAnswer_InterpretedOther_ConfirmOverrideAndAgentLine(t *testi
 	})
 	require.Equal(t, http.StatusOK, confRR.Code, confRR.Body.String())
 	assert.Len(t, f.dispatcher.getMessages()[beforeConfirmOnly:], 0, "all-confirm Other set must not deliver to agent")
+}
+
+func TestDecisionSetAnswer_Comment_NoCommentGoldenEquality(t *testing.T) {
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
+
+	emptyStr := ""
+	wsStr := "   "
+	cases := []struct {
+		name    string
+		keyBase string
+		comment *string
+	}{
+		{name: "absent", keyBase: "gold-abs"},
+		{name: "empty", keyBase: "gold-emp", comment: &emptyStr},
+		{name: "whitespace", keyBase: "gold-ws", comment: &wsStr},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			k0, k1 := tc.keyBase+"-r", tc.keyBase+"-n"
+			promptMsg, promptRes := f.topicPrompt(t, fmt.Sprintf(`[
+				{"id":%q,"question":"Which region?","choices":["us-central1","europe-west1"],"default":"us-central1"},
+				{"id":%q,"question":"Notify channel?","choices":["Yes","No"]}
+			]`, k0, k1), false)
+			require.Len(t, promptRes.Decisions, 2)
+
+			body := map[string]interface{}{
+				"answers": []map[string]interface{}{
+					{"decision_row_id": promptRes.Decisions[0].RowID, "choice_id": "1"},
+					{"decision_row_id": promptRes.Decisions[1].RowID, "choice_id": "2"},
+				},
+			}
+			if tc.comment != nil {
+				body["comment"] = *tc.comment
+			}
+			before := len(f.dispatcher.getMessages())
+			rr := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+promptMsg.ID+"/answers", body)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+			// 1. Response view JSON must omit "comment" everywhere.
+			var out DecisionSetAnswerResponse
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+			assert.NotContains(t, rr.Body.String(), `"comment"`)
+			require.Len(t, out.Decisions, 2)
+			assert.Empty(t, out.Decisions[0].Decision.Comment)
+			assert.Empty(t, out.Decisions[1].Decision.Comment)
+
+			// 2. Stored chat message body is byte-identical to no-comment format.
+			respMsg, err := f.srv.store.GetMessage(context.Background(), out.ResponseMessageID)
+			require.NoError(t, err)
+			wantStored := fmt.Sprintf("Bob answered 2 decisions: %s us-central1 · %s No", k0, k1)
+			assert.Equal(t, wantStored, respMsg.Msg)
+
+			// 3. Delivered agent text and metadata are byte-identical (no trailing comment line, no decision_comment key).
+			delivered := f.dispatcher.getMessages()[before:]
+			require.Len(t, delivered, 1)
+			wantDelivered := fmt.Sprintf(
+				"[decision-response] 2 decisions answered by %s (prompt %s)\n%s v1 (\"Which region?\") answer=us-central1 (choice 1, recommended)\n%s v1 (\"Notify channel?\") answer=No (choice 2)",
+				f.bob.Email, promptMsg.ID, k0, k1,
+			)
+			assert.Equal(t, wantDelivered, delivered[0].structured.Msg)
+			assert.Equal(t, map[string]string{
+				messages.MetadataDecisionBatch:   out.BatchID,
+				messages.MetadataDecisionAnswers: k0 + "@1=1," + k1 + "@1=2",
+			}, delivered[0].structured.Metadata)
+			assert.NotContains(t, delivered[0].structured.Metadata, messages.MetadataDecisionComment)
+
+			// 4. History DecisionResponseSetView omits "comment" key.
+			histRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+				"/api/v1/chat/conversations/"+f.topicID+"/messages", nil)
+			require.Equal(t, http.StatusOK, histRR.Code, histRR.Body.String())
+			var rawHist map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(histRR.Body.Bytes(), &rawHist))
+			var setMap map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(rawHist["messageDecisionResponseSets"], &setMap))
+			assert.NotContains(t, string(setMap[out.ResponseMessageID]), `"comment"`)
+
+			// 5. Client-forged decision_comment metadata is stripped on set redrive path when no comment exists.
+			sm := &messages.StructuredMessage{
+				Metadata: map[string]string{messages.MetadataDecisionComment: "forged-by-client"},
+			}
+			failReason, enrichErr := f.srv.enrichHeldDecisionResponse(context.Background(), respMsg, sm)
+			require.NoError(t, enrichErr)
+			assert.Empty(t, failReason)
+			assert.Equal(t, wantDelivered, sm.Msg)
+			assert.NotContains(t, sm.Metadata, messages.MetadataDecisionComment)
+		})
+	}
+}
+
+func TestDecisionSetAnswer_Comment_Validation400BeforeStateRead(t *testing.T) {
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
+
+	badCases := []struct {
+		name    string
+		comment string
+		code    string
+	}{
+		{name: "newline", comment: "line1\nline2", code: "invalid"},
+		{name: "tab", comment: "col1\tcol2", code: "invalid"},
+		{name: "bidi", comment: "hello \u202e world", code: "invalid"},
+		{name: "too_long", comment: strings.Repeat("x", messages.MaxDecisionCommentLen+1), code: "too_long"},
+	}
+
+	for _, tc := range badCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Non-existent prompt ID: 400 validation_error proves comment is validated before any state read.
+			rr := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/nonexistent-msg/answers", map[string]interface{}{
+				"comment": tc.comment,
+				"answers": []map[string]interface{}{
+					{"decision_row_id": "row-1", "choice_id": "1"},
+				},
+			})
+			require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+			var errResp struct {
+				Error struct {
+					Code    string                 `json:"code"`
+					Details map[string]interface{} `json:"details"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+			assert.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+			assert.Equal(t, "comment", errResp.Error.Details["field"])
+			assert.Equal(t, tc.code, errResp.Error.Details["code"])
+		})
+	}
+}
+
+func TestDecisionSetAnswer_Comment_DeliveredStoredViewAndReplay(t *testing.T) {
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
+
+	promptMsg, promptRes := f.topicPrompt(t, `[
+		{"id":"reg-c","question":"Which region?","choices":["us-central1","europe-west1"],"default":"us-central1","allow_other":true},
+		{"id":"not-c","question":"Notify channel?","choices":["Yes","No"]}
+	]`, false)
+	require.Len(t, promptRes.Decisions, 2)
+	r0, r1 := promptRes.Decisions[0].RowID, promptRes.Decisions[1].RowID
+
+	rawComment := "  Hold **announcement** for @alice until canary runs  "
+	wantComment := "Hold **announcement** for @alice until canary runs"
+
+	before := len(f.dispatcher.getMessages())
+	rr := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+promptMsg.ID+"/answers", map[string]interface{}{
+		"idempotency_key": "set-cmt-idem-1",
+		"comment":         rawComment,
+		"answers": []map[string]interface{}{
+			{"decision_row_id": r0, "choice_id": messages.ChoiceIDOther, "other_text": "europe-west4"},
+			{"decision_row_id": r1, "choice_id": "2"},
+		},
+	})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var out DecisionSetAnswerResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	require.Len(t, out.Decisions, 2)
+	assert.Equal(t, wantComment, out.Decisions[0].Decision.Comment)
+	assert.Equal(t, wantComment, out.Decisions[1].Decision.Comment)
+
+	// Stored chat copy appends EscapeMarkdownPlain(comment).
+	respMsg, err := f.srv.store.GetMessage(context.Background(), out.ResponseMessageID)
+	require.NoError(t, err)
+	wantStored := fmt.Sprintf(
+		`Bob answered 2 decisions: reg-c "europe-west4" (Other) · not-c No — comment: "%s"`,
+		messages.EscapeMarkdownPlain(wantComment),
+	)
+	assert.Equal(t, wantStored, respMsg.Msg)
+
+	// Delivered agent text has header + per-row lines + one trailing comment="..." line and decision_comment metadata.
+	delivered := f.dispatcher.getMessages()[before:]
+	require.Len(t, delivered, 1)
+	wantDelivered := fmt.Sprintf(
+		"[decision-response] 2 decisions answered by %s (prompt %s)\nreg-c v1 (\"Which region?\") answer=Other (choice $other) text=\"europe-west4\"\nnot-c v1 (\"Notify channel?\") answer=No (choice 2)\ncomment=%q",
+		f.bob.Email, promptMsg.ID, wantComment,
+	)
+	assert.Equal(t, wantDelivered, delivered[0].structured.Msg)
+	assert.Equal(t, map[string]string{
+		messages.MetadataDecisionBatch:   out.BatchID,
+		messages.MetadataDecisionAnswers: "reg-c@1=$other,not-c@1=2",
+		messages.MetadataDecisionComment: wantComment,
+	}, delivered[0].structured.Metadata)
+
+	// Chat history DecisionResponseSetView carries top-level comment.
+	histRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+		"/api/v1/chat/conversations/"+f.topicID+"/messages", nil)
+	require.Equal(t, http.StatusOK, histRR.Code, histRR.Body.String())
+	var hist chatHistoryResponse
+	require.NoError(t, json.Unmarshal(histRR.Body.Bytes(), &hist))
+	setView, ok := hist.MessageDecisionResponseSets[out.ResponseMessageID]
+	require.True(t, ok)
+	assert.Equal(t, wantComment, setView.Comment)
+
+	// Held-message redrive enrichment preserves set comment line and decision_comment metadata.
+	sm := &messages.StructuredMessage{
+		Metadata: map[string]string{messages.MetadataDecisionComment: "forged-by-client"},
+	}
+	failReason, enrichErr := f.srv.enrichHeldDecisionResponse(context.Background(), respMsg, sm)
+	require.NoError(t, enrichErr)
+	assert.Empty(t, failReason)
+	assert.Equal(t, wantDelivered, sm.Msg)
+	assert.Equal(t, wantComment, sm.Metadata[messages.MetadataDecisionComment])
+
+	// Replay with same key + same comment returns 200 replayed: true.
+	repSame := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+promptMsg.ID+"/answers", map[string]interface{}{
+		"idempotency_key": "set-cmt-idem-1",
+		"comment":         wantComment,
+		"answers": []map[string]interface{}{
+			{"decision_row_id": r0, "choice_id": messages.ChoiceIDOther, "other_text": "europe-west4"},
+			{"decision_row_id": r1, "choice_id": "2"},
+		},
+	})
+	require.Equal(t, http.StatusOK, repSame.Code, repSame.Body.String())
+	var repOut DecisionSetAnswerResponse
+	require.NoError(t, json.Unmarshal(repSame.Body.Bytes(), &repOut))
+	assert.True(t, repOut.Replayed)
+	assert.Equal(t, out.BatchID, repOut.BatchID)
+
+	// Replay with same key + different comment returns 422 idempotency_mismatch.
+	repDiff := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+promptMsg.ID+"/answers", map[string]interface{}{
+		"idempotency_key": "set-cmt-idem-1",
+		"comment":         "other comment",
+		"answers": []map[string]interface{}{
+			{"decision_row_id": r0, "choice_id": messages.ChoiceIDOther, "other_text": "europe-west4"},
+			{"decision_row_id": r1, "choice_id": "2"},
+		},
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, repDiff.Code, repDiff.Body.String())
+	assert.Contains(t, repDiff.Body.String(), ErrCodeIdempotencyMismatch)
+
+	// Replay with same key + empty comment also returns 422 idempotency_mismatch.
+	repEmpty := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+promptMsg.ID+"/answers", map[string]interface{}{
+		"idempotency_key": "set-cmt-idem-1",
+		"answers": []map[string]interface{}{
+			{"decision_row_id": r0, "choice_id": messages.ChoiceIDOther, "other_text": "europe-west4"},
+			{"decision_row_id": r1, "choice_id": "2"},
+		},
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, repEmpty.Code, repEmpty.Body.String())
+	assert.Contains(t, repEmpty.Body.String(), ErrCodeIdempotencyMismatch)
+}
+
+func TestDecisionSetAnswer_Comment_AllConfirmDeliveryAndAuth(t *testing.T) {
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
+
+	// 1. All-confirm WITH comment: delivered to agent, comment stored on every confirm row.
+	promptMsg, promptRes := f.topicPrompt(t, `[
+		{"id":"conf-a","question":"Region?","choices":["us-central1","europe-west1"]},
+		{"id":"conf-b","question":"Notify?","choices":["Yes","No"]}
+	]`, false)
+	reply := f.storeUserReply(t, f.bob, f.topicID, "", "slack", "us-central1 and no")
+	recRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: reply.ID,
+		Answers: []InterpretedAnswerInput{
+			{Key: "conf-a", ChoiceID: "1"},
+			{Key: "conf-b", ChoiceID: "2"},
+		},
+	})
+	require.Equal(t, http.StatusOK, recRR.Code, recRR.Body.String())
+
+	before := len(f.dispatcher.getMessages())
+	rr := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+promptMsg.ID+"/answers", map[string]interface{}{
+		"comment": "Confirmed, page me when green.",
+		"answers": []map[string]interface{}{
+			{"decision_row_id": promptRes.Decisions[0].RowID, "choice_id": "1"},
+			{"decision_row_id": promptRes.Decisions[1].RowID, "choice_id": "2"},
+		},
+	})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var out DecisionSetAnswerResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	require.Len(t, out.Decisions, 2)
+	for _, d := range out.Decisions {
+		assert.Equal(t, store.DecisionOutcomeConfirm, d.Decision.Outcome)
+		assert.Equal(t, "Confirmed, page me when green.", d.Decision.Comment)
+	}
+
+	delivered := f.dispatcher.getMessages()[before:]
+	require.Len(t, delivered, 1, "all-confirm set with comment must be delivered")
+	wantDelivered := fmt.Sprintf(
+		"[decision-response] 2 decisions answered by %s (prompt %s)\nconf-a v1 (\"Region?\") answer=us-central1 (choice 1, confirmed)\nconf-b v1 (\"Notify?\") answer=No (choice 2, confirmed)\ncomment=\"Confirmed, page me when green.\"",
+		f.bob.Email, promptMsg.ID,
+	)
+	assert.Equal(t, wantDelivered, delivered[0].structured.Msg)
+	assert.Equal(t, "Confirmed, page me when green.", delivered[0].structured.Metadata[messages.MetadataDecisionComment])
+
+	// 2. All-confirm WITH comment when asker denies user messages -> 403 message_denied before recording;
+	//    all-confirm WITHOUT comment succeeds with zero delivery.
+	promptMsg2, promptRes2 := f.topicPrompt(t, `[
+		{"id":"conf-deny-a","question":"Region?","choices":["us-central1","europe-west1"]},
+		{"id":"conf-deny-b","question":"Notify?","choices":["Yes","No"]}
+	]`, false)
+	reply2 := f.storeUserReply(t, f.bob, f.topicID, "", "slack", "us-central1 and no")
+	recRR2 := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: reply2.ID,
+		Answers: []InterpretedAnswerInput{
+			{Key: "conf-deny-a", ChoiceID: "1"},
+			{Key: "conf-deny-b", ChoiceID: "2"},
+		},
+	})
+	require.Equal(t, http.StatusOK, recRR2.Code, recRR2.Body.String())
+
+	f.agent.MessageMode = store.MessageModeNone
+	require.NoError(t, f.srv.store.UpdateAgent(context.Background(), f.agent))
+
+	denyRR := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+promptMsg2.ID+"/answers", map[string]interface{}{
+		"comment": "Cannot deliver this",
+		"answers": []map[string]interface{}{
+			{"decision_row_id": promptRes2.Decisions[0].RowID, "choice_id": "1"},
+			{"decision_row_id": promptRes2.Decisions[1].RowID, "choice_id": "2"},
+		},
+	})
+	require.Equal(t, http.StatusForbidden, denyRR.Code, denyRR.Body.String())
+	assert.Contains(t, denyRR.Body.String(), ErrCodeMessageDenied)
+
+	// Confirm without comment still succeeds and delivers nothing.
+	beforeNoCmt := len(f.dispatcher.getMessages())
+	okRR := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+promptMsg2.ID+"/answers", map[string]interface{}{
+		"answers": []map[string]interface{}{
+			{"decision_row_id": promptRes2.Decisions[0].RowID, "choice_id": "1"},
+			{"decision_row_id": promptRes2.Decisions[1].RowID, "choice_id": "2"},
+		},
+	})
+	require.Equal(t, http.StatusOK, okRR.Code, okRR.Body.String())
+	assert.Len(t, f.dispatcher.getMessages()[beforeNoCmt:], 0)
 }

@@ -3764,3 +3764,92 @@ func TestRecordAnswer_CommentStorageAndReplay(t *testing.T) {
 	_, _, err = f.cs.RecordAnswer(ctx, inReplayEmpty)
 	assert.ErrorIs(t, err, store.ErrDecisionAnswerConflict)
 }
+
+func TestRecordAnswerSet_CommentStorageAndReplay(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	// 1. Whitespace-only comment stores SQL NULL on every row of the batch.
+	msgNull, rowsNull := f.createSet(t,
+		yesNo("set-null-a", "A?"),
+		yesNo("set-null-b", "B?"),
+	)
+	inNull := f.answerSet(msgNull, "user-1", "set-idem-null", rowsNull[0], "1", rowsNull[1], "2")
+	inNull.Comment = "   "
+	resNull, err := f.cs.RecordAnswerSet(ctx, inNull)
+	require.NoError(t, err)
+	assert.False(t, resNull.Replayed)
+	require.Len(t, resNull.Answers, 2)
+	for _, a := range resNull.Answers {
+		assert.Empty(t, a.Comment)
+		entRow, gerr := f.cs.client.DecisionAnswer.Get(ctx, uuid.MustParse(a.ID))
+		require.NoError(t, gerr)
+		assert.Nil(t, entRow.Comment, "empty/whitespace set comment must store NULL")
+	}
+
+	// Replay with absent comment succeeds; adding a comment returns ErrIdempotencyMismatch.
+	inNullReplay := f.answerSet(msgNull, "user-1", "set-idem-null", rowsNull[0], "1", rowsNull[1], "2")
+	resNullReplay, err := f.cs.RecordAnswerSet(ctx, inNullReplay)
+	require.NoError(t, err)
+	assert.True(t, resNullReplay.Replayed)
+	assert.Equal(t, resNull.BatchID, resNullReplay.BatchID)
+
+	inNullMismatch := f.answerSet(msgNull, "user-1", "set-idem-null", rowsNull[0], "1", rowsNull[1], "2")
+	inNullMismatch.Comment = "added later"
+	_, err = f.cs.RecordAnswerSet(ctx, inNullMismatch)
+	assert.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+
+	// 2. Invalid comment is rejected before storing anything.
+	msgCmt, rowsCmt := f.createSet(t,
+		yesNo("set-cmt-a", "Region?"),
+		yesNo("set-cmt-b", "Notify?"),
+	)
+	// Record an interpreted answer on row 0 so the set submit writes both a
+	// confirm row and a normal answer row, verifying both store the comment.
+	_, _, err = f.cs.RecordAnswer(ctx, f.interpretedAnswer(rowsCmt[0], "1", "user-1"))
+	require.NoError(t, err)
+
+	makeIn := func(cmt string) *store.RecordAnswerSetInput {
+		in := f.answerSet(msgCmt, "user-1", "set-idem-cmt", rowsCmt[0], "1", rowsCmt[1], "2")
+		in.Answers[0].Outcome = store.DecisionOutcomeConfirm
+		in.Comment = cmt
+		return in
+	}
+
+	_, err = f.cs.RecordAnswerSet(ctx, makeIn("line1\nline2"))
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+
+	_, err = f.cs.RecordAnswerSet(ctx, makeIn(strings.Repeat("a", messages.MaxDecisionCommentLen+1)))
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+
+	// 3. Valid comment is trimmed and stored on every row of the batch (including confirm rows).
+	resOk, err := f.cs.RecordAnswerSet(ctx, makeIn("  Hold the announcement for an hour.  "))
+	require.NoError(t, err)
+	assert.False(t, resOk.Replayed)
+	require.Len(t, resOk.Answers, 2)
+	assert.Equal(t, store.DecisionOutcomeConfirm, resOk.Answers[0].Outcome)
+	assert.Equal(t, store.DecisionOutcomeAnswer, resOk.Answers[1].Outcome)
+	for _, a := range resOk.Answers {
+		assert.Equal(t, "Hold the announcement for an hour.", a.Comment)
+		entRow, gerr := f.cs.client.DecisionAnswer.Get(ctx, uuid.MustParse(a.ID))
+		require.NoError(t, gerr)
+		require.NotNil(t, entRow.Comment)
+		assert.Equal(t, "Hold the announcement for an hour.", *entRow.Comment)
+	}
+
+	// 4. Replay with same comment (different surrounding whitespace) succeeds.
+	resSame, err := f.cs.RecordAnswerSet(ctx, makeIn("Hold the announcement for an hour."))
+	require.NoError(t, err)
+	assert.True(t, resSame.Replayed)
+	assert.Equal(t, resOk.BatchID, resSame.BatchID)
+	require.Len(t, resSame.Answers, 2)
+	assert.Equal(t, "Hold the announcement for an hour.", resSame.Answers[0].Comment)
+	assert.Equal(t, "Hold the announcement for an hour.", resSame.Answers[1].Comment)
+
+	// 5. Replay with different or empty comment fails with ErrIdempotencyMismatch.
+	_, err = f.cs.RecordAnswerSet(ctx, makeIn("different comment"))
+	assert.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+
+	_, err = f.cs.RecordAnswerSet(ctx, makeIn(""))
+	assert.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+}

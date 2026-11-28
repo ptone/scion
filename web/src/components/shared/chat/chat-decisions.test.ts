@@ -2252,3 +2252,256 @@ describe('scion-chat-decisions single-card optional comment (ptone/scion#9834)',
     expect((window as unknown as { __cmtXss?: number }).__cmtXss).toBeUndefined();
   });
 });
+
+describe('scion-chat-decisions set-card optional comment (ptone/scion#9839)', () => {
+  function setViews(): DecisionView[] {
+    return [
+      view({ rowId: 'r1', key: 'region', question: 'Which region?', defaultChoiceId: 'yes' }),
+      view({ rowId: 'r2', key: 'notify', question: 'Notify channel?' }),
+    ];
+  }
+
+  it('shows .card-cmt strip, never gates Submit or counts in remaining, sends top-level comment, and renders once in done footer', async () => {
+    const doneViews: DecisionView[] = [
+      {
+        ...answered('yes', { id: 'u-me', name: 'Me' }),
+        rowId: 'r1',
+        key: 'region',
+        decision: {
+          ...answered('yes', { id: 'u-me', name: 'Me' }).decision!,
+          batchId: 'b-1',
+          comment: 'Hold the announcement',
+        },
+      },
+      {
+        ...answered('no', { id: 'u-me', name: 'Me' }),
+        rowId: 'r2',
+        key: 'notify',
+        decision: {
+          ...answered('no', { id: 'u-me', name: 'Me' }).decision!,
+          batchId: 'b-1',
+          comment: 'Hold the announcement',
+        },
+      },
+    ];
+    apiFetch.mockResolvedValueOnce(
+      res(200, { decisions: doneViews, responseMessageId: 'resp-set-1', batchId: 'b-1' })
+    );
+
+    const el = await mount(setViews());
+    await settle(el);
+
+    expect(root(el).querySelector('.card-cmt [data-action="add-comment"]')).toBeTruthy();
+    expect(root(el).querySelector('.card-foot .counter')?.textContent).toContain('2 remaining');
+
+    // Open comment field: remaining count stays 2 and Submit is not gated by empty comment.
+    root(el).querySelector<HTMLButtonElement>('.card-cmt [data-action="add-comment"]')!.click();
+    await el.updateComplete;
+    expect(root(el).querySelector('.card-foot .counter')?.textContent).toContain('2 remaining');
+
+    const rows = root(el).querySelectorAll('.row');
+    rows[0]!.querySelector<HTMLButtonElement>('[data-choice="yes"]')!.click();
+    rows[1]!.querySelector<HTMLButtonElement>('[data-choice="no"]')!.click();
+    await el.updateComplete;
+
+    const submitBtn = root(el).querySelector<HTMLElement & { disabled?: boolean }>(
+      '.card-foot sl-button.submit'
+    )!;
+    expect(root(el).querySelector('.card-foot .counter')?.textContent).toContain('0 remaining');
+    expect(submitBtn.hasAttribute('disabled')).toBe(false);
+
+    // Type comment and submit.
+    const input = root(el).querySelector<HTMLElement & { value: string }>('.card-cmt sl-input')!;
+    input.value = '  Hold the announcement  ';
+    input.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+
+    submitBtn.click();
+    await settle(el);
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(apiFetch.mock.calls[0]![1]!.body as string) as Record<string, unknown>;
+    expect(body.comment).toBe('Hold the announcement');
+    expect(root(el).querySelector('.card-cmt')).toBeNull();
+
+    // Done footer shows the comment once above "Submitted by".
+    const cmts = root(el).querySelectorAll('.card-foot [data-decision-comment]');
+    expect(cmts.length).toBe(1);
+    expect(cmts[0]!.querySelector('.t')?.textContent).toBe('Hold the announcement');
+  });
+
+  it('omits comment key when no draft or whitespace-only draft is present', async () => {
+    const doneViews: DecisionView[] = [
+      { ...answered('yes', { id: 'u-me', name: 'Me' }), rowId: 'r1', key: 'region' },
+      { ...answered('no', { id: 'u-me', name: 'Me' }), rowId: 'r2', key: 'notify' },
+    ];
+    apiFetch.mockResolvedValueOnce(
+      res(200, { decisions: doneViews, responseMessageId: 'resp-set-2', batchId: 'b-2' })
+    );
+
+    const el = await mount(setViews());
+    await settle(el);
+
+    root(el).querySelector<HTMLButtonElement>('.card-cmt [data-action="add-comment"]')!.click();
+    await el.updateComplete;
+    const input = root(el).querySelector<HTMLElement & { value: string }>('.card-cmt sl-input')!;
+    input.value = '   ';
+    input.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+
+    const rows = root(el).querySelectorAll('.row');
+    rows[0]!.querySelector<HTMLButtonElement>('[data-choice="yes"]')!.click();
+    rows[1]!.querySelector<HTMLButtonElement>('[data-choice="no"]')!.click();
+    await el.updateComplete;
+
+    root(el).querySelector<HTMLElement>('.card-foot sl-button.submit')!.click();
+    await settle(el);
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(apiFetch.mock.calls[0]![1]!.body as string) as Record<string, unknown>;
+    expect('comment' in body).toBe(false);
+  });
+
+  it('keeps draft on network error and on 409 answer_set_changed when actionable rows remain', async () => {
+    apiFetch.mockRejectedValueOnce(new Error('offline'));
+    const partialChanged: DecisionView[] = [
+      { ...answered('yes', { id: 'u-other', name: 'Alice' }), rowId: 'r1', key: 'region' },
+      view({ rowId: 'r2', key: 'notify', question: 'Notify channel?' }),
+    ];
+    apiFetch.mockResolvedValueOnce(
+      res(409, {
+        error: {
+          code: 'answer_set_changed',
+          message: 'answer set changed',
+          details: { decisions: partialChanged, reasons: { r1: 'decided' } },
+        },
+      })
+    );
+
+    const el = await mount(setViews());
+    await settle(el);
+
+    root(el).querySelector<HTMLButtonElement>('.card-cmt [data-action="add-comment"]')!.click();
+    await el.updateComplete;
+    const input = root(el).querySelector<HTMLElement & { value: string }>('.card-cmt sl-input')!;
+    input.value = 'Keep this draft';
+    input.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+
+    const rows = root(el).querySelectorAll('.row');
+    rows[0]!.querySelector<HTMLButtonElement>('[data-choice="yes"]')!.click();
+    rows[1]!.querySelector<HTMLButtonElement>('[data-choice="no"]')!.click();
+    await el.updateComplete;
+
+    // 1. Network error keeps draft.
+    root(el).querySelector<HTMLElement>('.card-foot sl-button.submit')!.click();
+    await settle(el);
+    expect(
+      root(el).querySelector<HTMLElement & { value: string }>('.card-cmt sl-input')?.value
+    ).toBe('Keep this draft');
+
+    // 2. 409 answer_set_changed with one actionable row still remaining keeps draft.
+    root(el).querySelector<HTMLElement>('.card-foot sl-button.submit')!.click();
+    await settle(el);
+    expect(
+      root(el).querySelector<HTMLElement & { value: string }>('.card-cmt sl-input')?.value
+    ).toBe('Keep this draft');
+  });
+
+  it('drops draft with toast note on read-only refusal (409 all closed and 403 denied) and renders plain text', async () => {
+    const allClosed: DecisionView[] = [
+      { ...answered('yes', { id: 'u-other', name: 'Alice' }), rowId: 'r1', key: 'region' },
+      { ...answered('no', { id: 'u-other', name: 'Alice' }), rowId: 'r2', key: 'notify' },
+    ];
+    apiFetch.mockResolvedValueOnce(
+      res(409, {
+        error: {
+          code: 'answer_set_changed',
+          message: 'answer set changed',
+          details: { decisions: allClosed, reasons: { r1: 'decided', r2: 'decided' } },
+        },
+      })
+    );
+
+    const el = await mount(setViews());
+    await settle(el);
+
+    root(el).querySelector<HTMLButtonElement>('.card-cmt [data-action="add-comment"]')!.click();
+    await el.updateComplete;
+    const input = root(el).querySelector<HTMLElement & { value: string }>('.card-cmt sl-input')!;
+    input.value = 'unsent set comment';
+    input.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+
+    const rows = root(el).querySelectorAll('.row');
+    rows[0]!.querySelector<HTMLButtonElement>('[data-choice="yes"]')!.click();
+    rows[1]!.querySelector<HTMLButtonElement>('[data-choice="no"]')!.click();
+    await el.updateComplete;
+
+    root(el).querySelector<HTMLElement>('.card-foot sl-button.submit')!.click();
+    await settle(el);
+    expect(root(el).querySelector('.card-cmt')).toBeNull();
+    expect(showToast).toHaveBeenCalledWith('Your comment was not sent.', 'warning');
+
+    // 403 message_denied also drops draft and appends "Your comment was not sent."
+    showToast.mockClear();
+    apiFetch.mockResolvedValueOnce(
+      res(403, {
+        error: {
+          code: 'message_denied',
+          message: 'denied',
+          details: { reason: 'recipient_no_messages' },
+        },
+      })
+    );
+    const el2 = await mount(setViews());
+    await settle(el2);
+    root(el2).querySelector<HTMLButtonElement>('.card-cmt [data-action="add-comment"]')!.click();
+    await el2.updateComplete;
+    const input2 = root(el2).querySelector<HTMLElement & { value: string }>('.card-cmt sl-input')!;
+    input2.value = 'blocked comment';
+    input2.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el2.updateComplete;
+    const rows2 = root(el2).querySelectorAll('.row');
+    rows2[0]!.querySelector<HTMLButtonElement>('[data-choice="yes"]')!.click();
+    rows2[1]!.querySelector<HTMLButtonElement>('[data-choice="no"]')!.click();
+    await el2.updateComplete;
+    root(el2).querySelector<HTMLElement>('.card-foot sl-button.submit')!.click();
+    await settle(el2);
+    expect(root(el2).querySelector('.card-cmt')).toBeNull();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.stringContaining('Your comment was not sent.'),
+      'warning'
+    );
+
+    // Done footer renders Markdown, HTML, and @mentions as literal plain text.
+    const literal = '**bold** <img src=x onerror="window.__setCmtXss=1"> @alice';
+    const el3 = await mount([
+      {
+        ...answered('yes', { id: 'u-me', name: 'Me' }),
+        rowId: 'r1',
+        key: 'region',
+        decision: {
+          ...answered('yes', { id: 'u-me', name: 'Me' }).decision!,
+          batchId: 'b-xss',
+          comment: literal,
+        },
+      },
+      {
+        ...answered('no', { id: 'u-me', name: 'Me' }),
+        rowId: 'r2',
+        key: 'notify',
+        decision: {
+          ...answered('no', { id: 'u-me', name: 'Me' }).decision!,
+          batchId: 'b-xss',
+          comment: literal,
+        },
+      },
+    ]);
+    await settle(el3);
+    const cmtSpan = root(el3).querySelector('.card-foot [data-decision-comment] .t');
+    expect(cmtSpan?.textContent).toBe(literal);
+    expect(cmtSpan?.children.length).toBe(0);
+    expect((window as unknown as { __setCmtXss?: number }).__setCmtXss).toBeUndefined();
+  });
+});

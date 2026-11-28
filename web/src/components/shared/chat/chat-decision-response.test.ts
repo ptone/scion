@@ -845,4 +845,74 @@ describe('set Other free-form response lines (ptone/scion#8153)', () => {
       '— “Page me when green”'
     );
   });
+
+  it('renders set-answer comment as plain text and omits not-sent on all-confirm set with comment', async () => {
+    const literal = '**bold** <b>html</b> @alice';
+    const el = await mount({
+      responseSet: {
+        promptMessageId: 'prompt-1',
+        batchId: 'batch-1',
+        comment: literal,
+        answers: [
+          {
+            rowId: 'r1',
+            ref: 'a/region',
+            key: 'region',
+            version: 1,
+            question: 'Which region?',
+            choiceId: '1',
+            label: 'us-central1',
+            provenance: 'direct',
+            outcome: 'answer',
+            matchedDefault: true,
+          },
+          {
+            rowId: 'r2',
+            ref: 'a/notify',
+            key: 'notify',
+            version: 1,
+            question: 'Notify?',
+            choiceId: '2',
+            label: 'No',
+            provenance: 'direct',
+            outcome: 'answer',
+            matchedDefault: false,
+          },
+        ],
+      },
+    });
+    const cmt = root(el).querySelector('[data-decision-comment]');
+    expect(cmt?.textContent).toBe(`— “${literal}”`);
+    expect(cmt?.children.length).toBe(0);
+
+    // No comment -> no comment span.
+    const baseSet = {
+      promptMessageId: el.responseSet!.promptMessageId!,
+      batchId: el.responseSet!.batchId,
+      answers: el.responseSet!.answers,
+    };
+    el.responseSet = baseSet;
+    await el.updateComplete;
+    expect(root(el).querySelector('[data-decision-comment]')).toBeNull();
+
+    // All-confirm set WITHOUT comment -> shows "not sent to the agent".
+    el.responseSet = {
+      ...baseSet,
+      answers: baseSet.answers.map((a) => ({ ...a, outcome: 'confirm' })),
+    };
+    await el.updateComplete;
+    expect(root(el).querySelector('[data-state="not-sent"]')).toBeTruthy();
+    expect(root(el).querySelector('[data-decision-comment]')).toBeNull();
+
+    // All-confirm set WITH comment -> shows comment and omits "not sent to the agent".
+    el.responseSet = {
+      ...el.responseSet!,
+      comment: 'Confirmed, hold announcement',
+    };
+    await el.updateComplete;
+    expect(root(el).querySelector('[data-state="not-sent"]')).toBeNull();
+    expect(root(el).querySelector('[data-decision-comment]')?.textContent).toBe(
+      '— “Confirmed, hold announcement”'
+    );
+  });
 });
