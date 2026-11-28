@@ -211,6 +211,82 @@ func TestAuthMe(t *testing.T) {
 	}
 }
 
+func TestAuthMe_PrincipalKind_DevAndAgent(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	t.Run("dev", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+		req.Header.Set("Authorization", "Bearer "+testDevToken)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp UserResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if resp.PrincipalKind != "dev" {
+			t.Errorf("expected principalKind %q, got %q", "dev", resp.PrincipalKind)
+		}
+	})
+
+	t.Run("agent", func(t *testing.T) {
+		proj := &store.Project{
+			ID:   tid("proj-authme-agent"),
+			Name: "AuthMe Agent Project",
+			Slug: "authme-agent",
+		}
+		if err := s.CreateProject(ctx, proj); err != nil {
+			t.Fatalf("CreateProject: %v", err)
+		}
+		agent := &store.Agent{
+			ID:              tid("agent-authme-1"),
+			Name:            "authme-agent",
+			Slug:            "authme-agent",
+			ProjectID:       proj.ID,
+			RuntimeBrokerID: tid("broker-authme"),
+			Phase:           "running",
+			RunID:           "run-authme-1",
+		}
+		if err := s.CreateAgent(ctx, agent); err != nil {
+			t.Fatalf("CreateAgent: %v", err)
+		}
+		agentToken, agentCred, err := srv.SignAgentToken(AgentTokenGrant{
+			AgentID:   agent.ID,
+			ProjectID: proj.ID,
+			Scopes:    []AgentTokenScope{ScopeAgentStatusUpdate},
+		}, "run-authme-1")
+		if err != nil {
+			t.Fatalf("SignAgentToken: %v", err)
+		}
+		if err := s.CreateAgentCredential(ctx, agentCred); err != nil {
+			t.Fatalf("CreateAgentCredential: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+		req.Header.Set("X-Scion-Agent-Token", agentToken)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp UserResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if resp.Role != "agent" {
+			t.Errorf("expected role %q, got %q", "agent", resp.Role)
+		}
+		if resp.PrincipalKind != "agent" {
+			t.Errorf("expected principalKind %q, got %q", "agent", resp.PrincipalKind)
+		}
+	})
+}
+
 // TestAuthRefreshRoleReevaluation covers the role re-evaluation that happens on
 // every token refresh. The admin_emails config is additive-only: it promotes,
 // but it never demotes a user who holds admin in the store.

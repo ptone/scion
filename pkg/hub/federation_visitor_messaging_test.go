@@ -1020,3 +1020,106 @@ func TestVisitorOwnDMConversation_Matrix(t *testing.T) {
 		})
 	}
 }
+
+// TestAuthorizeConversationReadByID_VisitorDefenseInDepth tests the handler-layer
+// visitor checks in authorizeConversationReadByID directly, bypassing routeGuard.
+// It ensures that even without routeGuard, own DM is admitted only while both
+// experiments are on and the caller holds a valid federation credential, and that
+// another user's DM, a group, a foreign-project DM, either experiment off, and
+// non-visitor federated identities are all denied with 403.
+func TestAuthorizeConversationReadByID_VisitorDefenseInDepth(t *testing.T) {
+	f := newVisitorMessagingFixture(t)
+	ctx := context.Background()
+	visitorSetExperiments(t, f.srv, true, true)
+
+	aliceID, aliceToken := f.visitor(t, "sub-alice-did", "alice-did@corp.example")
+	bobID, _ := f.visitor(t, "sub-bob-did", "bob-did@corp.example")
+
+	// Create Alice's own DM via send.
+	sendRec := f.do(t, aliceToken, http.MethodPost, f.projectMessagePath(f.agent.Slug), visitorTextBody("hello"))
+	require.Equal(t, http.StatusOK, sendRec.Code, sendRec.Body.String())
+	var sendResp MessageDeliveryResponse
+	require.NoError(t, json.Unmarshal(sendRec.Body.Bytes(), &sendResp))
+	ownDMID := sendResp.ConversationID
+	require.NotEmpty(t, ownDMID)
+
+	now := time.Now().UTC()
+
+	// Another user's DM with f.agent.
+	bobDMKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", bobID)
+	require.NoError(t, err)
+	bobDM := &store.Conversation{
+		ID: tid("did-bob-dm"), Kind: "direct", Surface: "native",
+		ExternalRef: bobDMKey, DriftState: "active", LastActivityAt: now, CreatedAt: now,
+	}
+	require.NoError(t, f.st.CreateConversation(ctx, bobDM))
+
+	// A group conversation in f.projectID.
+	projID := f.projectID
+	groupConv := &store.Conversation{
+		ID: tid("did-group"), Kind: "group", Surface: "native",
+		ProjectID: &projID, DisplayName: "did-group", DriftState: "active", LastActivityAt: now, CreatedAt: now,
+	}
+	require.NoError(t, f.st.CreateConversation(ctx, groupConv))
+
+	// A DM between Alice and f.foreign (agent in a project with no visitor grant).
+	foreignDMKey, err := messages.DMConversationKey("agent", f.foreign.ID, "user", aliceID)
+	require.NoError(t, err)
+	foreignDM := &store.Conversation{
+		ID: tid("did-foreign-dm"), Kind: "direct", Surface: "native",
+		ExternalRef: foreignDMKey, DriftState: "active", LastActivityAt: now, CreatedAt: now,
+	}
+	require.NoError(t, f.st.CreateConversation(ctx, foreignDM))
+
+	aliceVisitor := NewVisitorIdentity(aliceID, grantTestIssuer, "sub-alice-did", "alice-did@corp.example", "Alice")
+	fedUser := NewFederatedUserIdentity(grantTestIssuer, "sub-alice-did", "alice-did@corp.example", "Alice", "viewer", nil)
+	fedAgent := NewFederatedAgentIdentity(grantTestIssuer, f.agent.ID, "proj", "helper", "", nil, nil)
+
+	fedCred := CredentialContext{Kind: CredentialKindFederation}
+	callDirect := func(ident Identity, cred CredentialContext, convID string) (*store.Conversation, error) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+convID+"/messages", nil)
+		reqCtx := contextWithIdentity(ctx, ident)
+		reqCtx = contextWithCredentialContext(reqCtx, cred)
+		return f.srv.authorizeConversationReadByID(reqCtx, req.WithContext(reqCtx), convID)
+	}
+
+	assertDenied403 := func(t *testing.T, conv *store.Conversation, err error) {
+		t.Helper()
+		assert.Nil(t, conv)
+		require.Error(t, err)
+		var denial *convReadDenial
+		require.ErrorAs(t, err, &denial)
+		assert.Equal(t, http.StatusForbidden, denial.status)
+	}
+
+	for _, tc := range []struct {
+		name            string
+		ident           Identity
+		cred            CredentialContext
+		convID          string
+		projectVisitors bool
+		mcpServer       bool
+		wantAllow       bool
+	}{
+		{"own DM allowed", aliceVisitor, fedCred, ownDMID, true, true, true},
+		{"other user DM refused", aliceVisitor, fedCred, bobDM.ID, true, true, false},
+		{"group refused", aliceVisitor, fedCred, groupConv.ID, true, true, false},
+		{"foreign project DM refused", aliceVisitor, fedCred, foreignDM.ID, true, true, false},
+		{"mcp_server off refused", aliceVisitor, fedCred, ownDMID, true, false, false},
+		{"project_visitors off refused", aliceVisitor, fedCred, ownDMID, false, true, false},
+		{"FederatedUserIdentity refused", fedUser, fedCred, ownDMID, true, true, false},
+		{"FederatedAgentIdentity refused", fedAgent, fedCred, ownDMID, true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			visitorSetExperiments(t, f.srv, tc.projectVisitors, tc.mcpServer)
+			conv, err := callDirect(tc.ident, tc.cred, tc.convID)
+			if tc.wantAllow {
+				require.NoError(t, err)
+				require.NotNil(t, conv)
+				assert.Equal(t, ownDMID, conv.ID)
+			} else {
+				assertDenied403(t, conv, err)
+			}
+		})
+	}
+}
