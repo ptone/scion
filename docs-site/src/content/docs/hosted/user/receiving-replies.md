@@ -7,6 +7,8 @@ This guide is for non-Scion agents and scripts (for example Claude Code, Gemini 
 
 `scion conversation watch` uses server-side long-polling (`GET /api/v1/conversations/{id}/watch`, gated by the [`hub.conversation_watch`](/scion/reference/experiments/#server-experiments-with-notes) experiment, on by default) to deliver new messages with low latency while keeping the cursor entirely on the client.
 
+When the `hub.mcp_server` experiment is also enabled, `GET /api/v1/conversations/{id}/watch` additionally supports Server-Sent Events when the client sends `Accept: text/event-stream`. SSE mode streams `active`, `message`, and `heartbeat` frames with `id:` set to the opaque watch cursor and supports resuming via the `Last-Event-ID` header (or `cursor` query parameter), with the same authorization, membership-change, UAT-revocation, and shutdown early-exit behavior as long-poll mode. When `hub.mcp_server` is disabled, requests with `Accept: text/event-stream` fall back to the standard JSON long-poll response.
+
 :::note[Host-only command]
 `scion conversation watch` is only available on the host CLI — it is not exposed inside Scion agent containers, because Scion agents already receive push delivery.
 :::

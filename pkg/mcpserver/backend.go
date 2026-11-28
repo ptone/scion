@@ -35,6 +35,7 @@ type HubBackend interface {
 	Me(ctx context.Context, c Credential) (Principal, error)
 	SendToAgent(ctx context.Context, c Credential, project, agent, text string) (SendResult, error)
 	Watch(ctx context.Context, c Credential, convID string, o hubclient.WatchOptions) (*hubclient.WatchResult, error)
+	WatchStream(ctx context.Context, c Credential, convID string, o hubclient.WatchOptions) (*hubclient.WatchStream, error)
 	ExperimentEnabled(ctx context.Context, c Credential, name string) (bool, error)
 }
 
@@ -182,6 +183,14 @@ func (b *hubBackend) Watch(ctx context.Context, c Credential, convID string, o h
 		return nil, err
 	}
 	return cl.Conversations().Watch(ctx, convID, o)
+}
+
+func (b *hubBackend) WatchStream(ctx context.Context, c Credential, convID string, o hubclient.WatchOptions) (*hubclient.WatchStream, error) {
+	cl, err := b.clientFor(c)
+	if err != nil {
+		return nil, err
+	}
+	return cl.Conversations().WatchStream(ctx, convID, o)
 }
 
 func (b *hubBackend) ExperimentEnabled(ctx context.Context, c Credential, name string) (bool, error) {

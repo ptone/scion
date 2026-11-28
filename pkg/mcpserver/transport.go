@@ -226,6 +226,9 @@ func (t *AllowlistTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if acc := req.Header.Get("Accept"); acc != "" {
 		h.Set("Accept", acc)
 	}
+	if lastID := req.Header.Get("Last-Event-ID"); lastID != "" {
+		h.Set("Last-Event-ID", lastID)
+	}
 
 	ver := t.Version
 	if ver == "" {

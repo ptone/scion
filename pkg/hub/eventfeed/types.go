@@ -127,6 +127,10 @@ type PollRequest struct {
 	// StopRetryAfter, when non-zero, is copied to PollResult.RetryAfter when
 	// StopCh ends a poll early, so streaming clients pace their follow-up poll.
 	StopRetryAfter time.Duration
+	// OnIdle, when non-nil, is invoked by Feed.Watch after a blocking Poll
+	// times out with no matching events (TimedOut: true, len(Events) == 0).
+	// Returning a non-nil error stops Watch and propagates that error.
+	OnIdle func(nextCursor Cursor, truncated bool) error
 }
 
 // PollResult is the outcome of one Poll call.

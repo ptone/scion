@@ -1120,3 +1120,305 @@ func TestConversationWatch_DevUserDMAuthzParity(t *testing.T) {
 	resAgentOwn := callAsCollidingAgent("/api/v1/conversations/resolve?reference=conv:" + dmDev.ID)
 	assert.Equal(t, http.StatusNotFound, resAgentOwn.Code, resAgentOwn.Body.String())
 }
+
+func TestConversationWatch_SSEMode(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "SSE Proj", Slug: "sse-proj-" + projID[:8]}))
+	member := watchTestUser(t, s, projID, store.ProjectRoleMember)
+	outsider := watchTestUser(t, s, "", "")
+	conv := watchTestGroupConv(t, s, projID)
+
+	memberTok, _, err := srv.GetUserTokenService().MintAccessToken(UserTokenSubject{
+		UserID: member.ID, Email: member.Email, DisplayName: member.DisplayName, Role: member.Role, ClientType: ClientTypeCLI,
+	})
+	require.NoError(t, err)
+	outsiderTok, _, err := srv.GetUserTokenService().MintAccessToken(UserTokenSubject{
+		UserID: outsider.ID, Email: outsider.Email, DisplayName: outsider.DisplayName, Role: outsider.Role, ClientType: ClientTypeCLI,
+	})
+	require.NoError(t, err)
+
+	// 1. With hub.mcp_server OFF (default), Accept: text/event-stream falls back to JSON long-poll.
+	reqOff := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/watch?wait=0", nil)
+	reqOff.Header.Set("Authorization", "Bearer "+memberTok)
+	reqOff.Header.Set("Accept", "text/event-stream")
+	recOff := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recOff, reqOff)
+	require.Equal(t, http.StatusOK, recOff.Code, recOff.Body.String())
+	assert.Contains(t, recOff.Header().Get("Content-Type"), "application/json")
+
+	// Enable hub.mcp_server via override.
+	setExperimentOverrides(t, srv, map[string]bool{experiments.MCPServer: true})
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// 2. Authz, invalid cursor (400), and expired cursor (410) still return JSON errors before SSE headers.
+	for _, tc := range []struct {
+		name   string
+		token  string
+		query  string
+		status int
+	}{
+		{"forbidden", outsiderTok, "?wait=1s", http.StatusForbidden},
+		{"invalid cursor", memberTok, "?cursor=not-a-valid-cursor", http.StatusBadRequest},
+		{"expired cursor", memberTok, "?cursor=" + string(eventfeed.EncodeCursor(conv.ID, 9999)), http.StatusGone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/conversations/"+conv.ID+"/watch"+tc.query, nil)
+			require.NoError(t, err)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			req.Header.Set("Accept", "text/event-stream")
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			assert.Equal(t, tc.status, resp.StatusCode)
+			assert.Contains(t, resp.Header.Get("Content-Type"), "application/json")
+		})
+	}
+
+	// 3. Open SSE stream: expect active, then message within 2s on doorbell, then heartbeat.
+	streamCtx, cancelStream := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelStream()
+
+	sseReq, err := http.NewRequestWithContext(streamCtx, http.MethodGet, ts.URL+"/api/v1/conversations/"+conv.ID+"/watch?wait=500ms&filter=all", nil)
+	require.NoError(t, err)
+	sseReq.Header.Set("Authorization", "Bearer "+memberTok)
+	sseReq.Header.Set("Accept", "text/event-stream")
+	sseResp, err := http.DefaultClient.Do(sseReq)
+	require.NoError(t, err)
+	defer sseResp.Body.Close()
+	require.Equal(t, http.StatusOK, sseResp.StatusCode)
+	assert.Contains(t, sseResp.Header.Get("Content-Type"), "text/event-stream")
+
+	type sseFrame struct {
+		event string
+		id    string
+		data  string
+	}
+	frames := make(chan sseFrame, 16)
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		buf := make([]byte, 4096)
+		var pending string
+		for {
+			n, rErr := sseResp.Body.Read(buf)
+			if n > 0 {
+				pending += string(buf[:n])
+				for {
+					idx := -1
+					for i := 0; i+1 < len(pending); i++ {
+						if pending[i] == '\n' && pending[i+1] == '\n' {
+							idx = i
+							break
+						}
+					}
+					if idx < 0 {
+						break
+					}
+					raw := pending[:idx]
+					pending = pending[idx+2:]
+					var f sseFrame
+					for _, line := range splitLines(raw) {
+						switch {
+						case len(line) >= 6 && line[:6] == "event:":
+							f.event = trimSpace(line[6:])
+						case len(line) >= 3 && line[:3] == "id:":
+							f.id = trimSpace(line[3:])
+						case len(line) >= 5 && line[:5] == "data:":
+							f.data = trimSpace(line[5:])
+						}
+					}
+					if f.event != "" || f.data != "" {
+						frames <- f
+					}
+				}
+			}
+			if rErr != nil {
+				return
+			}
+		}
+	}()
+
+	// Expect active frame first.
+	var activeFrame sseFrame
+	select {
+	case activeFrame = <-frames:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for SSE active frame")
+	}
+	assert.Equal(t, "active", activeFrame.event)
+	assert.NotEmpty(t, activeFrame.id)
+
+	// Post a message and verify doorbell delivery within 2s.
+	msg1 := &store.Message{
+		ID:             uuid.NewString(),
+		ConversationID: conv.ID,
+		ProjectID:      projID,
+		Sender:         "agent:bot",
+		SenderID:       uuid.NewString(),
+		Recipient:      "user:" + member.Email,
+		RecipientID:    member.ID,
+		Msg:            "hello via sse",
+		Type:           messages.TypeReply,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateMessage(ctx, msg1))
+	require.NoError(t, (&feedNotifier{events: srv.getEventPublisher}).PublishUserMessage(ctx, msg1))
+
+	var msgFrame sseFrame
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case f := <-frames:
+			if f.event == "message" {
+				msgFrame = f
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for SSE message frame")
+		}
+		if msgFrame.event == "message" {
+			break
+		}
+	}
+	assert.NotEmpty(t, msgFrame.id)
+	assert.Contains(t, msgFrame.data, "hello via sse")
+
+	// Expect heartbeat frame after wait (500ms).
+	var hbFrame sseFrame
+	hbDeadline := time.After(3 * time.Second)
+	for {
+		select {
+		case f := <-frames:
+			if f.event == "heartbeat" {
+				hbFrame = f
+			}
+		case <-hbDeadline:
+			t.Fatal("timed out waiting for SSE heartbeat frame")
+		}
+		if hbFrame.event == "heartbeat" {
+			break
+		}
+	}
+	assert.Equal(t, msgFrame.id, hbFrame.id)
+	cancelStream()
+	<-readDone
+
+	// 4. Last-Event-ID resume delivers only messages after msg1.
+	msg2 := &store.Message{
+		ID:             uuid.NewString(),
+		ConversationID: conv.ID,
+		ProjectID:      projID,
+		Sender:         "agent:bot",
+		SenderID:       uuid.NewString(),
+		Recipient:      "user:" + member.Email,
+		RecipientID:    member.ID,
+		Msg:            "second message after resume",
+		Type:           messages.TypeReply,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateMessage(ctx, msg2))
+
+	resumeCtx, cancelResume := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelResume()
+	resumeReq, err := http.NewRequestWithContext(resumeCtx, http.MethodGet, ts.URL+"/api/v1/conversations/"+conv.ID+"/watch?wait=500ms&filter=all", nil)
+	require.NoError(t, err)
+	resumeReq.Header.Set("Authorization", "Bearer "+memberTok)
+	resumeReq.Header.Set("Accept", "text/event-stream")
+	resumeReq.Header.Set("Last-Event-ID", msgFrame.id)
+	resumeResp, err := http.DefaultClient.Do(resumeReq)
+	require.NoError(t, err)
+	defer resumeResp.Body.Close()
+	require.Equal(t, http.StatusOK, resumeResp.StatusCode)
+
+	buf := make([]byte, 8192)
+	var collected string
+	readUntil := time.Now().Add(2 * time.Second)
+	for time.Now().Before(readUntil) && !containsStr(collected, "second message after resume") {
+		n, rErr := resumeResp.Body.Read(buf)
+		if n > 0 {
+			collected += string(buf[:n])
+		}
+		if rErr != nil {
+			break
+		}
+	}
+	assert.Contains(t, collected, "second message after resume")
+	assert.NotContains(t, collected, "hello via sse")
+	cancelResume()
+
+	// 5. BeginShutdown closes an active SSE stream cleanly.
+	shutCtx, cancelShut := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelShut()
+	shutReq, err := http.NewRequestWithContext(shutCtx, http.MethodGet, ts.URL+"/api/v1/conversations/"+conv.ID+"/watch?wait=30s&filter=all", nil)
+	require.NoError(t, err)
+	shutReq.Header.Set("Authorization", "Bearer "+memberTok)
+	shutReq.Header.Set("Accept", "text/event-stream")
+	shutResp, err := http.DefaultClient.Do(shutReq)
+	require.NoError(t, err)
+	defer shutResp.Body.Close()
+	require.Equal(t, http.StatusOK, shutResp.StatusCode)
+
+	// Wait for active frame so the stream is blocked in Watch.
+	oneBuf := make([]byte, 512)
+	_, err = shutResp.Body.Read(oneBuf)
+	require.NoError(t, err)
+
+	srv.BeginShutdown()
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		tmp := make([]byte, 512)
+		for {
+			_, rErr := shutResp.Body.Read(tmp)
+			if rErr != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-drainDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("SSE stream did not close promptly on BeginShutdown")
+	}
+}
+
+func splitLines(s string) []string {
+	var out []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	if start <= len(s) {
+		out = append(out, s[start:])
+	}
+	return out
+}
+
+func trimSpace(s string) string {
+	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\r') {
+		s = s[1:]
+	}
+	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t' || s[len(s)-1] == '\r') {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+func containsStr(haystack, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}
