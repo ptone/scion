@@ -184,7 +184,6 @@
         "kind": "direct",
         "project_id": "proj-uuid-1",
         "surface": "native",
-        "thread_id": "",
         "user_count": 0
       },
       "delivery": {
@@ -241,7 +240,6 @@
         "kind": "direct",
         "project_id": "proj-uuid-1",
         "surface": "native",
-        "thread_id": "",
         "user_count": 0
       },
       "delivery": {

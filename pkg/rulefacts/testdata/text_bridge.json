@@ -161,7 +161,6 @@
         "project_id": "proj-uuid-1",
         "ref": "conv-slack-1",
         "surface": "slack",
-        "thread_id": "thread-42",
         "user_count": 1
       },
       "delivery": {
@@ -218,7 +217,6 @@
         "project_id": "proj-uuid-1",
         "ref": "conv-slack-1",
         "surface": "slack",
-        "thread_id": "thread-42",
         "user_count": 1
       },
       "delivery": {

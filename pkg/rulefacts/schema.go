@@ -612,7 +612,9 @@ func buildSchema() Registry {
 		{Path: "conversation.kind", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: ScopesAll, Since: 1},
 		{Path: "conversation.surface", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: ScopesAll, Since: 1},
 		{Path: "conversation.project_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: ScopesAll, Since: 1},
-		{Path: "conversation.thread_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: ScopesAll, Since: 1},
+		// Amendment A3 §2.1: thread_id carries a DM key on broker-inbound DMs,
+		// so it is statically invisible in policy_out and policy_in.
+		{Path: "conversation.thread_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefValueDependent, Producer: "hub:conversation", Visible: a2aAndTrigger, Since: 1},
 		{Path: "conversation.agent_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: ScopesAll, Since: 1},
 		{Path: "conversation.user_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: ScopesAll, Since: 1},
 		{Path: "conversation.agent_participant_ids", Type: TypeList(TypeString()), Grade: GradeAuthority, IdentityRef: IdentityRefThirdParty, Producer: "hub:conversation", Visible: a2aAndTrigger, Since: 1},

@@ -146,7 +146,6 @@
         "project_id": "proj-uuid-1",
         "ref": "conv-group-1",
         "surface": "native",
-        "thread_id": "",
         "user_count": 0
       },
       "delivery": {
@@ -208,7 +207,6 @@
         "project_id": "proj-uuid-1",
         "ref": "conv-group-1",
         "surface": "native",
-        "thread_id": "",
         "user_count": 0
       },
       "delivery": {

@@ -144,6 +144,7 @@ func TestProject_NoOppositeEndLeak(t *testing.T) {
 				Kind:                  "direct",
 				Surface:               "native",
 				ProjectID:             "proj-1",
+				ThreadID:              "dm:agent:" + senderID + ":user:" + recipientID, // A3 §2.3 DM-key seed
 				AgentCount:            2,
 				UserCount:             1,
 				AgentParticipantIDs:   []string{senderID, thirdPartyID},
@@ -174,6 +175,7 @@ func TestProject_NoOppositeEndLeak(t *testing.T) {
 		_, hasID := convOut["id"]
 		assert.False(t, hasRef, "D1: conversation.ref must be absent for direct DM in policy_out")
 		assert.False(t, hasID, "D1: conversation.id must be absent for direct DM in policy_out")
+		assert.NotContains(t, convOut, "thread_id", "A3: conversation.thread_id must be absent in policy_out")
 		assert.NotContains(t, convOut, "agent_participant_ids")
 		assert.NotContains(t, convOut, "user_participant_ids")
 		mentionsOut := outMap["mentions"].(map[string]any)
@@ -203,6 +205,7 @@ func TestProject_NoOppositeEndLeak(t *testing.T) {
 		convIn := inMap["conversation"].(map[string]any)
 		assert.NotContains(t, convIn, "ref")
 		assert.NotContains(t, convIn, "id")
+		assert.NotContains(t, convIn, "thread_id", "A3: conversation.thread_id must be absent in policy_in")
 		assert.NotContains(t, convIn, "agent_participant_ids")
 		assert.NotContains(t, convIn, "user_participant_ids")
 		mentionsIn := inMap["mentions"].(map[string]any)
@@ -213,9 +216,10 @@ func TestProject_NoOppositeEndLeak(t *testing.T) {
 			assert.NotContainsf(t, val, thirdPartyID, "policy_in leaked third-party ID at %s", path)
 		})
 
-		// policy_a2a and trigger_chat: retain seeded IDs and delivery.cross_project.
+		// policy_a2a and trigger_chat: retain seeded IDs, delivery.cross_project, and conversation.thread_id.
 		a2aMap := rulefacts.Project(facts, rulefacts.ScopePolicyA2A).Map()
 		assert.Equal(t, true, a2aMap["delivery"].(map[string]any)["cross_project"])
+		assert.Equal(t, "dm:agent:"+senderID+":user:"+recipientID, a2aMap["conversation"].(map[string]any)["thread_id"])
 		evA2A := a2aMap["message"].(map[string]any)["event"].(map[string]any)
 		assert.Equal(t, "agent:"+thirdPartyID, evA2A["subject"])
 		assert.Contains(t, evA2A["reason"], recipientID)
@@ -223,11 +227,52 @@ func TestProject_NoOppositeEndLeak(t *testing.T) {
 		assert.Equal(t, []string{"actor:" + recipientID, "cc:" + thirdPartyID}, evA2A["templated_vars"])
 
 		trigMap := rulefacts.Project(facts, rulefacts.ScopeTriggerChat).Map()
-		trigDelivery := trigMap["message"].(map[string]any)["context"].(map[string]any)["delivery"].(map[string]any)
+		trigCtx := trigMap["message"].(map[string]any)["context"].(map[string]any)
+		trigDelivery := trigCtx["delivery"].(map[string]any)
 		assert.Equal(t, true, trigDelivery["cross_project"])
+		assert.Equal(t, "dm:agent:"+senderID+":user:"+recipientID, trigCtx["conversation"].(map[string]any)["thread_id"])
 		evTrig := trigMap["message"].(map[string]any)["event"].(map[string]any)
 		assert.Equal(t, "agent:"+thirdPartyID, evTrig["subject"])
 		assert.Equal(t, recipientID, evTrig["source"].(map[string]any)["id"])
+	})
+
+	// Amendment A3 §2.3: second fixture seeding a third-party ID into thread_id.
+	t.Run("dm_key_thread_id_with_third_party", func(t *testing.T) {
+		thirdPartyThread := "dm:agent:" + thirdPartyID + ":user:" + recipientID
+		facts := rulefacts.Facts{
+			Message: rulefacts.MessageFacts{
+				ID:         "msg-leak-thread-2",
+				CreatedAt:  fixedFixtureTime(),
+				Kind:       rulefacts.KindText,
+				Intent:     rulefacts.IntentInform,
+				Type:       messages.TypeChat,
+				Origin:     rulefacts.OriginAgent,
+				Body:       "neutral",
+				Bytes:      7,
+				BodySource: rulefacts.BodySourceEvaluatedInput,
+			},
+			Sender:    &sender,
+			Recipient: &recipient,
+			Conversation: rulefacts.ConversationFacts{
+				Ref:       "conv-group-1",
+				ID:        "conv-group-1",
+				Kind:      "group",
+				Surface:   "slack",
+				ProjectID: "proj-1",
+				ThreadID:  thirdPartyThread,
+			},
+			Delivery: rulefacts.DeliveryFacts{Surface: "group_post", Via: "explicit"},
+		}
+
+		for _, sc := range []rulefacts.Scope{rulefacts.ScopePolicyOut, rulefacts.ScopePolicyIn} {
+			m := rulefacts.Project(facts, sc).Map()
+			assert.NotContains(t, m["conversation"].(map[string]any), "thread_id")
+			walkStrings("", m, func(path, val string) {
+				assert.NotContainsf(t, val, thirdPartyID, "%s leaked third-party thread_id at %s", sc, path)
+			})
+		}
+		assert.Equal(t, thirdPartyThread, rulefacts.Project(facts, rulefacts.ScopePolicyA2A).Map()["conversation"].(map[string]any)["thread_id"])
+		assert.Equal(t, thirdPartyThread, rulefacts.Project(facts, rulefacts.ScopeTriggerChat).Map()["message"].(map[string]any)["context"].(map[string]any)["conversation"].(map[string]any)["thread_id"])
 	})
 
 	t.Run("event_source_kept_when_matching_visible_end", func(t *testing.T) {
@@ -306,21 +351,30 @@ func TestProject_OutOfScopeCompileFailsWithLineColumn(t *testing.T) {
 	assert.GreaterOrEqual(t, ce.Line, 1)
 	assert.GreaterOrEqual(t, ce.Column, 1)
 
-	// Amendment A2 §2.3 / §3.4: delivery.cross_project is statically invisible
-	// in policy_out (and policy_in). In R1 (map declarations + authoring path
-	// check), Schema.ValidatePath rejects it at authoring time and direct CEL
-	// evaluation against Project(policy_out) yields missing_input.
-	assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopePolicyOut, "delivery.cross_project"))
-	assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopePolicyIn, "delivery.cross_project"))
-	cpProg, err := outEng.Compile(`delivery.cross_project`, celengine.Kind{Name: "violation", Result: celengine.Bool()})
-	require.NoError(t, err)
-	_, _, evalErr := cpProg.Eval(context.Background(), rulefacts.Project(rulefacts.Facts{
-		Message:  rulefacts.MessageFacts{Kind: rulefacts.KindText, Type: "chat", Origin: rulefacts.OriginAgent, BodySource: rulefacts.BodySourceEvaluatedInput},
-		Delivery: rulefacts.DeliveryFacts{Surface: "agent_to_user", CrossProject: true},
-	}, rulefacts.ScopePolicyOut).Map())
-	var ee *celengine.EvalError
-	require.True(t, errors.As(evalErr, &ee), "expected *EvalError on delivery.cross_project in policy_out, got %T: %v", evalErr, evalErr)
-	assert.Equal(t, celengine.ReasonMissingInput, ee.Reason)
+	// Amendment A2 §2.3 / §3.4 & A3 §2.1 / §3.1: delivery.cross_project and
+	// conversation.thread_id are statically invisible in policy_out and policy_in.
+	// In R1 (map declarations + authoring path check), Schema.ValidatePath rejects
+	// them at authoring time and direct CEL evaluation yields missing_input.
+	for _, hidden := range []struct {
+		path string
+		expr string
+	}{
+		{"delivery.cross_project", `delivery.cross_project`},
+		{"conversation.thread_id", `conversation.thread_id == "t1"`},
+	} {
+		assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopePolicyOut, hidden.path))
+		assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopePolicyIn, hidden.path))
+		prog, err := outEng.Compile(hidden.expr, celengine.Kind{Name: "violation", Result: celengine.Bool()})
+		require.NoError(t, err)
+		_, _, evalErr := prog.Eval(context.Background(), rulefacts.Project(rulefacts.Facts{
+			Message:      rulefacts.MessageFacts{Kind: rulefacts.KindText, Type: "chat", Origin: rulefacts.OriginAgent, BodySource: rulefacts.BodySourceEvaluatedInput},
+			Conversation: rulefacts.ConversationFacts{Kind: "group", ID: "c-1", ThreadID: "t1"},
+			Delivery:     rulefacts.DeliveryFacts{Surface: "agent_to_user", CrossProject: true},
+		}, rulefacts.ScopePolicyOut).Map())
+		var ee *celengine.EvalError
+		require.True(t, errors.As(evalErr, &ee), "expected *EvalError on %s in policy_out, got %T: %v", hidden.path, evalErr, evalErr)
+		assert.Equal(t, celengine.ReasonMissingInput, ee.Reason)
+	}
 }
 
 // TestProject_RecipientInvariance_Out verifies Amendment A2 §2.1 & §3.1:
@@ -372,48 +426,84 @@ func TestProject_RecipientInvariance_Out(t *testing.T) {
 		func() (string, rulefacts.TemplateLookupStatus) { return "", rulefacts.TemplateLookupNotFound },
 	)
 
-	// Hold End.Kind, ConversationInfo, and DeliveryInfo constant (A2 §2.1 + C3).
-	fixedConv := rulefacts.ConversationInfo{
-		Ref:        "dm:fixed:key",
-		ID:         "conv-dm-fixed",
-		Kind:       "direct",
-		Surface:    "native",
-		ProjectID:  "proj-A",
-		AgentCount: 2,
-	}
-
-	buildFacts := func(recip *rulefacts.End) rulefacts.Facts {
-		f, err := rulefacts.FromMessage(
-			rulefacts.MessageInput{
-				Type:         messages.TypeInstruction,
-				Sender:       "agent:dev-worker",
-				SenderID:     sender.ID,
-				Recipient:    "agent:" + recip.Slug,
-				Body:         "Status update",
-				BodySource:   rulefacts.BodySourceEvaluatedInput,
-				SenderEnd:    &sender,
-				RecipientEnd: recip,
-			},
-			fixedConv,
-			rulefacts.DeliveryInfo{
-				Surface: "agent_dm",
-				Via:     "direct",
-			},
-		)
+	// Group conversation: hold End.Kind, ConversationInfo, and DeliveryInfo constant (A2 §2.1 + C3).
+	t.Run("group_constant_conversation", func(t *testing.T) {
+		fixedGroupConv := rulefacts.ConversationInfo{
+			Ref:        "conv-group-1",
+			ID:         "conv-group-1",
+			Kind:       "group",
+			Surface:    "native",
+			ProjectID:  "proj-A",
+			ThreadID:   "topic-1",
+			AgentCount: 2,
+		}
+		buildFacts := func(recip *rulefacts.End) rulefacts.Facts {
+			f, err := rulefacts.FromMessage(
+				rulefacts.MessageInput{
+					Type:         messages.TypeInstruction,
+					Sender:       "agent:dev-worker",
+					SenderID:     sender.ID,
+					Recipient:    "agent:" + recip.Slug,
+					Body:         "Status update",
+					BodySource:   rulefacts.BodySourceEvaluatedInput,
+					SenderEnd:    &sender,
+					RecipientEnd: recip,
+				},
+				fixedGroupConv,
+				rulefacts.DeliveryInfo{Surface: "agent_dm", Via: "direct"},
+			)
+			require.NoError(t, err)
+			return f
+		}
+		f1, f2 := buildFacts(&recipient1), buildFacts(&recipient2)
+		require.False(t, f1.Delivery.CrossProject)
+		require.True(t, f2.Delivery.CrossProject)
+		b1, err := json.Marshal(rulefacts.Project(f1, rulefacts.ScopePolicyOut).Map())
 		require.NoError(t, err)
-		return f
-	}
+		b2, err := json.Marshal(rulefacts.Project(f2, rulefacts.ScopePolicyOut).Map())
+		require.NoError(t, err)
+		assert.Equal(t, string(b1), string(b2))
+	})
 
-	f1 := buildFacts(&recipient1)
-	f2 := buildFacts(&recipient2)
-	require.False(t, f1.Delivery.CrossProject)
-	require.True(t, f2.Delivery.CrossProject)
-
-	b1, err := json.Marshal(rulefacts.Project(f1, rulefacts.ScopePolicyOut).Map())
-	require.NoError(t, err)
-	b2, err := json.Marshal(rulefacts.Project(f2, rulefacts.ScopePolicyOut).Map())
-	require.NoError(t, err)
-	assert.Equal(t, string(b1), string(b2), "policy_out projection must be byte-identical when only the recipient end identity/attributes change")
+	// Amendment A3 §2.2 coupled variant for DIRECT conversations: re-derive
+	// conversation.ref, id, and thread_id from the varied recipient end.
+	t.Run("direct_coupled_identifiers", func(t *testing.T) {
+		buildCoupled := func(recip *rulefacts.End) rulefacts.Facts {
+			dmKey := "dm:agent:" + sender.ID + ":agent:" + recip.ID
+			f, err := rulefacts.FromMessage(
+				rulefacts.MessageInput{
+					Type:         messages.TypeInstruction,
+					Sender:       "agent:dev-worker",
+					SenderID:     sender.ID,
+					Recipient:    "agent:" + recip.Slug,
+					Body:         "Status update",
+					BodySource:   rulefacts.BodySourceEvaluatedInput,
+					SenderEnd:    &sender,
+					RecipientEnd: recip,
+				},
+				rulefacts.ConversationInfo{
+					Ref:        dmKey,
+					ID:         "conv-dm-" + recip.ID,
+					Kind:       "direct",
+					Surface:    "slack",
+					ProjectID:  "proj-A",
+					ThreadID:   dmKey,
+					AgentCount: 2,
+				},
+				rulefacts.DeliveryInfo{Surface: "agent_dm", Via: "direct"},
+			)
+			require.NoError(t, err)
+			return f
+		}
+		f1, f2 := buildCoupled(&recipient1), buildCoupled(&recipient2)
+		require.False(t, f1.Delivery.CrossProject)
+		require.True(t, f2.Delivery.CrossProject)
+		b1, err := json.Marshal(rulefacts.Project(f1, rulefacts.ScopePolicyOut).Map())
+		require.NoError(t, err)
+		b2, err := json.Marshal(rulefacts.Project(f2, rulefacts.ScopePolicyOut).Map())
+		require.NoError(t, err)
+		assert.Equal(t, string(b1), string(b2), "policy_out projection must be byte-identical even when direct-DM ref/id/thread_id are coupled to the varied recipient")
+	})
 }
 
 // flattenLeafPaths returns a map of dotted leaf path -> canonical JSON value
@@ -634,47 +724,83 @@ func TestProject_SenderInvariance_In(t *testing.T) {
 		func() (string, rulefacts.TemplateLookupStatus) { return "", rulefacts.TemplateLookupError },
 	)
 
-	fixedConv := rulefacts.ConversationInfo{
-		Ref:        "dm:fixed:key",
-		ID:         "conv-dm-fixed",
-		Kind:       "direct",
-		Surface:    "native",
-		ProjectID:  "proj-A",
-		AgentCount: 2,
-	}
-
-	buildFacts := func(s *rulefacts.End) rulefacts.Facts {
-		f, err := rulefacts.FromMessage(
-			rulefacts.MessageInput{
-				Type:         messages.TypeInstruction,
-				Sender:       "agent:" + s.Slug,
-				SenderID:     s.ID,
-				Recipient:    "agent:" + recipient.Slug,
-				Body:         "Inbound task",
-				BodySource:   rulefacts.BodySourceEvaluatedInput,
-				SenderEnd:    s,
-				RecipientEnd: &recipient,
-			},
-			fixedConv,
-			rulefacts.DeliveryInfo{
-				Surface: "agent_dm",
-				Via:     "direct",
-			},
-		)
+	t.Run("group_constant_conversation", func(t *testing.T) {
+		fixedGroupConv := rulefacts.ConversationInfo{
+			Ref:        "conv-group-1",
+			ID:         "conv-group-1",
+			Kind:       "group",
+			Surface:    "native",
+			ProjectID:  "proj-A",
+			ThreadID:   "topic-1",
+			AgentCount: 2,
+		}
+		buildFacts := func(s *rulefacts.End) rulefacts.Facts {
+			f, err := rulefacts.FromMessage(
+				rulefacts.MessageInput{
+					Type:         messages.TypeInstruction,
+					Sender:       "agent:" + s.Slug,
+					SenderID:     s.ID,
+					Recipient:    "agent:" + recipient.Slug,
+					Body:         "Inbound task",
+					BodySource:   rulefacts.BodySourceEvaluatedInput,
+					SenderEnd:    s,
+					RecipientEnd: &recipient,
+				},
+				fixedGroupConv,
+				rulefacts.DeliveryInfo{Surface: "agent_dm", Via: "direct"},
+			)
+			require.NoError(t, err)
+			return f
+		}
+		f1, f2 := buildFacts(&sender1), buildFacts(&sender2)
+		require.False(t, f1.Delivery.CrossProject)
+		require.True(t, f2.Delivery.CrossProject)
+		b1, err := json.Marshal(rulefacts.Project(f1, rulefacts.ScopePolicyIn).Map())
 		require.NoError(t, err)
-		return f
-	}
+		b2, err := json.Marshal(rulefacts.Project(f2, rulefacts.ScopePolicyIn).Map())
+		require.NoError(t, err)
+		assert.Equal(t, string(b1), string(b2))
+	})
 
-	f1 := buildFacts(&sender1)
-	f2 := buildFacts(&sender2)
-	require.False(t, f1.Delivery.CrossProject)
-	require.True(t, f2.Delivery.CrossProject)
-
-	b1, err := json.Marshal(rulefacts.Project(f1, rulefacts.ScopePolicyIn).Map())
-	require.NoError(t, err)
-	b2, err := json.Marshal(rulefacts.Project(f2, rulefacts.ScopePolicyIn).Map())
-	require.NoError(t, err)
-	assert.Equal(t, string(b1), string(b2), "policy_in projection must be byte-identical when only the sender end changes")
+	// Amendment A3 §2.2 coupled variant for DIRECT conversations: re-derive
+	// conversation.ref, id, and thread_id from the varied sender end.
+	t.Run("direct_coupled_identifiers", func(t *testing.T) {
+		buildCoupled := func(s *rulefacts.End) rulefacts.Facts {
+			dmKey := "dm:agent:" + s.ID + ":agent:" + recipient.ID
+			f, err := rulefacts.FromMessage(
+				rulefacts.MessageInput{
+					Type:         messages.TypeInstruction,
+					Sender:       "agent:" + s.Slug,
+					SenderID:     s.ID,
+					Recipient:    "agent:" + recipient.Slug,
+					Body:         "Inbound task",
+					BodySource:   rulefacts.BodySourceEvaluatedInput,
+					SenderEnd:    s,
+					RecipientEnd: &recipient,
+				},
+				rulefacts.ConversationInfo{
+					Ref:        dmKey,
+					ID:         "conv-dm-" + s.ID,
+					Kind:       "direct",
+					Surface:    "slack",
+					ProjectID:  "proj-A",
+					ThreadID:   dmKey,
+					AgentCount: 2,
+				},
+				rulefacts.DeliveryInfo{Surface: "agent_dm", Via: "direct"},
+			)
+			require.NoError(t, err)
+			return f
+		}
+		f1, f2 := buildCoupled(&sender1), buildCoupled(&sender2)
+		require.False(t, f1.Delivery.CrossProject)
+		require.True(t, f2.Delivery.CrossProject)
+		b1, err := json.Marshal(rulefacts.Project(f1, rulefacts.ScopePolicyIn).Map())
+		require.NoError(t, err)
+		b2, err := json.Marshal(rulefacts.Project(f2, rulefacts.ScopePolicyIn).Map())
+		require.NoError(t, err)
+		assert.Equal(t, string(b1), string(b2), "policy_in projection must be byte-identical even when direct-DM ref/id/thread_id are coupled to the varied sender")
+	})
 }
 
 // TestProject_SameEndProvenanceKeptWhenEqualToOppositeEnd verifies Amendment A2

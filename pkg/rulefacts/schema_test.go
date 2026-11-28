@@ -56,6 +56,7 @@ func TestRegistry_IdentityRefComplete(t *testing.T) {
 		{"conversation.unmentioned_agent_slugs", rulefacts.ScopePolicyA2A, rulefacts.IdentityRefThirdParty},
 		{"conversation.ref", rulefacts.ScopePolicyOut, rulefacts.IdentityRefValueDependent},
 		{"conversation.id", rulefacts.ScopePolicyOut, rulefacts.IdentityRefValueDependent},
+		{"conversation.thread_id", rulefacts.ScopePolicyOut, rulefacts.IdentityRefValueDependent},
 		{"message.event.source.id", rulefacts.ScopePolicyOut, rulefacts.IdentityRefValueDependent},
 		{"message.event.source.name", rulefacts.ScopePolicyOut, rulefacts.IdentityRefValueDependent},
 		{"message.event.source.kind", rulefacts.ScopePolicyOut, rulefacts.IdentityRefNone},
@@ -128,12 +129,13 @@ func TestSchema_VisibilityAndValidatePath(t *testing.T) {
 		assert.Error(t, rulefacts.Schema.ValidatePath(sc, "message.nonexistent_field"))
 	}
 
-	// A1 §B.2 & A2 §2.3 static visibility: always-dropped paths must exclude policy_out and policy_in.
+	// A1 §B.2, A2 §2.3 & A3 §2.1 static visibility: always-dropped paths must exclude policy_out and policy_in.
 	for _, p := range []string{
 		"message.event.subject",
 		"message.event.reason",
 		"message.event.templated_vars",
 		"delivery.cross_project",
+		"conversation.thread_id",
 	} {
 		assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopePolicyOut, p))
 		assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopePolicyIn, p))
@@ -167,5 +169,119 @@ func TestSchema_VisibilityAndValidatePath(t *testing.T) {
 	} {
 		assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopeLegacyPolicyV1, p),
 			"legacy_policy_v1 is mirror-only and must not validate path %q in Schema", p)
+	}
+}
+
+// TestSchema_IdentityCarrierCensus pins Amendment A3 §2.4: every string or
+// list(string) path in Schema.Fields must have an explicit IdentityRef AND a
+// census classification here so a newly added string/list(string) path cannot
+// silently carry a principal ID or DM key into policy_out/policy_in.
+func TestSchema_IdentityCarrierCensus(t *testing.T) {
+	type censusEntry struct {
+		wantRef      rulefacts.IdentityRef
+		absentOutIn  bool // statically absent in policy_out and policy_in
+		contentOnly  bool
+		isContentCat bool
+	}
+
+	// Explicit census of EVERY string and list(string) path in Schema v1 + A1 + A2 + A3.
+	census := map[string]censusEntry{
+		// A3 §2.4 Identity-carrier table:
+		"conversation.ref":                     {wantRef: rulefacts.IdentityRefValueDependent}, // D1 runtime drop for direct
+		"conversation.id":                      {wantRef: rulefacts.IdentityRefValueDependent}, // D1 runtime drop for direct
+		"conversation.thread_id":               {wantRef: rulefacts.IdentityRefValueDependent, absentOutIn: true},
+		"message.event.subject":                {wantRef: rulefacts.IdentityRefValueDependent, absentOutIn: true},
+		"message.event.reason":                 {wantRef: rulefacts.IdentityRefValueDependent, absentOutIn: true},
+		"message.event.templated_vars":         {wantRef: rulefacts.IdentityRefValueDependent, absentOutIn: true},
+		"message.event.source.id":              {wantRef: rulefacts.IdentityRefValueDependent}, // A1 §B.2 runtime visible-end check
+		"message.event.source.name":            {wantRef: rulefacts.IdentityRefValueDependent}, // A1 §B.2 runtime visible-end check
+		"mentions.agent_ids":                   {wantRef: rulefacts.IdentityRefThirdParty, absentOutIn: true},
+		"mentions.user_ids":                    {wantRef: rulefacts.IdentityRefThirdParty, absentOutIn: true},
+		"conversation.agent_participant_ids":   {wantRef: rulefacts.IdentityRefThirdParty, absentOutIn: true},
+		"conversation.user_participant_ids":    {wantRef: rulefacts.IdentityRefThirdParty, absentOutIn: true},
+		"conversation.unmentioned_agent_slugs": {wantRef: rulefacts.IdentityRefThirdParty, absentOutIn: true, contentOnly: true},
+		"message.body":                         {wantRef: rulefacts.IdentityRefNone, isContentCat: true},
+
+		// Same-end fields (sender.* absent in policy_in; recipient.* absent in policy_out):
+		"sender.kind":                           {wantRef: rulefacts.IdentityRefSelfEnd},
+		"sender.id":                             {wantRef: rulefacts.IdentityRefSelfEnd},
+		"sender.slug":                           {wantRef: rulefacts.IdentityRefSelfEnd},
+		"sender.project_id":                     {wantRef: rulefacts.IdentityRefSelfEnd},
+		"sender.created_by.kind":                {wantRef: rulefacts.IdentityRefSelfEnd},
+		"sender.created_by.id":                  {wantRef: rulefacts.IdentityRefSelfEnd},
+		"sender.root_user_id":                   {wantRef: rulefacts.IdentityRefSelfEnd},
+		"sender.attributes.name":                {wantRef: rulefacts.IdentityRefSelfEnd},
+		"sender.attributes.template":            {wantRef: rulefacts.IdentityRefSelfEnd},
+		"sender.attributes.template_lookup":     {wantRef: rulefacts.IdentityRefSelfEnd},
+		"sender.attributes.template_id":         {wantRef: rulefacts.IdentityRefSelfEnd},
+		"sender.attributes.template_version":    {wantRef: rulefacts.IdentityRefSelfEnd},
+		"recipient.kind":                        {wantRef: rulefacts.IdentityRefSelfEnd},
+		"recipient.id":                          {wantRef: rulefacts.IdentityRefSelfEnd},
+		"recipient.slug":                        {wantRef: rulefacts.IdentityRefSelfEnd},
+		"recipient.project_id":                  {wantRef: rulefacts.IdentityRefSelfEnd},
+		"recipient.created_by.kind":             {wantRef: rulefacts.IdentityRefSelfEnd},
+		"recipient.created_by.id":               {wantRef: rulefacts.IdentityRefSelfEnd},
+		"recipient.root_user_id":                {wantRef: rulefacts.IdentityRefSelfEnd},
+		"recipient.attributes.name":             {wantRef: rulefacts.IdentityRefSelfEnd},
+		"recipient.attributes.template":         {wantRef: rulefacts.IdentityRefSelfEnd},
+		"recipient.attributes.template_lookup":  {wantRef: rulefacts.IdentityRefSelfEnd},
+		"recipient.attributes.template_id":      {wantRef: rulefacts.IdentityRefSelfEnd},
+		"recipient.attributes.template_version": {wantRef: rulefacts.IdentityRefSelfEnd},
+
+		// Non-carrier string descriptors, enums, and resource IDs:
+		"message.id":                      {wantRef: rulefacts.IdentityRefNone, absentOutIn: true},
+		"message.kind":                    {wantRef: rulefacts.IdentityRefNone},
+		"message.intent":                  {wantRef: rulefacts.IdentityRefNone},
+		"message.type":                    {wantRef: rulefacts.IdentityRefNone},
+		"message.origin":                  {wantRef: rulefacts.IdentityRefNone},
+		"message.body_source":             {wantRef: rulefacts.IdentityRefNone},
+		"message.event.type":              {wantRef: rulefacts.IdentityRefNone},
+		"message.event.event_type":        {wantRef: rulefacts.IdentityRefNone},
+		"message.event.event_id":          {wantRef: rulefacts.IdentityRefNone},
+		"message.event.fire_id":           {wantRef: rulefacts.IdentityRefNone},
+		"message.event.status":            {wantRef: rulefacts.IdentityRefNone},
+		"message.event.source.kind":       {wantRef: rulefacts.IdentityRefNone},
+		"message.event.trigger.id":        {wantRef: rulefacts.IdentityRefNone},
+		"message.event.trigger.name":      {wantRef: rulefacts.IdentityRefNone},
+		"message.event.schedule.id":       {wantRef: rulefacts.IdentityRefNone},
+		"message.event.schedule.name":     {wantRef: rulefacts.IdentityRefNone},
+		"message.event.schedule.event_id": {wantRef: rulefacts.IdentityRefNone},
+		"message.event.external.verified": {wantRef: rulefacts.IdentityRefNone},
+		"message.interaction.kind":        {wantRef: rulefacts.IdentityRefNone},
+		"message.system.category":         {wantRef: rulefacts.IdentityRefNone},
+		"conversation.kind":               {wantRef: rulefacts.IdentityRefNone},
+		"conversation.surface":            {wantRef: rulefacts.IdentityRefNone},
+		"conversation.project_id":         {wantRef: rulefacts.IdentityRefNone},
+		"delivery.surface":                {wantRef: rulefacts.IdentityRefNone},
+		"delivery.via":                    {wantRef: rulefacts.IdentityRefNone},
+	}
+
+	seen := make(map[string]bool)
+	for _, f := range rulefacts.Schema.Fields {
+		isStringOrStringList := f.Type.Kind == rulefacts.CELKindString ||
+			(f.Type.Kind == rulefacts.CELKindList && f.Type.Elem != nil && f.Type.Elem.Kind == rulefacts.CELKindString)
+		if !isStringOrStringList {
+			continue
+		}
+		seen[f.Path] = true
+		entry, ok := census[f.Path]
+		require.Truef(t, ok, "string/list(string) path %q is missing from A3 §2.4 identity-carrier census; classify it explicitly", f.Path)
+		assert.Equal(t, entry.wantRef, f.IdentityRef, "IdentityRef mismatch for %q", f.Path)
+		if entry.absentOutIn {
+			assert.Falsef(t, f.Visible.Has(rulefacts.ScopePolicyOut), "path %q must be absent in policy_out", f.Path)
+			assert.Falsef(t, f.Visible.Has(rulefacts.ScopePolicyIn), "path %q must be absent in policy_in", f.Path)
+		}
+		if entry.contentOnly {
+			require.NotNil(t, f.Content)
+			assert.True(t, f.Content.ContentOnly)
+		}
+		if entry.isContentCat {
+			assert.Equal(t, rulefacts.GradeContent, f.Grade)
+		}
+	}
+
+	// Ensure no stale census entries remain.
+	for p := range census {
+		assert.Truef(t, seen[p], "census entry %q no longer exists in Schema.Fields", p)
 	}
 }

@@ -426,7 +426,6 @@ func projectConversation(c ConversationFacts, scope Scope) map[string]any {
 		"kind":        c.Kind,
 		"surface":     c.Surface,
 		"project_id":  c.ProjectID,
-		"thread_id":   c.ThreadID,
 		"agent_count": c.AgentCount,
 		"user_count":  c.UserCount,
 	}
@@ -444,11 +443,13 @@ func projectConversation(c ConversationFacts, scope Scope) map[string]any {
 		}
 	}
 
-	// Third-party participant lists: visible in policy_a2a and trigger_chat (Q1);
-	// ABSENT in policy_out and policy_in.
+	// Third-party participant lists and conversation.thread_id (Amendment A3 §2.1:
+	// statically absent in policy_out/policy_in because broker-inbound DMs set
+	// thread_id to the DM key): visible in policy_a2a and trigger_chat (Q1).
 	// Note: conversation.unmentioned_agent_slugs is System One content-only and
 	// is never emitted in CEL activation maps.
 	if scope == ScopePolicyA2A || scope == ScopeTriggerChat {
+		out["thread_id"] = c.ThreadID
 		out["agent_participant_ids"] = cloneStringsNonNil(c.AgentParticipantIDs)
 		out["user_participant_ids"] = cloneStringsNonNil(c.UserParticipantIDs)
 	}
