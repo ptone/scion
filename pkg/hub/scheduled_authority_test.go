@@ -868,18 +868,12 @@ func (d *softDeletingScheduledDispatcher) DispatchAgentCreateWithGather(ctx cont
 }
 
 func (d *softDeletingScheduledDispatcher) softDelete(agent *store.Agent) {
-	d.err = d.srv.store.WithTx(context.Background(), func(tx store.Store) error {
-		row, gerr := tx.GetAgent(context.Background(), agent.ID)
-		if gerr != nil {
-			return gerr
-		}
-		now := time.Now()
-		row.DeletedAt = now
-		if _, uerr := tx.UpdateAgentDeletion(context.Background(), row.ID, store.DeletionPredicate{}, store.DeletionFields{DeletedAt: &now}); uerr != nil {
-			return uerr
-		}
-		return d.srv.softDeleteAgentTx(context.Background(), tx, row, AuditActor{})
-	})
+	now := time.Now()
+	_, d.err = d.srv.store.FinalizeAgentDeletion(context.Background(), agent.ID, store.DeletionPredicate{}, store.DeletionFinalizeSoft,
+		store.DeletionFields{DeletedAt: &now},
+		func(ctx context.Context, tx store.Store, row *store.Agent, _ store.DeletionFinalizeMode) error {
+			return d.srv.softDeleteAgentTx(ctx, tx, row, AuditActor{})
+		})
 }
 
 // A scheduled child deleted while its synchronous dispatch was in flight

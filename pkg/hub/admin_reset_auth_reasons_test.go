@@ -85,27 +85,26 @@ func requireCreatorMissingEntry(t *testing.T, body resetAuthAllBody, raw string,
 func TestAdminResetAuthAll_DeletedCreator(t *testing.T) {
 	cases := []struct {
 		name   string
-		delete func(ctx context.Context, f *mintFixture, tx store.Store, parent *store.Agent) error
+		delete func(ctx context.Context, f *mintFixture, parent *store.Agent) error
 	}{
-		{"hard delete", func(ctx context.Context, f *mintFixture, tx store.Store, parent *store.Agent) error {
-			if err := tx.DeleteAgent(ctx, parent.ID); err != nil {
-				return err
-			}
-			return f.srv.hardDeleteAgentTx(ctx, tx, parent, AuditActor{})
+		{"hard delete", func(ctx context.Context, f *mintFixture, parent *store.Agent) error {
+			return f.store.WithTx(ctx, func(tx store.Store) error {
+				if err := tx.DeleteAgent(ctx, parent.ID); err != nil {
+					return err
+				}
+				return f.srv.hardDeleteAgentTx(ctx, tx, parent, AuditActor{})
+			})
 		}},
 		// The soft delete deactivates the creator's edge with
 		// EdgeDeactivationAgentSoftDelete and keeps its row.
-		{"soft delete", func(ctx context.Context, f *mintFixture, tx store.Store, parent *store.Agent) error {
-			row, err := tx.GetAgent(ctx, parent.ID)
-			if err != nil {
-				return err
-			}
+		{"soft delete", func(ctx context.Context, f *mintFixture, parent *store.Agent) error {
 			now := time.Now()
-			row.DeletedAt = now
-			if _, err := tx.UpdateAgentDeletion(ctx, row.ID, store.DeletionPredicate{}, store.DeletionFields{DeletedAt: &now}); err != nil {
-				return err
-			}
-			return f.srv.softDeleteAgentTx(ctx, tx, row, AuditActor{})
+			_, err := f.store.FinalizeAgentDeletion(ctx, parent.ID, store.DeletionPredicate{}, store.DeletionFinalizeSoft,
+				store.DeletionFields{DeletedAt: &now},
+				func(ctx context.Context, tx store.Store, row *store.Agent, _ store.DeletionFinalizeMode) error {
+					return f.srv.softDeleteAgentTx(ctx, tx, row, AuditActor{})
+				})
+			return err
 		}},
 	}
 	for i, tc := range cases {
@@ -120,9 +119,7 @@ func TestAdminResetAuthAll_DeletedCreator(t *testing.T) {
 			child := f.childAgent(t, name+"-child", parent, AgentRoleFull)
 			ok := healthyResetAuthAgent(t, f, name+"-ok")
 
-			require.NoError(t, f.store.WithTx(ctx, func(tx store.Store) error {
-				return tc.delete(ctx, f, tx, parent)
-			}))
+			require.NoError(t, tc.delete(ctx, f, parent))
 
 			body, raw := postResetAuthAll(t, f.srv)
 
