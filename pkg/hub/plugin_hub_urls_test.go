@@ -124,3 +124,42 @@ func TestNeverAPIWritable_FileModeGetDoesNotEchoHubInternalURL(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "internal_url: "+hubInternalURLSentinel, "the file value is preserved")
 }
+
+const mcpHubEndpointSentinel = "http://192.0.2.88:8080"
+
+func TestNeverAPIWritable_MCPHubEndpointRefused(t *testing.T) {
+	body := `{"server":{"mcp":{"hub_endpoint":"http://127.0.0.1:8080"}}}`
+	t.Run("file", func(t *testing.T) {
+		rr, settingsPath := fileModePutServerConfig(t, &Server{}, body)
+		assert.Equal(t, []string{config.MCPHubEndpointKey}, tiaErrorKeys(t, rr))
+		_, err := os.Stat(settingsPath)
+		assert.True(t, os.IsNotExist(err), "a refused PUT writes no settings file")
+	})
+	for _, workstation := range []bool{false, true} {
+		t.Run(map[bool]string{false: "db", true: "workstation"}[workstation], func(t *testing.T) {
+			workstationHome(t)
+			srv, st, _ := newSQLiteHubInMode(t, workstation, nil)
+			before := hubSettingRevisions(t, st)
+			rr := putServerConfig(t, srv, body)
+			assert.Equal(t, []string{config.MCPHubEndpointKey}, tiaErrorKeys(t, rr))
+			assert.Equal(t, before, hubSettingRevisions(t, st), "a refused PUT writes no DB row")
+		})
+	}
+}
+
+func TestNeverAPIWritable_FileModeGetDoesNotEchoMCPHubEndpoint(t *testing.T) {
+	settingsPath := tempSettingsHome(t)
+	yaml := "schema_version: \"1\"\nserver:\n  mcp:\n    hub_endpoint: " + mcpHubEndpointSentinel + "\n"
+	require.NoError(t, os.WriteFile(settingsPath, []byte(yaml), 0o644))
+	srv := &Server{}
+	getRR := httptest.NewRecorder()
+	srv.handleGetServerConfig(getRR)
+	require.Equal(t, http.StatusOK, getRR.Code, getRR.Body.String())
+	assert.NotContains(t, getRR.Body.String(), mcpHubEndpointSentinel)
+	echo := httptest.NewRecorder()
+	srv.handleAdminServerConfig(echo, adminRequest(http.MethodPut, "/api/v1/admin/server-config", getRR.Body.String()))
+	assert.Equal(t, http.StatusOK, echo.Code, echo.Body.String())
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "hub_endpoint: "+mcpHubEndpointSentinel, "the file value is preserved")
+}

@@ -231,6 +231,7 @@ export default defineConfig({
 								{ label: 'Identity & Access (RBAC)', slug: 'hosted/ha/permissions' },
 								{ label: 'Proxy Auth (IAP)', slug: 'hosted/ha/auth-proxy-iap' },
 								{ label: 'Separate Conduit Relays', slug: 'hosted/ha/separate-relay' },
+								{ label: 'Standalone MCP Server', slug: 'hosted/ha/mcp-standalone' },
 								{ label: 'Lifecycle Hooks', slug: 'hosted/ha/lifecycle-hooks' },
 								{ label: 'Branding & White-Labeling', slug: 'hosted/single-node/branding' },
 								{ label: 'Observability', slug: 'hosted/single-node/observability' },

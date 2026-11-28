@@ -283,7 +283,7 @@ func init() {
 
 	// Web Frontend flags
 	serverStartCmd.Flags().BoolVar(&enableWeb, "enable-web", false, "Enable the web frontend")
-	serverStartCmd.Flags().BoolVar(&enableMCP, "enable-mcp", false, "Enable the MCP server listener (experimental; requires --enable-hub)")
+	serverStartCmd.Flags().BoolVar(&enableMCP, "enable-mcp", false, "Enable the MCP server listener (experimental; runs standalone against server.mcp.hub_endpoint with --hosted or --enable-hub=false)")
 	serverStartCmd.Flags().IntVar(&webPort, "web-port", 8080, "Web frontend port")
 	serverStartCmd.Flags().StringVar(&webAssetsDir, "web-assets-dir", "", "Path to client assets directory (overrides embedded)")
 	serverStartCmd.Flags().StringVar(&webSessionSecret, "session-secret", "", "Session cookie signing secret (auto-generated if empty)")

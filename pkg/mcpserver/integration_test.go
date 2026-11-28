@@ -19,17 +19,21 @@ package mcpserver_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
@@ -38,7 +42,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
+	"github.com/knadh/koanf/v2"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -63,7 +70,7 @@ func (*noopMessageDispatcher) DispatchAgentMessage(_ context.Context, _ *store.A
 	return nil
 }
 
-func newIntegrationHub(t *testing.T) (*hub.Server, store.Store) {
+func newIntegrationHub(t *testing.T) (*hub.Server, store.Store, *hub.OperationalSettings) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -85,15 +92,119 @@ func newIntegrationHub(t *testing.T) (*hub.Server, store.Store) {
 	if err != nil {
 		t.Fatalf("hub.New: %v", err)
 	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	srv.SetDispatcher(&noopMessageDispatcher{})
-	return srv, st
+
+	ops := hub.NewOperationalSettings(st, koanf.New("."), koanf.New("."))
+	if _, err := ops.Refresh(ctx); err != nil {
+		t.Fatalf("ops.Refresh: %v", err)
+	}
+	srv.SetOperationalSettings(ops)
+	return srv, st, ops
+}
+
+func setMCPServerExperiment(t *testing.T, ctx context.Context, st store.Store, ops *hub.OperationalSettings, enabled bool) {
+	t.Helper()
+	doc, err := json.Marshal(map[string]any{
+		"overrides": map[string]bool{experiments.MCPServer: enabled},
+	})
+	if err != nil {
+		t.Fatalf("marshal experiment override: %v", err)
+	}
+	if _, err := st.UpsertHubSetting(ctx, "experiments", doc, "test", -1, "seeded"); err != nil {
+		t.Fatalf("UpsertHubSetting(experiments): %v", err)
+	}
+	if _, err := ops.Refresh(ctx); err != nil {
+		t.Fatalf("ops.Refresh: %v", err)
+	}
+}
+
+type mcpMode string
+
+const (
+	modeEmbedded   mcpMode = "embedded"
+	modeStandalone mcpMode = "standalone"
+)
+
+func startMCPServerForMode(t *testing.T, ctx context.Context, mode mcpMode, hubSrv *hub.Server, wrapTransport func(http.RoundTripper) http.RoundTripper) (endpoint string, cleanup func()) {
+	t.Helper()
+
+	var backendOpts mcpserver.BackendOptions
+	switch mode {
+	case modeEmbedded:
+		var rt http.RoundTripper = &mcpserver.InProcessTransport{Handler: hubSrv.Handler()}
+		if wrapTransport != nil {
+			rt = wrapTransport(rt)
+		}
+		backendOpts = mcpserver.BackendOptions{
+			HubBaseURL: "http://in-process",
+			Transport:  rt,
+			Version:    "integration-test",
+			ExperimentChecker: func(_ context.Context, _ mcpserver.Credential, name string) (bool, error) {
+				return hubSrv.ExperimentEnabled(name), nil
+			},
+			DisableTransportAuth: true,
+		}
+	case modeStandalone:
+		hubTS := httptest.NewServer(hubSrv.Handler())
+		t.Cleanup(hubTS.Close)
+		rt := hubTS.Client().Transport
+		if wrapTransport != nil {
+			rt = wrapTransport(rt)
+		}
+		backendOpts = mcpserver.BackendOptions{
+			HubBaseURL:           hubTS.URL,
+			Transport:            rt,
+			Version:              "integration-test",
+			ExperimentCacheTTL:   5 * time.Millisecond,
+			DisableTransportAuth: false,
+		}
+	default:
+		t.Fatalf("unknown mcpMode: %q", mode)
+	}
+
+	srvOpts := mcpserver.Options{
+		Version: "integration-test",
+		Backend: mcpserver.NewBackend(backendOpts),
+	}
+	if mode == modeStandalone {
+		srvOpts.HubHealthProbe = mcpserver.NewHubHealthProbe(backendOpts)
+	}
+	mcpSrv, err := mcpserver.New(srvOpts)
+	if err != nil {
+		t.Fatalf("mcpserver.New(%s): %v", mode, err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	srvCtx, srvCancel := context.WithCancel(ctx)
+	srvDone := make(chan error, 1)
+	go func() {
+		srvDone <- mcpSrv.Serve(srvCtx, ln)
+	}()
+	return "http://" + ln.Addr().String() + "/mcp", func() {
+		srvCancel()
+		if err := <-srvDone; err != nil {
+			t.Errorf("mcpSrv.Serve(%s) shutdown error: %v", mode, err)
+		}
+	}
 }
 
 func TestIntegration_SendAndReadMessagesWithRealHub(t *testing.T) {
+	for _, mode := range []mcpMode{modeEmbedded, modeStandalone} {
+		t.Run(string(mode), func(t *testing.T) {
+			runIntegrationSendAndReadMessages(t, mode)
+		})
+	}
+}
+
+func runIntegrationSendAndReadMessages(t *testing.T, mode mcpMode) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	hubSrv, st := newIntegrationHub(t)
+	hubSrv, st, ops := newIntegrationHub(t)
 
 	// 1. Seed a user in the real Hub store and grant hub-member so they can create a project.
 	user := &store.User{
@@ -215,48 +326,10 @@ func TestIntegration_SendAndReadMessagesWithRealHub(t *testing.T) {
 		t.Fatalf("create no-msg UAT: %v", err)
 	}
 
-	// 2. Start the embedded MCP listener on 127.0.0.1:0 with an in-process RoundTripper.
-	var expEnabled atomic.Bool
-	expEnabled.Store(false) // starts off to test 404 gate
-
-	backend := mcpserver.NewBackend(mcpserver.BackendOptions{
-		HubBaseURL: "http://in-process",
-		Transport:  &mcpserver.InProcessTransport{Handler: hubSrv.Handler()},
-		Version:    "integration-test",
-		ExperimentChecker: func(_ context.Context, _ mcpserver.Credential, name string) (bool, error) {
-			if name == experiments.MCPServer {
-				return expEnabled.Load(), nil
-			}
-			return hubSrv.ExperimentEnabled(name), nil
-		},
-		DisableTransportAuth: true,
-	})
-
-	mcpSrv, err := mcpserver.New(mcpserver.Options{
-		Version: "integration-test",
-		Backend: backend,
-	})
-	if err != nil {
-		t.Fatalf("mcpserver.New: %v", err)
-	}
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen: %v", err)
-	}
-	srvCtx, srvCancel := context.WithCancel(ctx)
-	srvDone := make(chan error, 1)
-	go func() {
-		srvDone <- mcpSrv.Serve(srvCtx, ln)
-	}()
-	defer func() {
-		srvCancel()
-		if err := <-srvDone; err != nil {
-			t.Errorf("mcpSrv.Serve shutdown error: %v", err)
-		}
-	}()
-
-	endpoint := "http://" + ln.Addr().String() + "/mcp"
+	// 2. Start the MCP listener in the requested mode (embedded or standalone).
+	// hub.mcp_server starts off by default to test the 404 gate.
+	endpoint, stopMCP := startMCPServerForMode(t, ctx, mode, hubSrv, nil)
+	defer stopMCP()
 
 	// 3. With hub.mcp_server off, /mcp answers 404.
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
@@ -271,8 +344,12 @@ func TestIntegration_SendAndReadMessagesWithRealHub(t *testing.T) {
 		t.Fatalf("experiment off: got status %d, want 404", resp.StatusCode)
 	}
 
-	// Flip hub.mcp_server on.
-	expEnabled.Store(true)
+	// Flip hub.mcp_server on via real Hub operational settings.
+	setMCPServerExperiment(t, ctx, st, ops, true)
+	if mode == modeStandalone {
+		// Allow the short test experiment cache (5ms) to expire.
+		time.Sleep(15 * time.Millisecond)
+	}
 
 	// 4. Connect a go-sdk StreamableClientTransport with the static UAT header.
 	connectClient := func(token string) *mcp.ClientSession {
@@ -559,13 +636,23 @@ func (r *raceInjectingTransport) RoundTrip(req *http.Request) (*http.Response, e
 }
 
 // TestIntegration_SendMessageCursorDoesNotSkipConcurrentReply is the R1
-// regression test: an agent reply committed concurrently with (before
-// SendToAgent returns) must still be returned by read_messages(send_cursor).
+// regression test, run table-driven over {embedded, standalone}: an agent reply
+// committed concurrently with (before SendToAgent returns) must still be
+// returned by read_messages(send_cursor).
 func TestIntegration_SendMessageCursorDoesNotSkipConcurrentReply(t *testing.T) {
+	for _, mode := range []mcpMode{modeEmbedded, modeStandalone} {
+		t.Run(string(mode), func(t *testing.T) {
+			runIntegrationConcurrentReply(t, mode)
+		})
+	}
+}
+
+func runIntegrationConcurrentReply(t *testing.T, mode mcpMode) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	hubSrv, st := newIntegrationHub(t)
+	hubSrv, st, ops := newIntegrationHub(t)
+	setMCPServerExperiment(t, ctx, st, ops, true)
 
 	user := &store.User{
 		ID:          uuid.NewString(),
@@ -658,46 +745,23 @@ func TestIntegration_SendMessageCursorDoesNotSkipConcurrentReply(t *testing.T) {
 	}
 
 	agentHubClient := inProcClient(hubclient.WithAgentToken(agentToken))
-	raceRT := &raceInjectingTransport{
-		base: &mcpserver.InProcessTransport{Handler: hubSrv.Handler()},
-		onSent: func(convID string) error {
-			_, err := agentHubClient.Agents().SendOutboundMessage(ctx, agent.ID, &hubclient.OutboundMessageRequest{
-				Recipient:      "user:" + user.Email,
-				ConversationID: convID,
-				Msg:            "CONCURRENT-REPLY",
-				Type:           messages.TypeReply,
-			})
-			return err
-		},
-	}
-
-	backend := mcpserver.NewBackend(mcpserver.BackendOptions{
-		HubBaseURL: "http://in-process",
-		Transport:  raceRT,
-		Version:    "race-test",
-		ExperimentChecker: func(_ context.Context, _ mcpserver.Credential, _ string) (bool, error) {
-			return true, nil
-		},
-		DisableTransportAuth: true,
-	})
-	mcpSrv, err := mcpserver.New(mcpserver.Options{Version: "race-test", Backend: backend})
-	if err != nil {
-		t.Fatalf("mcpserver.New: %v", err)
-	}
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen: %v", err)
-	}
-	srvCtx, srvCancel := context.WithCancel(ctx)
-	srvDone := make(chan error, 1)
-	go func() { srvDone <- mcpSrv.Serve(srvCtx, ln) }()
-	defer func() {
-		srvCancel()
-		if err := <-srvDone; err != nil {
-			t.Errorf("Serve shutdown error: %v", err)
+	var raceRT *raceInjectingTransport
+	endpoint, stopMCP := startMCPServerForMode(t, ctx, mode, hubSrv, func(base http.RoundTripper) http.RoundTripper {
+		raceRT = &raceInjectingTransport{
+			base: base,
+			onSent: func(convID string) error {
+				_, err := agentHubClient.Agents().SendOutboundMessage(ctx, agent.ID, &hubclient.OutboundMessageRequest{
+					Recipient:      "user:" + user.Email,
+					ConversationID: convID,
+					Msg:            "CONCURRENT-REPLY",
+					Type:           messages.TypeReply,
+				})
+				return err
+			},
 		}
-	}()
+		return raceRT
+	})
+	defer stopMCP()
 
 	cl := mcp.NewClient(&mcp.Implementation{Name: "race-client", Version: "1.0"}, nil)
 	hc := &http.Client{
@@ -707,7 +771,7 @@ func TestIntegration_SendMessageCursorDoesNotSkipConcurrentReply(t *testing.T) {
 		},
 	}
 	sess, err := cl.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint:   "http://" + ln.Addr().String() + "/mcp",
+		Endpoint:   endpoint,
 		HTTPClient: hc,
 	}, nil)
 	if err != nil {
@@ -750,5 +814,407 @@ func TestIntegration_SendMessageCursorDoesNotSkipConcurrentReply(t *testing.T) {
 	}
 	if len(readOut.Messages) != 1 || readOut.Messages[0].Text != "CONCURRENT-REPLY" {
 		t.Fatalf("expected CONCURRENT-REPLY after send cursor, got: %+v", readOut.Messages)
+	}
+}
+
+// TestIntegration_CrossReplicaCursorResume implements §9 B5: two standalone MCP
+// server replicas pointing at one Hub. A cursor obtained on replica 1 resumes
+// cleanly on replica 2 with no loss and no duplicate delivery.
+func TestIntegration_CrossReplicaCursorResume(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	hubSrv, st, ops := newIntegrationHub(t)
+	setMCPServerExperiment(t, ctx, st, ops, true)
+
+	user := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "replica@example.com",
+		DisplayName: "Replica User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	hubMemberRole, err := st.GetRoleDefinitionByName(ctx, "hub-member", store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("GetRoleDefinitionByName: %v", err)
+	}
+	if _, err := st.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               uuid.NewString(),
+		PrincipalType:    "user",
+		PrincipalID:      user.ID,
+		RoleDefinitionID: hubMemberRole.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        user.ID,
+	}); err != nil {
+		t.Fatalf("CreateRoleBinding: %v", err)
+	}
+
+	hubTS := httptest.NewServer(hubSrv.Handler())
+	defer hubTS.Close()
+
+	newHubClient := func(opt hubclient.Option) hubclient.Client {
+		cl, err := hubclient.New(hubTS.URL, hubclient.WithHTTPClient(hubTS.Client()), opt, hubclient.WithTransportAuth(nil, 0))
+		if err != nil {
+			t.Fatalf("hubclient.New: %v", err)
+		}
+		return cl
+	}
+
+	userJWT, _, err := hubSrv.GetUserTokenService().MintAccessToken(hub.UserTokenSubject{
+		UserID:      user.ID,
+		Email:       user.Email,
+		DisplayName: user.DisplayName,
+		Role:        user.Role,
+		ClientType:  hub.ClientTypeCLI,
+	})
+	if err != nil {
+		t.Fatalf("MintAccessToken: %v", err)
+	}
+	userHubClient := newHubClient(hubclient.WithBearerToken(userJWT))
+	proj, err := userHubClient.Projects().Create(ctx, &hubclient.CreateProjectRequest{
+		Name: "Cross-Replica Project",
+		Slug: "cross-replica",
+	})
+	if err != nil {
+		t.Fatalf("Projects.Create: %v", err)
+	}
+
+	agent := &store.Agent{
+		ID:              uuid.NewString(),
+		Slug:            "echo-replica",
+		Name:            "echo-replica",
+		ProjectID:       proj.ID,
+		OwnerID:         user.ID,
+		CreatedBy:       user.ID,
+		RuntimeBrokerID: uuid.NewString(),
+		Phase:           "running",
+		MessageMode:     "project",
+		RunID:           "run-replica-1",
+	}
+	if err := st.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	agentToken, agentCred, err := hubSrv.SignAgentToken(hub.AgentTokenGrant{
+		AgentID:   agent.ID,
+		ProjectID: proj.ID,
+		Ancestry:  []string{user.ID},
+		Scopes:    []hub.AgentTokenScope{hub.ScopeAgentStatusUpdate, hub.ScopeProjectRead},
+	}, "run-replica-1")
+	if err != nil {
+		t.Fatalf("SignAgentToken: %v", err)
+	}
+	if err := st.CreateAgentCredential(ctx, agentCred); err != nil {
+		t.Fatalf("CreateAgentCredential: %v", err)
+	}
+	uat, err := userHubClient.Tokens().Create(ctx, &hubclient.CreateTokenRequest{
+		Name:      "mcp-replica-uat",
+		ProjectID: proj.ID,
+		Scopes:    []string{"project:read", "agent:read", "agent:message", "inbox:read", "inbox:write"},
+	})
+	if err != nil {
+		t.Fatalf("Tokens.Create: %v", err)
+	}
+
+	// Start two independent standalone MCP server replicas against the same Hub.
+	startReplica := func(name string) (string, func()) {
+		backendOpts := mcpserver.BackendOptions{
+			HubBaseURL:           hubTS.URL,
+			Transport:            hubTS.Client().Transport,
+			Version:              name,
+			DisableTransportAuth: false,
+		}
+		srv, err := mcpserver.New(mcpserver.Options{
+			Version:        name,
+			Backend:        mcpserver.NewBackend(backendOpts),
+			HubHealthProbe: mcpserver.NewHubHealthProbe(backendOpts),
+		})
+		if err != nil {
+			t.Fatalf("mcpserver.New(%s): %v", name, err)
+		}
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("net.Listen(%s): %v", name, err)
+		}
+		rCtx, rCancel := context.WithCancel(ctx)
+		rDone := make(chan error, 1)
+		go func() { rDone <- srv.Serve(rCtx, ln) }()
+		return "http://" + ln.Addr().String() + "/mcp", func() {
+			rCancel()
+			if err := <-rDone; err != nil {
+				t.Errorf("%s shutdown error: %v", name, err)
+			}
+		}
+	}
+
+	ep1, stop1 := startReplica("replica-1")
+	defer stop1()
+	ep2, stop2 := startReplica("replica-2")
+	defer stop2()
+
+	connectTo := func(ep string) *mcp.ClientSession {
+		cl := mcp.NewClient(&mcp.Implementation{Name: "replica-client", Version: "1.0"}, nil)
+		hc := &http.Client{
+			Transport: &headerRoundTripper{
+				base:    &http.Transport{DisableKeepAlives: true},
+				headers: map[string]string{"Authorization": "Bearer " + uat.Token},
+			},
+		}
+		sess, err := cl.Connect(ctx, &mcp.StreamableClientTransport{
+			Endpoint:   ep,
+			HTTPClient: hc,
+		}, nil)
+		if err != nil {
+			t.Fatalf("Connect(%s): %v", ep, err)
+		}
+		t.Cleanup(func() { _ = sess.Close() })
+		return sess
+	}
+
+	sess1 := connectTo(ep1)
+	sess2 := connectTo(ep2)
+
+	// Send initial message through replica 1.
+	sendRes, err := sess1.CallTool(ctx, &mcp.CallToolParams{
+		Name: "send_message",
+		Arguments: map[string]any{
+			"project": proj.ID,
+			"agent":   agent.Slug,
+			"text":    "hello-from-replica-1",
+		},
+	})
+	if err != nil || sendRes.IsError {
+		t.Fatalf("send_message via replica 1 failed: err=%v res=%+v", err, sendRes)
+	}
+	var sendOut mcpserver.SendResult
+	if err := json.Unmarshal([]byte(sendRes.Content[0].(*mcp.TextContent).Text), &sendOut); err != nil {
+		t.Fatalf("unmarshal sendOut: %v", err)
+	}
+
+	// Agent writes reply 1; read it through replica 1 to obtain cursor2.
+	agentHubClient := newHubClient(hubclient.WithAgentToken(agentToken))
+	if _, err := agentHubClient.Agents().SendOutboundMessage(ctx, agent.ID, &hubclient.OutboundMessageRequest{
+		Recipient:      "user:" + user.Email,
+		ConversationID: sendOut.ConversationID,
+		Msg:            "reply-1",
+		Type:           messages.TypeReply,
+	}); err != nil {
+		t.Fatalf("SendOutboundMessage reply-1: %v", err)
+	}
+
+	read1, err := sess1.CallTool(ctx, &mcp.CallToolParams{
+		Name: "read_messages",
+		Arguments: map[string]any{
+			"conversation_id": sendOut.ConversationID,
+			"cursor":          sendOut.Cursor,
+		},
+	})
+	if err != nil || read1.IsError {
+		t.Fatalf("read_messages via replica 1 failed: err=%v res=%+v", err, read1)
+	}
+	var out1 mcpserver.ReadMessagesOutput
+	if err := json.Unmarshal([]byte(read1.Content[0].(*mcp.TextContent).Text), &out1); err != nil {
+		t.Fatalf("unmarshal out1: %v", err)
+	}
+	if len(out1.Messages) != 1 || out1.Messages[0].Text != "reply-1" {
+		t.Fatalf("replica 1 read = %+v, want [reply-1]", out1.Messages)
+	}
+
+	// Agent writes reply 2; resume on replica 2 using replica 1's next_cursor.
+	if _, err := agentHubClient.Agents().SendOutboundMessage(ctx, agent.ID, &hubclient.OutboundMessageRequest{
+		Recipient:      "user:" + user.Email,
+		ConversationID: sendOut.ConversationID,
+		Msg:            "reply-2",
+		Type:           messages.TypeReply,
+	}); err != nil {
+		t.Fatalf("SendOutboundMessage reply-2: %v", err)
+	}
+
+	read2, err := sess2.CallTool(ctx, &mcp.CallToolParams{
+		Name: "read_messages",
+		Arguments: map[string]any{
+			"conversation_id": sendOut.ConversationID,
+			"cursor":          out1.NextCursor,
+		},
+	})
+	if err != nil || read2.IsError {
+		t.Fatalf("read_messages via replica 2 failed: err=%v res=%+v", err, read2)
+	}
+	var out2 mcpserver.ReadMessagesOutput
+	if err := json.Unmarshal([]byte(read2.Content[0].(*mcp.TextContent).Text), &out2); err != nil {
+		t.Fatalf("unmarshal out2: %v", err)
+	}
+	if len(out2.Messages) != 1 || out2.Messages[0].Text != "reply-2" {
+		t.Fatalf("replica 2 resume = %+v, want [reply-2]", out2.Messages)
+	}
+	if out2.NextCursor == "" || out2.NextCursor == out1.NextCursor {
+		t.Fatalf("expected replica 2 next_cursor to advance from %q, got %q", out1.NextCursor, out2.NextCursor)
+	}
+}
+
+// TestIntegration_VisitorPassesFrontDoorInBothModes verifies R2: a linked
+// project visitor authenticating with X-Scion-Federation-Token gets parity
+// between embedded and standalone modes (404 when hub.mcp_server is off,
+// 200 OK on initialize when hub.mcp_server is on — never 403 at the
+// standalone experiment probe).
+func TestIntegration_VisitorPassesFrontDoorInBothModes(t *testing.T) {
+	for _, mode := range []mcpMode{modeEmbedded, modeStandalone} {
+		t.Run(string(mode), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			const (
+				issuerURL = "https://idp-mcp-visitor.example.com"
+				audience  = "https://hub-mcp-visitor.example.com"
+				kid       = "mcp-visitor-kid-1"
+			)
+
+			privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatalf("rsa.GenerateKey: %v", err)
+			}
+			jwk := jose.JSONWebKey{Key: &privKey.PublicKey, KeyID: kid, Algorithm: string(jose.RS256), Use: "sig"}
+			jwksBytes, err := json.Marshal(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{jwk}})
+			if err != nil {
+				t.Fatalf("marshal jwks: %v", err)
+			}
+			jwksTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(jwksBytes)
+			}))
+			defer jwksTS.Close()
+
+			dbPath := filepath.Join(t.TempDir(), "hub-visitor.db")
+			entClient, err := entc.OpenSQLite(dbPath, entc.PoolConfig{MaxOpenConns: 1})
+			if err != nil {
+				t.Fatalf("entc.OpenSQLite: %v", err)
+			}
+			if err := entc.AutoMigrate(ctx, entClient); err != nil {
+				t.Fatalf("entc.AutoMigrate: %v", err)
+			}
+			st := entadapter.NewCompositeStore(entClient)
+			t.Cleanup(func() { _ = st.Close() })
+
+			hubSrv, err := hub.New(hub.ServerConfig{
+				Host: "127.0.0.1",
+				Port: 0,
+				Federation: config.FederationConfig{
+					Enabled: true,
+					TrustedIssuers: []config.TrustedIssuerConfig{
+						{
+							IssuerURL:          issuerURL,
+							IssuerType:         "user",
+							JWKSURL:            jwksTS.URL,
+							ExpectedAudience:   audience,
+							AllowVisitorGrants: true,
+						},
+					},
+				},
+			}, st)
+			if err != nil {
+				t.Fatalf("hub.New: %v", err)
+			}
+			t.Cleanup(func() { _ = hubSrv.Shutdown(context.Background()) })
+
+			ops := hub.NewOperationalSettings(st, koanf.New("."), koanf.New("."))
+			if _, err := ops.Refresh(ctx); err != nil {
+				t.Fatalf("ops.Refresh: %v", err)
+			}
+			hubSrv.SetOperationalSettings(ops)
+
+			setFlags := func(mcpOn bool) {
+				doc, err := json.Marshal(map[string]any{
+					"overrides": map[string]bool{
+						experiments.FederationProjectVisitors: true,
+						experiments.MCPServer:                 mcpOn,
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal flags: %v", err)
+				}
+				if _, err := st.UpsertHubSetting(ctx, "experiments", doc, "test", -1, "seeded"); err != nil {
+					t.Fatalf("UpsertHubSetting: %v", err)
+				}
+				if _, err := ops.Refresh(ctx); err != nil {
+					t.Fatalf("ops.Refresh: %v", err)
+				}
+			}
+
+			// Seed linked federated visitor account.
+			iss := issuerURL
+			email := "visitor-mcp@corp.example.com"
+			fedUser := &store.User{
+				DisplayName:    "MCP Visitor",
+				Kind:           store.UserKindFederated,
+				Status:         store.UserStatusActive,
+				HomeIssuer:     &iss,
+				FederatedEmail: &email,
+			}
+			if err := st.CreateFederatedUser(ctx, fedUser); err != nil {
+				t.Fatalf("CreateFederatedUser: %v", err)
+			}
+			if _, err := st.LinkFederatedIdentity(ctx, fedUser.ID, issuerURL, "sub-mcp-visitor", email); err != nil {
+				t.Fatalf("LinkFederatedIdentity: %v", err)
+			}
+
+			// Mint signed OIDC JWT for the visitor.
+			signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: privKey}, (&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid))
+			if err != nil {
+				t.Fatalf("jose.NewSigner: %v", err)
+			}
+			now := time.Now()
+			visitorJWT, err := jwt.Signed(signer).Claims(map[string]any{
+				"iss":            issuerURL,
+				"sub":            "sub-mcp-visitor",
+				"aud":            audience,
+				"iat":            now.Unix(),
+				"exp":            now.Add(time.Hour).Unix(),
+				"email":          email,
+				"email_verified": true,
+				"name":           "MCP Visitor",
+			}).Serialize()
+			if err != nil {
+				t.Fatalf("sign visitor JWT: %v", err)
+			}
+
+			setFlags(false)
+			endpoint, stopMCP := startMCPServerForMode(t, ctx, mode, hubSrv, nil)
+			defer stopMCP()
+
+			postInit := func() (int, string) {
+				t.Helper()
+				initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"visitor-client","version":"0.1"}}}`
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(initBody))
+				if err != nil {
+					t.Fatalf("NewRequest: %v", err)
+				}
+				req.Header.Set(mcpserver.HeaderFederationToken, visitorJWT)
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Accept", "application/json, text/event-stream")
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatalf("POST /mcp: %v", err)
+				}
+				b, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				return resp.StatusCode, string(b)
+			}
+
+			// 1. hub.mcp_server off -> 404 in both embedded and standalone modes.
+			if code, body := postInit(); code != http.StatusNotFound {
+				t.Fatalf("mode=%s hub.mcp_server=false: got %d (%s), want 404", mode, code, body)
+			}
+
+			// 2. hub.mcp_server on -> 200 OK in both modes (never 403).
+			setFlags(true)
+			if mode == modeStandalone {
+				time.Sleep(15 * time.Millisecond)
+			}
+			if code, body := postInit(); code != http.StatusOK {
+				t.Fatalf("mode=%s hub.mcp_server=true: got %d (%s), want 200", mode, code, body)
+			}
+		})
 	}
 }

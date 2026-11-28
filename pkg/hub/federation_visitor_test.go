@@ -259,6 +259,7 @@ type visitorRouteMethod struct {
 var expectedVisitorRouteMethods = []visitorRouteMethod{
 	{"/api/v1/auth/me", http.MethodGet}, // own profile, read-only
 	{"/api/v1/auth/me", http.MethodHead},
+	{"/api/v1/experiments", http.MethodGet},             // narrow ?name=hub.mcp_server probe only (handler refuses bare GET)
 	{"/api/v1/projects/", http.MethodPost},              // send a message to an agent
 	{"/api/v1/projects/", http.MethodGet},               // list and read the project's agents (visitor view)
 	{"/api/v1/users/me/visitor-grants", http.MethodGet}, // own visitor grants
@@ -394,6 +395,109 @@ func TestRouteGuard_ProfileWriteRoutesRefuseVisitor(t *testing.T) {
 			assertVisitorRefusal(t, rec, method+" "+pattern)
 		}
 	}
+}
+
+// TestHandleExperiments_NamedProbe_VisitorUserAgent verifies that
+// GET /api/v1/experiments?name=hub.mcp_server returns only that single flag
+// for a linked visitor, a user UAT, and an agent JWT, while bare
+// GET /api/v1/experiments refuses visitors and unlisted names return 400.
+func TestHandleExperiments_NamedProbe_VisitorUserAgent(t *testing.T) {
+	ctx := context.Background()
+	f := newVisitorFixture(t)
+	visitorSetExperiment(t, f.srv, true)
+
+	// Enable hub.mcp_server via OperationalSettings so we verify the live true value.
+	ops := NewOperationalSettings(f.st, emptyKoanf(), emptyKoanf())
+	_, err := f.st.UpsertHubSetting(ctx, "experiments", json.RawMessage(`{"overrides":{"hub.mcp_server":true}}`), "test", -1, "seeded")
+	require.NoError(t, err)
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	f.srv.SetOperationalSettings(ops)
+
+	// 1. Linked visitor token (X-Scion-Federation-Token).
+	f.account(t, "visitor-exp@corp.com", store.UserStatusActive, "sub-visitor-exp")
+	visitorTok := f.userToken(t, "sub-visitor-exp", "visitor-exp@corp.com")
+
+	// 2. Real user UAT.
+	u := &store.User{
+		ID:          tid("uat-exp-user"),
+		Email:       "uat-exp@example.com",
+		DisplayName: "UAT User",
+		Role:        store.UserRoleMember,
+		Status:      store.UserStatusActive,
+	}
+	require.NoError(t, f.st.CreateUser(ctx, u))
+	projID := tid("proj-exp")
+	require.NoError(t, f.st.CreateProject(ctx, &store.Project{
+		ID:      projID,
+		Name:    "Exp Probe Project",
+		Slug:    "exp-probe-proj",
+		OwnerID: u.ID,
+	}))
+	ownerRole, err := f.st.GetRoleDefinitionByName(ctx, "project-owner", store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = f.st.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               tid("rb-exp-owner"),
+		PrincipalType:    "user",
+		PrincipalID:      u.ID,
+		RoleDefinitionID: ownerRole.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projID,
+		CreatedBy:        u.ID,
+	})
+	require.NoError(t, err)
+	uatCtx := contextWithIdentity(ctx, NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "cli"))
+	uatCtx = contextWithCredentialContext(uatCtx, CredentialContext{Kind: CredentialKindInteractive})
+	uatToken, _, err := f.srv.uatService.CreateToken(uatCtx, u.ID, "exp-probe-uat", projID, []string{"project:read"}, nil)
+	require.NoError(t, err)
+
+	// 3. Real agent JWT.
+	agentID := tid("agent-exp")
+	agentToken, agentCred, err := f.srv.SignAgentToken(AgentTokenGrant{
+		AgentID:   agentID,
+		ProjectID: projID,
+		Ancestry:  []string{u.ID},
+		Scopes:    []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead},
+	}, "run-exp-1")
+	require.NoError(t, err)
+	require.NoError(t, f.st.CreateAgentCredential(ctx, agentCred))
+
+	doWithHeader := func(path, header, value string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set(header, value)
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	callers := []struct {
+		name   string
+		header string
+		value  string
+	}{
+		{"visitor", "X-Scion-Federation-Token", visitorTok},
+		{"user_uat", "Authorization", "Bearer " + uatToken},
+		{"agent_jwt", "X-Scion-Agent-Token", agentToken},
+	}
+
+	for _, c := range callers {
+		t.Run(c.name+"/allowed_flag", func(t *testing.T) {
+			rec := doWithHeader("/api/v1/experiments?name="+experiments.MCPServer, c.header, c.value)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var body experimentsResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, map[string]bool{experiments.MCPServer: true}, body.Experiments)
+		})
+		t.Run(c.name+"/unlisted_flag_refused", func(t *testing.T) {
+			rec := doWithHeader("/api/v1/experiments?name="+experiments.ConversationWatch, c.header, c.value)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		})
+	}
+
+	t.Run("visitor/bare_experiments_refused", func(t *testing.T) {
+		rec := doWithHeader("/api/v1/experiments", "X-Scion-Federation-Token", visitorTok)
+		assertVisitorRefusal(t, rec, "GET /api/v1/experiments as visitor")
+	})
 }
 
 // The list defaults to refusal: a route of any classification with no

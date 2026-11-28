@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/google/uuid"
 )
 
@@ -43,6 +44,10 @@ type HubBackend interface {
 // mode (P4) it queries GET /api/v1/experiments with caching.
 type ExperimentChecker func(ctx context.Context, c Credential, name string) (bool, error)
 
+// DefaultExperimentCacheTTL is the maximum duration standalone mode caches
+// resolved experiment values fetched from GET /api/v1/experiments (§4.5).
+const DefaultExperimentCacheTTL = 30 * time.Second
+
 // BackendOptions configures NewBackend.
 type BackendOptions struct {
 	// HubBaseURL is the base URL passed to hubclient.New (e.g., "http://in-process"
@@ -53,18 +58,35 @@ type BackendOptions struct {
 	Transport http.RoundTripper
 	// Version is the server version stamped into User-Agent: scion-mcp/<ver>.
 	Version string
-	// ExperimentChecker resolves hub experiments per request.
+	// ExperimentChecker resolves hub experiments per request. When nil, the
+	// backend queries GET /api/v1/experiments?name=<flag> using the caller's
+	// credential and caches successful results for ExperimentCacheTTL (default 30s).
 	ExperimentChecker ExperimentChecker
-	// DisableTransportAuth suppresses hubclient's automatic SCION_TRANSPORT_MODE
-	// wrapping. Set true for embedded mode; P4 leaves it false for standalone.
+	// ExperimentCacheTTL overrides the 30s cache TTL for standalone experiment
+	// probing when ExperimentChecker is nil.
+	ExperimentCacheTTL time.Duration
+	// Now overrides the clock used by the standalone experiment cache (for tests).
+	Now func() time.Time
+	// DisableTransportAuth suppresses transport auth resolution. Set true for
+	// embedded mode; leave false for standalone mode.
 	DisableTransportAuth bool
+	// TransportAuthSource and TransportAuthMode optionally supply a pre-resolved
+	// transportauth.TokenSource and HeaderMode shared across the backend and
+	// health probe so OIDC tokens are cached for their lifetime instead of
+	// minted per request. When nil and DisableTransportAuth is false, NewBackend
+	// resolves them once from the environment via ResolveStandaloneTransportAuth.
+	TransportAuthSource transportauth.TokenSource
+	TransportAuthMode   transportauth.HeaderMode
 }
 
 type hubBackend struct {
-	baseURL              string
-	transport            http.RoundTripper
-	expCheck             ExperimentChecker
-	disableTransportAuth bool
+	baseURL           string
+	transport         http.RoundTripper
+	expCheck          ExperimentChecker
+	expCache          *experimentCache
+	transportAuthSrc  transportauth.TokenSource
+	transportAuthMode transportauth.HeaderMode
+	transportAuthErr  error
 }
 
 // NewBackend creates a HubBackend backed by hubclient and the given transport.
@@ -76,27 +98,35 @@ func NewBackend(opts BackendOptions) HubBackend {
 		baseURL = "http://in-process"
 	}
 	rt := &AllowlistTransport{
-		Base:    opts.Transport,
-		Version: opts.Version,
+		Base:                      opts.Transport,
+		Version:                   opts.Version,
+		AllowTransportAuthHeaders: !opts.DisableTransportAuth,
 	}
+	src, mode, taErr := resolveBackendTransportAuth(opts)
 	return &hubBackend{
-		baseURL:              baseURL,
-		transport:            rt,
-		expCheck:             opts.ExperimentChecker,
-		disableTransportAuth: opts.DisableTransportAuth,
+		baseURL:           baseURL,
+		transport:         rt,
+		expCheck:          opts.ExperimentChecker,
+		expCache:          newExperimentCache(opts.ExperimentCacheTTL, opts.Now),
+		transportAuthSrc:  src,
+		transportAuthMode: mode,
+		transportAuthErr:  taErr,
 	}
 }
 
 func (b *hubBackend) clientFor(c Credential) (hubclient.Client, error) {
+	if b.transportAuthErr != nil {
+		return nil, b.transportAuthErr
+	}
 	hc := &http.Client{
 		Transport: b.transport,
 	}
 	opts := []hubclient.Option{
 		hubclient.WithHTTPClient(hc),
 		hubclient.WithAuthenticator(&credentialAuthenticator{cred: c}),
-	}
-	if b.disableTransportAuth {
-		opts = append(opts, hubclient.WithTransportAuth(nil, 0))
+		// Always pass WithTransportAuth (including nil when disabled/unset) so
+		// hubclient.New never re-runs transportauth.FromEnv() per request.
+		hubclient.WithTransportAuth(b.transportAuthSrc, b.transportAuthMode),
 	}
 	return hubclient.New(b.baseURL, opts...)
 }
@@ -185,10 +215,69 @@ func (b *hubBackend) Watch(ctx context.Context, c Credential, convID string, o h
 }
 
 func (b *hubBackend) ExperimentEnabled(ctx context.Context, c Credential, name string) (bool, error) {
-	if b.expCheck == nil {
-		return false, nil
+	if b.expCheck != nil {
+		return b.expCheck(ctx, c, name)
 	}
-	return b.expCheck(ctx, c, name)
+	if val, ok := b.expCache.get(name); ok {
+		return val, nil
+	}
+	cl, err := b.clientFor(c)
+	if err != nil {
+		return false, err
+	}
+	enabled, err := cl.Experiments().Fetch(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	b.expCache.set(name, enabled)
+	return enabled, nil
+}
+
+// experimentCache caches resolved hub-wide experiment flags for at most ttl
+// (default 30s) per Hub in standalone mode (§4.5). Errors are never cached.
+type experimentCache struct {
+	mu      sync.RWMutex
+	ttl     time.Duration
+	now     func() time.Time
+	entries map[string]experimentCacheEntry
+}
+
+type experimentCacheEntry struct {
+	value     bool
+	fetchedAt time.Time
+}
+
+func newExperimentCache(ttl time.Duration, now func() time.Time) *experimentCache {
+	if ttl <= 0 {
+		ttl = DefaultExperimentCacheTTL
+	}
+	if now == nil {
+		now = time.Now
+	}
+	return &experimentCache{
+		ttl:     ttl,
+		now:     now,
+		entries: make(map[string]experimentCacheEntry),
+	}
+}
+
+func (c *experimentCache) get(name string) (bool, bool) {
+	c.mu.RLock()
+	e, ok := c.entries[name]
+	c.mu.RUnlock()
+	if !ok || c.now().Sub(e.fetchedAt) >= c.ttl {
+		return false, false
+	}
+	return e.value, true
+}
+
+func (c *experimentCache) set(name string, value bool) {
+	c.mu.Lock()
+	c.entries[name] = experimentCacheEntry{
+		value:     value,
+		fetchedAt: c.now(),
+	}
+	c.mu.Unlock()
 }
 
 // credentialAuthenticator applies a Credential to outbound Hub requests.
@@ -279,10 +368,25 @@ func hubStatusCode(err error) int {
 	return 0
 }
 
+// isUpstreamProxyAuthError reports whether err is a non-JSON 401/403 from an
+// upstream proxy (such as IAP or Cloud Run invoker IAM) rejecting the bridge's
+// transport credentials rather than a structured Hub JSON error.
+func isUpstreamProxyAuthError(err error) bool {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.NonJSONBody && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden)
+}
+
 // formatHubToolError formats a Hub error for an MCP tool error result,
-// preserving the Hub's error code and message verbatim (e.g. missing UAT
-// selector or 403 reason).
+// preserving the Hub's structured error code and message verbatim (e.g.
+// missing UAT selector or 403 reason) while redacting non-JSON upstream proxy
+// 401/403 rejections so they are never presented as caller credential errors.
 func formatHubToolError(err error) string {
+	if isUpstreamProxyAuthError(err) {
+		return "upstream Hub proxy rejected the MCP server's transport credentials (upstream_auth_failed; operator action needed)"
+	}
 	var apiErr *apiclient.APIError
 	if errors.As(err, &apiErr) {
 		if apiErr.Code != "" {

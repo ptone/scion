@@ -755,6 +755,19 @@ func ValidateHubInternalURL(raw string) (string, error) {
 	return validateHubOriginURL(HubInternalURLKey, raw)
 }
 
+// MCPHubEndpointKey is the settings key of MCPServerConfig.HubEndpoint. It is
+// set only in the settings file or the environment
+// (SCION_SERVER_MCP_HUBENDPOINT): the server-config API refuses it in every
+// mode so a web session cannot redirect standalone MCP traffic (which carries
+// caller credentials and transport auth) to an arbitrary host.
+const MCPHubEndpointKey = "server.mcp.hub_endpoint"
+
+// ValidateMCPHubEndpoint checks server.mcp.hub_endpoint by the rules of
+// ValidateAgentEndpoint and returns its normalized form ("" when unset).
+func ValidateMCPHubEndpoint(raw string) (string, error) {
+	return validateHubOriginURL(MCPHubEndpointKey, raw)
+}
+
 // validateHubOriginURL implements ValidateAgentEndpoint for the settings
 // key named key, which prefixes every error message.
 func validateHubOriginURL(key, raw string) (string, error) {

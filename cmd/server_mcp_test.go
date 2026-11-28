@@ -36,8 +36,37 @@ func TestValidateMCPStartup(t *testing.T) {
 		t.Fatalf("enabled MCP with hub should succeed, got: %v", err)
 	}
 	if err := validateMCPStartup(&config.GlobalConfig{MCP: config.MCPServerConfig{Enabled: true}}, false); err == nil {
-		t.Fatal("expected error when MCP is enabled without hub in P1")
+		t.Fatal("expected error when MCP is enabled without hub and hub_endpoint is empty")
 	}
+	if err := validateMCPStartup(&config.GlobalConfig{MCP: config.MCPServerConfig{Enabled: true, HubEndpoint: "ftp://hub.example.com"}}, false); err == nil {
+		t.Fatal("expected error when MCP standalone hub_endpoint has non-http(s) scheme")
+	}
+	if err := validateMCPStartup(&config.GlobalConfig{MCP: config.MCPServerConfig{Enabled: true, HubEndpoint: "https://hub.example.com"}}, false); err != nil {
+		t.Fatalf("enabled MCP without hub and valid hub_endpoint should succeed, got: %v", err)
+	}
+
+	t.Run("standalone_refuses_transport_token_without_proxy_mode", func(t *testing.T) {
+		t.Setenv("SCION_TRANSPORT_TOKEN", "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDB9.sig")
+		t.Setenv("SCION_TRANSPORT_MODE", "")
+		if err := validateMCPStartup(&config.GlobalConfig{MCP: config.MCPServerConfig{Enabled: true, HubEndpoint: "https://hub.example.com"}}, false); err == nil {
+			t.Fatal("expected error when transport auth is configured without SCION_TRANSPORT_MODE=iap|cloudrun_invoker")
+		}
+		t.Setenv("SCION_TRANSPORT_MODE", "iap")
+		if err := validateMCPStartup(&config.GlobalConfig{MCP: config.MCPServerConfig{Enabled: true, HubEndpoint: "https://hub.example.com"}}, false); err != nil {
+			t.Fatalf("expected success with SCION_TRANSPORT_MODE=iap, got: %v", err)
+		}
+	})
+
+	t.Run("standalone_refuses_proxy_mode_without_resolvable_source", func(t *testing.T) {
+		t.Setenv("SCION_TRANSPORT_MODE", "iap")
+		t.Setenv("SCION_TRANSPORT_TOKEN", "")
+		t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
+		t.Setenv("SCION_TRANSPORT_AUDIENCE", "")
+		t.Setenv("SCION_HUB_OIDC_AUDIENCE", "")
+		if err := validateMCPStartup(&config.GlobalConfig{MCP: config.MCPServerConfig{Enabled: true, HubEndpoint: "https://hub.example.com"}}, false); err == nil {
+			t.Fatal("expected error when SCION_TRANSPORT_MODE=iap is set with no resolvable transport token source")
+		}
+	})
 }
 
 func TestV1ServerMCPRoundTrip(t *testing.T) {

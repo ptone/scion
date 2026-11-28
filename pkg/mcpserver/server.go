@@ -54,6 +54,14 @@ type Options struct {
 	// ExtraTools is an optional extension hook allowing callers (e.g. custom
 	// wrappers) to register additional tools on the underlying *mcp.Server.
 	ExtraTools func(*mcp.Server)
+	// HubHealthProbe, when non-nil (standalone mode), is polled periodically
+	// while Serve runs. If it fails continuously for HubUnhealthyAfter (default
+	// 30s), /readyz returns 503 until a probe succeeds again (§4.5).
+	HubHealthProbe    func(ctx context.Context) error
+	HubHealthInterval time.Duration
+	HubUnhealthyAfter time.Duration
+	// Now overrides the clock for health readiness tracking (used in tests).
+	Now func() time.Time
 }
 
 // Server serves the Scion MCP endpoint on its own HTTP listener alongside
@@ -64,6 +72,7 @@ type Server struct {
 	logger         *slog.Logger
 	allowedOrigins map[string]struct{}
 	principalCache *principalCache
+	hubHealth      *hubHealthTracker
 	mcpServer      *mcp.Server
 	handler        http.Handler
 
@@ -112,6 +121,9 @@ func New(opts Options) (*Server, error) {
 		logger:         opts.Logger,
 		allowedOrigins: origins,
 		principalCache: newPrincipalCache(opts.PrincipalTTL),
+	}
+	if opts.HubHealthProbe != nil {
+		s.hubHealth = newHubHealthTracker(opts.HubHealthProbe, opts.HubHealthInterval, opts.HubUnhealthyAfter, opts.Now)
 	}
 
 	mcpSrv := mcp.NewServer(&mcp.Implementation{
@@ -190,6 +202,20 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.httpSrv = httpSrv
 	s.mu.Unlock()
 
+	probeCtx, probeCancel := context.WithCancel(ctx)
+	var probeWG sync.WaitGroup
+	if s.hubHealth != nil {
+		probeWG.Add(1)
+		go func() {
+			defer probeWG.Done()
+			s.hubHealth.run(probeCtx)
+		}()
+	}
+	stopProbe := func() {
+		probeCancel()
+		probeWG.Wait()
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -201,9 +227,11 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 
 	select {
 	case err := <-errCh:
+		stopProbe()
 		return err
 	case <-ctx.Done():
 		s.BeginShutdown()
+		stopProbe()
 		shutCtx, cancel := context.WithTimeout(context.Background(), s.opts.ShutdownTimeout)
 		defer cancel()
 		shutErr := httpSrv.Shutdown(shutCtx)
@@ -260,6 +288,13 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		if r.Method == http.MethodGet {
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "shutting_down"})
+		}
+		return
+	}
+	if s.hubHealth != nil && !s.hubHealth.isReady() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "hub_unhealthy"})
 		}
 		return
 	}

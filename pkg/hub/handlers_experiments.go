@@ -14,11 +14,23 @@
 
 package hub
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+)
 
 // experimentsResponse is the response shape for GET /api/v1/experiments.
 type experimentsResponse struct {
 	Experiments map[string]bool `json:"experiments"`
+}
+
+// namedExperimentProbeAllowlist lists the server-layer experiments that any
+// authenticated principal (including project visitors) may probe individually
+// via GET /api/v1/experiments?name=<flag>. Keeping this allowlist explicit
+// avoids disclosing unrelated server-layer rollout posture.
+var namedExperimentProbeAllowlist = map[string]bool{
+	experiments.MCPServer: true,
 }
 
 // handleExperiments handles GET /api/v1/experiments (ptone/scion#2217).
@@ -26,15 +38,32 @@ type experimentsResponse struct {
 // It is the client's source of truth for the hub-wide experiment map,
 // fetched at boot in parallel with GET /api/v1/settings/public. The route is
 // classified RouteAuthenticated: any signed-in identity (user, agent, or
-// broker token) receives the map; there is no per-experiment authorization.
+// broker token) receives the web-layer map; there is no per-experiment
+// authorization.
 //
-// The response holds every registered web-layer experiment, resolved from
-// one snapshot so it never mixes two refreshes, and matches the value every
-// other reader (experimentEnabled, the admin endpoints) would report right
-// now.
+// Passing ?name=<flag> for a flag in namedExperimentProbeAllowlist (currently
+// only hub.mcp_server) returns only that single flag's resolved value, and is
+// also admitted for project visitors (*VisitorIdentity) so standalone MCP
+// servers can probe hub.mcp_server on a visitor's behalf without exposing the
+// full map. Unlisted or unknown flag names are refused with 400. A visitor
+// calling GET /api/v1/experiments without ?name= is refused with 403.
 func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	if name := r.URL.Query().Get("name"); name != "" {
+		if !namedExperimentProbeAllowlist[name] {
+			BadRequest(w, "unknown or unsupported experiment name")
+			return
+		}
+		writeJSON(w, http.StatusOK, experimentsResponse{
+			Experiments: map[string]bool{name: s.experimentEnabled(name)},
+		})
+		return
+	}
+	if _, isVisitor := GetIdentityFromContext(r.Context()).(*VisitorIdentity); isVisitor {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, visitorRouteRefusalMessage, nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, experimentsResponse{Experiments: s.resolvedExperiments()})

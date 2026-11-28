@@ -373,7 +373,7 @@
 - [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:delete
 - [quota.usage.self.read](#quotausageselfread) — Read the caller's own quota usage: each limit's effective value and active count for the caller only (distinct from GET /api/v1/me/usage, which returns Track 1 token usage)
 - [hub.usage.self.read](#hubusageselfread) — Read the caller's own Track 1 token usage summary by billing_user_id (behind tokenomics.usage_ledger; distinct from GET /api/v1/usage/me, which returns quota usage). A project-boundary user access token is restricted to its boundary project
-- [hub.experiments.read](#hubexperimentsread) — Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them
+- [hub.experiments.read](#hubexperimentsread) — Read the resolved experiment flags. Any signed-in user, agent or broker reads the web-layer map (and any user access token reads it). Project visitors are admitted only for allowlisted named flag probes (?name=hub.mcp_server) and refused on the bare map
 - [hub.profiling.read](#hubprofilingread) — Read the client profiling switch. Any signed-in identity (user, agent or broker) reads it, and any user access token reads it
 - [hub.injectedskills.read](#hubinjectedskillsread) — Read the hub injected skill references. Any signed-in identity reads them, and any token reads them
 - [hub.conduitgrantkeys.read](#hubconduitgrantkeysread) — Read the conduit grant verification keys (public halves only). Any signed-in identity reads them, and any token reads them; 404 while the hub.conduit experiment is off
@@ -14195,7 +14195,7 @@
 
 **Domain:** hub
 
-**Description:** Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them
+**Description:** Read the resolved experiment flags. Any signed-in user, agent or broker reads the web-layer map (and any user access token reads it). Project visitors are admitted only for allowlisted named flag probes (?name=hub.mcp_server) and refused on the bare map
 
 ### Entry Points
 
@@ -14205,7 +14205,7 @@
 
 **Principals:** `user`, `agent`, `broker`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `broker_token`, `federated_user`
 
 **Bearer:** `admit_self` (self filter `none`; pinned by `TestExperimentsRead_AnyTokenReads`)
 
@@ -14220,6 +14220,7 @@
 - `pkg/hub:TestExperimentsRead_AnyTokenReads`
 - `pkg/hub:TestAuthenticatedReads_AgentTokenReads`
 - `pkg/hub:TestAuthenticatedReads_BrokerReads`
+- `pkg/hub:TestHandleExperiments_NamedProbe_VisitorUserAgent`
 
 ### Exemptions
 
