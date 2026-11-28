@@ -39,7 +39,27 @@ var (
 	ruleDialectNameRE                  = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 )
 
-const maxTriggerMatchFormBytes = 16 * 1024
+const (
+	maxTriggerMatchFormBytes     = 16 * 1024
+	triggerDialectSystemOne      = "system_one"
+	triggerReasonAgentNotAllowed = "agent_not_allowed"
+)
+
+type triggerMatchRuleKey struct {
+	dialect string
+	expr    string
+}
+
+type triggerMatchValidationOpts struct {
+	defaultTypes          bool
+	explicitScalarDialect bool
+	// allowStoredAdmissionSkip is true on PATCH only (never create or resume;
+	// mixed-rule-arrays-design.md §11.3, ptone/scion#9916). When true, elements
+	// matching storedRules under the caller's identity rule carry through
+	// without re-admission (still running shape, size, and control-char checks).
+	allowStoredAdmissionSkip bool
+	storedRules              []triggerrule.Rule
+}
 
 // validateTriggerMatchForm validates and compacts an opaque Match.Form JSON
 // object (Stage 3 §9.2). Empty or JSON null clears the form and returns ("", nil).
@@ -293,15 +313,25 @@ func writeTriggerMatchElementErrors(w http.ResponseWriter, failures []triggerEle
 		"field":    "match",
 		"elements": elements,
 	}
+	if elem, hasElem := first.entry["element"]; hasElem {
+		details["element"] = elem
+	}
 	if cat, hasCat := first.entry["category"]; hasCat {
 		if first.kind != "" {
 			details["kind"] = first.kind
 		}
 		details["category"] = cat
-		details["message"] = first.entry["message"]
-		details["line"] = first.entry["line"]
-		details["column"] = first.entry["column"]
-	} else if dialect, hasDialect := first.entry["dialect"]; hasDialect {
+		if msg, ok := first.entry["message"]; ok {
+			details["message"] = msg
+		}
+		if line, ok := first.entry["line"]; ok {
+			details["line"] = line
+		}
+		if col, ok := first.entry["column"]; ok {
+			details["column"] = col
+		}
+	}
+	if dialect, hasDialect := first.entry["dialect"]; hasDialect {
 		details["dialect"] = dialect
 		if first.consumer != "" {
 			details["consumer"] = first.consumer
@@ -313,18 +343,192 @@ func writeTriggerMatchElementErrors(w http.ResponseWriter, failures []triggerEle
 	writeError(w, http.StatusBadRequest, ErrCodeInvalidRule, strings.Join(summaries, "; "), details)
 }
 
+func makeUnsupportedDialectFailure(elemNum int, unsup *ruleengine.UnsupportedDialectError) triggerElementFailure {
+	msg := fmt.Sprintf("unsupported match dialect %q [element %d]", unsup.Dialect, elemNum)
+	if unsup.Reason != "" {
+		msg += ": " + unsup.Reason
+	}
+	entry := map[string]any{
+		"element": elemNum,
+		"dialect": unsup.Dialect,
+		"reason":  unsup.Reason,
+	}
+	if unsup.Reason != "" {
+		entry["category"] = unsup.Reason
+	}
+	return triggerElementFailure{
+		entry:    entry,
+		summary:  msg,
+		consumer: unsup.Consumer,
+	}
+}
+
+func makeAgentSystemOneNotAllowedFailure(elemNum int) triggerElementFailure {
+	return triggerElementFailure{
+		entry: map[string]any{
+			"element":  elemNum,
+			"dialect":  triggerDialectSystemOne,
+			"reason":   triggerReasonAgentNotAllowed,
+			"category": triggerReasonAgentNotAllowed,
+		},
+		summary:  fmt.Sprintf("unsupported match dialect %q [element %d]: %s", triggerDialectSystemOne, elemNum, triggerReasonAgentNotAllowed),
+		consumer: triggerrule.ConsumerName,
+	}
+}
+
+// isTriggerAgentCaller reports whether ctx carries an agent identity.
+func isTriggerAgentCaller(ctx context.Context) bool {
+	identity := GetIdentityFromContext(ctx)
+	return identity != nil && identity.Type() == "agent"
+}
+
+// normalizedTriggerRuleDialect canonicalizes a rule dialect name for authoring
+// and comparison: trim whitespace, defaulting empty to "cel".
+func normalizedTriggerRuleDialect(dialect string) string {
+	d := strings.TrimSpace(dialect)
+	if d == "" {
+		return ruleengine.DialectCEL
+	}
+	return d
+}
+
+// lastStoredSystemOneIndex returns the largest 0-based index of a system_one
+// element in stored, or -1 if stored contains no system_one element.
+func lastStoredSystemOneIndex(stored []triggerrule.Rule) int {
+	last := -1
+	for i, s := range stored {
+		if normalizedTriggerRuleDialect(s.Dialect) == triggerDialectSystemOne {
+			last = i
+		}
+	}
+	return last
+}
+
+// unchangedMatchElements identifies which elements of normalized carry over
+// unchanged from stored on PATCH (mixed-rule-arrays-design.md §11.3,
+// ptone/scion#9916).
+//
+// Normalization on both sides: Dialect is trimmed with "" defaulting to "cel";
+// Expr is compared byte-for-byte without trimming.
+//
+// Identity rules:
+//   - Users (non-agent callers): bounded multiset content identity. Each stored
+//     {Dialect, Expr} may be consumed at most once regardless of index, so
+//     reordering or removing elements is allowed while duplicating, editing, or
+//     adding a non-admitted element is refused.
+//   - Agent callers (D2 carve-out): the ordered rule prefix from index 0
+//     through and including the last stored system_one element must be
+//     byte-identical (count, order, dialect, expr) to stored; only elements in
+//     that identical prefix carry through without re-admission, and CEL rows
+//     strictly after the last system_one remain agent-editable.
+func unchangedMatchElements(normalized []store.TriggerMatchRule, stored []triggerrule.Rule, isAgent bool) []bool {
+	unchanged := make([]bool, len(normalized))
+	if len(stored) == 0 {
+		return unchanged
+	}
+	if isAgent {
+		lastS1 := lastStoredSystemOneIndex(stored)
+		if lastS1 < 0 {
+			return unchanged
+		}
+		for i := 0; i <= lastS1 && i < len(normalized); i++ {
+			if normalized[i].Dialect == normalizedTriggerRuleDialect(stored[i].Dialect) && normalized[i].Expr == stored[i].Expr {
+				unchanged[i] = true
+			}
+		}
+		return unchanged
+	}
+	remaining := make(map[triggerMatchRuleKey]int, len(stored))
+	for _, s := range stored {
+		remaining[triggerMatchRuleKey{
+			dialect: normalizedTriggerRuleDialect(s.Dialect),
+			expr:    s.Expr,
+		}]++
+	}
+	for i, elem := range normalized {
+		key := triggerMatchRuleKey{dialect: elem.Dialect, expr: elem.Expr}
+		if remaining[key] > 0 {
+			remaining[key]--
+			unchanged[i] = true
+		}
+	}
+	return unchanged
+}
+
+// validateAgentSystemOnePrefix enforces the D2 agent PATCH invariant
+// (mixed-rule-arrays-design.md §11.3): for an agent caller, the ordered rule
+// prefix from index 0 through and including the last stored system_one element
+// must be byte-identical to stored (count, order, dialect, expr), and no
+// system_one element may be added after that prefix. CEL rows strictly after
+// the last system_one remain agent-editable.
+func validateAgentSystemOnePrefix(normalized []store.TriggerMatchRule, stored []triggerrule.Rule, alreadyFailed map[int]bool) []triggerElementFailure {
+	var failures []triggerElementFailure
+	lastS1 := lastStoredSystemOneIndex(stored)
+	for i := 0; i <= lastS1; i++ {
+		elemNum := i + 1
+		if alreadyFailed[elemNum] {
+			continue
+		}
+		sd := normalizedTriggerRuleDialect(stored[i].Dialect)
+		if i < len(normalized) && normalized[i].Dialect == sd && normalized[i].Expr == stored[i].Expr {
+			continue
+		}
+		failures = append(failures, makeAgentSystemOneNotAllowedFailure(elemNum))
+	}
+	return failures
+}
+
+// authorizeNewOrChangedTriggerMatchElement is the authoring authorization hook
+// for NEW or CHANGED match elements only (never called for unchanged stored
+// elements carried through a PATCH).
+//
+// T2 hook (ptone/scion#8051 / #8045): when System One trigger authoring lands,
+// T2's D1 per-project instance allowlist check and D2 user-only authoring check
+// plug in here so they automatically apply only to new or changed elements and
+// never re-check unchanged byte-identical elements on PATCH.
+func (s *Server) authorizeNewOrChangedTriggerMatchElement(ctx context.Context, elemNum int, elem store.TriggerMatchRule, isAgent bool) *triggerElementFailure {
+	_ = s
+	_ = ctx
+	if isAgent && elem.Dialect == triggerDialectSystemOne {
+		f := makeAgentSystemOneNotAllowedFailure(elemNum)
+		return &f
+	}
+	return nil
+}
+
 // writeAndValidateTriggerMatch normalizes and compiles a trigger's match block
-// at authoring time (create, PATCH, or resume; mixed-rule-arrays §2, §4).
+// at authoring time (create, PATCH, or resume; mixed-rule-arrays §2, §4, §11.3).
 // Scalar dialect/expr is accepted as sugar for a one-element list; mixing both
 // rules and scalar dialect/expr returns 400 invalid_rule (ambiguous_match).
 // Every element is validated and compiled, and ALL failing elements are
 // reported together in details.elements[].
+//
+// Authoring-admission invariant inventory (ptone/scion#9916):
+//   - POST /triggers (createTrigger) & default webhook trigger creation:
+//     allowStoredAdmissionSkip=false -> full admission on every element.
+//   - PATCH /triggers/{id} (updateTrigger, with or without req.Match):
+//     allowStoredAdmissionSkip=true -> unchanged elements matched against
+//     storedRules skip dialect admission and T2's D1/D2 hook while still running
+//     shape, size, control-character, and CEL compile checks. Users match by
+//     bounded multiset content identity (each stored element consumed at most
+//     once); agents must keep the ordered rule prefix from index 0 through the
+//     last stored system_one element byte-identical (D2 carve-out; CEL rows
+//     strictly after the last system_one remain agent-editable).
+//   - POST /triggers/{id}/resume (resumeTrigger):
+//     allowStoredAdmissionSkip=false -> full re-admission on all stored elements,
+//     returning 400 invalid_rule {element, category: dialect_not_allowed, ...}.
+//   - Fire-time evaluation (triggerrule.MatchAllWithTrace): unchanged; engine
+//     deny-by-default refuses any non-granted dialect with 0 provider calls.
 func (s *Server) writeAndValidateTriggerMatch(
 	w http.ResponseWriter,
 	ctx context.Context,
 	spec *TriggerMatchSpec,
-	defaultTypes, explicitScalarDialect bool,
+	opts triggerMatchValidationOpts,
 ) ([]string, []store.TriggerMatchRule, bool) {
+	defaultTypes := opts.defaultTypes
+	explicitScalarDialect := opts.explicitScalarDialect
+	isAgent := isTriggerAgentCaller(ctx)
+
 	var types []string
 	if spec != nil {
 		types = spec.Types
@@ -373,19 +577,7 @@ func (s *Server) writeAndValidateTriggerMatch(
 				if err := s.compileTriggerMatchRule(ctx, scalarDialect, ""); err != nil {
 					var unsup *ruleengine.UnsupportedDialectError
 					if errors.As(err, &unsup) {
-						msg := fmt.Sprintf("unsupported match dialect %q [element 1]", unsup.Dialect)
-						if unsup.Reason != "" {
-							msg += ": " + unsup.Reason
-						}
-						writeTriggerMatchElementErrors(w, []triggerElementFailure{{
-							entry: map[string]any{
-								"element": 1,
-								"dialect": unsup.Dialect,
-								"reason":  unsup.Reason,
-							},
-							summary:  msg,
-							consumer: unsup.Consumer,
-						}})
+						writeTriggerMatchElementErrors(w, []triggerElementFailure{makeUnsupportedDialectFailure(1, unsup)})
 						return nil, nil, false
 					}
 					writeTriggerRuleError(w, "match", err)
@@ -407,6 +599,12 @@ func (s *Server) writeAndValidateTriggerMatch(
 	copy(copiedTypes, types)
 
 	if len(rawRules) == 0 {
+		if isAgent && opts.allowStoredAdmissionSkip {
+			if removedFailures := validateAgentSystemOnePrefix(nil, opts.storedRules, nil); len(removedFailures) > 0 {
+				writeTriggerMatchElementErrors(w, removedFailures)
+				return nil, nil, false
+			}
+		}
 		// Verify the trigger rule engine is initialized and consumer "trigger" is admitted.
 		if err := s.compileTriggerMatchRule(ctx, ruleengine.DialectCEL, ""); err != nil {
 			writeTriggerRuleError(w, "match", err)
@@ -463,11 +661,18 @@ func (s *Server) writeAndValidateTriggerMatch(
 		return nil, nil, false
 	}
 
+	var unchanged []bool
+	if opts.allowStoredAdmissionSkip {
+		unchanged = unchangedMatchElements(normalized, opts.storedRules, isAgent)
+	}
+
 	var failures []triggerElementFailure
+	agentFailedElems := make(map[int]bool)
 
 	for i, elem := range normalized {
 		elemNum := i + 1
 		d := elem.Dialect
+		isUnchanged := len(unchanged) > i && unchanged[i]
 		if err := validateTriggerDialectName(d); err != nil {
 			failures = append(failures, triggerElementFailure{
 				entry: map[string]any{
@@ -497,9 +702,22 @@ func (s *Server) writeAndValidateTriggerMatch(
 			continue
 		}
 
+		// For new or changed elements, enforce T2 authoring hooks (D2 agent
+		// carve-out on system_one, and D1 allowlist once T2 lands).
+		if !isUnchanged && opts.allowStoredAdmissionSkip {
+			if authzFailure := s.authorizeNewOrChangedTriggerMatchElement(ctx, elemNum, elem, isAgent); authzFailure != nil {
+				failures = append(failures, *authzFailure)
+				agentFailedElems[elemNum] = true
+				continue
+			}
+		}
+
 		// Check dialect admission and engine initialization first so ungranted
 		// dialects surface dialect_not_allowed even when expr is empty or oversize,
 		// and an uninitialized engine returns HTTP 500 without leaking details.
+		// Unchanged stored elements on PATCH skip UnsupportedDialectError admission
+		// failures while still running empty/size checks below.
+		admissionSkipped := false
 		if err := s.compileTriggerMatchRule(ctx, d, ""); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				writeErrorFromErr(w, err, "")
@@ -507,23 +725,16 @@ func (s *Server) writeAndValidateTriggerMatch(
 			}
 			var unsup *ruleengine.UnsupportedDialectError
 			if errors.As(err, &unsup) {
-				msg := fmt.Sprintf("unsupported match dialect %q [element %d]", unsup.Dialect, elemNum)
-				if unsup.Reason != "" {
-					msg += ": " + unsup.Reason
+				if isUnchanged {
+					admissionSkipped = true
+				} else {
+					failures = append(failures, makeUnsupportedDialectFailure(elemNum, unsup))
+					continue
 				}
-				failures = append(failures, triggerElementFailure{
-					entry: map[string]any{
-						"element": elemNum,
-						"dialect": unsup.Dialect,
-						"reason":  unsup.Reason,
-					},
-					summary:  msg,
-					consumer: unsup.Consumer,
-				})
-				continue
+			} else {
+				writeErrorFromErr(w, err, "")
+				return nil, nil, false
 			}
-			writeErrorFromErr(w, err, "")
-			return nil, nil, false
 		}
 
 		if elem.Expr == "" {
@@ -557,6 +768,13 @@ func (s *Server) writeAndValidateTriggerMatch(
 			continue
 		}
 
+		// Unchanged non-CEL elements (e.g. system_one) carry through without
+		// re-admission or dialect compilation (0 provider calls; D1 not re-checked).
+		// CEL elements always compile so broken stored CEL rules are still caught.
+		if admissionSkipped || (isUnchanged && d != ruleengine.DialectCEL) {
+			continue
+		}
+
 		if err := s.compileTriggerMatchRule(ctx, d, elem.Expr); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				writeErrorFromErr(w, err, "")
@@ -580,24 +798,16 @@ func (s *Server) writeAndValidateTriggerMatch(
 			}
 			var unsup *ruleengine.UnsupportedDialectError
 			if errors.As(err, &unsup) {
-				msg := fmt.Sprintf("unsupported match dialect %q [element %d]", unsup.Dialect, elemNum)
-				if unsup.Reason != "" {
-					msg += ": " + unsup.Reason
-				}
-				failures = append(failures, triggerElementFailure{
-					entry: map[string]any{
-						"element": elemNum,
-						"dialect": unsup.Dialect,
-						"reason":  unsup.Reason,
-					},
-					summary:  msg,
-					consumer: unsup.Consumer,
-				})
+				failures = append(failures, makeUnsupportedDialectFailure(elemNum, unsup))
 				continue
 			}
 			writeErrorFromErr(w, err, "")
 			return nil, nil, false
 		}
+	}
+
+	if isAgent && opts.allowStoredAdmissionSkip {
+		failures = append(failures, validateAgentSystemOnePrefix(normalized, opts.storedRules, agentFailedElems)...)
 	}
 
 	if len(failures) > 0 {
