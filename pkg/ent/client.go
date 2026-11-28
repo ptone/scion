@@ -123,7 +123,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectoryartifact"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectorysegment"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectorysession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
@@ -365,8 +367,12 @@ type Client struct {
 	ThreadGroup *ThreadGroupClient
 	// ThreadGroupMember is the client for interacting with the ThreadGroupMember builders.
 	ThreadGroupMember *ThreadGroupMemberClient
+	// TrajectoryArtifact is the client for interacting with the TrajectoryArtifact builders.
+	TrajectoryArtifact *TrajectoryArtifactClient
 	// TrajectorySegment is the client for interacting with the TrajectorySegment builders.
 	TrajectorySegment *TrajectorySegmentClient
+	// TrajectorySession is the client for interacting with the TrajectorySession builders.
+	TrajectorySession *TrajectorySessionClient
 	// Trigger is the client for interacting with the Trigger builders.
 	Trigger *TriggerClient
 	// TriggerEvent is the client for interacting with the TriggerEvent builders.
@@ -525,7 +531,9 @@ func (c *Client) init() {
 	c.TestInfraMarker = NewTestInfraMarkerClient(c.config)
 	c.ThreadGroup = NewThreadGroupClient(c.config)
 	c.ThreadGroupMember = NewThreadGroupMemberClient(c.config)
+	c.TrajectoryArtifact = NewTrajectoryArtifactClient(c.config)
 	c.TrajectorySegment = NewTrajectorySegmentClient(c.config)
+	c.TrajectorySession = NewTrajectorySessionClient(c.config)
 	c.Trigger = NewTriggerClient(c.config)
 	c.TriggerEvent = NewTriggerEventClient(c.config)
 	c.TriggerFire = NewTriggerFireClient(c.config)
@@ -745,7 +753,9 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		TestInfraMarker:               NewTestInfraMarkerClient(cfg),
 		ThreadGroup:                   NewThreadGroupClient(cfg),
 		ThreadGroupMember:             NewThreadGroupMemberClient(cfg),
+		TrajectoryArtifact:            NewTrajectoryArtifactClient(cfg),
 		TrajectorySegment:             NewTrajectorySegmentClient(cfg),
+		TrajectorySession:             NewTrajectorySessionClient(cfg),
 		Trigger:                       NewTriggerClient(cfg),
 		TriggerEvent:                  NewTriggerEventClient(cfg),
 		TriggerFire:                   NewTriggerFireClient(cfg),
@@ -892,7 +902,9 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		TestInfraMarker:               NewTestInfraMarkerClient(cfg),
 		ThreadGroup:                   NewThreadGroupClient(cfg),
 		ThreadGroupMember:             NewThreadGroupMemberClient(cfg),
+		TrajectoryArtifact:            NewTrajectoryArtifactClient(cfg),
 		TrajectorySegment:             NewTrajectorySegmentClient(cfg),
+		TrajectorySession:             NewTrajectorySessionClient(cfg),
 		Trigger:                       NewTriggerClient(cfg),
 		TriggerEvent:                  NewTriggerEventClient(cfg),
 		TriggerFire:                   NewTriggerFireClient(cfg),
@@ -970,13 +982,14 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ScheduledExecRun, c.Secret, c.SecretRequest, c.Skill, c.SkillInjection,
 		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
-		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim,
-		c.UploadSession, c.UsageBudgetState, c.UsageEvent, c.UsageGroupBudgetSeed,
-		c.UsageGroupRollupDaily, c.UsageReservation, c.UsageRollupDaily,
-		c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User, c.UserAccessToken,
-		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
-		c.UserTerminalWorkspace, c.WebhookEndpoint,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectoryArtifact,
+		c.TrajectorySegment, c.TrajectorySession, c.Trigger, c.TriggerEvent,
+		c.TriggerFire, c.TriggerSubjectClaim, c.UploadSession, c.UsageBudgetState,
+		c.UsageEvent, c.UsageGroupBudgetSeed, c.UsageGroupRollupDaily,
+		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
+		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
+		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
+		c.WebhookEndpoint,
 	} {
 		n.Use(hooks...)
 	}
@@ -1014,13 +1027,14 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ScheduledExecRun, c.Secret, c.SecretRequest, c.Skill, c.SkillInjection,
 		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
-		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim,
-		c.UploadSession, c.UsageBudgetState, c.UsageEvent, c.UsageGroupBudgetSeed,
-		c.UsageGroupRollupDaily, c.UsageReservation, c.UsageRollupDaily,
-		c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User, c.UserAccessToken,
-		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
-		c.UserTerminalWorkspace, c.WebhookEndpoint,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectoryArtifact,
+		c.TrajectorySegment, c.TrajectorySession, c.Trigger, c.TriggerEvent,
+		c.TriggerFire, c.TriggerSubjectClaim, c.UploadSession, c.UsageBudgetState,
+		c.UsageEvent, c.UsageGroupBudgetSeed, c.UsageGroupRollupDaily,
+		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
+		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
+		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
+		c.WebhookEndpoint,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -1243,8 +1257,12 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.ThreadGroup.mutate(ctx, m)
 	case *ThreadGroupMemberMutation:
 		return c.ThreadGroupMember.mutate(ctx, m)
+	case *TrajectoryArtifactMutation:
+		return c.TrajectoryArtifact.mutate(ctx, m)
 	case *TrajectorySegmentMutation:
 		return c.TrajectorySegment.mutate(ctx, m)
+	case *TrajectorySessionMutation:
+		return c.TrajectorySession.mutate(ctx, m)
 	case *TriggerMutation:
 		return c.Trigger.mutate(ctx, m)
 	case *TriggerEventMutation:
@@ -16129,6 +16147,139 @@ func (c *ThreadGroupMemberClient) mutate(ctx context.Context, m *ThreadGroupMemb
 	}
 }
 
+// TrajectoryArtifactClient is a client for the TrajectoryArtifact schema.
+type TrajectoryArtifactClient struct {
+	config
+}
+
+// NewTrajectoryArtifactClient returns a client for the TrajectoryArtifact from the given config.
+func NewTrajectoryArtifactClient(c config) *TrajectoryArtifactClient {
+	return &TrajectoryArtifactClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `trajectoryartifact.Hooks(f(g(h())))`.
+func (c *TrajectoryArtifactClient) Use(hooks ...Hook) {
+	c.hooks.TrajectoryArtifact = append(c.hooks.TrajectoryArtifact, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `trajectoryartifact.Intercept(f(g(h())))`.
+func (c *TrajectoryArtifactClient) Intercept(interceptors ...Interceptor) {
+	c.inters.TrajectoryArtifact = append(c.inters.TrajectoryArtifact, interceptors...)
+}
+
+// Create returns a builder for creating a TrajectoryArtifact entity.
+func (c *TrajectoryArtifactClient) Create() *TrajectoryArtifactCreate {
+	mutation := newTrajectoryArtifactMutation(c.config, OpCreate)
+	return &TrajectoryArtifactCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of TrajectoryArtifact entities.
+func (c *TrajectoryArtifactClient) CreateBulk(builders ...*TrajectoryArtifactCreate) *TrajectoryArtifactCreateBulk {
+	return &TrajectoryArtifactCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *TrajectoryArtifactClient) MapCreateBulk(slice any, setFunc func(*TrajectoryArtifactCreate, int)) *TrajectoryArtifactCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &TrajectoryArtifactCreateBulk{err: fmt.Errorf("calling to TrajectoryArtifactClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*TrajectoryArtifactCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &TrajectoryArtifactCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for TrajectoryArtifact.
+func (c *TrajectoryArtifactClient) Update() *TrajectoryArtifactUpdate {
+	mutation := newTrajectoryArtifactMutation(c.config, OpUpdate)
+	return &TrajectoryArtifactUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *TrajectoryArtifactClient) UpdateOne(_m *TrajectoryArtifact) *TrajectoryArtifactUpdateOne {
+	mutation := newTrajectoryArtifactMutation(c.config, OpUpdateOne, withTrajectoryArtifact(_m))
+	return &TrajectoryArtifactUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *TrajectoryArtifactClient) UpdateOneID(id string) *TrajectoryArtifactUpdateOne {
+	mutation := newTrajectoryArtifactMutation(c.config, OpUpdateOne, withTrajectoryArtifactID(id))
+	return &TrajectoryArtifactUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for TrajectoryArtifact.
+func (c *TrajectoryArtifactClient) Delete() *TrajectoryArtifactDelete {
+	mutation := newTrajectoryArtifactMutation(c.config, OpDelete)
+	return &TrajectoryArtifactDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *TrajectoryArtifactClient) DeleteOne(_m *TrajectoryArtifact) *TrajectoryArtifactDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *TrajectoryArtifactClient) DeleteOneID(id string) *TrajectoryArtifactDeleteOne {
+	builder := c.Delete().Where(trajectoryartifact.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &TrajectoryArtifactDeleteOne{builder}
+}
+
+// Query returns a query builder for TrajectoryArtifact.
+func (c *TrajectoryArtifactClient) Query() *TrajectoryArtifactQuery {
+	return &TrajectoryArtifactQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeTrajectoryArtifact},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a TrajectoryArtifact entity by its id.
+func (c *TrajectoryArtifactClient) Get(ctx context.Context, id string) (*TrajectoryArtifact, error) {
+	return c.Query().Where(trajectoryartifact.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *TrajectoryArtifactClient) GetX(ctx context.Context, id string) *TrajectoryArtifact {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *TrajectoryArtifactClient) Hooks() []Hook {
+	return c.hooks.TrajectoryArtifact
+}
+
+// Interceptors returns the client interceptors.
+func (c *TrajectoryArtifactClient) Interceptors() []Interceptor {
+	return c.inters.TrajectoryArtifact
+}
+
+func (c *TrajectoryArtifactClient) mutate(ctx context.Context, m *TrajectoryArtifactMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&TrajectoryArtifactCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&TrajectoryArtifactUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&TrajectoryArtifactUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&TrajectoryArtifactDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown TrajectoryArtifact mutation op: %q", m.Op())
+	}
+}
+
 // TrajectorySegmentClient is a client for the TrajectorySegment schema.
 type TrajectorySegmentClient struct {
 	config
@@ -16259,6 +16410,139 @@ func (c *TrajectorySegmentClient) mutate(ctx context.Context, m *TrajectorySegme
 		return (&TrajectorySegmentDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown TrajectorySegment mutation op: %q", m.Op())
+	}
+}
+
+// TrajectorySessionClient is a client for the TrajectorySession schema.
+type TrajectorySessionClient struct {
+	config
+}
+
+// NewTrajectorySessionClient returns a client for the TrajectorySession from the given config.
+func NewTrajectorySessionClient(c config) *TrajectorySessionClient {
+	return &TrajectorySessionClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `trajectorysession.Hooks(f(g(h())))`.
+func (c *TrajectorySessionClient) Use(hooks ...Hook) {
+	c.hooks.TrajectorySession = append(c.hooks.TrajectorySession, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `trajectorysession.Intercept(f(g(h())))`.
+func (c *TrajectorySessionClient) Intercept(interceptors ...Interceptor) {
+	c.inters.TrajectorySession = append(c.inters.TrajectorySession, interceptors...)
+}
+
+// Create returns a builder for creating a TrajectorySession entity.
+func (c *TrajectorySessionClient) Create() *TrajectorySessionCreate {
+	mutation := newTrajectorySessionMutation(c.config, OpCreate)
+	return &TrajectorySessionCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of TrajectorySession entities.
+func (c *TrajectorySessionClient) CreateBulk(builders ...*TrajectorySessionCreate) *TrajectorySessionCreateBulk {
+	return &TrajectorySessionCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *TrajectorySessionClient) MapCreateBulk(slice any, setFunc func(*TrajectorySessionCreate, int)) *TrajectorySessionCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &TrajectorySessionCreateBulk{err: fmt.Errorf("calling to TrajectorySessionClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*TrajectorySessionCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &TrajectorySessionCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for TrajectorySession.
+func (c *TrajectorySessionClient) Update() *TrajectorySessionUpdate {
+	mutation := newTrajectorySessionMutation(c.config, OpUpdate)
+	return &TrajectorySessionUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *TrajectorySessionClient) UpdateOne(_m *TrajectorySession) *TrajectorySessionUpdateOne {
+	mutation := newTrajectorySessionMutation(c.config, OpUpdateOne, withTrajectorySession(_m))
+	return &TrajectorySessionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *TrajectorySessionClient) UpdateOneID(id string) *TrajectorySessionUpdateOne {
+	mutation := newTrajectorySessionMutation(c.config, OpUpdateOne, withTrajectorySessionID(id))
+	return &TrajectorySessionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for TrajectorySession.
+func (c *TrajectorySessionClient) Delete() *TrajectorySessionDelete {
+	mutation := newTrajectorySessionMutation(c.config, OpDelete)
+	return &TrajectorySessionDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *TrajectorySessionClient) DeleteOne(_m *TrajectorySession) *TrajectorySessionDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *TrajectorySessionClient) DeleteOneID(id string) *TrajectorySessionDeleteOne {
+	builder := c.Delete().Where(trajectorysession.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &TrajectorySessionDeleteOne{builder}
+}
+
+// Query returns a query builder for TrajectorySession.
+func (c *TrajectorySessionClient) Query() *TrajectorySessionQuery {
+	return &TrajectorySessionQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeTrajectorySession},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a TrajectorySession entity by its id.
+func (c *TrajectorySessionClient) Get(ctx context.Context, id string) (*TrajectorySession, error) {
+	return c.Query().Where(trajectorysession.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *TrajectorySessionClient) GetX(ctx context.Context, id string) *TrajectorySession {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *TrajectorySessionClient) Hooks() []Hook {
+	return c.hooks.TrajectorySession
+}
+
+// Interceptors returns the client interceptors.
+func (c *TrajectorySessionClient) Interceptors() []Interceptor {
+	return c.inters.TrajectorySession
+}
+
+func (c *TrajectorySessionClient) mutate(ctx context.Context, m *TrajectorySessionMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&TrajectorySessionCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&TrajectorySessionUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&TrajectorySessionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&TrajectorySessionDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown TrajectorySession mutation op: %q", m.Op())
 	}
 }
 
@@ -19174,11 +19458,12 @@ type (
 		SecretRequest, Skill, SkillInjection, SkillRegistry, SkillVersion,
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
-		UploadSession, UsageBudgetState, UsageEvent, UsageGroupBudgetSeed,
-		UsageGroupRollupDaily, UsageReservation, UsageRollupDaily, UsageRollupHourly,
-		UsageScopeCounterDaily, User, UserAccessToken, UserDeletion, UserDeletionAgent,
-		UserExecContainer, UserTerminalWorkspace, WebhookEndpoint []ent.Hook
+		TrajectoryArtifact, TrajectorySegment, TrajectorySession, Trigger,
+		TriggerEvent, TriggerFire, TriggerSubjectClaim, UploadSession,
+		UsageBudgetState, UsageEvent, UsageGroupBudgetSeed, UsageGroupRollupDaily,
+		UsageReservation, UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily,
+		User, UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
+		UserTerminalWorkspace, WebhookEndpoint []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -19206,10 +19491,11 @@ type (
 		SecretRequest, Skill, SkillInjection, SkillRegistry, SkillVersion,
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
-		UploadSession, UsageBudgetState, UsageEvent, UsageGroupBudgetSeed,
-		UsageGroupRollupDaily, UsageReservation, UsageRollupDaily, UsageRollupHourly,
-		UsageScopeCounterDaily, User, UserAccessToken, UserDeletion, UserDeletionAgent,
-		UserExecContainer, UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
+		TrajectoryArtifact, TrajectorySegment, TrajectorySession, Trigger,
+		TriggerEvent, TriggerFire, TriggerSubjectClaim, UploadSession,
+		UsageBudgetState, UsageEvent, UsageGroupBudgetSeed, UsageGroupRollupDaily,
+		UsageReservation, UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily,
+		User, UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
+		UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
 	}
 )

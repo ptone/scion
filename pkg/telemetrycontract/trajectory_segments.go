@@ -72,7 +72,9 @@ const (
 	TrajectorySegmentStatusPending   = "pending"
 	TrajectorySegmentStatusCommitted = "committed"
 
-	TrajectoryNormalizeStatusPending = "pending"
+	TrajectoryNormalizeStatusPending     = "pending"
+	TrajectoryNormalizeStatusNormalized  = "normalized"
+	TrajectoryNormalizeStatusParseFailed = "parse_failed"
 )
 
 // Effective capture policy values.

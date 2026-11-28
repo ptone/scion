@@ -121,7 +121,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectoryartifact"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectorysegment"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectorysession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
@@ -263,7 +265,9 @@ const (
 	TypeTestInfraMarker               = "TestInfraMarker"
 	TypeThreadGroup                   = "ThreadGroup"
 	TypeThreadGroupMember             = "ThreadGroupMember"
+	TypeTrajectoryArtifact            = "TrajectoryArtifact"
 	TypeTrajectorySegment             = "TrajectorySegment"
+	TypeTrajectorySession             = "TrajectorySession"
 	TypeTrigger                       = "Trigger"
 	TypeTriggerEvent                  = "TriggerEvent"
 	TypeTriggerFire                   = "TriggerFire"
@@ -128766,6 +128770,2187 @@ func (m *ThreadGroupMemberMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown ThreadGroupMember edge %s", name)
 }
 
+// TrajectoryArtifactMutation represents an operation that mutates the TrajectoryArtifact nodes in the graph.
+type TrajectoryArtifactMutation struct {
+	config
+	op                   Op
+	typ                  string
+	id                   *string
+	hub_id               *string
+	project_id           *string
+	agent_id             *string
+	run_id               *string
+	harness              *string
+	artifact_type        *string
+	parser_version       *string
+	identity_key         *string
+	chunk_id             *string
+	inventory_seq        *int64
+	addinventory_seq     *int64
+	final                *bool
+	session_id           *string
+	native_relative_path *string
+	parsed_offset        *int64
+	addparsed_offset     *int64
+	row_count            *int64
+	addrow_count         *int64
+	atif_schema_version  *string
+	file_format          *string
+	content_encoding     *string
+	size                 *int64
+	addsize              *int64
+	charged_bytes        *int64
+	addcharged_bytes     *int64
+	sha256               *string
+	stamped_size         *int64
+	addstamped_size      *int64
+	stamped_sha256       *string
+	pending_object_path  *string
+	object_path          *string
+	status               *string
+	created_at           *time.Time
+	committed_at         *time.Time
+	prepare_expires_at   *time.Time
+	clearedFields        map[string]struct{}
+	done                 bool
+	oldValue             func(context.Context) (*TrajectoryArtifact, error)
+	predicates           []predicate.TrajectoryArtifact
+}
+
+var _ ent.Mutation = (*TrajectoryArtifactMutation)(nil)
+
+// trajectoryartifactOption allows management of the mutation configuration using functional options.
+type trajectoryartifactOption func(*TrajectoryArtifactMutation)
+
+// newTrajectoryArtifactMutation creates new mutation for the TrajectoryArtifact entity.
+func newTrajectoryArtifactMutation(c config, op Op, opts ...trajectoryartifactOption) *TrajectoryArtifactMutation {
+	m := &TrajectoryArtifactMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeTrajectoryArtifact,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withTrajectoryArtifactID sets the ID field of the mutation.
+func withTrajectoryArtifactID(id string) trajectoryartifactOption {
+	return func(m *TrajectoryArtifactMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *TrajectoryArtifact
+		)
+		m.oldValue = func(ctx context.Context) (*TrajectoryArtifact, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().TrajectoryArtifact.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withTrajectoryArtifact sets the old TrajectoryArtifact of the mutation.
+func withTrajectoryArtifact(node *TrajectoryArtifact) trajectoryartifactOption {
+	return func(m *TrajectoryArtifactMutation) {
+		m.oldValue = func(context.Context) (*TrajectoryArtifact, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m TrajectoryArtifactMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m TrajectoryArtifactMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of TrajectoryArtifact entities.
+func (m *TrajectoryArtifactMutation) SetID(id string) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *TrajectoryArtifactMutation) ID() (id string, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *TrajectoryArtifactMutation) IDs(ctx context.Context) ([]string, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []string{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().TrajectoryArtifact.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetHubID sets the "hub_id" field.
+func (m *TrajectoryArtifactMutation) SetHubID(s string) {
+	m.hub_id = &s
+}
+
+// HubID returns the value of the "hub_id" field in the mutation.
+func (m *TrajectoryArtifactMutation) HubID() (r string, exists bool) {
+	v := m.hub_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHubID returns the old "hub_id" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldHubID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHubID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHubID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHubID: %w", err)
+	}
+	return oldValue.HubID, nil
+}
+
+// ResetHubID resets all changes to the "hub_id" field.
+func (m *TrajectoryArtifactMutation) ResetHubID() {
+	m.hub_id = nil
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *TrajectoryArtifactMutation) SetProjectID(s string) {
+	m.project_id = &s
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *TrajectoryArtifactMutation) ProjectID() (r string, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *TrajectoryArtifactMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetAgentID sets the "agent_id" field.
+func (m *TrajectoryArtifactMutation) SetAgentID(s string) {
+	m.agent_id = &s
+}
+
+// AgentID returns the value of the "agent_id" field in the mutation.
+func (m *TrajectoryArtifactMutation) AgentID() (r string, exists bool) {
+	v := m.agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentID returns the old "agent_id" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldAgentID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentID: %w", err)
+	}
+	return oldValue.AgentID, nil
+}
+
+// ResetAgentID resets all changes to the "agent_id" field.
+func (m *TrajectoryArtifactMutation) ResetAgentID() {
+	m.agent_id = nil
+}
+
+// SetRunID sets the "run_id" field.
+func (m *TrajectoryArtifactMutation) SetRunID(s string) {
+	m.run_id = &s
+}
+
+// RunID returns the value of the "run_id" field in the mutation.
+func (m *TrajectoryArtifactMutation) RunID() (r string, exists bool) {
+	v := m.run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunID returns the old "run_id" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldRunID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunID: %w", err)
+	}
+	return oldValue.RunID, nil
+}
+
+// ResetRunID resets all changes to the "run_id" field.
+func (m *TrajectoryArtifactMutation) ResetRunID() {
+	m.run_id = nil
+}
+
+// SetHarness sets the "harness" field.
+func (m *TrajectoryArtifactMutation) SetHarness(s string) {
+	m.harness = &s
+}
+
+// Harness returns the value of the "harness" field in the mutation.
+func (m *TrajectoryArtifactMutation) Harness() (r string, exists bool) {
+	v := m.harness
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHarness returns the old "harness" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldHarness(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHarness is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHarness requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHarness: %w", err)
+	}
+	return oldValue.Harness, nil
+}
+
+// ResetHarness resets all changes to the "harness" field.
+func (m *TrajectoryArtifactMutation) ResetHarness() {
+	m.harness = nil
+}
+
+// SetArtifactType sets the "artifact_type" field.
+func (m *TrajectoryArtifactMutation) SetArtifactType(s string) {
+	m.artifact_type = &s
+}
+
+// ArtifactType returns the value of the "artifact_type" field in the mutation.
+func (m *TrajectoryArtifactMutation) ArtifactType() (r string, exists bool) {
+	v := m.artifact_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldArtifactType returns the old "artifact_type" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldArtifactType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldArtifactType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldArtifactType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldArtifactType: %w", err)
+	}
+	return oldValue.ArtifactType, nil
+}
+
+// ResetArtifactType resets all changes to the "artifact_type" field.
+func (m *TrajectoryArtifactMutation) ResetArtifactType() {
+	m.artifact_type = nil
+}
+
+// SetParserVersion sets the "parser_version" field.
+func (m *TrajectoryArtifactMutation) SetParserVersion(s string) {
+	m.parser_version = &s
+}
+
+// ParserVersion returns the value of the "parser_version" field in the mutation.
+func (m *TrajectoryArtifactMutation) ParserVersion() (r string, exists bool) {
+	v := m.parser_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldParserVersion returns the old "parser_version" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldParserVersion(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldParserVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldParserVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldParserVersion: %w", err)
+	}
+	return oldValue.ParserVersion, nil
+}
+
+// ResetParserVersion resets all changes to the "parser_version" field.
+func (m *TrajectoryArtifactMutation) ResetParserVersion() {
+	m.parser_version = nil
+}
+
+// SetIdentityKey sets the "identity_key" field.
+func (m *TrajectoryArtifactMutation) SetIdentityKey(s string) {
+	m.identity_key = &s
+}
+
+// IdentityKey returns the value of the "identity_key" field in the mutation.
+func (m *TrajectoryArtifactMutation) IdentityKey() (r string, exists bool) {
+	v := m.identity_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIdentityKey returns the old "identity_key" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldIdentityKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIdentityKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIdentityKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIdentityKey: %w", err)
+	}
+	return oldValue.IdentityKey, nil
+}
+
+// ResetIdentityKey resets all changes to the "identity_key" field.
+func (m *TrajectoryArtifactMutation) ResetIdentityKey() {
+	m.identity_key = nil
+}
+
+// SetChunkID sets the "chunk_id" field.
+func (m *TrajectoryArtifactMutation) SetChunkID(s string) {
+	m.chunk_id = &s
+}
+
+// ChunkID returns the value of the "chunk_id" field in the mutation.
+func (m *TrajectoryArtifactMutation) ChunkID() (r string, exists bool) {
+	v := m.chunk_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChunkID returns the old "chunk_id" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldChunkID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChunkID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChunkID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChunkID: %w", err)
+	}
+	return oldValue.ChunkID, nil
+}
+
+// ClearChunkID clears the value of the "chunk_id" field.
+func (m *TrajectoryArtifactMutation) ClearChunkID() {
+	m.chunk_id = nil
+	m.clearedFields[trajectoryartifact.FieldChunkID] = struct{}{}
+}
+
+// ChunkIDCleared returns if the "chunk_id" field was cleared in this mutation.
+func (m *TrajectoryArtifactMutation) ChunkIDCleared() bool {
+	_, ok := m.clearedFields[trajectoryartifact.FieldChunkID]
+	return ok
+}
+
+// ResetChunkID resets all changes to the "chunk_id" field.
+func (m *TrajectoryArtifactMutation) ResetChunkID() {
+	m.chunk_id = nil
+	delete(m.clearedFields, trajectoryartifact.FieldChunkID)
+}
+
+// SetInventorySeq sets the "inventory_seq" field.
+func (m *TrajectoryArtifactMutation) SetInventorySeq(i int64) {
+	m.inventory_seq = &i
+	m.addinventory_seq = nil
+}
+
+// InventorySeq returns the value of the "inventory_seq" field in the mutation.
+func (m *TrajectoryArtifactMutation) InventorySeq() (r int64, exists bool) {
+	v := m.inventory_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInventorySeq returns the old "inventory_seq" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldInventorySeq(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInventorySeq is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInventorySeq requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInventorySeq: %w", err)
+	}
+	return oldValue.InventorySeq, nil
+}
+
+// AddInventorySeq adds i to the "inventory_seq" field.
+func (m *TrajectoryArtifactMutation) AddInventorySeq(i int64) {
+	if m.addinventory_seq != nil {
+		*m.addinventory_seq += i
+	} else {
+		m.addinventory_seq = &i
+	}
+}
+
+// AddedInventorySeq returns the value that was added to the "inventory_seq" field in this mutation.
+func (m *TrajectoryArtifactMutation) AddedInventorySeq() (r int64, exists bool) {
+	v := m.addinventory_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetInventorySeq resets all changes to the "inventory_seq" field.
+func (m *TrajectoryArtifactMutation) ResetInventorySeq() {
+	m.inventory_seq = nil
+	m.addinventory_seq = nil
+}
+
+// SetFinal sets the "final" field.
+func (m *TrajectoryArtifactMutation) SetFinal(b bool) {
+	m.final = &b
+}
+
+// Final returns the value of the "final" field in the mutation.
+func (m *TrajectoryArtifactMutation) Final() (r bool, exists bool) {
+	v := m.final
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFinal returns the old "final" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldFinal(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFinal is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFinal requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFinal: %w", err)
+	}
+	return oldValue.Final, nil
+}
+
+// ResetFinal resets all changes to the "final" field.
+func (m *TrajectoryArtifactMutation) ResetFinal() {
+	m.final = nil
+}
+
+// SetSessionID sets the "session_id" field.
+func (m *TrajectoryArtifactMutation) SetSessionID(s string) {
+	m.session_id = &s
+}
+
+// SessionID returns the value of the "session_id" field in the mutation.
+func (m *TrajectoryArtifactMutation) SessionID() (r string, exists bool) {
+	v := m.session_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSessionID returns the old "session_id" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldSessionID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSessionID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSessionID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSessionID: %w", err)
+	}
+	return oldValue.SessionID, nil
+}
+
+// ClearSessionID clears the value of the "session_id" field.
+func (m *TrajectoryArtifactMutation) ClearSessionID() {
+	m.session_id = nil
+	m.clearedFields[trajectoryartifact.FieldSessionID] = struct{}{}
+}
+
+// SessionIDCleared returns if the "session_id" field was cleared in this mutation.
+func (m *TrajectoryArtifactMutation) SessionIDCleared() bool {
+	_, ok := m.clearedFields[trajectoryartifact.FieldSessionID]
+	return ok
+}
+
+// ResetSessionID resets all changes to the "session_id" field.
+func (m *TrajectoryArtifactMutation) ResetSessionID() {
+	m.session_id = nil
+	delete(m.clearedFields, trajectoryartifact.FieldSessionID)
+}
+
+// SetNativeRelativePath sets the "native_relative_path" field.
+func (m *TrajectoryArtifactMutation) SetNativeRelativePath(s string) {
+	m.native_relative_path = &s
+}
+
+// NativeRelativePath returns the value of the "native_relative_path" field in the mutation.
+func (m *TrajectoryArtifactMutation) NativeRelativePath() (r string, exists bool) {
+	v := m.native_relative_path
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNativeRelativePath returns the old "native_relative_path" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldNativeRelativePath(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNativeRelativePath is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNativeRelativePath requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNativeRelativePath: %w", err)
+	}
+	return oldValue.NativeRelativePath, nil
+}
+
+// ClearNativeRelativePath clears the value of the "native_relative_path" field.
+func (m *TrajectoryArtifactMutation) ClearNativeRelativePath() {
+	m.native_relative_path = nil
+	m.clearedFields[trajectoryartifact.FieldNativeRelativePath] = struct{}{}
+}
+
+// NativeRelativePathCleared returns if the "native_relative_path" field was cleared in this mutation.
+func (m *TrajectoryArtifactMutation) NativeRelativePathCleared() bool {
+	_, ok := m.clearedFields[trajectoryartifact.FieldNativeRelativePath]
+	return ok
+}
+
+// ResetNativeRelativePath resets all changes to the "native_relative_path" field.
+func (m *TrajectoryArtifactMutation) ResetNativeRelativePath() {
+	m.native_relative_path = nil
+	delete(m.clearedFields, trajectoryartifact.FieldNativeRelativePath)
+}
+
+// SetParsedOffset sets the "parsed_offset" field.
+func (m *TrajectoryArtifactMutation) SetParsedOffset(i int64) {
+	m.parsed_offset = &i
+	m.addparsed_offset = nil
+}
+
+// ParsedOffset returns the value of the "parsed_offset" field in the mutation.
+func (m *TrajectoryArtifactMutation) ParsedOffset() (r int64, exists bool) {
+	v := m.parsed_offset
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldParsedOffset returns the old "parsed_offset" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldParsedOffset(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldParsedOffset is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldParsedOffset requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldParsedOffset: %w", err)
+	}
+	return oldValue.ParsedOffset, nil
+}
+
+// AddParsedOffset adds i to the "parsed_offset" field.
+func (m *TrajectoryArtifactMutation) AddParsedOffset(i int64) {
+	if m.addparsed_offset != nil {
+		*m.addparsed_offset += i
+	} else {
+		m.addparsed_offset = &i
+	}
+}
+
+// AddedParsedOffset returns the value that was added to the "parsed_offset" field in this mutation.
+func (m *TrajectoryArtifactMutation) AddedParsedOffset() (r int64, exists bool) {
+	v := m.addparsed_offset
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetParsedOffset resets all changes to the "parsed_offset" field.
+func (m *TrajectoryArtifactMutation) ResetParsedOffset() {
+	m.parsed_offset = nil
+	m.addparsed_offset = nil
+}
+
+// SetRowCount sets the "row_count" field.
+func (m *TrajectoryArtifactMutation) SetRowCount(i int64) {
+	m.row_count = &i
+	m.addrow_count = nil
+}
+
+// RowCount returns the value of the "row_count" field in the mutation.
+func (m *TrajectoryArtifactMutation) RowCount() (r int64, exists bool) {
+	v := m.row_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRowCount returns the old "row_count" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldRowCount(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRowCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRowCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRowCount: %w", err)
+	}
+	return oldValue.RowCount, nil
+}
+
+// AddRowCount adds i to the "row_count" field.
+func (m *TrajectoryArtifactMutation) AddRowCount(i int64) {
+	if m.addrow_count != nil {
+		*m.addrow_count += i
+	} else {
+		m.addrow_count = &i
+	}
+}
+
+// AddedRowCount returns the value that was added to the "row_count" field in this mutation.
+func (m *TrajectoryArtifactMutation) AddedRowCount() (r int64, exists bool) {
+	v := m.addrow_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRowCount resets all changes to the "row_count" field.
+func (m *TrajectoryArtifactMutation) ResetRowCount() {
+	m.row_count = nil
+	m.addrow_count = nil
+}
+
+// SetAtifSchemaVersion sets the "atif_schema_version" field.
+func (m *TrajectoryArtifactMutation) SetAtifSchemaVersion(s string) {
+	m.atif_schema_version = &s
+}
+
+// AtifSchemaVersion returns the value of the "atif_schema_version" field in the mutation.
+func (m *TrajectoryArtifactMutation) AtifSchemaVersion() (r string, exists bool) {
+	v := m.atif_schema_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAtifSchemaVersion returns the old "atif_schema_version" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldAtifSchemaVersion(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAtifSchemaVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAtifSchemaVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAtifSchemaVersion: %w", err)
+	}
+	return oldValue.AtifSchemaVersion, nil
+}
+
+// ClearAtifSchemaVersion clears the value of the "atif_schema_version" field.
+func (m *TrajectoryArtifactMutation) ClearAtifSchemaVersion() {
+	m.atif_schema_version = nil
+	m.clearedFields[trajectoryartifact.FieldAtifSchemaVersion] = struct{}{}
+}
+
+// AtifSchemaVersionCleared returns if the "atif_schema_version" field was cleared in this mutation.
+func (m *TrajectoryArtifactMutation) AtifSchemaVersionCleared() bool {
+	_, ok := m.clearedFields[trajectoryartifact.FieldAtifSchemaVersion]
+	return ok
+}
+
+// ResetAtifSchemaVersion resets all changes to the "atif_schema_version" field.
+func (m *TrajectoryArtifactMutation) ResetAtifSchemaVersion() {
+	m.atif_schema_version = nil
+	delete(m.clearedFields, trajectoryartifact.FieldAtifSchemaVersion)
+}
+
+// SetFileFormat sets the "file_format" field.
+func (m *TrajectoryArtifactMutation) SetFileFormat(s string) {
+	m.file_format = &s
+}
+
+// FileFormat returns the value of the "file_format" field in the mutation.
+func (m *TrajectoryArtifactMutation) FileFormat() (r string, exists bool) {
+	v := m.file_format
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFileFormat returns the old "file_format" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldFileFormat(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFileFormat is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFileFormat requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFileFormat: %w", err)
+	}
+	return oldValue.FileFormat, nil
+}
+
+// ClearFileFormat clears the value of the "file_format" field.
+func (m *TrajectoryArtifactMutation) ClearFileFormat() {
+	m.file_format = nil
+	m.clearedFields[trajectoryartifact.FieldFileFormat] = struct{}{}
+}
+
+// FileFormatCleared returns if the "file_format" field was cleared in this mutation.
+func (m *TrajectoryArtifactMutation) FileFormatCleared() bool {
+	_, ok := m.clearedFields[trajectoryartifact.FieldFileFormat]
+	return ok
+}
+
+// ResetFileFormat resets all changes to the "file_format" field.
+func (m *TrajectoryArtifactMutation) ResetFileFormat() {
+	m.file_format = nil
+	delete(m.clearedFields, trajectoryartifact.FieldFileFormat)
+}
+
+// SetContentEncoding sets the "content_encoding" field.
+func (m *TrajectoryArtifactMutation) SetContentEncoding(s string) {
+	m.content_encoding = &s
+}
+
+// ContentEncoding returns the value of the "content_encoding" field in the mutation.
+func (m *TrajectoryArtifactMutation) ContentEncoding() (r string, exists bool) {
+	v := m.content_encoding
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldContentEncoding returns the old "content_encoding" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldContentEncoding(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldContentEncoding is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldContentEncoding requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldContentEncoding: %w", err)
+	}
+	return oldValue.ContentEncoding, nil
+}
+
+// ResetContentEncoding resets all changes to the "content_encoding" field.
+func (m *TrajectoryArtifactMutation) ResetContentEncoding() {
+	m.content_encoding = nil
+}
+
+// SetSize sets the "size" field.
+func (m *TrajectoryArtifactMutation) SetSize(i int64) {
+	m.size = &i
+	m.addsize = nil
+}
+
+// Size returns the value of the "size" field in the mutation.
+func (m *TrajectoryArtifactMutation) Size() (r int64, exists bool) {
+	v := m.size
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSize returns the old "size" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldSize(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSize is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSize requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSize: %w", err)
+	}
+	return oldValue.Size, nil
+}
+
+// AddSize adds i to the "size" field.
+func (m *TrajectoryArtifactMutation) AddSize(i int64) {
+	if m.addsize != nil {
+		*m.addsize += i
+	} else {
+		m.addsize = &i
+	}
+}
+
+// AddedSize returns the value that was added to the "size" field in this mutation.
+func (m *TrajectoryArtifactMutation) AddedSize() (r int64, exists bool) {
+	v := m.addsize
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetSize resets all changes to the "size" field.
+func (m *TrajectoryArtifactMutation) ResetSize() {
+	m.size = nil
+	m.addsize = nil
+}
+
+// SetChargedBytes sets the "charged_bytes" field.
+func (m *TrajectoryArtifactMutation) SetChargedBytes(i int64) {
+	m.charged_bytes = &i
+	m.addcharged_bytes = nil
+}
+
+// ChargedBytes returns the value of the "charged_bytes" field in the mutation.
+func (m *TrajectoryArtifactMutation) ChargedBytes() (r int64, exists bool) {
+	v := m.charged_bytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChargedBytes returns the old "charged_bytes" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldChargedBytes(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChargedBytes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChargedBytes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChargedBytes: %w", err)
+	}
+	return oldValue.ChargedBytes, nil
+}
+
+// AddChargedBytes adds i to the "charged_bytes" field.
+func (m *TrajectoryArtifactMutation) AddChargedBytes(i int64) {
+	if m.addcharged_bytes != nil {
+		*m.addcharged_bytes += i
+	} else {
+		m.addcharged_bytes = &i
+	}
+}
+
+// AddedChargedBytes returns the value that was added to the "charged_bytes" field in this mutation.
+func (m *TrajectoryArtifactMutation) AddedChargedBytes() (r int64, exists bool) {
+	v := m.addcharged_bytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetChargedBytes resets all changes to the "charged_bytes" field.
+func (m *TrajectoryArtifactMutation) ResetChargedBytes() {
+	m.charged_bytes = nil
+	m.addcharged_bytes = nil
+}
+
+// SetSha256 sets the "sha256" field.
+func (m *TrajectoryArtifactMutation) SetSha256(s string) {
+	m.sha256 = &s
+}
+
+// Sha256 returns the value of the "sha256" field in the mutation.
+func (m *TrajectoryArtifactMutation) Sha256() (r string, exists bool) {
+	v := m.sha256
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSha256 returns the old "sha256" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldSha256(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSha256 is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSha256 requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSha256: %w", err)
+	}
+	return oldValue.Sha256, nil
+}
+
+// ResetSha256 resets all changes to the "sha256" field.
+func (m *TrajectoryArtifactMutation) ResetSha256() {
+	m.sha256 = nil
+}
+
+// SetStampedSize sets the "stamped_size" field.
+func (m *TrajectoryArtifactMutation) SetStampedSize(i int64) {
+	m.stamped_size = &i
+	m.addstamped_size = nil
+}
+
+// StampedSize returns the value of the "stamped_size" field in the mutation.
+func (m *TrajectoryArtifactMutation) StampedSize() (r int64, exists bool) {
+	v := m.stamped_size
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStampedSize returns the old "stamped_size" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldStampedSize(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStampedSize is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStampedSize requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStampedSize: %w", err)
+	}
+	return oldValue.StampedSize, nil
+}
+
+// AddStampedSize adds i to the "stamped_size" field.
+func (m *TrajectoryArtifactMutation) AddStampedSize(i int64) {
+	if m.addstamped_size != nil {
+		*m.addstamped_size += i
+	} else {
+		m.addstamped_size = &i
+	}
+}
+
+// AddedStampedSize returns the value that was added to the "stamped_size" field in this mutation.
+func (m *TrajectoryArtifactMutation) AddedStampedSize() (r int64, exists bool) {
+	v := m.addstamped_size
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetStampedSize resets all changes to the "stamped_size" field.
+func (m *TrajectoryArtifactMutation) ResetStampedSize() {
+	m.stamped_size = nil
+	m.addstamped_size = nil
+}
+
+// SetStampedSha256 sets the "stamped_sha256" field.
+func (m *TrajectoryArtifactMutation) SetStampedSha256(s string) {
+	m.stamped_sha256 = &s
+}
+
+// StampedSha256 returns the value of the "stamped_sha256" field in the mutation.
+func (m *TrajectoryArtifactMutation) StampedSha256() (r string, exists bool) {
+	v := m.stamped_sha256
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStampedSha256 returns the old "stamped_sha256" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldStampedSha256(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStampedSha256 is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStampedSha256 requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStampedSha256: %w", err)
+	}
+	return oldValue.StampedSha256, nil
+}
+
+// ClearStampedSha256 clears the value of the "stamped_sha256" field.
+func (m *TrajectoryArtifactMutation) ClearStampedSha256() {
+	m.stamped_sha256 = nil
+	m.clearedFields[trajectoryartifact.FieldStampedSha256] = struct{}{}
+}
+
+// StampedSha256Cleared returns if the "stamped_sha256" field was cleared in this mutation.
+func (m *TrajectoryArtifactMutation) StampedSha256Cleared() bool {
+	_, ok := m.clearedFields[trajectoryartifact.FieldStampedSha256]
+	return ok
+}
+
+// ResetStampedSha256 resets all changes to the "stamped_sha256" field.
+func (m *TrajectoryArtifactMutation) ResetStampedSha256() {
+	m.stamped_sha256 = nil
+	delete(m.clearedFields, trajectoryartifact.FieldStampedSha256)
+}
+
+// SetPendingObjectPath sets the "pending_object_path" field.
+func (m *TrajectoryArtifactMutation) SetPendingObjectPath(s string) {
+	m.pending_object_path = &s
+}
+
+// PendingObjectPath returns the value of the "pending_object_path" field in the mutation.
+func (m *TrajectoryArtifactMutation) PendingObjectPath() (r string, exists bool) {
+	v := m.pending_object_path
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPendingObjectPath returns the old "pending_object_path" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldPendingObjectPath(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPendingObjectPath is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPendingObjectPath requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPendingObjectPath: %w", err)
+	}
+	return oldValue.PendingObjectPath, nil
+}
+
+// ResetPendingObjectPath resets all changes to the "pending_object_path" field.
+func (m *TrajectoryArtifactMutation) ResetPendingObjectPath() {
+	m.pending_object_path = nil
+}
+
+// SetObjectPath sets the "object_path" field.
+func (m *TrajectoryArtifactMutation) SetObjectPath(s string) {
+	m.object_path = &s
+}
+
+// ObjectPath returns the value of the "object_path" field in the mutation.
+func (m *TrajectoryArtifactMutation) ObjectPath() (r string, exists bool) {
+	v := m.object_path
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldObjectPath returns the old "object_path" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldObjectPath(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldObjectPath is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldObjectPath requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldObjectPath: %w", err)
+	}
+	return oldValue.ObjectPath, nil
+}
+
+// ResetObjectPath resets all changes to the "object_path" field.
+func (m *TrajectoryArtifactMutation) ResetObjectPath() {
+	m.object_path = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *TrajectoryArtifactMutation) SetStatus(s string) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *TrajectoryArtifactMutation) Status() (r string, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *TrajectoryArtifactMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *TrajectoryArtifactMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *TrajectoryArtifactMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *TrajectoryArtifactMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetCommittedAt sets the "committed_at" field.
+func (m *TrajectoryArtifactMutation) SetCommittedAt(t time.Time) {
+	m.committed_at = &t
+}
+
+// CommittedAt returns the value of the "committed_at" field in the mutation.
+func (m *TrajectoryArtifactMutation) CommittedAt() (r time.Time, exists bool) {
+	v := m.committed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCommittedAt returns the old "committed_at" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldCommittedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCommittedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCommittedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCommittedAt: %w", err)
+	}
+	return oldValue.CommittedAt, nil
+}
+
+// ClearCommittedAt clears the value of the "committed_at" field.
+func (m *TrajectoryArtifactMutation) ClearCommittedAt() {
+	m.committed_at = nil
+	m.clearedFields[trajectoryartifact.FieldCommittedAt] = struct{}{}
+}
+
+// CommittedAtCleared returns if the "committed_at" field was cleared in this mutation.
+func (m *TrajectoryArtifactMutation) CommittedAtCleared() bool {
+	_, ok := m.clearedFields[trajectoryartifact.FieldCommittedAt]
+	return ok
+}
+
+// ResetCommittedAt resets all changes to the "committed_at" field.
+func (m *TrajectoryArtifactMutation) ResetCommittedAt() {
+	m.committed_at = nil
+	delete(m.clearedFields, trajectoryartifact.FieldCommittedAt)
+}
+
+// SetPrepareExpiresAt sets the "prepare_expires_at" field.
+func (m *TrajectoryArtifactMutation) SetPrepareExpiresAt(t time.Time) {
+	m.prepare_expires_at = &t
+}
+
+// PrepareExpiresAt returns the value of the "prepare_expires_at" field in the mutation.
+func (m *TrajectoryArtifactMutation) PrepareExpiresAt() (r time.Time, exists bool) {
+	v := m.prepare_expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPrepareExpiresAt returns the old "prepare_expires_at" field's value of the TrajectoryArtifact entity.
+// If the TrajectoryArtifact object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryArtifactMutation) OldPrepareExpiresAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPrepareExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPrepareExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPrepareExpiresAt: %w", err)
+	}
+	return oldValue.PrepareExpiresAt, nil
+}
+
+// ResetPrepareExpiresAt resets all changes to the "prepare_expires_at" field.
+func (m *TrajectoryArtifactMutation) ResetPrepareExpiresAt() {
+	m.prepare_expires_at = nil
+}
+
+// Where appends a list predicates to the TrajectoryArtifactMutation builder.
+func (m *TrajectoryArtifactMutation) Where(ps ...predicate.TrajectoryArtifact) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the TrajectoryArtifactMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *TrajectoryArtifactMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.TrajectoryArtifact, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *TrajectoryArtifactMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *TrajectoryArtifactMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (TrajectoryArtifact).
+func (m *TrajectoryArtifactMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *TrajectoryArtifactMutation) Fields() []string {
+	fields := make([]string, 0, 29)
+	if m.hub_id != nil {
+		fields = append(fields, trajectoryartifact.FieldHubID)
+	}
+	if m.project_id != nil {
+		fields = append(fields, trajectoryartifact.FieldProjectID)
+	}
+	if m.agent_id != nil {
+		fields = append(fields, trajectoryartifact.FieldAgentID)
+	}
+	if m.run_id != nil {
+		fields = append(fields, trajectoryartifact.FieldRunID)
+	}
+	if m.harness != nil {
+		fields = append(fields, trajectoryartifact.FieldHarness)
+	}
+	if m.artifact_type != nil {
+		fields = append(fields, trajectoryartifact.FieldArtifactType)
+	}
+	if m.parser_version != nil {
+		fields = append(fields, trajectoryartifact.FieldParserVersion)
+	}
+	if m.identity_key != nil {
+		fields = append(fields, trajectoryartifact.FieldIdentityKey)
+	}
+	if m.chunk_id != nil {
+		fields = append(fields, trajectoryartifact.FieldChunkID)
+	}
+	if m.inventory_seq != nil {
+		fields = append(fields, trajectoryartifact.FieldInventorySeq)
+	}
+	if m.final != nil {
+		fields = append(fields, trajectoryartifact.FieldFinal)
+	}
+	if m.session_id != nil {
+		fields = append(fields, trajectoryartifact.FieldSessionID)
+	}
+	if m.native_relative_path != nil {
+		fields = append(fields, trajectoryartifact.FieldNativeRelativePath)
+	}
+	if m.parsed_offset != nil {
+		fields = append(fields, trajectoryartifact.FieldParsedOffset)
+	}
+	if m.row_count != nil {
+		fields = append(fields, trajectoryartifact.FieldRowCount)
+	}
+	if m.atif_schema_version != nil {
+		fields = append(fields, trajectoryartifact.FieldAtifSchemaVersion)
+	}
+	if m.file_format != nil {
+		fields = append(fields, trajectoryartifact.FieldFileFormat)
+	}
+	if m.content_encoding != nil {
+		fields = append(fields, trajectoryartifact.FieldContentEncoding)
+	}
+	if m.size != nil {
+		fields = append(fields, trajectoryartifact.FieldSize)
+	}
+	if m.charged_bytes != nil {
+		fields = append(fields, trajectoryartifact.FieldChargedBytes)
+	}
+	if m.sha256 != nil {
+		fields = append(fields, trajectoryartifact.FieldSha256)
+	}
+	if m.stamped_size != nil {
+		fields = append(fields, trajectoryartifact.FieldStampedSize)
+	}
+	if m.stamped_sha256 != nil {
+		fields = append(fields, trajectoryartifact.FieldStampedSha256)
+	}
+	if m.pending_object_path != nil {
+		fields = append(fields, trajectoryartifact.FieldPendingObjectPath)
+	}
+	if m.object_path != nil {
+		fields = append(fields, trajectoryartifact.FieldObjectPath)
+	}
+	if m.status != nil {
+		fields = append(fields, trajectoryartifact.FieldStatus)
+	}
+	if m.created_at != nil {
+		fields = append(fields, trajectoryartifact.FieldCreatedAt)
+	}
+	if m.committed_at != nil {
+		fields = append(fields, trajectoryartifact.FieldCommittedAt)
+	}
+	if m.prepare_expires_at != nil {
+		fields = append(fields, trajectoryartifact.FieldPrepareExpiresAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *TrajectoryArtifactMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case trajectoryartifact.FieldHubID:
+		return m.HubID()
+	case trajectoryartifact.FieldProjectID:
+		return m.ProjectID()
+	case trajectoryartifact.FieldAgentID:
+		return m.AgentID()
+	case trajectoryartifact.FieldRunID:
+		return m.RunID()
+	case trajectoryartifact.FieldHarness:
+		return m.Harness()
+	case trajectoryartifact.FieldArtifactType:
+		return m.ArtifactType()
+	case trajectoryartifact.FieldParserVersion:
+		return m.ParserVersion()
+	case trajectoryartifact.FieldIdentityKey:
+		return m.IdentityKey()
+	case trajectoryartifact.FieldChunkID:
+		return m.ChunkID()
+	case trajectoryartifact.FieldInventorySeq:
+		return m.InventorySeq()
+	case trajectoryartifact.FieldFinal:
+		return m.Final()
+	case trajectoryartifact.FieldSessionID:
+		return m.SessionID()
+	case trajectoryartifact.FieldNativeRelativePath:
+		return m.NativeRelativePath()
+	case trajectoryartifact.FieldParsedOffset:
+		return m.ParsedOffset()
+	case trajectoryartifact.FieldRowCount:
+		return m.RowCount()
+	case trajectoryartifact.FieldAtifSchemaVersion:
+		return m.AtifSchemaVersion()
+	case trajectoryartifact.FieldFileFormat:
+		return m.FileFormat()
+	case trajectoryartifact.FieldContentEncoding:
+		return m.ContentEncoding()
+	case trajectoryartifact.FieldSize:
+		return m.Size()
+	case trajectoryartifact.FieldChargedBytes:
+		return m.ChargedBytes()
+	case trajectoryartifact.FieldSha256:
+		return m.Sha256()
+	case trajectoryartifact.FieldStampedSize:
+		return m.StampedSize()
+	case trajectoryartifact.FieldStampedSha256:
+		return m.StampedSha256()
+	case trajectoryartifact.FieldPendingObjectPath:
+		return m.PendingObjectPath()
+	case trajectoryartifact.FieldObjectPath:
+		return m.ObjectPath()
+	case trajectoryartifact.FieldStatus:
+		return m.Status()
+	case trajectoryartifact.FieldCreatedAt:
+		return m.CreatedAt()
+	case trajectoryartifact.FieldCommittedAt:
+		return m.CommittedAt()
+	case trajectoryartifact.FieldPrepareExpiresAt:
+		return m.PrepareExpiresAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *TrajectoryArtifactMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case trajectoryartifact.FieldHubID:
+		return m.OldHubID(ctx)
+	case trajectoryartifact.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case trajectoryartifact.FieldAgentID:
+		return m.OldAgentID(ctx)
+	case trajectoryartifact.FieldRunID:
+		return m.OldRunID(ctx)
+	case trajectoryartifact.FieldHarness:
+		return m.OldHarness(ctx)
+	case trajectoryartifact.FieldArtifactType:
+		return m.OldArtifactType(ctx)
+	case trajectoryartifact.FieldParserVersion:
+		return m.OldParserVersion(ctx)
+	case trajectoryartifact.FieldIdentityKey:
+		return m.OldIdentityKey(ctx)
+	case trajectoryartifact.FieldChunkID:
+		return m.OldChunkID(ctx)
+	case trajectoryartifact.FieldInventorySeq:
+		return m.OldInventorySeq(ctx)
+	case trajectoryartifact.FieldFinal:
+		return m.OldFinal(ctx)
+	case trajectoryartifact.FieldSessionID:
+		return m.OldSessionID(ctx)
+	case trajectoryartifact.FieldNativeRelativePath:
+		return m.OldNativeRelativePath(ctx)
+	case trajectoryartifact.FieldParsedOffset:
+		return m.OldParsedOffset(ctx)
+	case trajectoryartifact.FieldRowCount:
+		return m.OldRowCount(ctx)
+	case trajectoryartifact.FieldAtifSchemaVersion:
+		return m.OldAtifSchemaVersion(ctx)
+	case trajectoryartifact.FieldFileFormat:
+		return m.OldFileFormat(ctx)
+	case trajectoryartifact.FieldContentEncoding:
+		return m.OldContentEncoding(ctx)
+	case trajectoryartifact.FieldSize:
+		return m.OldSize(ctx)
+	case trajectoryartifact.FieldChargedBytes:
+		return m.OldChargedBytes(ctx)
+	case trajectoryartifact.FieldSha256:
+		return m.OldSha256(ctx)
+	case trajectoryartifact.FieldStampedSize:
+		return m.OldStampedSize(ctx)
+	case trajectoryartifact.FieldStampedSha256:
+		return m.OldStampedSha256(ctx)
+	case trajectoryartifact.FieldPendingObjectPath:
+		return m.OldPendingObjectPath(ctx)
+	case trajectoryartifact.FieldObjectPath:
+		return m.OldObjectPath(ctx)
+	case trajectoryartifact.FieldStatus:
+		return m.OldStatus(ctx)
+	case trajectoryartifact.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case trajectoryartifact.FieldCommittedAt:
+		return m.OldCommittedAt(ctx)
+	case trajectoryartifact.FieldPrepareExpiresAt:
+		return m.OldPrepareExpiresAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown TrajectoryArtifact field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *TrajectoryArtifactMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case trajectoryartifact.FieldHubID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHubID(v)
+		return nil
+	case trajectoryartifact.FieldProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case trajectoryartifact.FieldAgentID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentID(v)
+		return nil
+	case trajectoryartifact.FieldRunID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunID(v)
+		return nil
+	case trajectoryartifact.FieldHarness:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHarness(v)
+		return nil
+	case trajectoryartifact.FieldArtifactType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetArtifactType(v)
+		return nil
+	case trajectoryartifact.FieldParserVersion:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetParserVersion(v)
+		return nil
+	case trajectoryartifact.FieldIdentityKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIdentityKey(v)
+		return nil
+	case trajectoryartifact.FieldChunkID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChunkID(v)
+		return nil
+	case trajectoryartifact.FieldInventorySeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInventorySeq(v)
+		return nil
+	case trajectoryartifact.FieldFinal:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFinal(v)
+		return nil
+	case trajectoryartifact.FieldSessionID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSessionID(v)
+		return nil
+	case trajectoryartifact.FieldNativeRelativePath:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNativeRelativePath(v)
+		return nil
+	case trajectoryartifact.FieldParsedOffset:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetParsedOffset(v)
+		return nil
+	case trajectoryartifact.FieldRowCount:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRowCount(v)
+		return nil
+	case trajectoryartifact.FieldAtifSchemaVersion:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAtifSchemaVersion(v)
+		return nil
+	case trajectoryartifact.FieldFileFormat:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFileFormat(v)
+		return nil
+	case trajectoryartifact.FieldContentEncoding:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetContentEncoding(v)
+		return nil
+	case trajectoryartifact.FieldSize:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSize(v)
+		return nil
+	case trajectoryartifact.FieldChargedBytes:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChargedBytes(v)
+		return nil
+	case trajectoryartifact.FieldSha256:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSha256(v)
+		return nil
+	case trajectoryartifact.FieldStampedSize:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStampedSize(v)
+		return nil
+	case trajectoryartifact.FieldStampedSha256:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStampedSha256(v)
+		return nil
+	case trajectoryartifact.FieldPendingObjectPath:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPendingObjectPath(v)
+		return nil
+	case trajectoryartifact.FieldObjectPath:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetObjectPath(v)
+		return nil
+	case trajectoryartifact.FieldStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case trajectoryartifact.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case trajectoryartifact.FieldCommittedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCommittedAt(v)
+		return nil
+	case trajectoryartifact.FieldPrepareExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPrepareExpiresAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectoryArtifact field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *TrajectoryArtifactMutation) AddedFields() []string {
+	var fields []string
+	if m.addinventory_seq != nil {
+		fields = append(fields, trajectoryartifact.FieldInventorySeq)
+	}
+	if m.addparsed_offset != nil {
+		fields = append(fields, trajectoryartifact.FieldParsedOffset)
+	}
+	if m.addrow_count != nil {
+		fields = append(fields, trajectoryartifact.FieldRowCount)
+	}
+	if m.addsize != nil {
+		fields = append(fields, trajectoryartifact.FieldSize)
+	}
+	if m.addcharged_bytes != nil {
+		fields = append(fields, trajectoryartifact.FieldChargedBytes)
+	}
+	if m.addstamped_size != nil {
+		fields = append(fields, trajectoryartifact.FieldStampedSize)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *TrajectoryArtifactMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case trajectoryartifact.FieldInventorySeq:
+		return m.AddedInventorySeq()
+	case trajectoryartifact.FieldParsedOffset:
+		return m.AddedParsedOffset()
+	case trajectoryartifact.FieldRowCount:
+		return m.AddedRowCount()
+	case trajectoryartifact.FieldSize:
+		return m.AddedSize()
+	case trajectoryartifact.FieldChargedBytes:
+		return m.AddedChargedBytes()
+	case trajectoryartifact.FieldStampedSize:
+		return m.AddedStampedSize()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *TrajectoryArtifactMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case trajectoryartifact.FieldInventorySeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddInventorySeq(v)
+		return nil
+	case trajectoryartifact.FieldParsedOffset:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddParsedOffset(v)
+		return nil
+	case trajectoryartifact.FieldRowCount:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRowCount(v)
+		return nil
+	case trajectoryartifact.FieldSize:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSize(v)
+		return nil
+	case trajectoryartifact.FieldChargedBytes:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddChargedBytes(v)
+		return nil
+	case trajectoryartifact.FieldStampedSize:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddStampedSize(v)
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectoryArtifact numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *TrajectoryArtifactMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(trajectoryartifact.FieldChunkID) {
+		fields = append(fields, trajectoryartifact.FieldChunkID)
+	}
+	if m.FieldCleared(trajectoryartifact.FieldSessionID) {
+		fields = append(fields, trajectoryartifact.FieldSessionID)
+	}
+	if m.FieldCleared(trajectoryartifact.FieldNativeRelativePath) {
+		fields = append(fields, trajectoryartifact.FieldNativeRelativePath)
+	}
+	if m.FieldCleared(trajectoryartifact.FieldAtifSchemaVersion) {
+		fields = append(fields, trajectoryartifact.FieldAtifSchemaVersion)
+	}
+	if m.FieldCleared(trajectoryartifact.FieldFileFormat) {
+		fields = append(fields, trajectoryartifact.FieldFileFormat)
+	}
+	if m.FieldCleared(trajectoryartifact.FieldStampedSha256) {
+		fields = append(fields, trajectoryartifact.FieldStampedSha256)
+	}
+	if m.FieldCleared(trajectoryartifact.FieldCommittedAt) {
+		fields = append(fields, trajectoryartifact.FieldCommittedAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *TrajectoryArtifactMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *TrajectoryArtifactMutation) ClearField(name string) error {
+	switch name {
+	case trajectoryartifact.FieldChunkID:
+		m.ClearChunkID()
+		return nil
+	case trajectoryartifact.FieldSessionID:
+		m.ClearSessionID()
+		return nil
+	case trajectoryartifact.FieldNativeRelativePath:
+		m.ClearNativeRelativePath()
+		return nil
+	case trajectoryartifact.FieldAtifSchemaVersion:
+		m.ClearAtifSchemaVersion()
+		return nil
+	case trajectoryartifact.FieldFileFormat:
+		m.ClearFileFormat()
+		return nil
+	case trajectoryartifact.FieldStampedSha256:
+		m.ClearStampedSha256()
+		return nil
+	case trajectoryartifact.FieldCommittedAt:
+		m.ClearCommittedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectoryArtifact nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *TrajectoryArtifactMutation) ResetField(name string) error {
+	switch name {
+	case trajectoryartifact.FieldHubID:
+		m.ResetHubID()
+		return nil
+	case trajectoryartifact.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case trajectoryartifact.FieldAgentID:
+		m.ResetAgentID()
+		return nil
+	case trajectoryartifact.FieldRunID:
+		m.ResetRunID()
+		return nil
+	case trajectoryartifact.FieldHarness:
+		m.ResetHarness()
+		return nil
+	case trajectoryartifact.FieldArtifactType:
+		m.ResetArtifactType()
+		return nil
+	case trajectoryartifact.FieldParserVersion:
+		m.ResetParserVersion()
+		return nil
+	case trajectoryartifact.FieldIdentityKey:
+		m.ResetIdentityKey()
+		return nil
+	case trajectoryartifact.FieldChunkID:
+		m.ResetChunkID()
+		return nil
+	case trajectoryartifact.FieldInventorySeq:
+		m.ResetInventorySeq()
+		return nil
+	case trajectoryartifact.FieldFinal:
+		m.ResetFinal()
+		return nil
+	case trajectoryartifact.FieldSessionID:
+		m.ResetSessionID()
+		return nil
+	case trajectoryartifact.FieldNativeRelativePath:
+		m.ResetNativeRelativePath()
+		return nil
+	case trajectoryartifact.FieldParsedOffset:
+		m.ResetParsedOffset()
+		return nil
+	case trajectoryartifact.FieldRowCount:
+		m.ResetRowCount()
+		return nil
+	case trajectoryartifact.FieldAtifSchemaVersion:
+		m.ResetAtifSchemaVersion()
+		return nil
+	case trajectoryartifact.FieldFileFormat:
+		m.ResetFileFormat()
+		return nil
+	case trajectoryartifact.FieldContentEncoding:
+		m.ResetContentEncoding()
+		return nil
+	case trajectoryartifact.FieldSize:
+		m.ResetSize()
+		return nil
+	case trajectoryartifact.FieldChargedBytes:
+		m.ResetChargedBytes()
+		return nil
+	case trajectoryartifact.FieldSha256:
+		m.ResetSha256()
+		return nil
+	case trajectoryartifact.FieldStampedSize:
+		m.ResetStampedSize()
+		return nil
+	case trajectoryartifact.FieldStampedSha256:
+		m.ResetStampedSha256()
+		return nil
+	case trajectoryartifact.FieldPendingObjectPath:
+		m.ResetPendingObjectPath()
+		return nil
+	case trajectoryartifact.FieldObjectPath:
+		m.ResetObjectPath()
+		return nil
+	case trajectoryartifact.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case trajectoryartifact.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case trajectoryartifact.FieldCommittedAt:
+		m.ResetCommittedAt()
+		return nil
+	case trajectoryartifact.FieldPrepareExpiresAt:
+		m.ResetPrepareExpiresAt()
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectoryArtifact field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *TrajectoryArtifactMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *TrajectoryArtifactMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *TrajectoryArtifactMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *TrajectoryArtifactMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *TrajectoryArtifactMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *TrajectoryArtifactMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *TrajectoryArtifactMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown TrajectoryArtifact unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *TrajectoryArtifactMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown TrajectoryArtifact edge %s", name)
+}
+
 // TrajectorySegmentMutation represents an operation that mutates the TrajectorySegment nodes in the graph.
 type TrajectorySegmentMutation struct {
 	config
@@ -130585,6 +132770,1689 @@ func (m *TrajectorySegmentMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *TrajectorySegmentMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown TrajectorySegment edge %s", name)
+}
+
+// TrajectorySessionMutation represents an operation that mutates the TrajectorySession nodes in the graph.
+type TrajectorySessionMutation struct {
+	config
+	op                    Op
+	typ                   string
+	id                    *string
+	hub_id                *string
+	project_id            *string
+	agent_id              *string
+	run_id                *string
+	harness               *string
+	session_id            *string
+	native_relative_path  *string
+	is_subagent           *bool
+	parent_session_id     *string
+	parser_version        *string
+	parser_version_num    *int64
+	addparser_version_num *int64
+	parsed_offset         *int64
+	addparsed_offset      *int64
+	atif_artifact_id      *string
+	atif_object_path      *string
+	atif_schema_version   *string
+	file_format           *string
+	step_count            *int
+	addstep_count         *int
+	normalize_status      *string
+	parse_error_count     *int
+	addparse_error_count  *int
+	first_error           *string
+	updated_at            *time.Time
+	clearedFields         map[string]struct{}
+	done                  bool
+	oldValue              func(context.Context) (*TrajectorySession, error)
+	predicates            []predicate.TrajectorySession
+}
+
+var _ ent.Mutation = (*TrajectorySessionMutation)(nil)
+
+// trajectorysessionOption allows management of the mutation configuration using functional options.
+type trajectorysessionOption func(*TrajectorySessionMutation)
+
+// newTrajectorySessionMutation creates new mutation for the TrajectorySession entity.
+func newTrajectorySessionMutation(c config, op Op, opts ...trajectorysessionOption) *TrajectorySessionMutation {
+	m := &TrajectorySessionMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeTrajectorySession,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withTrajectorySessionID sets the ID field of the mutation.
+func withTrajectorySessionID(id string) trajectorysessionOption {
+	return func(m *TrajectorySessionMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *TrajectorySession
+		)
+		m.oldValue = func(ctx context.Context) (*TrajectorySession, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().TrajectorySession.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withTrajectorySession sets the old TrajectorySession of the mutation.
+func withTrajectorySession(node *TrajectorySession) trajectorysessionOption {
+	return func(m *TrajectorySessionMutation) {
+		m.oldValue = func(context.Context) (*TrajectorySession, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m TrajectorySessionMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m TrajectorySessionMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of TrajectorySession entities.
+func (m *TrajectorySessionMutation) SetID(id string) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *TrajectorySessionMutation) ID() (id string, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *TrajectorySessionMutation) IDs(ctx context.Context) ([]string, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []string{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().TrajectorySession.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetHubID sets the "hub_id" field.
+func (m *TrajectorySessionMutation) SetHubID(s string) {
+	m.hub_id = &s
+}
+
+// HubID returns the value of the "hub_id" field in the mutation.
+func (m *TrajectorySessionMutation) HubID() (r string, exists bool) {
+	v := m.hub_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHubID returns the old "hub_id" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldHubID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHubID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHubID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHubID: %w", err)
+	}
+	return oldValue.HubID, nil
+}
+
+// ResetHubID resets all changes to the "hub_id" field.
+func (m *TrajectorySessionMutation) ResetHubID() {
+	m.hub_id = nil
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *TrajectorySessionMutation) SetProjectID(s string) {
+	m.project_id = &s
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *TrajectorySessionMutation) ProjectID() (r string, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *TrajectorySessionMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetAgentID sets the "agent_id" field.
+func (m *TrajectorySessionMutation) SetAgentID(s string) {
+	m.agent_id = &s
+}
+
+// AgentID returns the value of the "agent_id" field in the mutation.
+func (m *TrajectorySessionMutation) AgentID() (r string, exists bool) {
+	v := m.agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentID returns the old "agent_id" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldAgentID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentID: %w", err)
+	}
+	return oldValue.AgentID, nil
+}
+
+// ResetAgentID resets all changes to the "agent_id" field.
+func (m *TrajectorySessionMutation) ResetAgentID() {
+	m.agent_id = nil
+}
+
+// SetRunID sets the "run_id" field.
+func (m *TrajectorySessionMutation) SetRunID(s string) {
+	m.run_id = &s
+}
+
+// RunID returns the value of the "run_id" field in the mutation.
+func (m *TrajectorySessionMutation) RunID() (r string, exists bool) {
+	v := m.run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunID returns the old "run_id" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldRunID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunID: %w", err)
+	}
+	return oldValue.RunID, nil
+}
+
+// ResetRunID resets all changes to the "run_id" field.
+func (m *TrajectorySessionMutation) ResetRunID() {
+	m.run_id = nil
+}
+
+// SetHarness sets the "harness" field.
+func (m *TrajectorySessionMutation) SetHarness(s string) {
+	m.harness = &s
+}
+
+// Harness returns the value of the "harness" field in the mutation.
+func (m *TrajectorySessionMutation) Harness() (r string, exists bool) {
+	v := m.harness
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHarness returns the old "harness" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldHarness(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHarness is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHarness requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHarness: %w", err)
+	}
+	return oldValue.Harness, nil
+}
+
+// ResetHarness resets all changes to the "harness" field.
+func (m *TrajectorySessionMutation) ResetHarness() {
+	m.harness = nil
+}
+
+// SetSessionID sets the "session_id" field.
+func (m *TrajectorySessionMutation) SetSessionID(s string) {
+	m.session_id = &s
+}
+
+// SessionID returns the value of the "session_id" field in the mutation.
+func (m *TrajectorySessionMutation) SessionID() (r string, exists bool) {
+	v := m.session_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSessionID returns the old "session_id" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldSessionID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSessionID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSessionID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSessionID: %w", err)
+	}
+	return oldValue.SessionID, nil
+}
+
+// ClearSessionID clears the value of the "session_id" field.
+func (m *TrajectorySessionMutation) ClearSessionID() {
+	m.session_id = nil
+	m.clearedFields[trajectorysession.FieldSessionID] = struct{}{}
+}
+
+// SessionIDCleared returns if the "session_id" field was cleared in this mutation.
+func (m *TrajectorySessionMutation) SessionIDCleared() bool {
+	_, ok := m.clearedFields[trajectorysession.FieldSessionID]
+	return ok
+}
+
+// ResetSessionID resets all changes to the "session_id" field.
+func (m *TrajectorySessionMutation) ResetSessionID() {
+	m.session_id = nil
+	delete(m.clearedFields, trajectorysession.FieldSessionID)
+}
+
+// SetNativeRelativePath sets the "native_relative_path" field.
+func (m *TrajectorySessionMutation) SetNativeRelativePath(s string) {
+	m.native_relative_path = &s
+}
+
+// NativeRelativePath returns the value of the "native_relative_path" field in the mutation.
+func (m *TrajectorySessionMutation) NativeRelativePath() (r string, exists bool) {
+	v := m.native_relative_path
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNativeRelativePath returns the old "native_relative_path" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldNativeRelativePath(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNativeRelativePath is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNativeRelativePath requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNativeRelativePath: %w", err)
+	}
+	return oldValue.NativeRelativePath, nil
+}
+
+// ResetNativeRelativePath resets all changes to the "native_relative_path" field.
+func (m *TrajectorySessionMutation) ResetNativeRelativePath() {
+	m.native_relative_path = nil
+}
+
+// SetIsSubagent sets the "is_subagent" field.
+func (m *TrajectorySessionMutation) SetIsSubagent(b bool) {
+	m.is_subagent = &b
+}
+
+// IsSubagent returns the value of the "is_subagent" field in the mutation.
+func (m *TrajectorySessionMutation) IsSubagent() (r bool, exists bool) {
+	v := m.is_subagent
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIsSubagent returns the old "is_subagent" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldIsSubagent(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIsSubagent is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIsSubagent requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIsSubagent: %w", err)
+	}
+	return oldValue.IsSubagent, nil
+}
+
+// ResetIsSubagent resets all changes to the "is_subagent" field.
+func (m *TrajectorySessionMutation) ResetIsSubagent() {
+	m.is_subagent = nil
+}
+
+// SetParentSessionID sets the "parent_session_id" field.
+func (m *TrajectorySessionMutation) SetParentSessionID(s string) {
+	m.parent_session_id = &s
+}
+
+// ParentSessionID returns the value of the "parent_session_id" field in the mutation.
+func (m *TrajectorySessionMutation) ParentSessionID() (r string, exists bool) {
+	v := m.parent_session_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldParentSessionID returns the old "parent_session_id" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldParentSessionID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldParentSessionID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldParentSessionID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldParentSessionID: %w", err)
+	}
+	return oldValue.ParentSessionID, nil
+}
+
+// ClearParentSessionID clears the value of the "parent_session_id" field.
+func (m *TrajectorySessionMutation) ClearParentSessionID() {
+	m.parent_session_id = nil
+	m.clearedFields[trajectorysession.FieldParentSessionID] = struct{}{}
+}
+
+// ParentSessionIDCleared returns if the "parent_session_id" field was cleared in this mutation.
+func (m *TrajectorySessionMutation) ParentSessionIDCleared() bool {
+	_, ok := m.clearedFields[trajectorysession.FieldParentSessionID]
+	return ok
+}
+
+// ResetParentSessionID resets all changes to the "parent_session_id" field.
+func (m *TrajectorySessionMutation) ResetParentSessionID() {
+	m.parent_session_id = nil
+	delete(m.clearedFields, trajectorysession.FieldParentSessionID)
+}
+
+// SetParserVersion sets the "parser_version" field.
+func (m *TrajectorySessionMutation) SetParserVersion(s string) {
+	m.parser_version = &s
+}
+
+// ParserVersion returns the value of the "parser_version" field in the mutation.
+func (m *TrajectorySessionMutation) ParserVersion() (r string, exists bool) {
+	v := m.parser_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldParserVersion returns the old "parser_version" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldParserVersion(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldParserVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldParserVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldParserVersion: %w", err)
+	}
+	return oldValue.ParserVersion, nil
+}
+
+// ResetParserVersion resets all changes to the "parser_version" field.
+func (m *TrajectorySessionMutation) ResetParserVersion() {
+	m.parser_version = nil
+}
+
+// SetParserVersionNum sets the "parser_version_num" field.
+func (m *TrajectorySessionMutation) SetParserVersionNum(i int64) {
+	m.parser_version_num = &i
+	m.addparser_version_num = nil
+}
+
+// ParserVersionNum returns the value of the "parser_version_num" field in the mutation.
+func (m *TrajectorySessionMutation) ParserVersionNum() (r int64, exists bool) {
+	v := m.parser_version_num
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldParserVersionNum returns the old "parser_version_num" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldParserVersionNum(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldParserVersionNum is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldParserVersionNum requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldParserVersionNum: %w", err)
+	}
+	return oldValue.ParserVersionNum, nil
+}
+
+// AddParserVersionNum adds i to the "parser_version_num" field.
+func (m *TrajectorySessionMutation) AddParserVersionNum(i int64) {
+	if m.addparser_version_num != nil {
+		*m.addparser_version_num += i
+	} else {
+		m.addparser_version_num = &i
+	}
+}
+
+// AddedParserVersionNum returns the value that was added to the "parser_version_num" field in this mutation.
+func (m *TrajectorySessionMutation) AddedParserVersionNum() (r int64, exists bool) {
+	v := m.addparser_version_num
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetParserVersionNum resets all changes to the "parser_version_num" field.
+func (m *TrajectorySessionMutation) ResetParserVersionNum() {
+	m.parser_version_num = nil
+	m.addparser_version_num = nil
+}
+
+// SetParsedOffset sets the "parsed_offset" field.
+func (m *TrajectorySessionMutation) SetParsedOffset(i int64) {
+	m.parsed_offset = &i
+	m.addparsed_offset = nil
+}
+
+// ParsedOffset returns the value of the "parsed_offset" field in the mutation.
+func (m *TrajectorySessionMutation) ParsedOffset() (r int64, exists bool) {
+	v := m.parsed_offset
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldParsedOffset returns the old "parsed_offset" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldParsedOffset(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldParsedOffset is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldParsedOffset requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldParsedOffset: %w", err)
+	}
+	return oldValue.ParsedOffset, nil
+}
+
+// AddParsedOffset adds i to the "parsed_offset" field.
+func (m *TrajectorySessionMutation) AddParsedOffset(i int64) {
+	if m.addparsed_offset != nil {
+		*m.addparsed_offset += i
+	} else {
+		m.addparsed_offset = &i
+	}
+}
+
+// AddedParsedOffset returns the value that was added to the "parsed_offset" field in this mutation.
+func (m *TrajectorySessionMutation) AddedParsedOffset() (r int64, exists bool) {
+	v := m.addparsed_offset
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetParsedOffset resets all changes to the "parsed_offset" field.
+func (m *TrajectorySessionMutation) ResetParsedOffset() {
+	m.parsed_offset = nil
+	m.addparsed_offset = nil
+}
+
+// SetAtifArtifactID sets the "atif_artifact_id" field.
+func (m *TrajectorySessionMutation) SetAtifArtifactID(s string) {
+	m.atif_artifact_id = &s
+}
+
+// AtifArtifactID returns the value of the "atif_artifact_id" field in the mutation.
+func (m *TrajectorySessionMutation) AtifArtifactID() (r string, exists bool) {
+	v := m.atif_artifact_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAtifArtifactID returns the old "atif_artifact_id" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldAtifArtifactID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAtifArtifactID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAtifArtifactID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAtifArtifactID: %w", err)
+	}
+	return oldValue.AtifArtifactID, nil
+}
+
+// ClearAtifArtifactID clears the value of the "atif_artifact_id" field.
+func (m *TrajectorySessionMutation) ClearAtifArtifactID() {
+	m.atif_artifact_id = nil
+	m.clearedFields[trajectorysession.FieldAtifArtifactID] = struct{}{}
+}
+
+// AtifArtifactIDCleared returns if the "atif_artifact_id" field was cleared in this mutation.
+func (m *TrajectorySessionMutation) AtifArtifactIDCleared() bool {
+	_, ok := m.clearedFields[trajectorysession.FieldAtifArtifactID]
+	return ok
+}
+
+// ResetAtifArtifactID resets all changes to the "atif_artifact_id" field.
+func (m *TrajectorySessionMutation) ResetAtifArtifactID() {
+	m.atif_artifact_id = nil
+	delete(m.clearedFields, trajectorysession.FieldAtifArtifactID)
+}
+
+// SetAtifObjectPath sets the "atif_object_path" field.
+func (m *TrajectorySessionMutation) SetAtifObjectPath(s string) {
+	m.atif_object_path = &s
+}
+
+// AtifObjectPath returns the value of the "atif_object_path" field in the mutation.
+func (m *TrajectorySessionMutation) AtifObjectPath() (r string, exists bool) {
+	v := m.atif_object_path
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAtifObjectPath returns the old "atif_object_path" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldAtifObjectPath(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAtifObjectPath is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAtifObjectPath requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAtifObjectPath: %w", err)
+	}
+	return oldValue.AtifObjectPath, nil
+}
+
+// ClearAtifObjectPath clears the value of the "atif_object_path" field.
+func (m *TrajectorySessionMutation) ClearAtifObjectPath() {
+	m.atif_object_path = nil
+	m.clearedFields[trajectorysession.FieldAtifObjectPath] = struct{}{}
+}
+
+// AtifObjectPathCleared returns if the "atif_object_path" field was cleared in this mutation.
+func (m *TrajectorySessionMutation) AtifObjectPathCleared() bool {
+	_, ok := m.clearedFields[trajectorysession.FieldAtifObjectPath]
+	return ok
+}
+
+// ResetAtifObjectPath resets all changes to the "atif_object_path" field.
+func (m *TrajectorySessionMutation) ResetAtifObjectPath() {
+	m.atif_object_path = nil
+	delete(m.clearedFields, trajectorysession.FieldAtifObjectPath)
+}
+
+// SetAtifSchemaVersion sets the "atif_schema_version" field.
+func (m *TrajectorySessionMutation) SetAtifSchemaVersion(s string) {
+	m.atif_schema_version = &s
+}
+
+// AtifSchemaVersion returns the value of the "atif_schema_version" field in the mutation.
+func (m *TrajectorySessionMutation) AtifSchemaVersion() (r string, exists bool) {
+	v := m.atif_schema_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAtifSchemaVersion returns the old "atif_schema_version" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldAtifSchemaVersion(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAtifSchemaVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAtifSchemaVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAtifSchemaVersion: %w", err)
+	}
+	return oldValue.AtifSchemaVersion, nil
+}
+
+// ClearAtifSchemaVersion clears the value of the "atif_schema_version" field.
+func (m *TrajectorySessionMutation) ClearAtifSchemaVersion() {
+	m.atif_schema_version = nil
+	m.clearedFields[trajectorysession.FieldAtifSchemaVersion] = struct{}{}
+}
+
+// AtifSchemaVersionCleared returns if the "atif_schema_version" field was cleared in this mutation.
+func (m *TrajectorySessionMutation) AtifSchemaVersionCleared() bool {
+	_, ok := m.clearedFields[trajectorysession.FieldAtifSchemaVersion]
+	return ok
+}
+
+// ResetAtifSchemaVersion resets all changes to the "atif_schema_version" field.
+func (m *TrajectorySessionMutation) ResetAtifSchemaVersion() {
+	m.atif_schema_version = nil
+	delete(m.clearedFields, trajectorysession.FieldAtifSchemaVersion)
+}
+
+// SetFileFormat sets the "file_format" field.
+func (m *TrajectorySessionMutation) SetFileFormat(s string) {
+	m.file_format = &s
+}
+
+// FileFormat returns the value of the "file_format" field in the mutation.
+func (m *TrajectorySessionMutation) FileFormat() (r string, exists bool) {
+	v := m.file_format
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFileFormat returns the old "file_format" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldFileFormat(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFileFormat is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFileFormat requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFileFormat: %w", err)
+	}
+	return oldValue.FileFormat, nil
+}
+
+// ClearFileFormat clears the value of the "file_format" field.
+func (m *TrajectorySessionMutation) ClearFileFormat() {
+	m.file_format = nil
+	m.clearedFields[trajectorysession.FieldFileFormat] = struct{}{}
+}
+
+// FileFormatCleared returns if the "file_format" field was cleared in this mutation.
+func (m *TrajectorySessionMutation) FileFormatCleared() bool {
+	_, ok := m.clearedFields[trajectorysession.FieldFileFormat]
+	return ok
+}
+
+// ResetFileFormat resets all changes to the "file_format" field.
+func (m *TrajectorySessionMutation) ResetFileFormat() {
+	m.file_format = nil
+	delete(m.clearedFields, trajectorysession.FieldFileFormat)
+}
+
+// SetStepCount sets the "step_count" field.
+func (m *TrajectorySessionMutation) SetStepCount(i int) {
+	m.step_count = &i
+	m.addstep_count = nil
+}
+
+// StepCount returns the value of the "step_count" field in the mutation.
+func (m *TrajectorySessionMutation) StepCount() (r int, exists bool) {
+	v := m.step_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStepCount returns the old "step_count" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldStepCount(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStepCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStepCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStepCount: %w", err)
+	}
+	return oldValue.StepCount, nil
+}
+
+// AddStepCount adds i to the "step_count" field.
+func (m *TrajectorySessionMutation) AddStepCount(i int) {
+	if m.addstep_count != nil {
+		*m.addstep_count += i
+	} else {
+		m.addstep_count = &i
+	}
+}
+
+// AddedStepCount returns the value that was added to the "step_count" field in this mutation.
+func (m *TrajectorySessionMutation) AddedStepCount() (r int, exists bool) {
+	v := m.addstep_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetStepCount resets all changes to the "step_count" field.
+func (m *TrajectorySessionMutation) ResetStepCount() {
+	m.step_count = nil
+	m.addstep_count = nil
+}
+
+// SetNormalizeStatus sets the "normalize_status" field.
+func (m *TrajectorySessionMutation) SetNormalizeStatus(s string) {
+	m.normalize_status = &s
+}
+
+// NormalizeStatus returns the value of the "normalize_status" field in the mutation.
+func (m *TrajectorySessionMutation) NormalizeStatus() (r string, exists bool) {
+	v := m.normalize_status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNormalizeStatus returns the old "normalize_status" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldNormalizeStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNormalizeStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNormalizeStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNormalizeStatus: %w", err)
+	}
+	return oldValue.NormalizeStatus, nil
+}
+
+// ResetNormalizeStatus resets all changes to the "normalize_status" field.
+func (m *TrajectorySessionMutation) ResetNormalizeStatus() {
+	m.normalize_status = nil
+}
+
+// SetParseErrorCount sets the "parse_error_count" field.
+func (m *TrajectorySessionMutation) SetParseErrorCount(i int) {
+	m.parse_error_count = &i
+	m.addparse_error_count = nil
+}
+
+// ParseErrorCount returns the value of the "parse_error_count" field in the mutation.
+func (m *TrajectorySessionMutation) ParseErrorCount() (r int, exists bool) {
+	v := m.parse_error_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldParseErrorCount returns the old "parse_error_count" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldParseErrorCount(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldParseErrorCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldParseErrorCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldParseErrorCount: %w", err)
+	}
+	return oldValue.ParseErrorCount, nil
+}
+
+// AddParseErrorCount adds i to the "parse_error_count" field.
+func (m *TrajectorySessionMutation) AddParseErrorCount(i int) {
+	if m.addparse_error_count != nil {
+		*m.addparse_error_count += i
+	} else {
+		m.addparse_error_count = &i
+	}
+}
+
+// AddedParseErrorCount returns the value that was added to the "parse_error_count" field in this mutation.
+func (m *TrajectorySessionMutation) AddedParseErrorCount() (r int, exists bool) {
+	v := m.addparse_error_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetParseErrorCount resets all changes to the "parse_error_count" field.
+func (m *TrajectorySessionMutation) ResetParseErrorCount() {
+	m.parse_error_count = nil
+	m.addparse_error_count = nil
+}
+
+// SetFirstError sets the "first_error" field.
+func (m *TrajectorySessionMutation) SetFirstError(s string) {
+	m.first_error = &s
+}
+
+// FirstError returns the value of the "first_error" field in the mutation.
+func (m *TrajectorySessionMutation) FirstError() (r string, exists bool) {
+	v := m.first_error
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFirstError returns the old "first_error" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldFirstError(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFirstError is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFirstError requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFirstError: %w", err)
+	}
+	return oldValue.FirstError, nil
+}
+
+// ClearFirstError clears the value of the "first_error" field.
+func (m *TrajectorySessionMutation) ClearFirstError() {
+	m.first_error = nil
+	m.clearedFields[trajectorysession.FieldFirstError] = struct{}{}
+}
+
+// FirstErrorCleared returns if the "first_error" field was cleared in this mutation.
+func (m *TrajectorySessionMutation) FirstErrorCleared() bool {
+	_, ok := m.clearedFields[trajectorysession.FieldFirstError]
+	return ok
+}
+
+// ResetFirstError resets all changes to the "first_error" field.
+func (m *TrajectorySessionMutation) ResetFirstError() {
+	m.first_error = nil
+	delete(m.clearedFields, trajectorysession.FieldFirstError)
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *TrajectorySessionMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *TrajectorySessionMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the TrajectorySession entity.
+// If the TrajectorySession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySessionMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *TrajectorySessionMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// Where appends a list predicates to the TrajectorySessionMutation builder.
+func (m *TrajectorySessionMutation) Where(ps ...predicate.TrajectorySession) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the TrajectorySessionMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *TrajectorySessionMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.TrajectorySession, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *TrajectorySessionMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *TrajectorySessionMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (TrajectorySession).
+func (m *TrajectorySessionMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *TrajectorySessionMutation) Fields() []string {
+	fields := make([]string, 0, 21)
+	if m.hub_id != nil {
+		fields = append(fields, trajectorysession.FieldHubID)
+	}
+	if m.project_id != nil {
+		fields = append(fields, trajectorysession.FieldProjectID)
+	}
+	if m.agent_id != nil {
+		fields = append(fields, trajectorysession.FieldAgentID)
+	}
+	if m.run_id != nil {
+		fields = append(fields, trajectorysession.FieldRunID)
+	}
+	if m.harness != nil {
+		fields = append(fields, trajectorysession.FieldHarness)
+	}
+	if m.session_id != nil {
+		fields = append(fields, trajectorysession.FieldSessionID)
+	}
+	if m.native_relative_path != nil {
+		fields = append(fields, trajectorysession.FieldNativeRelativePath)
+	}
+	if m.is_subagent != nil {
+		fields = append(fields, trajectorysession.FieldIsSubagent)
+	}
+	if m.parent_session_id != nil {
+		fields = append(fields, trajectorysession.FieldParentSessionID)
+	}
+	if m.parser_version != nil {
+		fields = append(fields, trajectorysession.FieldParserVersion)
+	}
+	if m.parser_version_num != nil {
+		fields = append(fields, trajectorysession.FieldParserVersionNum)
+	}
+	if m.parsed_offset != nil {
+		fields = append(fields, trajectorysession.FieldParsedOffset)
+	}
+	if m.atif_artifact_id != nil {
+		fields = append(fields, trajectorysession.FieldAtifArtifactID)
+	}
+	if m.atif_object_path != nil {
+		fields = append(fields, trajectorysession.FieldAtifObjectPath)
+	}
+	if m.atif_schema_version != nil {
+		fields = append(fields, trajectorysession.FieldAtifSchemaVersion)
+	}
+	if m.file_format != nil {
+		fields = append(fields, trajectorysession.FieldFileFormat)
+	}
+	if m.step_count != nil {
+		fields = append(fields, trajectorysession.FieldStepCount)
+	}
+	if m.normalize_status != nil {
+		fields = append(fields, trajectorysession.FieldNormalizeStatus)
+	}
+	if m.parse_error_count != nil {
+		fields = append(fields, trajectorysession.FieldParseErrorCount)
+	}
+	if m.first_error != nil {
+		fields = append(fields, trajectorysession.FieldFirstError)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, trajectorysession.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *TrajectorySessionMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case trajectorysession.FieldHubID:
+		return m.HubID()
+	case trajectorysession.FieldProjectID:
+		return m.ProjectID()
+	case trajectorysession.FieldAgentID:
+		return m.AgentID()
+	case trajectorysession.FieldRunID:
+		return m.RunID()
+	case trajectorysession.FieldHarness:
+		return m.Harness()
+	case trajectorysession.FieldSessionID:
+		return m.SessionID()
+	case trajectorysession.FieldNativeRelativePath:
+		return m.NativeRelativePath()
+	case trajectorysession.FieldIsSubagent:
+		return m.IsSubagent()
+	case trajectorysession.FieldParentSessionID:
+		return m.ParentSessionID()
+	case trajectorysession.FieldParserVersion:
+		return m.ParserVersion()
+	case trajectorysession.FieldParserVersionNum:
+		return m.ParserVersionNum()
+	case trajectorysession.FieldParsedOffset:
+		return m.ParsedOffset()
+	case trajectorysession.FieldAtifArtifactID:
+		return m.AtifArtifactID()
+	case trajectorysession.FieldAtifObjectPath:
+		return m.AtifObjectPath()
+	case trajectorysession.FieldAtifSchemaVersion:
+		return m.AtifSchemaVersion()
+	case trajectorysession.FieldFileFormat:
+		return m.FileFormat()
+	case trajectorysession.FieldStepCount:
+		return m.StepCount()
+	case trajectorysession.FieldNormalizeStatus:
+		return m.NormalizeStatus()
+	case trajectorysession.FieldParseErrorCount:
+		return m.ParseErrorCount()
+	case trajectorysession.FieldFirstError:
+		return m.FirstError()
+	case trajectorysession.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *TrajectorySessionMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case trajectorysession.FieldHubID:
+		return m.OldHubID(ctx)
+	case trajectorysession.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case trajectorysession.FieldAgentID:
+		return m.OldAgentID(ctx)
+	case trajectorysession.FieldRunID:
+		return m.OldRunID(ctx)
+	case trajectorysession.FieldHarness:
+		return m.OldHarness(ctx)
+	case trajectorysession.FieldSessionID:
+		return m.OldSessionID(ctx)
+	case trajectorysession.FieldNativeRelativePath:
+		return m.OldNativeRelativePath(ctx)
+	case trajectorysession.FieldIsSubagent:
+		return m.OldIsSubagent(ctx)
+	case trajectorysession.FieldParentSessionID:
+		return m.OldParentSessionID(ctx)
+	case trajectorysession.FieldParserVersion:
+		return m.OldParserVersion(ctx)
+	case trajectorysession.FieldParserVersionNum:
+		return m.OldParserVersionNum(ctx)
+	case trajectorysession.FieldParsedOffset:
+		return m.OldParsedOffset(ctx)
+	case trajectorysession.FieldAtifArtifactID:
+		return m.OldAtifArtifactID(ctx)
+	case trajectorysession.FieldAtifObjectPath:
+		return m.OldAtifObjectPath(ctx)
+	case trajectorysession.FieldAtifSchemaVersion:
+		return m.OldAtifSchemaVersion(ctx)
+	case trajectorysession.FieldFileFormat:
+		return m.OldFileFormat(ctx)
+	case trajectorysession.FieldStepCount:
+		return m.OldStepCount(ctx)
+	case trajectorysession.FieldNormalizeStatus:
+		return m.OldNormalizeStatus(ctx)
+	case trajectorysession.FieldParseErrorCount:
+		return m.OldParseErrorCount(ctx)
+	case trajectorysession.FieldFirstError:
+		return m.OldFirstError(ctx)
+	case trajectorysession.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown TrajectorySession field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *TrajectorySessionMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case trajectorysession.FieldHubID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHubID(v)
+		return nil
+	case trajectorysession.FieldProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case trajectorysession.FieldAgentID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentID(v)
+		return nil
+	case trajectorysession.FieldRunID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunID(v)
+		return nil
+	case trajectorysession.FieldHarness:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHarness(v)
+		return nil
+	case trajectorysession.FieldSessionID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSessionID(v)
+		return nil
+	case trajectorysession.FieldNativeRelativePath:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNativeRelativePath(v)
+		return nil
+	case trajectorysession.FieldIsSubagent:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIsSubagent(v)
+		return nil
+	case trajectorysession.FieldParentSessionID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetParentSessionID(v)
+		return nil
+	case trajectorysession.FieldParserVersion:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetParserVersion(v)
+		return nil
+	case trajectorysession.FieldParserVersionNum:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetParserVersionNum(v)
+		return nil
+	case trajectorysession.FieldParsedOffset:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetParsedOffset(v)
+		return nil
+	case trajectorysession.FieldAtifArtifactID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAtifArtifactID(v)
+		return nil
+	case trajectorysession.FieldAtifObjectPath:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAtifObjectPath(v)
+		return nil
+	case trajectorysession.FieldAtifSchemaVersion:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAtifSchemaVersion(v)
+		return nil
+	case trajectorysession.FieldFileFormat:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFileFormat(v)
+		return nil
+	case trajectorysession.FieldStepCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStepCount(v)
+		return nil
+	case trajectorysession.FieldNormalizeStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNormalizeStatus(v)
+		return nil
+	case trajectorysession.FieldParseErrorCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetParseErrorCount(v)
+		return nil
+	case trajectorysession.FieldFirstError:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFirstError(v)
+		return nil
+	case trajectorysession.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectorySession field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *TrajectorySessionMutation) AddedFields() []string {
+	var fields []string
+	if m.addparser_version_num != nil {
+		fields = append(fields, trajectorysession.FieldParserVersionNum)
+	}
+	if m.addparsed_offset != nil {
+		fields = append(fields, trajectorysession.FieldParsedOffset)
+	}
+	if m.addstep_count != nil {
+		fields = append(fields, trajectorysession.FieldStepCount)
+	}
+	if m.addparse_error_count != nil {
+		fields = append(fields, trajectorysession.FieldParseErrorCount)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *TrajectorySessionMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case trajectorysession.FieldParserVersionNum:
+		return m.AddedParserVersionNum()
+	case trajectorysession.FieldParsedOffset:
+		return m.AddedParsedOffset()
+	case trajectorysession.FieldStepCount:
+		return m.AddedStepCount()
+	case trajectorysession.FieldParseErrorCount:
+		return m.AddedParseErrorCount()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *TrajectorySessionMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case trajectorysession.FieldParserVersionNum:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddParserVersionNum(v)
+		return nil
+	case trajectorysession.FieldParsedOffset:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddParsedOffset(v)
+		return nil
+	case trajectorysession.FieldStepCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddStepCount(v)
+		return nil
+	case trajectorysession.FieldParseErrorCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddParseErrorCount(v)
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectorySession numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *TrajectorySessionMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(trajectorysession.FieldSessionID) {
+		fields = append(fields, trajectorysession.FieldSessionID)
+	}
+	if m.FieldCleared(trajectorysession.FieldParentSessionID) {
+		fields = append(fields, trajectorysession.FieldParentSessionID)
+	}
+	if m.FieldCleared(trajectorysession.FieldAtifArtifactID) {
+		fields = append(fields, trajectorysession.FieldAtifArtifactID)
+	}
+	if m.FieldCleared(trajectorysession.FieldAtifObjectPath) {
+		fields = append(fields, trajectorysession.FieldAtifObjectPath)
+	}
+	if m.FieldCleared(trajectorysession.FieldAtifSchemaVersion) {
+		fields = append(fields, trajectorysession.FieldAtifSchemaVersion)
+	}
+	if m.FieldCleared(trajectorysession.FieldFileFormat) {
+		fields = append(fields, trajectorysession.FieldFileFormat)
+	}
+	if m.FieldCleared(trajectorysession.FieldFirstError) {
+		fields = append(fields, trajectorysession.FieldFirstError)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *TrajectorySessionMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *TrajectorySessionMutation) ClearField(name string) error {
+	switch name {
+	case trajectorysession.FieldSessionID:
+		m.ClearSessionID()
+		return nil
+	case trajectorysession.FieldParentSessionID:
+		m.ClearParentSessionID()
+		return nil
+	case trajectorysession.FieldAtifArtifactID:
+		m.ClearAtifArtifactID()
+		return nil
+	case trajectorysession.FieldAtifObjectPath:
+		m.ClearAtifObjectPath()
+		return nil
+	case trajectorysession.FieldAtifSchemaVersion:
+		m.ClearAtifSchemaVersion()
+		return nil
+	case trajectorysession.FieldFileFormat:
+		m.ClearFileFormat()
+		return nil
+	case trajectorysession.FieldFirstError:
+		m.ClearFirstError()
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectorySession nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *TrajectorySessionMutation) ResetField(name string) error {
+	switch name {
+	case trajectorysession.FieldHubID:
+		m.ResetHubID()
+		return nil
+	case trajectorysession.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case trajectorysession.FieldAgentID:
+		m.ResetAgentID()
+		return nil
+	case trajectorysession.FieldRunID:
+		m.ResetRunID()
+		return nil
+	case trajectorysession.FieldHarness:
+		m.ResetHarness()
+		return nil
+	case trajectorysession.FieldSessionID:
+		m.ResetSessionID()
+		return nil
+	case trajectorysession.FieldNativeRelativePath:
+		m.ResetNativeRelativePath()
+		return nil
+	case trajectorysession.FieldIsSubagent:
+		m.ResetIsSubagent()
+		return nil
+	case trajectorysession.FieldParentSessionID:
+		m.ResetParentSessionID()
+		return nil
+	case trajectorysession.FieldParserVersion:
+		m.ResetParserVersion()
+		return nil
+	case trajectorysession.FieldParserVersionNum:
+		m.ResetParserVersionNum()
+		return nil
+	case trajectorysession.FieldParsedOffset:
+		m.ResetParsedOffset()
+		return nil
+	case trajectorysession.FieldAtifArtifactID:
+		m.ResetAtifArtifactID()
+		return nil
+	case trajectorysession.FieldAtifObjectPath:
+		m.ResetAtifObjectPath()
+		return nil
+	case trajectorysession.FieldAtifSchemaVersion:
+		m.ResetAtifSchemaVersion()
+		return nil
+	case trajectorysession.FieldFileFormat:
+		m.ResetFileFormat()
+		return nil
+	case trajectorysession.FieldStepCount:
+		m.ResetStepCount()
+		return nil
+	case trajectorysession.FieldNormalizeStatus:
+		m.ResetNormalizeStatus()
+		return nil
+	case trajectorysession.FieldParseErrorCount:
+		m.ResetParseErrorCount()
+		return nil
+	case trajectorysession.FieldFirstError:
+		m.ResetFirstError()
+		return nil
+	case trajectorysession.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectorySession field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *TrajectorySessionMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *TrajectorySessionMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *TrajectorySessionMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *TrajectorySessionMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *TrajectorySessionMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *TrajectorySessionMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *TrajectorySessionMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown TrajectorySession unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *TrajectorySessionMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown TrajectorySession edge %s", name)
 }
 
 // TriggerMutation represents an operation that mutates the Trigger nodes in the graph.

@@ -637,6 +637,9 @@ type Store interface {
 	// Tokenomics Track 2 raw trajectory segments (ptone/scion#9250)
 	TrajectorySegmentStore
 
+	// Tokenomics Track 2 L1 normalized trajectory artifacts & sessions (ptone/scion#9257)
+	TrajectoryArtifactStore
+
 	// Pre-suspend terminal screen snapshots (ptone/scion#8530)
 	AgentSuspendScreenStore
 

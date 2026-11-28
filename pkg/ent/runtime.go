@@ -113,7 +113,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectoryartifact"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectorysegment"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectorysession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
@@ -4095,6 +4097,134 @@ func init() {
 	threadgroupmemberDescID := threadgroupmemberFields[0].Descriptor()
 	// threadgroupmember.DefaultID holds the default value on creation for the id field.
 	threadgroupmember.DefaultID = threadgroupmemberDescID.Default.(func() uuid.UUID)
+	trajectoryartifactFields := schema.TrajectoryArtifact{}.Fields()
+	_ = trajectoryartifactFields
+	// trajectoryartifactDescHubID is the schema descriptor for hub_id field.
+	trajectoryartifactDescHubID := trajectoryartifactFields[1].Descriptor()
+	// trajectoryartifact.HubIDValidator is a validator for the "hub_id" field. It is called by the builders before save.
+	trajectoryartifact.HubIDValidator = trajectoryartifactDescHubID.Validators[0].(func(string) error)
+	// trajectoryartifactDescProjectID is the schema descriptor for project_id field.
+	trajectoryartifactDescProjectID := trajectoryartifactFields[2].Descriptor()
+	// trajectoryartifact.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	trajectoryartifact.ProjectIDValidator = trajectoryartifactDescProjectID.Validators[0].(func(string) error)
+	// trajectoryartifactDescAgentID is the schema descriptor for agent_id field.
+	trajectoryartifactDescAgentID := trajectoryartifactFields[3].Descriptor()
+	// trajectoryartifact.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	trajectoryartifact.AgentIDValidator = trajectoryartifactDescAgentID.Validators[0].(func(string) error)
+	// trajectoryartifactDescRunID is the schema descriptor for run_id field.
+	trajectoryartifactDescRunID := trajectoryartifactFields[4].Descriptor()
+	// trajectoryartifact.RunIDValidator is a validator for the "run_id" field. It is called by the builders before save.
+	trajectoryartifact.RunIDValidator = trajectoryartifactDescRunID.Validators[0].(func(string) error)
+	// trajectoryartifactDescHarness is the schema descriptor for harness field.
+	trajectoryartifactDescHarness := trajectoryartifactFields[5].Descriptor()
+	// trajectoryartifact.HarnessValidator is a validator for the "harness" field. It is called by the builders before save.
+	trajectoryartifact.HarnessValidator = trajectoryartifactDescHarness.Validators[0].(func(string) error)
+	// trajectoryartifactDescArtifactType is the schema descriptor for artifact_type field.
+	trajectoryartifactDescArtifactType := trajectoryartifactFields[6].Descriptor()
+	// trajectoryartifact.ArtifactTypeValidator is a validator for the "artifact_type" field. It is called by the builders before save.
+	trajectoryartifact.ArtifactTypeValidator = trajectoryartifactDescArtifactType.Validators[0].(func(string) error)
+	// trajectoryartifactDescParserVersion is the schema descriptor for parser_version field.
+	trajectoryartifactDescParserVersion := trajectoryartifactFields[7].Descriptor()
+	// trajectoryartifact.ParserVersionValidator is a validator for the "parser_version" field. It is called by the builders before save.
+	trajectoryartifact.ParserVersionValidator = trajectoryartifactDescParserVersion.Validators[0].(func(string) error)
+	// trajectoryartifactDescIdentityKey is the schema descriptor for identity_key field.
+	trajectoryartifactDescIdentityKey := trajectoryartifactFields[8].Descriptor()
+	// trajectoryartifact.IdentityKeyValidator is a validator for the "identity_key" field. It is called by the builders before save.
+	trajectoryartifact.IdentityKeyValidator = trajectoryartifactDescIdentityKey.Validators[0].(func(string) error)
+	// trajectoryartifactDescChunkID is the schema descriptor for chunk_id field.
+	trajectoryartifactDescChunkID := trajectoryartifactFields[9].Descriptor()
+	// trajectoryartifact.DefaultChunkID holds the default value on creation for the chunk_id field.
+	trajectoryartifact.DefaultChunkID = trajectoryartifactDescChunkID.Default.(string)
+	// trajectoryartifactDescInventorySeq is the schema descriptor for inventory_seq field.
+	trajectoryartifactDescInventorySeq := trajectoryartifactFields[10].Descriptor()
+	// trajectoryartifact.DefaultInventorySeq holds the default value on creation for the inventory_seq field.
+	trajectoryartifact.DefaultInventorySeq = trajectoryartifactDescInventorySeq.Default.(int64)
+	// trajectoryartifact.InventorySeqValidator is a validator for the "inventory_seq" field. It is called by the builders before save.
+	trajectoryartifact.InventorySeqValidator = trajectoryartifactDescInventorySeq.Validators[0].(func(int64) error)
+	// trajectoryartifactDescFinal is the schema descriptor for final field.
+	trajectoryartifactDescFinal := trajectoryartifactFields[11].Descriptor()
+	// trajectoryartifact.DefaultFinal holds the default value on creation for the final field.
+	trajectoryartifact.DefaultFinal = trajectoryartifactDescFinal.Default.(bool)
+	// trajectoryartifactDescSessionID is the schema descriptor for session_id field.
+	trajectoryartifactDescSessionID := trajectoryartifactFields[12].Descriptor()
+	// trajectoryartifact.DefaultSessionID holds the default value on creation for the session_id field.
+	trajectoryartifact.DefaultSessionID = trajectoryartifactDescSessionID.Default.(string)
+	// trajectoryartifactDescNativeRelativePath is the schema descriptor for native_relative_path field.
+	trajectoryartifactDescNativeRelativePath := trajectoryartifactFields[13].Descriptor()
+	// trajectoryartifact.DefaultNativeRelativePath holds the default value on creation for the native_relative_path field.
+	trajectoryartifact.DefaultNativeRelativePath = trajectoryartifactDescNativeRelativePath.Default.(string)
+	// trajectoryartifactDescParsedOffset is the schema descriptor for parsed_offset field.
+	trajectoryartifactDescParsedOffset := trajectoryartifactFields[14].Descriptor()
+	// trajectoryartifact.DefaultParsedOffset holds the default value on creation for the parsed_offset field.
+	trajectoryartifact.DefaultParsedOffset = trajectoryartifactDescParsedOffset.Default.(int64)
+	// trajectoryartifact.ParsedOffsetValidator is a validator for the "parsed_offset" field. It is called by the builders before save.
+	trajectoryartifact.ParsedOffsetValidator = trajectoryartifactDescParsedOffset.Validators[0].(func(int64) error)
+	// trajectoryartifactDescRowCount is the schema descriptor for row_count field.
+	trajectoryartifactDescRowCount := trajectoryartifactFields[15].Descriptor()
+	// trajectoryartifact.DefaultRowCount holds the default value on creation for the row_count field.
+	trajectoryartifact.DefaultRowCount = trajectoryartifactDescRowCount.Default.(int64)
+	// trajectoryartifact.RowCountValidator is a validator for the "row_count" field. It is called by the builders before save.
+	trajectoryartifact.RowCountValidator = trajectoryartifactDescRowCount.Validators[0].(func(int64) error)
+	// trajectoryartifactDescAtifSchemaVersion is the schema descriptor for atif_schema_version field.
+	trajectoryartifactDescAtifSchemaVersion := trajectoryartifactFields[16].Descriptor()
+	// trajectoryartifact.DefaultAtifSchemaVersion holds the default value on creation for the atif_schema_version field.
+	trajectoryartifact.DefaultAtifSchemaVersion = trajectoryartifactDescAtifSchemaVersion.Default.(string)
+	// trajectoryartifactDescFileFormat is the schema descriptor for file_format field.
+	trajectoryartifactDescFileFormat := trajectoryartifactFields[17].Descriptor()
+	// trajectoryartifact.DefaultFileFormat holds the default value on creation for the file_format field.
+	trajectoryartifact.DefaultFileFormat = trajectoryartifactDescFileFormat.Default.(string)
+	// trajectoryartifactDescContentEncoding is the schema descriptor for content_encoding field.
+	trajectoryartifactDescContentEncoding := trajectoryartifactFields[18].Descriptor()
+	// trajectoryartifact.DefaultContentEncoding holds the default value on creation for the content_encoding field.
+	trajectoryartifact.DefaultContentEncoding = trajectoryartifactDescContentEncoding.Default.(string)
+	// trajectoryartifact.ContentEncodingValidator is a validator for the "content_encoding" field. It is called by the builders before save.
+	trajectoryartifact.ContentEncodingValidator = trajectoryartifactDescContentEncoding.Validators[0].(func(string) error)
+	// trajectoryartifactDescSize is the schema descriptor for size field.
+	trajectoryartifactDescSize := trajectoryartifactFields[19].Descriptor()
+	// trajectoryartifact.SizeValidator is a validator for the "size" field. It is called by the builders before save.
+	trajectoryartifact.SizeValidator = trajectoryartifactDescSize.Validators[0].(func(int64) error)
+	// trajectoryartifactDescChargedBytes is the schema descriptor for charged_bytes field.
+	trajectoryartifactDescChargedBytes := trajectoryartifactFields[20].Descriptor()
+	// trajectoryartifact.DefaultChargedBytes holds the default value on creation for the charged_bytes field.
+	trajectoryartifact.DefaultChargedBytes = trajectoryartifactDescChargedBytes.Default.(int64)
+	// trajectoryartifact.ChargedBytesValidator is a validator for the "charged_bytes" field. It is called by the builders before save.
+	trajectoryartifact.ChargedBytesValidator = trajectoryartifactDescChargedBytes.Validators[0].(func(int64) error)
+	// trajectoryartifactDescSha256 is the schema descriptor for sha256 field.
+	trajectoryartifactDescSha256 := trajectoryartifactFields[21].Descriptor()
+	// trajectoryartifact.Sha256Validator is a validator for the "sha256" field. It is called by the builders before save.
+	trajectoryartifact.Sha256Validator = trajectoryartifactDescSha256.Validators[0].(func(string) error)
+	// trajectoryartifactDescStampedSize is the schema descriptor for stamped_size field.
+	trajectoryartifactDescStampedSize := trajectoryartifactFields[22].Descriptor()
+	// trajectoryartifact.DefaultStampedSize holds the default value on creation for the stamped_size field.
+	trajectoryartifact.DefaultStampedSize = trajectoryartifactDescStampedSize.Default.(int64)
+	// trajectoryartifact.StampedSizeValidator is a validator for the "stamped_size" field. It is called by the builders before save.
+	trajectoryartifact.StampedSizeValidator = trajectoryartifactDescStampedSize.Validators[0].(func(int64) error)
+	// trajectoryartifactDescStampedSha256 is the schema descriptor for stamped_sha256 field.
+	trajectoryartifactDescStampedSha256 := trajectoryartifactFields[23].Descriptor()
+	// trajectoryartifact.DefaultStampedSha256 holds the default value on creation for the stamped_sha256 field.
+	trajectoryartifact.DefaultStampedSha256 = trajectoryartifactDescStampedSha256.Default.(string)
+	// trajectoryartifactDescPendingObjectPath is the schema descriptor for pending_object_path field.
+	trajectoryartifactDescPendingObjectPath := trajectoryartifactFields[24].Descriptor()
+	// trajectoryartifact.PendingObjectPathValidator is a validator for the "pending_object_path" field. It is called by the builders before save.
+	trajectoryartifact.PendingObjectPathValidator = trajectoryartifactDescPendingObjectPath.Validators[0].(func(string) error)
+	// trajectoryartifactDescObjectPath is the schema descriptor for object_path field.
+	trajectoryartifactDescObjectPath := trajectoryartifactFields[25].Descriptor()
+	// trajectoryartifact.ObjectPathValidator is a validator for the "object_path" field. It is called by the builders before save.
+	trajectoryartifact.ObjectPathValidator = trajectoryartifactDescObjectPath.Validators[0].(func(string) error)
+	// trajectoryartifactDescStatus is the schema descriptor for status field.
+	trajectoryartifactDescStatus := trajectoryartifactFields[26].Descriptor()
+	// trajectoryartifact.DefaultStatus holds the default value on creation for the status field.
+	trajectoryartifact.DefaultStatus = trajectoryartifactDescStatus.Default.(string)
+	// trajectoryartifact.StatusValidator is a validator for the "status" field. It is called by the builders before save.
+	trajectoryartifact.StatusValidator = trajectoryartifactDescStatus.Validators[0].(func(string) error)
+	// trajectoryartifactDescCreatedAt is the schema descriptor for created_at field.
+	trajectoryartifactDescCreatedAt := trajectoryartifactFields[27].Descriptor()
+	// trajectoryartifact.DefaultCreatedAt holds the default value on creation for the created_at field.
+	trajectoryartifact.DefaultCreatedAt = trajectoryartifactDescCreatedAt.Default.(func() time.Time)
+	// trajectoryartifactDescID is the schema descriptor for id field.
+	trajectoryartifactDescID := trajectoryartifactFields[0].Descriptor()
+	// trajectoryartifact.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	trajectoryartifact.IDValidator = trajectoryartifactDescID.Validators[0].(func(string) error)
 	trajectorysegmentFields := schema.TrajectorySegment{}.Fields()
 	_ = trajectorysegmentFields
 	// trajectorysegmentDescHubID is the schema descriptor for hub_id field.
@@ -4195,6 +4325,106 @@ func init() {
 	trajectorysegmentDescID := trajectorysegmentFields[0].Descriptor()
 	// trajectorysegment.IDValidator is a validator for the "id" field. It is called by the builders before save.
 	trajectorysegment.IDValidator = trajectorysegmentDescID.Validators[0].(func(string) error)
+	trajectorysessionFields := schema.TrajectorySession{}.Fields()
+	_ = trajectorysessionFields
+	// trajectorysessionDescHubID is the schema descriptor for hub_id field.
+	trajectorysessionDescHubID := trajectorysessionFields[1].Descriptor()
+	// trajectorysession.HubIDValidator is a validator for the "hub_id" field. It is called by the builders before save.
+	trajectorysession.HubIDValidator = trajectorysessionDescHubID.Validators[0].(func(string) error)
+	// trajectorysessionDescProjectID is the schema descriptor for project_id field.
+	trajectorysessionDescProjectID := trajectorysessionFields[2].Descriptor()
+	// trajectorysession.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	trajectorysession.ProjectIDValidator = trajectorysessionDescProjectID.Validators[0].(func(string) error)
+	// trajectorysessionDescAgentID is the schema descriptor for agent_id field.
+	trajectorysessionDescAgentID := trajectorysessionFields[3].Descriptor()
+	// trajectorysession.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	trajectorysession.AgentIDValidator = trajectorysessionDescAgentID.Validators[0].(func(string) error)
+	// trajectorysessionDescRunID is the schema descriptor for run_id field.
+	trajectorysessionDescRunID := trajectorysessionFields[4].Descriptor()
+	// trajectorysession.RunIDValidator is a validator for the "run_id" field. It is called by the builders before save.
+	trajectorysession.RunIDValidator = trajectorysessionDescRunID.Validators[0].(func(string) error)
+	// trajectorysessionDescHarness is the schema descriptor for harness field.
+	trajectorysessionDescHarness := trajectorysessionFields[5].Descriptor()
+	// trajectorysession.HarnessValidator is a validator for the "harness" field. It is called by the builders before save.
+	trajectorysession.HarnessValidator = trajectorysessionDescHarness.Validators[0].(func(string) error)
+	// trajectorysessionDescSessionID is the schema descriptor for session_id field.
+	trajectorysessionDescSessionID := trajectorysessionFields[6].Descriptor()
+	// trajectorysession.DefaultSessionID holds the default value on creation for the session_id field.
+	trajectorysession.DefaultSessionID = trajectorysessionDescSessionID.Default.(string)
+	// trajectorysessionDescNativeRelativePath is the schema descriptor for native_relative_path field.
+	trajectorysessionDescNativeRelativePath := trajectorysessionFields[7].Descriptor()
+	// trajectorysession.NativeRelativePathValidator is a validator for the "native_relative_path" field. It is called by the builders before save.
+	trajectorysession.NativeRelativePathValidator = trajectorysessionDescNativeRelativePath.Validators[0].(func(string) error)
+	// trajectorysessionDescIsSubagent is the schema descriptor for is_subagent field.
+	trajectorysessionDescIsSubagent := trajectorysessionFields[8].Descriptor()
+	// trajectorysession.DefaultIsSubagent holds the default value on creation for the is_subagent field.
+	trajectorysession.DefaultIsSubagent = trajectorysessionDescIsSubagent.Default.(bool)
+	// trajectorysessionDescParentSessionID is the schema descriptor for parent_session_id field.
+	trajectorysessionDescParentSessionID := trajectorysessionFields[9].Descriptor()
+	// trajectorysession.DefaultParentSessionID holds the default value on creation for the parent_session_id field.
+	trajectorysession.DefaultParentSessionID = trajectorysessionDescParentSessionID.Default.(string)
+	// trajectorysessionDescParserVersion is the schema descriptor for parser_version field.
+	trajectorysessionDescParserVersion := trajectorysessionFields[10].Descriptor()
+	// trajectorysession.ParserVersionValidator is a validator for the "parser_version" field. It is called by the builders before save.
+	trajectorysession.ParserVersionValidator = trajectorysessionDescParserVersion.Validators[0].(func(string) error)
+	// trajectorysessionDescParserVersionNum is the schema descriptor for parser_version_num field.
+	trajectorysessionDescParserVersionNum := trajectorysessionFields[11].Descriptor()
+	// trajectorysession.DefaultParserVersionNum holds the default value on creation for the parser_version_num field.
+	trajectorysession.DefaultParserVersionNum = trajectorysessionDescParserVersionNum.Default.(int64)
+	// trajectorysession.ParserVersionNumValidator is a validator for the "parser_version_num" field. It is called by the builders before save.
+	trajectorysession.ParserVersionNumValidator = trajectorysessionDescParserVersionNum.Validators[0].(func(int64) error)
+	// trajectorysessionDescParsedOffset is the schema descriptor for parsed_offset field.
+	trajectorysessionDescParsedOffset := trajectorysessionFields[12].Descriptor()
+	// trajectorysession.DefaultParsedOffset holds the default value on creation for the parsed_offset field.
+	trajectorysession.DefaultParsedOffset = trajectorysessionDescParsedOffset.Default.(int64)
+	// trajectorysession.ParsedOffsetValidator is a validator for the "parsed_offset" field. It is called by the builders before save.
+	trajectorysession.ParsedOffsetValidator = trajectorysessionDescParsedOffset.Validators[0].(func(int64) error)
+	// trajectorysessionDescAtifArtifactID is the schema descriptor for atif_artifact_id field.
+	trajectorysessionDescAtifArtifactID := trajectorysessionFields[13].Descriptor()
+	// trajectorysession.DefaultAtifArtifactID holds the default value on creation for the atif_artifact_id field.
+	trajectorysession.DefaultAtifArtifactID = trajectorysessionDescAtifArtifactID.Default.(string)
+	// trajectorysessionDescAtifObjectPath is the schema descriptor for atif_object_path field.
+	trajectorysessionDescAtifObjectPath := trajectorysessionFields[14].Descriptor()
+	// trajectorysession.DefaultAtifObjectPath holds the default value on creation for the atif_object_path field.
+	trajectorysession.DefaultAtifObjectPath = trajectorysessionDescAtifObjectPath.Default.(string)
+	// trajectorysessionDescAtifSchemaVersion is the schema descriptor for atif_schema_version field.
+	trajectorysessionDescAtifSchemaVersion := trajectorysessionFields[15].Descriptor()
+	// trajectorysession.DefaultAtifSchemaVersion holds the default value on creation for the atif_schema_version field.
+	trajectorysession.DefaultAtifSchemaVersion = trajectorysessionDescAtifSchemaVersion.Default.(string)
+	// trajectorysessionDescFileFormat is the schema descriptor for file_format field.
+	trajectorysessionDescFileFormat := trajectorysessionFields[16].Descriptor()
+	// trajectorysession.DefaultFileFormat holds the default value on creation for the file_format field.
+	trajectorysession.DefaultFileFormat = trajectorysessionDescFileFormat.Default.(string)
+	// trajectorysessionDescStepCount is the schema descriptor for step_count field.
+	trajectorysessionDescStepCount := trajectorysessionFields[17].Descriptor()
+	// trajectorysession.DefaultStepCount holds the default value on creation for the step_count field.
+	trajectorysession.DefaultStepCount = trajectorysessionDescStepCount.Default.(int)
+	// trajectorysession.StepCountValidator is a validator for the "step_count" field. It is called by the builders before save.
+	trajectorysession.StepCountValidator = trajectorysessionDescStepCount.Validators[0].(func(int) error)
+	// trajectorysessionDescNormalizeStatus is the schema descriptor for normalize_status field.
+	trajectorysessionDescNormalizeStatus := trajectorysessionFields[18].Descriptor()
+	// trajectorysession.DefaultNormalizeStatus holds the default value on creation for the normalize_status field.
+	trajectorysession.DefaultNormalizeStatus = trajectorysessionDescNormalizeStatus.Default.(string)
+	// trajectorysession.NormalizeStatusValidator is a validator for the "normalize_status" field. It is called by the builders before save.
+	trajectorysession.NormalizeStatusValidator = trajectorysessionDescNormalizeStatus.Validators[0].(func(string) error)
+	// trajectorysessionDescParseErrorCount is the schema descriptor for parse_error_count field.
+	trajectorysessionDescParseErrorCount := trajectorysessionFields[19].Descriptor()
+	// trajectorysession.DefaultParseErrorCount holds the default value on creation for the parse_error_count field.
+	trajectorysession.DefaultParseErrorCount = trajectorysessionDescParseErrorCount.Default.(int)
+	// trajectorysession.ParseErrorCountValidator is a validator for the "parse_error_count" field. It is called by the builders before save.
+	trajectorysession.ParseErrorCountValidator = trajectorysessionDescParseErrorCount.Validators[0].(func(int) error)
+	// trajectorysessionDescFirstError is the schema descriptor for first_error field.
+	trajectorysessionDescFirstError := trajectorysessionFields[20].Descriptor()
+	// trajectorysession.DefaultFirstError holds the default value on creation for the first_error field.
+	trajectorysession.DefaultFirstError = trajectorysessionDescFirstError.Default.(string)
+	// trajectorysessionDescUpdatedAt is the schema descriptor for updated_at field.
+	trajectorysessionDescUpdatedAt := trajectorysessionFields[21].Descriptor()
+	// trajectorysession.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	trajectorysession.DefaultUpdatedAt = trajectorysessionDescUpdatedAt.Default.(func() time.Time)
+	// trajectorysessionDescID is the schema descriptor for id field.
+	trajectorysessionDescID := trajectorysessionFields[0].Descriptor()
+	// trajectorysession.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	trajectorysession.IDValidator = trajectorysessionDescID.Validators[0].(func(string) error)
 	triggerMixin := schema.Trigger{}.Mixin()
 	triggerMixinFields1 := triggerMixin[1].Fields()
 	_ = triggerMixinFields1

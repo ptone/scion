@@ -45,6 +45,9 @@
 - [project.trajectory.segments.list](#projecttrajectorysegmentslist) — List committed Track 2 raw trajectory segment metadata for an agent (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project; session-only in P5)
 - [project.trajectory.segments.download](#projecttrajectorysegmentsdownload) — Issue a short-lived signed GET URL for a committed Track 2 raw trajectory segment (and optional manifest) after synchronously writing a mandatory read-audit row (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project; session-only in P5)
 - [agent.trajectory.segments.content.read](#agenttrajectorysegmentscontentread) — Download committed Track 2 raw trajectory segment or manifest bytes via a Hub-issued short-lived HMAC capability URL issued by the audit-logged download endpoint (behind tokenomics.trajectory_capture)
+- [agent.trajectory.artifacts.prepare](#agenttrajectoryartifactsprepare) — Prepare a Track 2 L1 normalized trajectory artifact upload (usage_records, run_inventory, or atif) and issue a short-lived no-overwrite upload URL for the calling agent (behind tokenomics.trajectory_capture)
+- [agent.trajectory.artifacts.commit](#agenttrajectoryartifactscommit) — Verify, stamp, and commit a prepared Track 2 L1 normalized trajectory artifact (or report parse_failed via session_meta) for the calling agent (behind tokenomics.trajectory_capture)
+- [agent.trajectory.artifacts.content](#agenttrajectoryartifactscontent) — Upload pending Track 2 L1 trajectory artifact bytes via Hub-proxied no-overwrite PUT with HMAC capability URL and agent JWT (behind tokenomics.trajectory_capture)
 - [agent.secrets.access](#agentsecretsaccess) — List, read, write and delete the secrets available to the calling agent: its own agent-scoped secrets, its project's and its creating user's. A user-scope write is held as a pending secret for the owner's approval (secret.user.pending.*)
 - [agent.stopall](#agentstopall) — Stop all running agents on the hub
 - [agent.stopall.project](#agentstopallproject) — Stop all running agents in a project
@@ -1963,6 +1966,108 @@
 ### Exemptions
 
 - **public_endpoint:** Capability URL: the short-lived HMAC signature issued by the audit-logged trajectory segment download endpoint authorizes reading one segment or manifest object, with no principal (scope: signed trajectory segment content download) — waives: `principals`, `credentials`, `base_permission`, `denial_codes`
+
+---
+
+## agent.trajectory.artifacts.prepare
+
+**Domain:** agent
+
+**Description:** Prepare a Track 2 L1 normalized trajectory artifact upload (usage_records, run_inventory, or atif) and issue a short-lived no-overwrite upload URL for the calling agent (behind tokenomics.trajectory_capture)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/trajectory/artifacts:prepare` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The agent authenticates with its own agent JWT for its own trajectory artifact prepare; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## agent.trajectory.artifacts.commit
+
+**Domain:** agent
+
+**Description:** Verify, stamp, and commit a prepared Track 2 L1 normalized trajectory artifact (or report parse_failed via session_meta) for the calling agent (behind tokenomics.trajectory_capture)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/trajectory/artifacts:commit` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The agent authenticates with its own agent JWT for its own trajectory artifact commit; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## agent.trajectory.artifacts.content
+
+**Domain:** agent
+
+**Description:** Upload pending Track 2 L1 trajectory artifact bytes via Hub-proxied no-overwrite PUT with HMAC capability URL and agent JWT (behind tokenomics.trajectory_capture)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/agents/{id}/trajectory/artifacts/{artifactId}/content` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The agent authenticates with its own agent JWT and a Hub-issued HMAC capability URL for its own trajectory artifact upload; no user permission applies (scope: agent self access) — waives: `base_permission`
 
 ---
 

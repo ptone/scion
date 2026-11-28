@@ -327,8 +327,14 @@ type ThreadGroup func(*sql.Selector)
 // ThreadGroupMember is the predicate function for threadgroupmember builders.
 type ThreadGroupMember func(*sql.Selector)
 
+// TrajectoryArtifact is the predicate function for trajectoryartifact builders.
+type TrajectoryArtifact func(*sql.Selector)
+
 // TrajectorySegment is the predicate function for trajectorysegment builders.
 type TrajectorySegment func(*sql.Selector)
+
+// TrajectorySession is the predicate function for trajectorysession builders.
+type TrajectorySession func(*sql.Selector)
 
 // Trigger is the predicate function for trigger builders.
 type Trigger func(*sql.Selector)

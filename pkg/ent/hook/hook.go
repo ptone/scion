@@ -1293,6 +1293,18 @@ func (f ThreadGroupMemberFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ThreadGroupMemberMutation", m)
 }
 
+// The TrajectoryArtifactFunc type is an adapter to allow the use of ordinary
+// function as TrajectoryArtifact mutator.
+type TrajectoryArtifactFunc func(context.Context, *ent.TrajectoryArtifactMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f TrajectoryArtifactFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.TrajectoryArtifactMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TrajectoryArtifactMutation", m)
+}
+
 // The TrajectorySegmentFunc type is an adapter to allow the use of ordinary
 // function as TrajectorySegment mutator.
 type TrajectorySegmentFunc func(context.Context, *ent.TrajectorySegmentMutation) (ent.Value, error)
@@ -1303,6 +1315,18 @@ func (f TrajectorySegmentFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TrajectorySegmentMutation", m)
+}
+
+// The TrajectorySessionFunc type is an adapter to allow the use of ordinary
+// function as TrajectorySession mutator.
+type TrajectorySessionFunc func(context.Context, *ent.TrajectorySessionMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f TrajectorySessionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.TrajectorySessionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TrajectorySessionMutation", m)
 }
 
 // The TriggerFunc type is an adapter to allow the use of ordinary

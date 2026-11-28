@@ -338,6 +338,15 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			wantDen: assertForbidden,
 		},
 		{
+			key:    "POST /api/v1/agents/{id}/trajectory/artifacts:prepare",
+			method: http.MethodPost,
+			path: func(_ *standingCoverageFixture, a *store.Agent) string {
+				return "/api/v1/agents/" + a.ID + "/trajectory/artifacts:prepare"
+			},
+			body:    func(*standingCoverageFixture) any { return map[string]any{} },
+			wantDen: assertForbidden,
+		},
+		{
 			key:    "POST /api/v1/agents",
 			method: http.MethodPost,
 			path:   func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/agents" },

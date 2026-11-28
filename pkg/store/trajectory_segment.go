@@ -133,6 +133,15 @@ type TrajectorySegmentStore interface {
 	// byte_start, id) order, along with hasMore indicating whether additional
 	// rows exist beyond filter.Offset+len(result).
 	ListCommittedTrajectorySegments(ctx context.Context, filter TrajectorySegmentListFilter) ([]*TrajectorySegment, bool, error)
+
+	// MarkTrajectorySegmentsNormalizeStatus updates normalize_status on
+	// committed L0 trajectory_segments rows for (agentID, runID,
+	// nativeRelativePath). When maxByteEnd is non-nil (e.g. marking segments
+	// "normalized" on ATIF commit), only committed segments with byte_end <=
+	// *maxByteEnd are updated. When maxByteEnd is nil (e.g. marking pending
+	// segments "parse_failed"), only committed segments currently in
+	// normalize_status "pending" are updated.
+	MarkTrajectorySegmentsNormalizeStatus(ctx context.Context, agentID, runID, nativeRelativePath string, maxByteEnd *int64, normalizeStatus string) (int64, error)
 }
 
 // TrajectorySegmentListFilter scopes committed trajectory segment listing for an agent.

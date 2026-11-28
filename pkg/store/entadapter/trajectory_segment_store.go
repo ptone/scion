@@ -522,3 +522,27 @@ func (s *TrajectorySegmentStore) ListCommittedTrajectorySegments(ctx context.Con
 	}
 	return out, hasMore, nil
 }
+
+// MarkTrajectorySegmentsNormalizeStatus implements store.TrajectorySegmentStore.
+func (s *TrajectorySegmentStore) MarkTrajectorySegmentsNormalizeStatus(ctx context.Context, agentID, runID, nativeRelativePath string, maxByteEnd *int64, normalizeStatus string) (int64, error) {
+	if agentID == "" || runID == "" || nativeRelativePath == "" || normalizeStatus == "" {
+		return 0, fmt.Errorf("%w: agent_id, run_id, native_relative_path, and normalize_status are required", store.ErrInvalidInput)
+	}
+	q := s.client.TrajectorySegment.Update().
+		Where(
+			trajectorysegment.AgentIDEQ(agentID),
+			trajectorysegment.RunIDEQ(runID),
+			trajectorysegment.NativeRelativePathEQ(nativeRelativePath),
+			trajectorysegment.StatusEQ(telemetrycontract.TrajectorySegmentStatusCommitted),
+		)
+	if maxByteEnd != nil {
+		q = q.Where(trajectorysegment.ByteEndLTE(*maxByteEnd))
+	} else {
+		q = q.Where(trajectorysegment.NormalizeStatusEQ(telemetrycontract.TrajectoryNormalizeStatusPending))
+	}
+	n, err := q.SetNormalizeStatus(normalizeStatus).Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return int64(n), nil
+}

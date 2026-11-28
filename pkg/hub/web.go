@@ -3525,11 +3525,12 @@ func isCompressBypassPath(path string) bool {
 					// answer with signed object URLs.
 					return true
 				case "trajectory":
-					// POST /api/v1/agents/{id}/trajectory/segments:prepare
-					// returns a signed or capability upload URL;
+					// POST /api/v1/agents/{id}/trajectory/segments:prepare and
+					// POST /api/v1/agents/{id}/trajectory/artifacts:prepare
+					// return a signed or capability upload URL;
 					// GET /api/v1/agents/{id}/trajectory/segments/{segmentId}/download
 					// returns a short-lived signed GET download URL.
-					if i+3 < len(segs) && segs[i+3] == "segments:prepare" {
+					if i+3 < len(segs) && (segs[i+3] == "segments:prepare" || segs[i+3] == "artifacts:prepare") {
 						return true
 					}
 					if i+5 < len(segs) && segs[i+3] == "segments" && segs[i+5] == "download" {

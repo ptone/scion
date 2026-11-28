@@ -4369,6 +4369,67 @@ var (
 			},
 		},
 	}
+	// TrajectoryArtifactsColumns holds the columns for the "trajectory_artifacts" table.
+	TrajectoryArtifactsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "hub_id", Type: field.TypeString},
+		{Name: "project_id", Type: field.TypeString},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "run_id", Type: field.TypeString},
+		{Name: "harness", Type: field.TypeString},
+		{Name: "artifact_type", Type: field.TypeString},
+		{Name: "parser_version", Type: field.TypeString},
+		{Name: "identity_key", Type: field.TypeString},
+		{Name: "chunk_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "inventory_seq", Type: field.TypeInt64, Default: 0},
+		{Name: "final", Type: field.TypeBool, Default: false},
+		{Name: "session_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "native_relative_path", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "parsed_offset", Type: field.TypeInt64, Default: 0},
+		{Name: "row_count", Type: field.TypeInt64, Default: 0},
+		{Name: "atif_schema_version", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "file_format", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "content_encoding", Type: field.TypeString, Default: "gzip"},
+		{Name: "size", Type: field.TypeInt64},
+		{Name: "charged_bytes", Type: field.TypeInt64, Default: 0},
+		{Name: "sha256", Type: field.TypeString},
+		{Name: "stamped_size", Type: field.TypeInt64, Default: 0},
+		{Name: "stamped_sha256", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "pending_object_path", Type: field.TypeString},
+		{Name: "object_path", Type: field.TypeString},
+		{Name: "status", Type: field.TypeString, Default: "pending"},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "committed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "prepare_expires_at", Type: field.TypeTime},
+	}
+	// TrajectoryArtifactsTable holds the schema information for the "trajectory_artifacts" table.
+	TrajectoryArtifactsTable = &schema.Table{
+		Name:       "trajectory_artifacts",
+		Columns:    TrajectoryArtifactsColumns,
+		PrimaryKey: []*schema.Column{TrajectoryArtifactsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "trajectoryartifact_run_id_artifact_type_parser_version_identity_key",
+				Unique:  true,
+				Columns: []*schema.Column{TrajectoryArtifactsColumns[4], TrajectoryArtifactsColumns[6], TrajectoryArtifactsColumns[7], TrajectoryArtifactsColumns[8]},
+			},
+			{
+				Name:    "trajectoryartifact_agent_id_run_id",
+				Unique:  false,
+				Columns: []*schema.Column{TrajectoryArtifactsColumns[3], TrajectoryArtifactsColumns[4]},
+			},
+			{
+				Name:    "trajectoryartifact_run_id_parser_version_artifact_type_chunk_id",
+				Unique:  false,
+				Columns: []*schema.Column{TrajectoryArtifactsColumns[4], TrajectoryArtifactsColumns[7], TrajectoryArtifactsColumns[6], TrajectoryArtifactsColumns[9]},
+			},
+			{
+				Name:    "trajectoryartifact_project_id_agent_id_run_id",
+				Unique:  false,
+				Columns: []*schema.Column{TrajectoryArtifactsColumns[2], TrajectoryArtifactsColumns[3], TrajectoryArtifactsColumns[4]},
+			},
+		},
+	}
 	// TrajectorySegmentsColumns holds the columns for the "trajectory_segments" table.
 	TrajectorySegmentsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeString},
@@ -4417,6 +4478,54 @@ var (
 				Name:    "trajectorysegment_agent_id_created_at",
 				Unique:  false,
 				Columns: []*schema.Column{TrajectorySegmentsColumns[4], TrajectorySegmentsColumns[22]},
+			},
+		},
+	}
+	// TrajectorySessionsColumns holds the columns for the "trajectory_sessions" table.
+	TrajectorySessionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "hub_id", Type: field.TypeString},
+		{Name: "project_id", Type: field.TypeString},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "run_id", Type: field.TypeString},
+		{Name: "harness", Type: field.TypeString},
+		{Name: "session_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "native_relative_path", Type: field.TypeString},
+		{Name: "is_subagent", Type: field.TypeBool, Default: false},
+		{Name: "parent_session_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "parser_version", Type: field.TypeString},
+		{Name: "parser_version_num", Type: field.TypeInt64, Default: 0},
+		{Name: "parsed_offset", Type: field.TypeInt64, Default: 0},
+		{Name: "atif_artifact_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "atif_object_path", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "atif_schema_version", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "file_format", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "step_count", Type: field.TypeInt, Default: 0},
+		{Name: "normalize_status", Type: field.TypeString, Default: "ok"},
+		{Name: "parse_error_count", Type: field.TypeInt, Default: 0},
+		{Name: "first_error", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// TrajectorySessionsTable holds the schema information for the "trajectory_sessions" table.
+	TrajectorySessionsTable = &schema.Table{
+		Name:       "trajectory_sessions",
+		Columns:    TrajectorySessionsColumns,
+		PrimaryKey: []*schema.Column{TrajectorySessionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "trajectorysession_run_id_native_relative_path",
+				Unique:  true,
+				Columns: []*schema.Column{TrajectorySessionsColumns[4], TrajectorySessionsColumns[7]},
+			},
+			{
+				Name:    "trajectorysession_project_id_agent_id_run_id",
+				Unique:  false,
+				Columns: []*schema.Column{TrajectorySessionsColumns[2], TrajectorySessionsColumns[3], TrajectorySessionsColumns[4]},
+			},
+			{
+				Name:    "trajectorysession_agent_id_updated_at",
+				Unique:  false,
+				Columns: []*schema.Column{TrajectorySessionsColumns[3], TrajectorySessionsColumns[21]},
 			},
 		},
 	}
@@ -5537,7 +5646,9 @@ var (
 		TestInfraMarkerTable,
 		ThreadGroupsTable,
 		ThreadGroupMembersTable,
+		TrajectoryArtifactsTable,
 		TrajectorySegmentsTable,
+		TrajectorySessionsTable,
 		TriggersTable,
 		TriggerEventsTable,
 		TriggerFiresTable,
@@ -5844,8 +5955,14 @@ func init() {
 	ThreadGroupMembersTable.Annotation = &entsql.Annotation{
 		Table: "thread_group_members",
 	}
+	TrajectoryArtifactsTable.Annotation = &entsql.Annotation{
+		Table: "trajectory_artifacts",
+	}
 	TrajectorySegmentsTable.Annotation = &entsql.Annotation{
 		Table: "trajectory_segments",
+	}
+	TrajectorySessionsTable.Annotation = &entsql.Annotation{
+		Table: "trajectory_sessions",
 	}
 	TriggersTable.Annotation = &entsql.Annotation{
 		Table: "triggers",
