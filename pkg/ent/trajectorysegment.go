@@ -51,6 +51,8 @@ type TrajectorySegment struct {
 	IncompleteTail bool `json:"incomplete_tail,omitempty"`
 	// SessionID holds the value of the "session_id" field.
 	SessionID string `json:"session_id,omitempty"`
+	// UploadSource holds the value of the "upload_source" field.
+	UploadSource string `json:"upload_source,omitempty"`
 	// ObjectPath holds the value of the "object_path" field.
 	ObjectPath string `json:"object_path,omitempty"`
 	// ManifestPath holds the value of the "manifest_path" field.
@@ -77,7 +79,7 @@ func (*TrajectorySegment) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case trajectorysegment.FieldGeneration, trajectorysegment.FieldByteStart, trajectorysegment.FieldByteEnd, trajectorysegment.FieldCompressedSize, trajectorysegment.FieldChargedBytes:
 			values[i] = new(sql.NullInt64)
-		case trajectorysegment.FieldID, trajectorysegment.FieldHubID, trajectorysegment.FieldOriginHubID, trajectorysegment.FieldProjectID, trajectorysegment.FieldAgentID, trajectorysegment.FieldRunID, trajectorysegment.FieldHarness, trajectorysegment.FieldNativeRelativePath, trajectorysegment.FieldArtifactKind, trajectorysegment.FieldRawSha256, trajectorysegment.FieldCompressedSha256, trajectorysegment.FieldSessionID, trajectorysegment.FieldObjectPath, trajectorysegment.FieldManifestPath, trajectorysegment.FieldStatus, trajectorysegment.FieldNormalizeStatus:
+		case trajectorysegment.FieldID, trajectorysegment.FieldHubID, trajectorysegment.FieldOriginHubID, trajectorysegment.FieldProjectID, trajectorysegment.FieldAgentID, trajectorysegment.FieldRunID, trajectorysegment.FieldHarness, trajectorysegment.FieldNativeRelativePath, trajectorysegment.FieldArtifactKind, trajectorysegment.FieldRawSha256, trajectorysegment.FieldCompressedSha256, trajectorysegment.FieldSessionID, trajectorysegment.FieldUploadSource, trajectorysegment.FieldObjectPath, trajectorysegment.FieldManifestPath, trajectorysegment.FieldStatus, trajectorysegment.FieldNormalizeStatus:
 			values[i] = new(sql.NullString)
 		case trajectorysegment.FieldCreatedAt, trajectorysegment.FieldCommittedAt, trajectorysegment.FieldPrepareExpiresAt:
 			values[i] = new(sql.NullTime)
@@ -203,6 +205,12 @@ func (_m *TrajectorySegment) assignValues(columns []string, values []any) error 
 				return fmt.Errorf("unexpected type %T for field session_id", values[i])
 			} else if value.Valid {
 				_m.SessionID = value.String
+			}
+		case trajectorysegment.FieldUploadSource:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field upload_source", values[i])
+			} else if value.Valid {
+				_m.UploadSource = value.String
 			}
 		case trajectorysegment.FieldObjectPath:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -333,6 +341,9 @@ func (_m *TrajectorySegment) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("session_id=")
 	builder.WriteString(_m.SessionID)
+	builder.WriteString(", ")
+	builder.WriteString("upload_source=")
+	builder.WriteString(_m.UploadSource)
 	builder.WriteString(", ")
 	builder.WriteString("object_path=")
 	builder.WriteString(_m.ObjectPath)

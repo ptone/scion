@@ -173,6 +173,20 @@ func (_u *TrajectorySegmentUpdate) ClearSessionID() *TrajectorySegmentUpdate {
 	return _u
 }
 
+// SetUploadSource sets the "upload_source" field.
+func (_u *TrajectorySegmentUpdate) SetUploadSource(v string) *TrajectorySegmentUpdate {
+	_u.mutation.SetUploadSource(v)
+	return _u
+}
+
+// SetNillableUploadSource sets the "upload_source" field if the given value is not nil.
+func (_u *TrajectorySegmentUpdate) SetNillableUploadSource(v *string) *TrajectorySegmentUpdate {
+	if v != nil {
+		_u.SetUploadSource(*v)
+	}
+	return _u
+}
+
 // SetManifestPath sets the "manifest_path" field.
 func (_u *TrajectorySegmentUpdate) SetManifestPath(v string) *TrajectorySegmentUpdate {
 	_u.mutation.SetManifestPath(v)
@@ -314,6 +328,11 @@ func (_u *TrajectorySegmentUpdate) check() error {
 			return &ValidationError{Name: "compressed_sha256", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.compressed_sha256": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.UploadSource(); ok {
+		if err := trajectorysegment.UploadSourceValidator(v); err != nil {
+			return &ValidationError{Name: "upload_source", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.upload_source": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Status(); ok {
 		if err := trajectorysegment.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.status": %w`, err)}
@@ -377,6 +396,9 @@ func (_u *TrajectorySegmentUpdate) sqlSave(ctx context.Context) (_node int, err 
 	}
 	if _u.mutation.SessionIDCleared() {
 		_spec.ClearField(trajectorysegment.FieldSessionID, field.TypeString)
+	}
+	if value, ok := _u.mutation.UploadSource(); ok {
+		_spec.SetField(trajectorysegment.FieldUploadSource, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.ManifestPath(); ok {
 		_spec.SetField(trajectorysegment.FieldManifestPath, field.TypeString, value)
@@ -564,6 +586,20 @@ func (_u *TrajectorySegmentUpdateOne) ClearSessionID() *TrajectorySegmentUpdateO
 	return _u
 }
 
+// SetUploadSource sets the "upload_source" field.
+func (_u *TrajectorySegmentUpdateOne) SetUploadSource(v string) *TrajectorySegmentUpdateOne {
+	_u.mutation.SetUploadSource(v)
+	return _u
+}
+
+// SetNillableUploadSource sets the "upload_source" field if the given value is not nil.
+func (_u *TrajectorySegmentUpdateOne) SetNillableUploadSource(v *string) *TrajectorySegmentUpdateOne {
+	if v != nil {
+		_u.SetUploadSource(*v)
+	}
+	return _u
+}
+
 // SetManifestPath sets the "manifest_path" field.
 func (_u *TrajectorySegmentUpdateOne) SetManifestPath(v string) *TrajectorySegmentUpdateOne {
 	_u.mutation.SetManifestPath(v)
@@ -718,6 +754,11 @@ func (_u *TrajectorySegmentUpdateOne) check() error {
 			return &ValidationError{Name: "compressed_sha256", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.compressed_sha256": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.UploadSource(); ok {
+		if err := trajectorysegment.UploadSourceValidator(v); err != nil {
+			return &ValidationError{Name: "upload_source", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.upload_source": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Status(); ok {
 		if err := trajectorysegment.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.status": %w`, err)}
@@ -798,6 +839,9 @@ func (_u *TrajectorySegmentUpdateOne) sqlSave(ctx context.Context) (_node *Traje
 	}
 	if _u.mutation.SessionIDCleared() {
 		_spec.ClearField(trajectorysegment.FieldSessionID, field.TypeString)
+	}
+	if value, ok := _u.mutation.UploadSource(); ok {
+		_spec.SetField(trajectorysegment.FieldUploadSource, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.ManifestPath(); ok {
 		_spec.SetField(trajectorysegment.FieldManifestPath, field.TypeString, value)

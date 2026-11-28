@@ -72,6 +72,7 @@ type TrajectorySegment struct {
 	CompressedSHA256   string     `json:"compressedSha256"`
 	IncompleteTail     bool       `json:"incompleteTail"`
 	SessionID          string     `json:"sessionId,omitempty"`
+	UploadSource       string     `json:"uploadSource,omitempty"`
 	ObjectPath         string     `json:"objectPath"`
 	ManifestPath       string     `json:"manifestPath,omitempty"`
 	Status             string     `json:"status"`

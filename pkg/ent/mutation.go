@@ -121,6 +121,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectoryharvest"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectorysegment"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
@@ -263,6 +264,7 @@ const (
 	TypeTestInfraMarker               = "TestInfraMarker"
 	TypeThreadGroup                   = "ThreadGroup"
 	TypeThreadGroupMember             = "ThreadGroupMember"
+	TypeTrajectoryHarvest             = "TrajectoryHarvest"
 	TypeTrajectorySegment             = "TrajectorySegment"
 	TypeTrigger                       = "Trigger"
 	TypeTriggerEvent                  = "TriggerEvent"
@@ -128766,6 +128768,1665 @@ func (m *ThreadGroupMemberMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown ThreadGroupMember edge %s", name)
 }
 
+// TrajectoryHarvestMutation represents an operation that mutates the TrajectoryHarvest nodes in the graph.
+type TrajectoryHarvestMutation struct {
+	config
+	op                      Op
+	typ                     string
+	id                      *string
+	harvest_id              *string
+	hub_id                  *string
+	project_id              *string
+	agent_id                *string
+	broker_id               *string
+	run_id                  *string
+	trigger                 *string
+	outcome                 *string
+	trajectory              *string
+	usage                   *string
+	segments_committed      *int
+	addsegments_committed   *int
+	bytes_committed         *int64
+	addbytes_committed      *int64
+	pending_bytes           *int64
+	addpending_bytes        *int64
+	oldest_pending_at       *time.Time
+	usage_events_drained    *int
+	addusage_events_drained *int
+	usage_events_pending    *int
+	addusage_events_pending *int
+	error_code              *string
+	error                   *string
+	started_at              *time.Time
+	finished_at             *time.Time
+	created_at              *time.Time
+	clearedFields           map[string]struct{}
+	done                    bool
+	oldValue                func(context.Context) (*TrajectoryHarvest, error)
+	predicates              []predicate.TrajectoryHarvest
+}
+
+var _ ent.Mutation = (*TrajectoryHarvestMutation)(nil)
+
+// trajectoryharvestOption allows management of the mutation configuration using functional options.
+type trajectoryharvestOption func(*TrajectoryHarvestMutation)
+
+// newTrajectoryHarvestMutation creates new mutation for the TrajectoryHarvest entity.
+func newTrajectoryHarvestMutation(c config, op Op, opts ...trajectoryharvestOption) *TrajectoryHarvestMutation {
+	m := &TrajectoryHarvestMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeTrajectoryHarvest,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withTrajectoryHarvestID sets the ID field of the mutation.
+func withTrajectoryHarvestID(id string) trajectoryharvestOption {
+	return func(m *TrajectoryHarvestMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *TrajectoryHarvest
+		)
+		m.oldValue = func(ctx context.Context) (*TrajectoryHarvest, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().TrajectoryHarvest.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withTrajectoryHarvest sets the old TrajectoryHarvest of the mutation.
+func withTrajectoryHarvest(node *TrajectoryHarvest) trajectoryharvestOption {
+	return func(m *TrajectoryHarvestMutation) {
+		m.oldValue = func(context.Context) (*TrajectoryHarvest, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m TrajectoryHarvestMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m TrajectoryHarvestMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of TrajectoryHarvest entities.
+func (m *TrajectoryHarvestMutation) SetID(id string) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *TrajectoryHarvestMutation) ID() (id string, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *TrajectoryHarvestMutation) IDs(ctx context.Context) ([]string, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []string{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().TrajectoryHarvest.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetHarvestID sets the "harvest_id" field.
+func (m *TrajectoryHarvestMutation) SetHarvestID(s string) {
+	m.harvest_id = &s
+}
+
+// HarvestID returns the value of the "harvest_id" field in the mutation.
+func (m *TrajectoryHarvestMutation) HarvestID() (r string, exists bool) {
+	v := m.harvest_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHarvestID returns the old "harvest_id" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldHarvestID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHarvestID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHarvestID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHarvestID: %w", err)
+	}
+	return oldValue.HarvestID, nil
+}
+
+// ResetHarvestID resets all changes to the "harvest_id" field.
+func (m *TrajectoryHarvestMutation) ResetHarvestID() {
+	m.harvest_id = nil
+}
+
+// SetHubID sets the "hub_id" field.
+func (m *TrajectoryHarvestMutation) SetHubID(s string) {
+	m.hub_id = &s
+}
+
+// HubID returns the value of the "hub_id" field in the mutation.
+func (m *TrajectoryHarvestMutation) HubID() (r string, exists bool) {
+	v := m.hub_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHubID returns the old "hub_id" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldHubID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHubID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHubID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHubID: %w", err)
+	}
+	return oldValue.HubID, nil
+}
+
+// ResetHubID resets all changes to the "hub_id" field.
+func (m *TrajectoryHarvestMutation) ResetHubID() {
+	m.hub_id = nil
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *TrajectoryHarvestMutation) SetProjectID(s string) {
+	m.project_id = &s
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *TrajectoryHarvestMutation) ProjectID() (r string, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *TrajectoryHarvestMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetAgentID sets the "agent_id" field.
+func (m *TrajectoryHarvestMutation) SetAgentID(s string) {
+	m.agent_id = &s
+}
+
+// AgentID returns the value of the "agent_id" field in the mutation.
+func (m *TrajectoryHarvestMutation) AgentID() (r string, exists bool) {
+	v := m.agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentID returns the old "agent_id" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldAgentID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentID: %w", err)
+	}
+	return oldValue.AgentID, nil
+}
+
+// ResetAgentID resets all changes to the "agent_id" field.
+func (m *TrajectoryHarvestMutation) ResetAgentID() {
+	m.agent_id = nil
+}
+
+// SetBrokerID sets the "broker_id" field.
+func (m *TrajectoryHarvestMutation) SetBrokerID(s string) {
+	m.broker_id = &s
+}
+
+// BrokerID returns the value of the "broker_id" field in the mutation.
+func (m *TrajectoryHarvestMutation) BrokerID() (r string, exists bool) {
+	v := m.broker_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBrokerID returns the old "broker_id" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldBrokerID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBrokerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBrokerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBrokerID: %w", err)
+	}
+	return oldValue.BrokerID, nil
+}
+
+// ResetBrokerID resets all changes to the "broker_id" field.
+func (m *TrajectoryHarvestMutation) ResetBrokerID() {
+	m.broker_id = nil
+}
+
+// SetRunID sets the "run_id" field.
+func (m *TrajectoryHarvestMutation) SetRunID(s string) {
+	m.run_id = &s
+}
+
+// RunID returns the value of the "run_id" field in the mutation.
+func (m *TrajectoryHarvestMutation) RunID() (r string, exists bool) {
+	v := m.run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunID returns the old "run_id" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldRunID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunID: %w", err)
+	}
+	return oldValue.RunID, nil
+}
+
+// ClearRunID clears the value of the "run_id" field.
+func (m *TrajectoryHarvestMutation) ClearRunID() {
+	m.run_id = nil
+	m.clearedFields[trajectoryharvest.FieldRunID] = struct{}{}
+}
+
+// RunIDCleared returns if the "run_id" field was cleared in this mutation.
+func (m *TrajectoryHarvestMutation) RunIDCleared() bool {
+	_, ok := m.clearedFields[trajectoryharvest.FieldRunID]
+	return ok
+}
+
+// ResetRunID resets all changes to the "run_id" field.
+func (m *TrajectoryHarvestMutation) ResetRunID() {
+	m.run_id = nil
+	delete(m.clearedFields, trajectoryharvest.FieldRunID)
+}
+
+// SetTrigger sets the "trigger" field.
+func (m *TrajectoryHarvestMutation) SetTrigger(s string) {
+	m.trigger = &s
+}
+
+// Trigger returns the value of the "trigger" field in the mutation.
+func (m *TrajectoryHarvestMutation) Trigger() (r string, exists bool) {
+	v := m.trigger
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTrigger returns the old "trigger" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldTrigger(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTrigger is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTrigger requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTrigger: %w", err)
+	}
+	return oldValue.Trigger, nil
+}
+
+// ResetTrigger resets all changes to the "trigger" field.
+func (m *TrajectoryHarvestMutation) ResetTrigger() {
+	m.trigger = nil
+}
+
+// SetOutcome sets the "outcome" field.
+func (m *TrajectoryHarvestMutation) SetOutcome(s string) {
+	m.outcome = &s
+}
+
+// Outcome returns the value of the "outcome" field in the mutation.
+func (m *TrajectoryHarvestMutation) Outcome() (r string, exists bool) {
+	v := m.outcome
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOutcome returns the old "outcome" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldOutcome(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOutcome is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOutcome requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOutcome: %w", err)
+	}
+	return oldValue.Outcome, nil
+}
+
+// ResetOutcome resets all changes to the "outcome" field.
+func (m *TrajectoryHarvestMutation) ResetOutcome() {
+	m.outcome = nil
+}
+
+// SetTrajectory sets the "trajectory" field.
+func (m *TrajectoryHarvestMutation) SetTrajectory(s string) {
+	m.trajectory = &s
+}
+
+// Trajectory returns the value of the "trajectory" field in the mutation.
+func (m *TrajectoryHarvestMutation) Trajectory() (r string, exists bool) {
+	v := m.trajectory
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTrajectory returns the old "trajectory" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldTrajectory(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTrajectory is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTrajectory requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTrajectory: %w", err)
+	}
+	return oldValue.Trajectory, nil
+}
+
+// ResetTrajectory resets all changes to the "trajectory" field.
+func (m *TrajectoryHarvestMutation) ResetTrajectory() {
+	m.trajectory = nil
+}
+
+// SetUsage sets the "usage" field.
+func (m *TrajectoryHarvestMutation) SetUsage(s string) {
+	m.usage = &s
+}
+
+// Usage returns the value of the "usage" field in the mutation.
+func (m *TrajectoryHarvestMutation) Usage() (r string, exists bool) {
+	v := m.usage
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUsage returns the old "usage" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldUsage(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUsage is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUsage requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUsage: %w", err)
+	}
+	return oldValue.Usage, nil
+}
+
+// ResetUsage resets all changes to the "usage" field.
+func (m *TrajectoryHarvestMutation) ResetUsage() {
+	m.usage = nil
+}
+
+// SetSegmentsCommitted sets the "segments_committed" field.
+func (m *TrajectoryHarvestMutation) SetSegmentsCommitted(i int) {
+	m.segments_committed = &i
+	m.addsegments_committed = nil
+}
+
+// SegmentsCommitted returns the value of the "segments_committed" field in the mutation.
+func (m *TrajectoryHarvestMutation) SegmentsCommitted() (r int, exists bool) {
+	v := m.segments_committed
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSegmentsCommitted returns the old "segments_committed" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldSegmentsCommitted(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSegmentsCommitted is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSegmentsCommitted requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSegmentsCommitted: %w", err)
+	}
+	return oldValue.SegmentsCommitted, nil
+}
+
+// AddSegmentsCommitted adds i to the "segments_committed" field.
+func (m *TrajectoryHarvestMutation) AddSegmentsCommitted(i int) {
+	if m.addsegments_committed != nil {
+		*m.addsegments_committed += i
+	} else {
+		m.addsegments_committed = &i
+	}
+}
+
+// AddedSegmentsCommitted returns the value that was added to the "segments_committed" field in this mutation.
+func (m *TrajectoryHarvestMutation) AddedSegmentsCommitted() (r int, exists bool) {
+	v := m.addsegments_committed
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetSegmentsCommitted resets all changes to the "segments_committed" field.
+func (m *TrajectoryHarvestMutation) ResetSegmentsCommitted() {
+	m.segments_committed = nil
+	m.addsegments_committed = nil
+}
+
+// SetBytesCommitted sets the "bytes_committed" field.
+func (m *TrajectoryHarvestMutation) SetBytesCommitted(i int64) {
+	m.bytes_committed = &i
+	m.addbytes_committed = nil
+}
+
+// BytesCommitted returns the value of the "bytes_committed" field in the mutation.
+func (m *TrajectoryHarvestMutation) BytesCommitted() (r int64, exists bool) {
+	v := m.bytes_committed
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBytesCommitted returns the old "bytes_committed" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldBytesCommitted(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBytesCommitted is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBytesCommitted requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBytesCommitted: %w", err)
+	}
+	return oldValue.BytesCommitted, nil
+}
+
+// AddBytesCommitted adds i to the "bytes_committed" field.
+func (m *TrajectoryHarvestMutation) AddBytesCommitted(i int64) {
+	if m.addbytes_committed != nil {
+		*m.addbytes_committed += i
+	} else {
+		m.addbytes_committed = &i
+	}
+}
+
+// AddedBytesCommitted returns the value that was added to the "bytes_committed" field in this mutation.
+func (m *TrajectoryHarvestMutation) AddedBytesCommitted() (r int64, exists bool) {
+	v := m.addbytes_committed
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetBytesCommitted resets all changes to the "bytes_committed" field.
+func (m *TrajectoryHarvestMutation) ResetBytesCommitted() {
+	m.bytes_committed = nil
+	m.addbytes_committed = nil
+}
+
+// SetPendingBytes sets the "pending_bytes" field.
+func (m *TrajectoryHarvestMutation) SetPendingBytes(i int64) {
+	m.pending_bytes = &i
+	m.addpending_bytes = nil
+}
+
+// PendingBytes returns the value of the "pending_bytes" field in the mutation.
+func (m *TrajectoryHarvestMutation) PendingBytes() (r int64, exists bool) {
+	v := m.pending_bytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPendingBytes returns the old "pending_bytes" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldPendingBytes(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPendingBytes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPendingBytes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPendingBytes: %w", err)
+	}
+	return oldValue.PendingBytes, nil
+}
+
+// AddPendingBytes adds i to the "pending_bytes" field.
+func (m *TrajectoryHarvestMutation) AddPendingBytes(i int64) {
+	if m.addpending_bytes != nil {
+		*m.addpending_bytes += i
+	} else {
+		m.addpending_bytes = &i
+	}
+}
+
+// AddedPendingBytes returns the value that was added to the "pending_bytes" field in this mutation.
+func (m *TrajectoryHarvestMutation) AddedPendingBytes() (r int64, exists bool) {
+	v := m.addpending_bytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetPendingBytes resets all changes to the "pending_bytes" field.
+func (m *TrajectoryHarvestMutation) ResetPendingBytes() {
+	m.pending_bytes = nil
+	m.addpending_bytes = nil
+}
+
+// SetOldestPendingAt sets the "oldest_pending_at" field.
+func (m *TrajectoryHarvestMutation) SetOldestPendingAt(t time.Time) {
+	m.oldest_pending_at = &t
+}
+
+// OldestPendingAt returns the value of the "oldest_pending_at" field in the mutation.
+func (m *TrajectoryHarvestMutation) OldestPendingAt() (r time.Time, exists bool) {
+	v := m.oldest_pending_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOldestPendingAt returns the old "oldest_pending_at" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldOldestPendingAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOldestPendingAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOldestPendingAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOldestPendingAt: %w", err)
+	}
+	return oldValue.OldestPendingAt, nil
+}
+
+// ClearOldestPendingAt clears the value of the "oldest_pending_at" field.
+func (m *TrajectoryHarvestMutation) ClearOldestPendingAt() {
+	m.oldest_pending_at = nil
+	m.clearedFields[trajectoryharvest.FieldOldestPendingAt] = struct{}{}
+}
+
+// OldestPendingAtCleared returns if the "oldest_pending_at" field was cleared in this mutation.
+func (m *TrajectoryHarvestMutation) OldestPendingAtCleared() bool {
+	_, ok := m.clearedFields[trajectoryharvest.FieldOldestPendingAt]
+	return ok
+}
+
+// ResetOldestPendingAt resets all changes to the "oldest_pending_at" field.
+func (m *TrajectoryHarvestMutation) ResetOldestPendingAt() {
+	m.oldest_pending_at = nil
+	delete(m.clearedFields, trajectoryharvest.FieldOldestPendingAt)
+}
+
+// SetUsageEventsDrained sets the "usage_events_drained" field.
+func (m *TrajectoryHarvestMutation) SetUsageEventsDrained(i int) {
+	m.usage_events_drained = &i
+	m.addusage_events_drained = nil
+}
+
+// UsageEventsDrained returns the value of the "usage_events_drained" field in the mutation.
+func (m *TrajectoryHarvestMutation) UsageEventsDrained() (r int, exists bool) {
+	v := m.usage_events_drained
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUsageEventsDrained returns the old "usage_events_drained" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldUsageEventsDrained(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUsageEventsDrained is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUsageEventsDrained requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUsageEventsDrained: %w", err)
+	}
+	return oldValue.UsageEventsDrained, nil
+}
+
+// AddUsageEventsDrained adds i to the "usage_events_drained" field.
+func (m *TrajectoryHarvestMutation) AddUsageEventsDrained(i int) {
+	if m.addusage_events_drained != nil {
+		*m.addusage_events_drained += i
+	} else {
+		m.addusage_events_drained = &i
+	}
+}
+
+// AddedUsageEventsDrained returns the value that was added to the "usage_events_drained" field in this mutation.
+func (m *TrajectoryHarvestMutation) AddedUsageEventsDrained() (r int, exists bool) {
+	v := m.addusage_events_drained
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetUsageEventsDrained resets all changes to the "usage_events_drained" field.
+func (m *TrajectoryHarvestMutation) ResetUsageEventsDrained() {
+	m.usage_events_drained = nil
+	m.addusage_events_drained = nil
+}
+
+// SetUsageEventsPending sets the "usage_events_pending" field.
+func (m *TrajectoryHarvestMutation) SetUsageEventsPending(i int) {
+	m.usage_events_pending = &i
+	m.addusage_events_pending = nil
+}
+
+// UsageEventsPending returns the value of the "usage_events_pending" field in the mutation.
+func (m *TrajectoryHarvestMutation) UsageEventsPending() (r int, exists bool) {
+	v := m.usage_events_pending
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUsageEventsPending returns the old "usage_events_pending" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldUsageEventsPending(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUsageEventsPending is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUsageEventsPending requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUsageEventsPending: %w", err)
+	}
+	return oldValue.UsageEventsPending, nil
+}
+
+// AddUsageEventsPending adds i to the "usage_events_pending" field.
+func (m *TrajectoryHarvestMutation) AddUsageEventsPending(i int) {
+	if m.addusage_events_pending != nil {
+		*m.addusage_events_pending += i
+	} else {
+		m.addusage_events_pending = &i
+	}
+}
+
+// AddedUsageEventsPending returns the value that was added to the "usage_events_pending" field in this mutation.
+func (m *TrajectoryHarvestMutation) AddedUsageEventsPending() (r int, exists bool) {
+	v := m.addusage_events_pending
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetUsageEventsPending resets all changes to the "usage_events_pending" field.
+func (m *TrajectoryHarvestMutation) ResetUsageEventsPending() {
+	m.usage_events_pending = nil
+	m.addusage_events_pending = nil
+}
+
+// SetErrorCode sets the "error_code" field.
+func (m *TrajectoryHarvestMutation) SetErrorCode(s string) {
+	m.error_code = &s
+}
+
+// ErrorCode returns the value of the "error_code" field in the mutation.
+func (m *TrajectoryHarvestMutation) ErrorCode() (r string, exists bool) {
+	v := m.error_code
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldErrorCode returns the old "error_code" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldErrorCode(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldErrorCode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldErrorCode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldErrorCode: %w", err)
+	}
+	return oldValue.ErrorCode, nil
+}
+
+// ClearErrorCode clears the value of the "error_code" field.
+func (m *TrajectoryHarvestMutation) ClearErrorCode() {
+	m.error_code = nil
+	m.clearedFields[trajectoryharvest.FieldErrorCode] = struct{}{}
+}
+
+// ErrorCodeCleared returns if the "error_code" field was cleared in this mutation.
+func (m *TrajectoryHarvestMutation) ErrorCodeCleared() bool {
+	_, ok := m.clearedFields[trajectoryharvest.FieldErrorCode]
+	return ok
+}
+
+// ResetErrorCode resets all changes to the "error_code" field.
+func (m *TrajectoryHarvestMutation) ResetErrorCode() {
+	m.error_code = nil
+	delete(m.clearedFields, trajectoryharvest.FieldErrorCode)
+}
+
+// SetError sets the "error" field.
+func (m *TrajectoryHarvestMutation) SetError(s string) {
+	m.error = &s
+}
+
+// Error returns the value of the "error" field in the mutation.
+func (m *TrajectoryHarvestMutation) Error() (r string, exists bool) {
+	v := m.error
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldError returns the old "error" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldError(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldError is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldError requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldError: %w", err)
+	}
+	return oldValue.Error, nil
+}
+
+// ClearError clears the value of the "error" field.
+func (m *TrajectoryHarvestMutation) ClearError() {
+	m.error = nil
+	m.clearedFields[trajectoryharvest.FieldError] = struct{}{}
+}
+
+// ErrorCleared returns if the "error" field was cleared in this mutation.
+func (m *TrajectoryHarvestMutation) ErrorCleared() bool {
+	_, ok := m.clearedFields[trajectoryharvest.FieldError]
+	return ok
+}
+
+// ResetError resets all changes to the "error" field.
+func (m *TrajectoryHarvestMutation) ResetError() {
+	m.error = nil
+	delete(m.clearedFields, trajectoryharvest.FieldError)
+}
+
+// SetStartedAt sets the "started_at" field.
+func (m *TrajectoryHarvestMutation) SetStartedAt(t time.Time) {
+	m.started_at = &t
+}
+
+// StartedAt returns the value of the "started_at" field in the mutation.
+func (m *TrajectoryHarvestMutation) StartedAt() (r time.Time, exists bool) {
+	v := m.started_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartedAt returns the old "started_at" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldStartedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartedAt: %w", err)
+	}
+	return oldValue.StartedAt, nil
+}
+
+// ResetStartedAt resets all changes to the "started_at" field.
+func (m *TrajectoryHarvestMutation) ResetStartedAt() {
+	m.started_at = nil
+}
+
+// SetFinishedAt sets the "finished_at" field.
+func (m *TrajectoryHarvestMutation) SetFinishedAt(t time.Time) {
+	m.finished_at = &t
+}
+
+// FinishedAt returns the value of the "finished_at" field in the mutation.
+func (m *TrajectoryHarvestMutation) FinishedAt() (r time.Time, exists bool) {
+	v := m.finished_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFinishedAt returns the old "finished_at" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldFinishedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFinishedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFinishedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFinishedAt: %w", err)
+	}
+	return oldValue.FinishedAt, nil
+}
+
+// ResetFinishedAt resets all changes to the "finished_at" field.
+func (m *TrajectoryHarvestMutation) ResetFinishedAt() {
+	m.finished_at = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *TrajectoryHarvestMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *TrajectoryHarvestMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the TrajectoryHarvest entity.
+// If the TrajectoryHarvest object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectoryHarvestMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *TrajectoryHarvestMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// Where appends a list predicates to the TrajectoryHarvestMutation builder.
+func (m *TrajectoryHarvestMutation) Where(ps ...predicate.TrajectoryHarvest) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the TrajectoryHarvestMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *TrajectoryHarvestMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.TrajectoryHarvest, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *TrajectoryHarvestMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *TrajectoryHarvestMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (TrajectoryHarvest).
+func (m *TrajectoryHarvestMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *TrajectoryHarvestMutation) Fields() []string {
+	fields := make([]string, 0, 21)
+	if m.harvest_id != nil {
+		fields = append(fields, trajectoryharvest.FieldHarvestID)
+	}
+	if m.hub_id != nil {
+		fields = append(fields, trajectoryharvest.FieldHubID)
+	}
+	if m.project_id != nil {
+		fields = append(fields, trajectoryharvest.FieldProjectID)
+	}
+	if m.agent_id != nil {
+		fields = append(fields, trajectoryharvest.FieldAgentID)
+	}
+	if m.broker_id != nil {
+		fields = append(fields, trajectoryharvest.FieldBrokerID)
+	}
+	if m.run_id != nil {
+		fields = append(fields, trajectoryharvest.FieldRunID)
+	}
+	if m.trigger != nil {
+		fields = append(fields, trajectoryharvest.FieldTrigger)
+	}
+	if m.outcome != nil {
+		fields = append(fields, trajectoryharvest.FieldOutcome)
+	}
+	if m.trajectory != nil {
+		fields = append(fields, trajectoryharvest.FieldTrajectory)
+	}
+	if m.usage != nil {
+		fields = append(fields, trajectoryharvest.FieldUsage)
+	}
+	if m.segments_committed != nil {
+		fields = append(fields, trajectoryharvest.FieldSegmentsCommitted)
+	}
+	if m.bytes_committed != nil {
+		fields = append(fields, trajectoryharvest.FieldBytesCommitted)
+	}
+	if m.pending_bytes != nil {
+		fields = append(fields, trajectoryharvest.FieldPendingBytes)
+	}
+	if m.oldest_pending_at != nil {
+		fields = append(fields, trajectoryharvest.FieldOldestPendingAt)
+	}
+	if m.usage_events_drained != nil {
+		fields = append(fields, trajectoryharvest.FieldUsageEventsDrained)
+	}
+	if m.usage_events_pending != nil {
+		fields = append(fields, trajectoryharvest.FieldUsageEventsPending)
+	}
+	if m.error_code != nil {
+		fields = append(fields, trajectoryharvest.FieldErrorCode)
+	}
+	if m.error != nil {
+		fields = append(fields, trajectoryharvest.FieldError)
+	}
+	if m.started_at != nil {
+		fields = append(fields, trajectoryharvest.FieldStartedAt)
+	}
+	if m.finished_at != nil {
+		fields = append(fields, trajectoryharvest.FieldFinishedAt)
+	}
+	if m.created_at != nil {
+		fields = append(fields, trajectoryharvest.FieldCreatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *TrajectoryHarvestMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case trajectoryharvest.FieldHarvestID:
+		return m.HarvestID()
+	case trajectoryharvest.FieldHubID:
+		return m.HubID()
+	case trajectoryharvest.FieldProjectID:
+		return m.ProjectID()
+	case trajectoryharvest.FieldAgentID:
+		return m.AgentID()
+	case trajectoryharvest.FieldBrokerID:
+		return m.BrokerID()
+	case trajectoryharvest.FieldRunID:
+		return m.RunID()
+	case trajectoryharvest.FieldTrigger:
+		return m.Trigger()
+	case trajectoryharvest.FieldOutcome:
+		return m.Outcome()
+	case trajectoryharvest.FieldTrajectory:
+		return m.Trajectory()
+	case trajectoryharvest.FieldUsage:
+		return m.Usage()
+	case trajectoryharvest.FieldSegmentsCommitted:
+		return m.SegmentsCommitted()
+	case trajectoryharvest.FieldBytesCommitted:
+		return m.BytesCommitted()
+	case trajectoryharvest.FieldPendingBytes:
+		return m.PendingBytes()
+	case trajectoryharvest.FieldOldestPendingAt:
+		return m.OldestPendingAt()
+	case trajectoryharvest.FieldUsageEventsDrained:
+		return m.UsageEventsDrained()
+	case trajectoryharvest.FieldUsageEventsPending:
+		return m.UsageEventsPending()
+	case trajectoryharvest.FieldErrorCode:
+		return m.ErrorCode()
+	case trajectoryharvest.FieldError:
+		return m.Error()
+	case trajectoryharvest.FieldStartedAt:
+		return m.StartedAt()
+	case trajectoryharvest.FieldFinishedAt:
+		return m.FinishedAt()
+	case trajectoryharvest.FieldCreatedAt:
+		return m.CreatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *TrajectoryHarvestMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case trajectoryharvest.FieldHarvestID:
+		return m.OldHarvestID(ctx)
+	case trajectoryharvest.FieldHubID:
+		return m.OldHubID(ctx)
+	case trajectoryharvest.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case trajectoryharvest.FieldAgentID:
+		return m.OldAgentID(ctx)
+	case trajectoryharvest.FieldBrokerID:
+		return m.OldBrokerID(ctx)
+	case trajectoryharvest.FieldRunID:
+		return m.OldRunID(ctx)
+	case trajectoryharvest.FieldTrigger:
+		return m.OldTrigger(ctx)
+	case trajectoryharvest.FieldOutcome:
+		return m.OldOutcome(ctx)
+	case trajectoryharvest.FieldTrajectory:
+		return m.OldTrajectory(ctx)
+	case trajectoryharvest.FieldUsage:
+		return m.OldUsage(ctx)
+	case trajectoryharvest.FieldSegmentsCommitted:
+		return m.OldSegmentsCommitted(ctx)
+	case trajectoryharvest.FieldBytesCommitted:
+		return m.OldBytesCommitted(ctx)
+	case trajectoryharvest.FieldPendingBytes:
+		return m.OldPendingBytes(ctx)
+	case trajectoryharvest.FieldOldestPendingAt:
+		return m.OldOldestPendingAt(ctx)
+	case trajectoryharvest.FieldUsageEventsDrained:
+		return m.OldUsageEventsDrained(ctx)
+	case trajectoryharvest.FieldUsageEventsPending:
+		return m.OldUsageEventsPending(ctx)
+	case trajectoryharvest.FieldErrorCode:
+		return m.OldErrorCode(ctx)
+	case trajectoryharvest.FieldError:
+		return m.OldError(ctx)
+	case trajectoryharvest.FieldStartedAt:
+		return m.OldStartedAt(ctx)
+	case trajectoryharvest.FieldFinishedAt:
+		return m.OldFinishedAt(ctx)
+	case trajectoryharvest.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown TrajectoryHarvest field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *TrajectoryHarvestMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case trajectoryharvest.FieldHarvestID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHarvestID(v)
+		return nil
+	case trajectoryharvest.FieldHubID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHubID(v)
+		return nil
+	case trajectoryharvest.FieldProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case trajectoryharvest.FieldAgentID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentID(v)
+		return nil
+	case trajectoryharvest.FieldBrokerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBrokerID(v)
+		return nil
+	case trajectoryharvest.FieldRunID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunID(v)
+		return nil
+	case trajectoryharvest.FieldTrigger:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTrigger(v)
+		return nil
+	case trajectoryharvest.FieldOutcome:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOutcome(v)
+		return nil
+	case trajectoryharvest.FieldTrajectory:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTrajectory(v)
+		return nil
+	case trajectoryharvest.FieldUsage:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUsage(v)
+		return nil
+	case trajectoryharvest.FieldSegmentsCommitted:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSegmentsCommitted(v)
+		return nil
+	case trajectoryharvest.FieldBytesCommitted:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBytesCommitted(v)
+		return nil
+	case trajectoryharvest.FieldPendingBytes:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPendingBytes(v)
+		return nil
+	case trajectoryharvest.FieldOldestPendingAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOldestPendingAt(v)
+		return nil
+	case trajectoryharvest.FieldUsageEventsDrained:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUsageEventsDrained(v)
+		return nil
+	case trajectoryharvest.FieldUsageEventsPending:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUsageEventsPending(v)
+		return nil
+	case trajectoryharvest.FieldErrorCode:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetErrorCode(v)
+		return nil
+	case trajectoryharvest.FieldError:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetError(v)
+		return nil
+	case trajectoryharvest.FieldStartedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartedAt(v)
+		return nil
+	case trajectoryharvest.FieldFinishedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFinishedAt(v)
+		return nil
+	case trajectoryharvest.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectoryHarvest field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *TrajectoryHarvestMutation) AddedFields() []string {
+	var fields []string
+	if m.addsegments_committed != nil {
+		fields = append(fields, trajectoryharvest.FieldSegmentsCommitted)
+	}
+	if m.addbytes_committed != nil {
+		fields = append(fields, trajectoryharvest.FieldBytesCommitted)
+	}
+	if m.addpending_bytes != nil {
+		fields = append(fields, trajectoryharvest.FieldPendingBytes)
+	}
+	if m.addusage_events_drained != nil {
+		fields = append(fields, trajectoryharvest.FieldUsageEventsDrained)
+	}
+	if m.addusage_events_pending != nil {
+		fields = append(fields, trajectoryharvest.FieldUsageEventsPending)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *TrajectoryHarvestMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case trajectoryharvest.FieldSegmentsCommitted:
+		return m.AddedSegmentsCommitted()
+	case trajectoryharvest.FieldBytesCommitted:
+		return m.AddedBytesCommitted()
+	case trajectoryharvest.FieldPendingBytes:
+		return m.AddedPendingBytes()
+	case trajectoryharvest.FieldUsageEventsDrained:
+		return m.AddedUsageEventsDrained()
+	case trajectoryharvest.FieldUsageEventsPending:
+		return m.AddedUsageEventsPending()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *TrajectoryHarvestMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case trajectoryharvest.FieldSegmentsCommitted:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSegmentsCommitted(v)
+		return nil
+	case trajectoryharvest.FieldBytesCommitted:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddBytesCommitted(v)
+		return nil
+	case trajectoryharvest.FieldPendingBytes:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddPendingBytes(v)
+		return nil
+	case trajectoryharvest.FieldUsageEventsDrained:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddUsageEventsDrained(v)
+		return nil
+	case trajectoryharvest.FieldUsageEventsPending:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddUsageEventsPending(v)
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectoryHarvest numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *TrajectoryHarvestMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(trajectoryharvest.FieldRunID) {
+		fields = append(fields, trajectoryharvest.FieldRunID)
+	}
+	if m.FieldCleared(trajectoryharvest.FieldOldestPendingAt) {
+		fields = append(fields, trajectoryharvest.FieldOldestPendingAt)
+	}
+	if m.FieldCleared(trajectoryharvest.FieldErrorCode) {
+		fields = append(fields, trajectoryharvest.FieldErrorCode)
+	}
+	if m.FieldCleared(trajectoryharvest.FieldError) {
+		fields = append(fields, trajectoryharvest.FieldError)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *TrajectoryHarvestMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *TrajectoryHarvestMutation) ClearField(name string) error {
+	switch name {
+	case trajectoryharvest.FieldRunID:
+		m.ClearRunID()
+		return nil
+	case trajectoryharvest.FieldOldestPendingAt:
+		m.ClearOldestPendingAt()
+		return nil
+	case trajectoryharvest.FieldErrorCode:
+		m.ClearErrorCode()
+		return nil
+	case trajectoryharvest.FieldError:
+		m.ClearError()
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectoryHarvest nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *TrajectoryHarvestMutation) ResetField(name string) error {
+	switch name {
+	case trajectoryharvest.FieldHarvestID:
+		m.ResetHarvestID()
+		return nil
+	case trajectoryharvest.FieldHubID:
+		m.ResetHubID()
+		return nil
+	case trajectoryharvest.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case trajectoryharvest.FieldAgentID:
+		m.ResetAgentID()
+		return nil
+	case trajectoryharvest.FieldBrokerID:
+		m.ResetBrokerID()
+		return nil
+	case trajectoryharvest.FieldRunID:
+		m.ResetRunID()
+		return nil
+	case trajectoryharvest.FieldTrigger:
+		m.ResetTrigger()
+		return nil
+	case trajectoryharvest.FieldOutcome:
+		m.ResetOutcome()
+		return nil
+	case trajectoryharvest.FieldTrajectory:
+		m.ResetTrajectory()
+		return nil
+	case trajectoryharvest.FieldUsage:
+		m.ResetUsage()
+		return nil
+	case trajectoryharvest.FieldSegmentsCommitted:
+		m.ResetSegmentsCommitted()
+		return nil
+	case trajectoryharvest.FieldBytesCommitted:
+		m.ResetBytesCommitted()
+		return nil
+	case trajectoryharvest.FieldPendingBytes:
+		m.ResetPendingBytes()
+		return nil
+	case trajectoryharvest.FieldOldestPendingAt:
+		m.ResetOldestPendingAt()
+		return nil
+	case trajectoryharvest.FieldUsageEventsDrained:
+		m.ResetUsageEventsDrained()
+		return nil
+	case trajectoryharvest.FieldUsageEventsPending:
+		m.ResetUsageEventsPending()
+		return nil
+	case trajectoryharvest.FieldErrorCode:
+		m.ResetErrorCode()
+		return nil
+	case trajectoryharvest.FieldError:
+		m.ResetError()
+		return nil
+	case trajectoryharvest.FieldStartedAt:
+		m.ResetStartedAt()
+		return nil
+	case trajectoryharvest.FieldFinishedAt:
+		m.ResetFinishedAt()
+		return nil
+	case trajectoryharvest.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectoryHarvest field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *TrajectoryHarvestMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *TrajectoryHarvestMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *TrajectoryHarvestMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *TrajectoryHarvestMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *TrajectoryHarvestMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *TrajectoryHarvestMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *TrajectoryHarvestMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown TrajectoryHarvest unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *TrajectoryHarvestMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown TrajectoryHarvest edge %s", name)
+}
+
 // TrajectorySegmentMutation represents an operation that mutates the TrajectorySegment nodes in the graph.
 type TrajectorySegmentMutation struct {
 	config
@@ -128794,6 +130455,7 @@ type TrajectorySegmentMutation struct {
 	compressed_sha256    *string
 	incomplete_tail      *bool
 	session_id           *string
+	upload_source        *string
 	object_path          *string
 	manifest_path        *string
 	status               *string
@@ -129649,6 +131311,42 @@ func (m *TrajectorySegmentMutation) ResetSessionID() {
 	delete(m.clearedFields, trajectorysegment.FieldSessionID)
 }
 
+// SetUploadSource sets the "upload_source" field.
+func (m *TrajectorySegmentMutation) SetUploadSource(s string) {
+	m.upload_source = &s
+}
+
+// UploadSource returns the value of the "upload_source" field in the mutation.
+func (m *TrajectorySegmentMutation) UploadSource() (r string, exists bool) {
+	v := m.upload_source
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUploadSource returns the old "upload_source" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldUploadSource(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUploadSource is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUploadSource requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUploadSource: %w", err)
+	}
+	return oldValue.UploadSource, nil
+}
+
+// ResetUploadSource resets all changes to the "upload_source" field.
+func (m *TrajectorySegmentMutation) ResetUploadSource() {
+	m.upload_source = nil
+}
+
 // SetObjectPath sets the "object_path" field.
 func (m *TrajectorySegmentMutation) SetObjectPath(s string) {
 	m.object_path = &s
@@ -129961,7 +131659,7 @@ func (m *TrajectorySegmentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TrajectorySegmentMutation) Fields() []string {
-	fields := make([]string, 0, 24)
+	fields := make([]string, 0, 25)
 	if m.hub_id != nil {
 		fields = append(fields, trajectorysegment.FieldHubID)
 	}
@@ -130012,6 +131710,9 @@ func (m *TrajectorySegmentMutation) Fields() []string {
 	}
 	if m.session_id != nil {
 		fields = append(fields, trajectorysegment.FieldSessionID)
+	}
+	if m.upload_source != nil {
+		fields = append(fields, trajectorysegment.FieldUploadSource)
 	}
 	if m.object_path != nil {
 		fields = append(fields, trajectorysegment.FieldObjectPath)
@@ -130076,6 +131777,8 @@ func (m *TrajectorySegmentMutation) Field(name string) (ent.Value, bool) {
 		return m.IncompleteTail()
 	case trajectorysegment.FieldSessionID:
 		return m.SessionID()
+	case trajectorysegment.FieldUploadSource:
+		return m.UploadSource()
 	case trajectorysegment.FieldObjectPath:
 		return m.ObjectPath()
 	case trajectorysegment.FieldManifestPath:
@@ -130133,6 +131836,8 @@ func (m *TrajectorySegmentMutation) OldField(ctx context.Context, name string) (
 		return m.OldIncompleteTail(ctx)
 	case trajectorysegment.FieldSessionID:
 		return m.OldSessionID(ctx)
+	case trajectorysegment.FieldUploadSource:
+		return m.OldUploadSource(ctx)
 	case trajectorysegment.FieldObjectPath:
 		return m.OldObjectPath(ctx)
 	case trajectorysegment.FieldManifestPath:
@@ -130274,6 +131979,13 @@ func (m *TrajectorySegmentMutation) SetField(name string, value ent.Value) error
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSessionID(v)
+		return nil
+	case trajectorysegment.FieldUploadSource:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUploadSource(v)
 		return nil
 	case trajectorysegment.FieldObjectPath:
 		v, ok := value.(string)
@@ -130513,6 +132225,9 @@ func (m *TrajectorySegmentMutation) ResetField(name string) error {
 		return nil
 	case trajectorysegment.FieldSessionID:
 		m.ResetSessionID()
+		return nil
+	case trajectorysegment.FieldUploadSource:
+		m.ResetUploadSource()
 		return nil
 	case trajectorysegment.FieldObjectPath:
 		m.ResetObjectPath()

@@ -216,6 +216,7 @@ func TestTrajectoryUploader_OutcomeMappingTable(t *testing.T) {
 	}{
 		{"404_experiment_off", http.StatusNotFound, "not_found", shipper.OutcomeCaptureUnavailable},
 		{"409_conflict", http.StatusConflict, telemetrycontract.TrajectoryErrSegmentConflict, shipper.OutcomeConflict},
+		{"409_object_conflict", http.StatusConflict, telemetrycontract.TrajectoryErrObjectConflict, shipper.OutcomeConflict},
 		{"400_invalid", http.StatusBadRequest, telemetrycontract.TrajectoryErrInvalidSegment, shipper.OutcomeRejected},
 		{"413_too_large", http.StatusRequestEntityTooLarge, telemetrycontract.TrajectoryErrSegmentTooLarge, shipper.OutcomeRejected},
 		{"413_run_cap", http.StatusRequestEntityTooLarge, telemetrycontract.TrajectoryErrRunCapExceeded, shipper.OutcomeRunCapExceeded},
@@ -457,5 +458,110 @@ func TestUploadTrajectorySegmentScrubsSignedURLQueryFromTransportError(t *testin
 	}
 	if !strings.Contains(msg, closedURL+"/bucket/agent/seg.jsonl.gz") {
 		t.Fatalf("expected redacted base URL in transport error, got: %s", msg)
+	}
+}
+
+func TestTrajectoryUploader_CommitObjectConflictBumpsGenerationWhile422Retries(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		commitStatus   int
+		commitCode     string
+		wantGenBumps   int
+		wantPendingNil bool
+	}{
+		{
+			name:           "409_segment_object_conflict_terminal_bumps_generation",
+			commitStatus:   http.StatusConflict,
+			commitCode:     telemetrycontract.TrajectoryErrObjectConflict,
+			wantGenBumps:   1,
+			wantPendingNil: true,
+		},
+		{
+			name:           "422_segment_verification_failed_retryable_preserves_pending",
+			commitStatus:   http.StatusUnprocessableEntity,
+			commitCode:     telemetrycontract.TrajectoryErrVerificationFailed,
+			wantGenBumps:   0,
+			wantPendingNil: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var srv *httptest.Server
+			srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case telemetrycontract.TrajectorySegmentsPrepareAgentPath("agent-1"):
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(telemetrycontract.TrajectorySegmentPrepareResponse{
+						SegmentID:  "seg-conflict",
+						State:      telemetrycontract.TrajectorySegmentStateUploadRequired,
+						ObjectPath: "hub/obj.seg.gz",
+						Upload: &telemetrycontract.TrajectorySegmentUploadInstruction{
+							Method: http.MethodPut,
+							URL:    srv.URL + telemetrycontract.TrajectorySegmentContentAgentPath("agent-1", "seg-conflict") + "?exp=9999999999&sig=abc",
+							Headers: map[string]string{
+								"Content-Type": "application/gzip",
+							},
+						},
+					})
+				case telemetrycontract.TrajectorySegmentContentAgentPath("agent-1", "seg-conflict"):
+					w.WriteHeader(http.StatusPreconditionFailed) // existing object -> proceed to commit
+				case telemetrycontract.TrajectorySegmentsCommitAgentPath("agent-1"):
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(tc.commitStatus)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"error": map[string]string{
+							"code":    tc.commitCode,
+							"message": "commit verification result",
+						},
+					})
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			home := t.TempDir()
+			rel := ".claude/projects/-workspace/sess-conflict.jsonl"
+			artPath := filepath.Join(home, filepath.FromSlash(rel))
+			if err := os.MkdirAll(filepath.Dir(artPath), 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if err := os.WriteFile(artPath, nil, 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+
+			up := NewTrajectoryUploader(NewClientWithConfig(srv.URL, "tok", "agent-1"))
+			s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up})
+			if err != nil {
+				t.Fatalf("shipper.New: %v", err)
+			}
+			if _, err := s.Baseline(context.Background()); err != nil {
+				t.Fatalf("Baseline: %v", err)
+			}
+			if err := os.WriteFile(artPath, []byte("{\"seq\":1}\n"), 0o644); err != nil {
+				t.Fatalf("append: %v", err)
+			}
+
+			roundRes, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+			if err != nil {
+				t.Fatalf("RunRound: %v", err)
+			}
+			if roundRes.GenerationBumps != tc.wantGenBumps {
+				t.Fatalf("GenerationBumps=%d, want %d", roundRes.GenerationBumps, tc.wantGenBumps)
+			}
+			st, ok, err := shipper.LoadState(home)
+			if err != nil || !ok {
+				t.Fatalf("LoadState: ok=%v err=%v", ok, err)
+			}
+			entry := st.Artifacts[rel]
+			if tc.wantPendingNil && entry.Pending != nil {
+				t.Fatalf("expected Pending to be cleared on conflict, got %+v", entry.Pending)
+			}
+			if !tc.wantPendingNil && entry.Pending == nil {
+				t.Fatalf("expected Pending to be preserved on retryable 422")
+			}
+			if entry.LastError == "" {
+				t.Fatalf("expected LastError to be recorded")
+			}
+		})
 	}
 }

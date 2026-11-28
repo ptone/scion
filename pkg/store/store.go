@@ -637,6 +637,9 @@ type Store interface {
 	// Tokenomics Track 2 raw trajectory segments (ptone/scion#9250)
 	TrajectorySegmentStore
 
+	// Tokenomics Track 2 broker harvest outcome records (ptone/scion#9253)
+	TrajectoryHarvestStore
+
 	// Pre-suspend terminal screen snapshots (ptone/scion#8530)
 	AgentSuspendScreenStore
 

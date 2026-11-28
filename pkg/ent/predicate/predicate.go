@@ -327,6 +327,9 @@ type ThreadGroup func(*sql.Selector)
 // ThreadGroupMember is the predicate function for threadgroupmember builders.
 type ThreadGroupMember func(*sql.Selector)
 
+// TrajectoryHarvest is the predicate function for trajectoryharvest builders.
+type TrajectoryHarvest func(*sql.Selector)
+
 // TrajectorySegment is the predicate function for trajectorysegment builders.
 type TrajectorySegment func(*sql.Selector)
 

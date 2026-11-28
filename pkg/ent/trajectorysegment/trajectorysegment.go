@@ -47,6 +47,8 @@ const (
 	FieldIncompleteTail = "incomplete_tail"
 	// FieldSessionID holds the string denoting the session_id field in the database.
 	FieldSessionID = "session_id"
+	// FieldUploadSource holds the string denoting the upload_source field in the database.
+	FieldUploadSource = "upload_source"
 	// FieldObjectPath holds the string denoting the object_path field in the database.
 	FieldObjectPath = "object_path"
 	// FieldManifestPath holds the string denoting the manifest_path field in the database.
@@ -85,6 +87,7 @@ var Columns = []string{
 	FieldCompressedSha256,
 	FieldIncompleteTail,
 	FieldSessionID,
+	FieldUploadSource,
 	FieldObjectPath,
 	FieldManifestPath,
 	FieldStatus,
@@ -141,6 +144,10 @@ var (
 	DefaultIncompleteTail bool
 	// DefaultSessionID holds the default value on creation for the "session_id" field.
 	DefaultSessionID string
+	// DefaultUploadSource holds the default value on creation for the "upload_source" field.
+	DefaultUploadSource string
+	// UploadSourceValidator is a validator for the "upload_source" field. It is called by the builders before save.
+	UploadSourceValidator func(string) error
 	// ObjectPathValidator is a validator for the "object_path" field. It is called by the builders before save.
 	ObjectPathValidator func(string) error
 	// DefaultManifestPath holds the default value on creation for the "manifest_path" field.
@@ -250,6 +257,11 @@ func ByIncompleteTail(opts ...sql.OrderTermOption) OrderOption {
 // BySessionID orders the results by the session_id field.
 func BySessionID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSessionID, opts...).ToFunc()
+}
+
+// ByUploadSource orders the results by the upload_source field.
+func ByUploadSource(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldUploadSource, opts...).ToFunc()
 }
 
 // ByObjectPath orders the results by the object_path field.
