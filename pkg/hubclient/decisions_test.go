@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -345,5 +346,38 @@ func TestDecisionService_DismissedStateAndViews(t *testing.T) {
 	}
 	if len(res.Items) != 1 || res.Items[0].Dismissed == nil || res.Items[0].Dismissed.Reason != "Stale: shipped" {
 		t.Fatalf("unexpected List dismissed items: %+v", res.Items)
+	}
+}
+
+func TestDecisionAnswerView_CommentAndNoCommentGolden(t *testing.T) {
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+
+	noCmt := DecisionAnswerView{
+		ChoiceID:   "1",
+		Label:      "Staging",
+		Provenance: "direct",
+		Surface:    "native",
+		At:         now,
+	}
+	rawNoCmt, err := json.Marshal(noCmt)
+	if err != nil {
+		t.Fatalf("marshal no-comment: %v", err)
+	}
+	if strings.Contains(string(rawNoCmt), `"comment"`) {
+		t.Fatalf("no-comment DecisionAnswerView must omit comment key, got: %s", rawNoCmt)
+	}
+
+	withCmt := noCmt
+	withCmt.Comment = "Skip the load test"
+	rawWithCmt, err := json.Marshal(withCmt)
+	if err != nil {
+		t.Fatalf("marshal with-comment: %v", err)
+	}
+	var decoded DecisionAnswerView
+	if err := json.Unmarshal(rawWithCmt, &decoded); err != nil {
+		t.Fatalf("unmarshal with-comment: %v", err)
+	}
+	if decoded.Comment != "Skip the load test" {
+		t.Fatalf("decoded.Comment = %q, want %q", decoded.Comment, "Skip the load test")
 	}
 }

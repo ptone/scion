@@ -16,9 +16,11 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -128,5 +130,37 @@ func TestProjectDecisionService_ListQueryAndSearchSupport(t *testing.T) {
 	}
 	if resp.SupportsSearch() {
 		t.Error("a response without a conversations facet does not support search")
+	}
+}
+
+func TestProjectDecisionLogEntry_CommentAndNoCommentGolden(t *testing.T) {
+	noCmt := ProjectDecisionLogEntry{
+		AnswerID:   "ans-1",
+		ChoiceID:   "1",
+		Label:      "Staging",
+		Provenance: "direct",
+		Outcome:    "answer",
+		Surface:    "native",
+	}
+	rawNoCmt, err := json.Marshal(noCmt)
+	if err != nil {
+		t.Fatalf("marshal no-comment log entry: %v", err)
+	}
+	if strings.Contains(string(rawNoCmt), `"comment"`) {
+		t.Fatalf("no-comment ProjectDecisionLogEntry must omit comment key, got: %s", rawNoCmt)
+	}
+
+	withCmt := noCmt
+	withCmt.Comment = "Skip the load test"
+	rawWithCmt, err := json.Marshal(withCmt)
+	if err != nil {
+		t.Fatalf("marshal with-comment log entry: %v", err)
+	}
+	var decoded ProjectDecisionLogEntry
+	if err := json.Unmarshal(rawWithCmt, &decoded); err != nil {
+		t.Fatalf("unmarshal with-comment log entry: %v", err)
+	}
+	if decoded.Comment != "Skip the load test" {
+		t.Fatalf("decoded.Comment = %q, want %q", decoded.Comment, "Skip the load test")
 	}
 }

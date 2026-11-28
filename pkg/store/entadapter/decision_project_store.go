@@ -1684,11 +1684,11 @@ func decisionAnswerInChatKeysBounded(keys []string) predicate.DecisionAnswer {
 	}
 }
 
-// decisionAnswerMatchesQuery keeps answers whose question text, choice label
-// or key snapshot contains q case-insensitively, or whose decision row's
-// asker_agent_name contains q or whose chat_key is in labelKeys. ContainsFold
-// escapes %, _ and \, so q matches literally (ILIKE on Postgres, LOWER() LIKE
-// on SQLite).
+// decisionAnswerMatchesQuery keeps answers whose question text, choice label,
+// other_text, comment, dismiss_reason or key snapshot contains q
+// case-insensitively, or whose decision row's asker_agent_name contains q or
+// whose chat_key is in labelKeys. ContainsFold escapes %, _ and \, so q matches
+// literally (ILIKE on Postgres, LOWER() LIKE on SQLite).
 func decisionAnswerMatchesQuery(q string, labelKeys []string) predicate.DecisionAnswer {
 	rowArms := []predicate.Decision{decision.AskerAgentNameContainsFold(q)}
 	if len(labelKeys) > 0 {
@@ -1699,6 +1699,7 @@ func decisionAnswerMatchesQuery(q string, labelKeys []string) predicate.Decision
 		decisionanswer.QuestionTextContainsFold(q),
 		decisionanswer.ChoiceLabelContainsFold(q),
 		decisionanswer.And(decisionanswer.OtherTextNotNil(), decisionanswer.OtherTextContainsFold(q)),
+		decisionanswer.And(decisionanswer.CommentNotNil(), decisionanswer.CommentContainsFold(q)),
 		decisionanswer.And(decisionanswer.DismissReasonNotNil(), decisionanswer.DismissReasonContainsFold(q)),
 		decisionanswer.KeyContainsFold(q),
 		func(s *entsql.Selector) {

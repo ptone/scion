@@ -58,6 +58,7 @@ type DecisionAnswerView struct {
 	ChoiceID             string    `json:"choiceId"`
 	Label                string    `json:"label"`
 	OtherText            string    `json:"otherText,omitempty"`
+	Comment              string    `json:"comment,omitempty"`
 	AnsweredByUserID     string    `json:"answeredByUserId,omitempty"`
 	AnsweredByName       string    `json:"answeredByName,omitempty"`
 	AnsweredByEmail      string    `json:"answeredByEmail,omitempty"`

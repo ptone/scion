@@ -1628,7 +1628,7 @@ func dismissalReasonContainsFold(q string) predicate.Decision {
 // effectiveAnswerLabelContainsFold matches decisions whose effective answer
 // (Decision.EffectiveAnswer: the direct answer when present, otherwise the
 // agent-interpreted answer, skipping dismissed decisions and outcome=dismiss
-// rows) has a choice_label or other_text containing q case-insensitively.
+// rows) has a choice_label, other_text or comment containing q case-insensitively.
 func effectiveAnswerLabelContainsFold(q string) predicate.Decision {
 	return func(s *entsql.Selector) {
 		ta := entsql.Table(decisionanswer.Table).As("da_eff")
@@ -1652,6 +1652,7 @@ func effectiveAnswerLabelContainsFold(q string) predicate.Decision {
 						entsql.Or(
 							entsql.ContainsFold(ta.C(decisionanswer.FieldChoiceLabel), q),
 							entsql.ContainsFold(ta.C(decisionanswer.FieldOtherText), q),
+							entsql.ContainsFold(ta.C(decisionanswer.FieldComment), q),
 						),
 						entsql.Or(
 							entsql.EQ(ta.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),

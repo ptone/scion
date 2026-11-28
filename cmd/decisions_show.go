@@ -155,6 +155,9 @@ func writeDecisionsShow(out io.Writer, resp *hubclient.AgentDecisionShowResponse
 				line += fmt.Sprintf(": %s", collapseSingleLine(a.DismissReason))
 			}
 			_, _ = fmt.Fprintln(out, line)
+			if cmt := collapseSingleLine(a.Comment); cmt != "" {
+				_, _ = fmt.Fprintf(out, "      comment: \"%s\"\n", cmt)
+			}
 		}
 	}
 }
