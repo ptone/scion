@@ -24,39 +24,36 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 )
 
-// TestComputeCacheKey tests cache key computation.
-func TestComputeCacheKey(t *testing.T) {
-	key1 := computeCacheKey("owner", "repo", "skills/test", "main", "public")
-	key2 := computeCacheKey("owner", "repo", "skills/test", "main", "public")
+// TestGitHubSkillCacheKeys tests canonical ref and tree cache keys from githubfetch.
+func TestGitHubSkillCacheKeys(t *testing.T) {
+	ep := githubfetch.DefaultEndpoint()
+	key1 := githubfetch.RefCacheKey(ep.APIHost(), "owner", "repo", "main", githubfetch.AnonScope)
+	key2 := githubfetch.RefCacheKey(ep.APIHost(), "owner", "repo", "main", githubfetch.AnonScope)
 	require.Equal(t, key1, key2, "same inputs should produce same key")
 
-	key3 := computeCacheKey("owner", "repo", "skills/test", "main", "12345")
+	key3 := githubfetch.RefCacheKey(ep.APIHost(), "owner", "repo", "main", "app:12345")
 	require.NotEqual(t, key1, key3, "different token scope should produce different key")
 
-	key4 := computeCacheKey("Owner", "Repo", "skills/test", "main", "public")
+	key4 := githubfetch.RefCacheKey(ep.APIHost(), "Owner", "Repo", "main", githubfetch.AnonScope)
 	require.Equal(t, key1, key4, "owner/repo should be lowercased")
+
+	empty := githubfetch.RefCacheKey(ep.APIHost(), "acme", "skills", "", githubfetch.AnonScope)
+	head := githubfetch.RefCacheKey(ep.APIHost(), "acme", "skills", "HEAD", githubfetch.AnonScope)
+	require.NotEqual(t, empty, head)
 }
 
-// TestIsFullCommitSHA tests SHA validation.
-func TestIsFullCommitSHA(t *testing.T) {
-	require.True(t, isFullCommitSHA("abcdef1234567890abcdef1234567890abcdef12"))
-	require.True(t, isFullCommitSHA("0000000000000000000000000000000000000000"))
-	require.False(t, isFullCommitSHA("abcdef123456"))                             // Too short
-	require.False(t, isFullCommitSHA("ABCDEF1234567890ABCDEF1234567890ABCDEF12")) // Uppercase
-	require.False(t, isFullCommitSHA("main"))                                     // Not a SHA
-	require.False(t, isFullCommitSHA(""))                                         // Empty
-}
-
-func TestGHRawContentURL(t *testing.T) {
+// TestSkillEndpointRawURL tests permanent raw URL construction via githubfetch.Endpoint.
+func TestSkillEndpointRawURL(t *testing.T) {
+	const commitSHA = "abcdef1234567890abcdef1234567890abcdef12"
 	cases := []struct {
 		name      string
 		rawBase   string
 		owner     string
 		repo      string
-		commitSHA string
+		skillPath string
 		filePath  string
 		want      string
 	}{
@@ -65,44 +62,42 @@ func TestGHRawContentURL(t *testing.T) {
 			rawBase:   "https://raw.githubusercontent.com",
 			owner:     "acme",
 			repo:      "skills",
-			commitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-			filePath:  "skills/deploy/SKILL.md",
-			want:      "https://raw.githubusercontent.com/acme/skills/abcdef1234567890abcdef1234567890abcdef12/skills/deploy/SKILL.md",
+			skillPath: "skills/deploy",
+			filePath:  "SKILL.md",
+			want:      "https://raw.githubusercontent.com/acme/skills/" + commitSHA + "/skills/deploy/SKILL.md",
 		},
 		{
 			name:      "trailing slash on base is not doubled",
 			rawBase:   "https://raw.githubusercontent.com/",
 			owner:     "acme",
 			repo:      "skills",
-			commitSHA: "abcdef1234567890abcdef1234567890abcdef12",
+			skillPath: "",
 			filePath:  "SKILL.md",
-			want:      "https://raw.githubusercontent.com/acme/skills/abcdef1234567890abcdef1234567890abcdef12/SKILL.md",
+			want:      "https://raw.githubusercontent.com/acme/skills/" + commitSHA + "/SKILL.md",
 		},
 		{
 			name:      "spaces are escaped but separators are preserved",
 			rawBase:   "https://raw.githubusercontent.com",
 			owner:     "acme",
 			repo:      "skills",
-			commitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-			filePath:  "my skills/read me.md",
-			want:      "https://raw.githubusercontent.com/acme/skills/abcdef1234567890abcdef1234567890abcdef12/my%20skills/read%20me.md",
+			skillPath: "my skills",
+			filePath:  "read me.md",
+			want:      "https://raw.githubusercontent.com/acme/skills/" + commitSHA + "/my%20skills/read%20me.md",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ghRawContentURL(tc.rawBase, tc.owner, tc.repo, tc.commitSHA, tc.filePath)
-			require.Equal(t, tc.want, got)
+			ep := githubfetch.Endpoint{RawBase: tc.rawBase}
+			src := githubfetch.Source{Owner: tc.owner, Repo: tc.repo, Path: tc.skillPath}
+			require.Equal(t, tc.want, ep.RawURL(src, commitSHA, tc.filePath))
 		})
 	}
 }
 
-// TestGHListTree_FilesModesAndURLs pins what the hub reads from the recursive
-// git tree of a skill directory (ptone/scion#5781): every regular file at
-// any depth, with its normalised mode, its git blob SHA and a permanent raw
-// URL built from the pinned commit; symlinks and directory entries are not
-// files.
-func TestGHListTree_FilesModesAndURLs(t *testing.T) {
+// TestSkillListTree_FilesModesAndURLs pins what the hub reads from the recursive
+// git tree of a skill directory via githubfetch.Client.ListTree.
+func TestSkillListTree_FilesModesAndURLs(t *testing.T) {
 	const commitSHA = "abcdef1234567890abcdef1234567890abcdef12"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -118,56 +113,52 @@ func TestGHListTree_FilesModesAndURLs(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, err := ghListTree(context.Background(), agent.NewGitHubCooldown(nil), "anon", srv.URL, "https://raw.githubusercontent.com",
-		"acme", "skills", "skills/deploy", commitSHA, "")
+	ep := githubfetch.Endpoint{APIBase: srv.URL, RawBase: "https://raw.githubusercontent.com"}
+	client := githubfetch.New(githubfetch.Options{
+		Endpoint: ep,
+		Doer:     &skillTestHTTPDoer{client: srv.Client()},
+		Cooldown: githubfetch.NewCooldown(nil),
+	})
+	src := githubfetch.Source{Owner: "acme", Repo: "skills", Path: "skills/deploy"}
+	tree, err := client.ListTree(context.Background(), src, commitSHA, githubfetch.Credential{Scope: githubfetch.AnonScope}, githubfetch.SkillLimits())
 	require.NoError(t, err)
-
-	require.Equal(t, []GitHubFileEntry{
-		{
-			Path: "SKILL.md",
-			URL:  "https://raw.githubusercontent.com/acme/skills/" + commitSHA + "/skills/deploy/SKILL.md",
-			Hash: "ce013625030ba8dba906f756967f9e9ca394464a",
-			Size: 6,
-			Mode: "0644",
-		},
-		{
-			Path: "scripts/run.sh",
-			URL:  "https://raw.githubusercontent.com/acme/skills/" + commitSHA + "/skills/deploy/scripts/run.sh",
-			Hash: "95d09f2b10159347eece71399a7e2e907ea3df4f",
-			Size: 11,
-			Mode: "0755",
-		},
-	}, entries)
+	require.Len(t, tree.Files, 2)
+	require.Equal(t, "SKILL.md", tree.Files[0].Path)
+	require.Equal(t, "0644", fmt.Sprintf("%04o", tree.Files[0].Mode))
+	require.Equal(t, "https://raw.githubusercontent.com/acme/skills/"+commitSHA+"/skills/deploy/SKILL.md", ep.RawURL(src, commitSHA, tree.Files[0].Path))
+	require.Equal(t, "scripts/run.sh", tree.Files[1].Path)
+	require.Equal(t, "0755", fmt.Sprintf("%04o", tree.Files[1].Mode))
+	require.Equal(t, "https://raw.githubusercontent.com/acme/skills/"+commitSHA+"/skills/deploy/scripts/run.sh", ep.RawURL(src, commitSHA, tree.Files[1].Path))
 }
 
-// TestGHListTree_RejectsUnusableTrees covers the listings the hub refuses
-// instead of caching an incomplete or unsafe skill (ptone/scion#5781).
-func TestGHListTree_RejectsUnusableTrees(t *testing.T) {
+// TestSkillListTree_RejectsUnusableTrees covers the listings the hub refuses
+// instead of caching an incomplete or unsafe skill.
+func TestSkillListTree_RejectsUnusableTrees(t *testing.T) {
 	const commitSHA = "abcdef1234567890abcdef1234567890abcdef12"
 	cases := []struct {
-		name string
-		body string
-		want error
+		name     string
+		body     string
+		wantKind githubfetch.Kind
 	}{
 		{
-			name: "truncated",
-			body: `{"truncated":true,"tree":[{"path":"SKILL.md","mode":"100644","type":"blob","sha":"x","size":1}]}`,
-			want: agent.ErrGitHubTreeTruncated,
+			name:     "truncated",
+			body:     `{"truncated":true,"tree":[{"path":"SKILL.md","mode":"100644","type":"blob","sha":"x","size":1}]}`,
+			wantKind: githubfetch.KindTooLarge,
 		},
 		{
-			name: "submodule",
-			body: `{"truncated":false,"tree":[{"path":"SKILL.md","mode":"100644","type":"blob","sha":"x","size":1},{"path":"vendor","mode":"160000","type":"commit","sha":"y"}]}`,
-			want: agent.ErrGitHubTreeSubmodule,
+			name:     "submodule",
+			body:     `{"truncated":false,"tree":[{"path":"SKILL.md","mode":"100644","type":"blob","sha":"x","size":1},{"path":"vendor","mode":"160000","type":"commit","sha":"y"}]}`,
+			wantKind: githubfetch.KindUnsupportedContent,
 		},
 		{
-			name: "more than the file limit",
-			body: ghManyFilesTree(agent.MaxGitHubSkillFiles + 1),
-			want: agent.ErrGitHubSkillTooManyFiles,
+			name:     "more than the file limit",
+			body:     ghManyFilesTree(githubfetch.SkillLimits().MaxFiles + 1),
+			wantKind: githubfetch.KindTooLarge,
 		},
 		{
-			name: "parent segment",
-			body: `{"truncated":false,"tree":[{"path":"../SKILL.md","mode":"100644","type":"blob","sha":"x","size":1}]}`,
-			want: agent.ErrGitHubTreeUnsafePath,
+			name:     "parent segment",
+			body:     `{"truncated":false,"tree":[{"path":"../SKILL.md","mode":"100644","type":"blob","sha":"x","size":1}]}`,
+			wantKind: githubfetch.KindUnsupportedContent,
 		},
 	}
 	for _, tc := range cases {
@@ -177,9 +168,17 @@ func TestGHListTree_RejectsUnusableTrees(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			_, err := ghListTree(context.Background(), agent.NewGitHubCooldown(nil), "anon", srv.URL, "https://raw.githubusercontent.com",
-				"acme", "skills", "skills/deploy", commitSHA, "")
-			require.ErrorIs(t, err, tc.want)
+			ep := githubfetch.Endpoint{APIBase: srv.URL, RawBase: "https://raw.githubusercontent.com"}
+			client := githubfetch.New(githubfetch.Options{
+				Endpoint: ep,
+				Doer:     &skillTestHTTPDoer{client: srv.Client()},
+				Cooldown: githubfetch.NewCooldown(nil),
+			})
+			_, err := client.ListTree(context.Background(), githubfetch.Source{Owner: "acme", Repo: "skills", Path: "skills/deploy"}, commitSHA, githubfetch.Credential{Scope: githubfetch.AnonScope}, githubfetch.SkillLimits())
+			require.Error(t, err)
+			var ghe *githubfetch.Error
+			require.ErrorAs(t, err, &ghe)
+			require.Equal(t, tc.wantKind, ghe.Kind)
 		})
 	}
 }
@@ -196,33 +195,4 @@ func ghManyFilesTree(n int) string {
 	}
 	b.WriteString("]}")
 	return b.String()
-}
-
-// TestGHListTree_RawBaseOverride confirms the raw origin is configurable,
-// which is what lets a GitHub Enterprise deployment work.
-func TestGHListTree_RawBaseOverride(t *testing.T) {
-	const commitSHA = "abcdef1234567890abcdef1234567890abcdef12"
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"truncated":false,"tree":[{"path":"SKILL.md","mode":"100644","type":"blob","sha":"ce013625030ba8dba906f756967f9e9ca394464a","size":6}]}`))
-	}))
-	defer srv.Close()
-
-	entries, err := ghListTree(context.Background(), agent.NewGitHubCooldown(nil), "anon", srv.URL, "https://raw.ghe.example.com",
-		"acme", "skills", "s", commitSHA, "")
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	require.Equal(t,
-		"https://raw.ghe.example.com/acme/skills/"+commitSHA+"/s/SKILL.md",
-		entries[0].URL)
-}
-
-// TestComputeCacheKey_EmptyRefDiffersFromHEAD documents why resolveGitHubSkill
-// must default an omitted ref before computing the cache key: the two spellings
-// resolve to the same commit but key differently, so leaving the ref empty
-// would halve the hit rate for every unpinned gh:// URI.
-func TestComputeCacheKey_EmptyRefDiffersFromHEAD(t *testing.T) {
-	empty := computeCacheKey("acme", "skills", "skills/deploy", "", "public")
-	head := computeCacheKey("acme", "skills", "skills/deploy", "HEAD", "public")
-	require.NotEqual(t, empty, head)
 }

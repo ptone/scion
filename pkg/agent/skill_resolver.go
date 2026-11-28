@@ -94,6 +94,10 @@ const (
 	// skills for the project. It reaches the broker as a
 	// SkillResolutionError.Code through PreResolvedSkills.
 	SkillErrCodeForbidden = "forbidden"
+	// SkillErrCodeCredentialRejected is the per-URI code the Hub's batch skill
+	// resolve returns when GitHub rejects or denies the configured credential
+	// (HTTP 401 or non-rate-limit 403).
+	SkillErrCodeCredentialRejected = "credential_rejected"
 	// SkillErrCodeResolveFailed is the uncategorized per-ref resolution
 	// failure: the ref could not be resolved for a reason none of the codes
 	// above describes. The create path keeps it on the 5xx path.

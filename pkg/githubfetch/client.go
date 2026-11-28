@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
@@ -181,7 +182,7 @@ func (c *Client) ResolveRef(ctx context.Context, s Source, cred Credential) (Res
 		}
 		// Annotated tags (object.type == "tag") or non-commit refs: dereference
 		// to the commit SHA via commits/{ref}.
-		res, err := c.resolveCommitSHA(ctx, resolved, matched, kind, cred)
+		res, _, err := c.resolveCommitSHA(ctx, resolved, matched, kind, cred, "")
 		if err != nil {
 			return ResolvedRef{}, s, err
 		}
@@ -196,7 +197,7 @@ func (c *Client) ResolveRef(ctx context.Context, s Source, cred Credential) (Res
 		}
 		resolved := s
 		resolved.Ref = defBranch
-		res, err := c.resolveCommitSHA(ctx, resolved, defBranch, RefDefault, cred)
+		res, _, err := c.resolveCommitSHA(ctx, resolved, defBranch, RefDefault, cred, "")
 		if err != nil {
 			return ResolvedRef{}, s, err
 		}
@@ -204,11 +205,28 @@ func (c *Client) ResolveRef(ctx context.Context, s Source, cred Credential) (Res
 	}
 
 	// Unambiguous non-empty ref.
-	res, err := c.resolveCommitSHA(ctx, s, s.Ref, RefBranch, cred)
+	res, _, err := c.resolveCommitSHA(ctx, s, s.Ref, RefBranch, cred, "")
 	if err != nil {
 		return ResolvedRef{}, s, err
 	}
 	return res, s, nil
+}
+
+// ResolveRefConditional resolves s like ResolveRef, sending If-None-Match when
+// ifNoneMatch is non-empty and s has an unambiguous non-SHA ref. When GitHub
+// answers 304 Not Modified, notModified is true, res.ETag carries the response
+// ETag (or ifNoneMatch when omitted), and res.CommitSHA is empty so the caller
+// retains its cached SHA and extends TTL without re-listing the tree.
+func (c *Client) ResolveRefConditional(ctx context.Context, s Source, cred Credential, ifNoneMatch string) (res ResolvedRef, resolved Source, notModified bool, err error) {
+	if ifNoneMatch == "" || s.Owner == "" || s.Repo == "" || s.Ref == "" || len(s.RefAmbiguous) > 0 || IsFullCommitSHA(s.Ref) {
+		res, resolved, err = c.ResolveRef(ctx, s, cred)
+		return res, resolved, false, err
+	}
+	res, notModified, err = c.resolveCommitSHA(ctx, s, s.Ref, RefBranch, cred, ifNoneMatch)
+	if err != nil {
+		return ResolvedRef{}, s, false, err
+	}
+	return res, s, notModified, nil
 }
 
 type matchingRefEntry struct {
@@ -317,22 +335,41 @@ func (c *Client) fetchDefaultBranch(ctx context.Context, s Source, cred Credenti
 	return meta.DefaultBranch, nil
 }
 
-func (c *Client) resolveCommitSHA(ctx context.Context, s Source, ref string, kind RefKind, cred Credential) (ResolvedRef, error) {
+func (c *Client) resolveCommitSHA(ctx context.Context, s Source, ref string, kind RefKind, cred Credential, ifNoneMatch string) (ResolvedRef, bool, error) {
 	u := c.endpoint.APIBase + "/repos/" + url.PathEscape(s.Owner) + "/" + url.PathEscape(s.Repo) +
 		"/commits/" + url.PathEscape(ref)
 	hdr := http.Header{"Accept": {"application/vnd.github.sha"}}
+	if ifNoneMatch != "" {
+		hdr.Set("If-None-Match", ifNoneMatch)
+	}
 	resp, err := c.doAPI(ctx, Request{URL: u, Header: hdr, MaxBytes: 1024}, s.RepoSlug(), cred)
 	if err != nil {
-		return ResolvedRef{}, err
+		return ResolvedRef{}, false, err
+	}
+	if resp.Status == http.StatusNotModified {
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		etag := ifNoneMatch
+		if resp.Header != nil {
+			if got := resp.Header.Get("ETag"); got != "" {
+				etag = got
+			}
+		}
+		return ResolvedRef{
+			Ref:  ref,
+			Kind: kind,
+			ETag: etag,
+		}, true, nil
 	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
 	_ = resp.Body.Close()
 	if readErr != nil {
-		return ResolvedRef{}, ClassifyRemoteFetchError(readErr, s.RepoSlug(), cred, c.clock())
+		return ResolvedRef{}, false, ClassifyRemoteFetchError(readErr, s.RepoSlug(), cred, c.clock())
 	}
 	sha := strings.TrimSpace(string(body))
 	if !IsFullCommitSHA(sha) {
-		return ResolvedRef{}, &Error{Kind: KindUpstream, Repo: s.RepoSlug(), Hint: "invalid commit SHA response"}
+		return ResolvedRef{}, false, &Error{Kind: KindUpstream, Repo: s.RepoSlug(), Hint: "invalid commit SHA response"}
 	}
 	var etag string
 	if resp.Header != nil {
@@ -343,7 +380,7 @@ func (c *Client) resolveCommitSHA(ctx context.Context, s Source, ref string, kin
 		Ref:       ref,
 		Kind:      kind,
 		ETag:      etag,
-	}, nil
+	}, false, nil
 }
 
 // ListTree lists the recursive git tree for s.Path at commitSHA and validates
@@ -879,8 +916,20 @@ func (c *Client) do(ctx context.Context, req Request, repo string, cred Credenti
 			}
 		}
 
+		conditional := req.Header != nil && req.Header.Get("If-None-Match") != ""
 		resp, err := c.doer.Open(ctx, req)
 		if err != nil {
+			if conditional {
+				var fe *remotefetch.Error
+				if errors.As(err, &fe) && fe.Reason == remotefetch.ReasonStatus && fe.Status == http.StatusNotModified {
+					c.cooldown.ClearIfElapsed(scope)
+					return &Response{
+						Status: http.StatusNotModified,
+						Header: fe.Header,
+						Body:   io.NopCloser(strings.NewReader("")),
+					}, nil
+				}
+			}
 			ghe := ClassifyRemoteFetchError(err, repo, cred, c.clock())
 			if ghe.Kind == KindRateLimited {
 				d := ghe.RetryAfter
@@ -895,6 +944,11 @@ func (c *Client) do(ctx context.Context, req Request, repo string, cred Credenti
 				continue
 			}
 			return nil, ghe
+		}
+
+		if conditional && resp.Status == http.StatusNotModified {
+			c.cooldown.ClearIfElapsed(scope)
+			return resp, nil
 		}
 
 		if resp.Status < 200 || resp.Status >= 300 {

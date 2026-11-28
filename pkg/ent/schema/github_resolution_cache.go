@@ -41,7 +41,7 @@ func (GitHubResolutionCache) Fields() []ent.Field {
 		field.String("cache_key").
 			NotEmpty().
 			Unique().
-			Comment("sha256(normalized_uri + \":\" + token_scope_id)"),
+			Comment("Canonical githubfetch cache key (ref:{host}/{owner}/{repo}@{ref}#{scope} or tree:{host}/{owner}/{repo}@{sha}:{path}#{scope})"),
 		field.String("original_uri").
 			NotEmpty().
 			Comment("Original gh:// URI for debugging"),
@@ -55,7 +55,10 @@ func (GitHubResolutionCache) Fields() []ent.Field {
 			Comment("Content-addressed bundle hash computed from file_entries"),
 		field.String("token_scope").
 			Default("public").
-			Comment("GitHub App installation ID or 'public' for unauthenticated"),
+			Comment("GitHub principal scope (anon, app:<id>, secret:<hmac>)"),
+		field.String("etag").
+			Default("").
+			Comment("HTTP ETag from the last ref resolution for conditional If-None-Match requests"),
 		field.Time("expires_at").
 			Comment("Cache entry expiration time"),
 		field.Time("create_time").

@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -36,9 +37,24 @@ const SecretKeyGitHubScopeKey = "github_scope_hmac_key"
 
 // initGitHubScopeKey loads or creates the dedicated GitHub credential scope
 // HMAC key through the Hub's purpose-key mechanism (signing ring in keyring
-// mode; ensureSigningKey in legacy mode). If the key cannot be loaded on a
-// non-strict deployment, the server logs a warning and falls back to truncated
-// SHA-256 scopes rather than failing startup.
+// mode; ensureSigningKey in legacy mode).
+//
+// Keyring rotation: in keyring mode, secretCredentialScope derives the HMAC
+// from the signing ring's active generation. Rotating the active generation
+// therefore changes every "secret:<hmac>" scope and orphans older DB cache rows
+// until PurgeExpired sweeps them. Because retiring old generations is the point
+// of keyring rotation (no single generation is guaranteed to remain across
+// rotations), this one-time cache miss on rotation is accepted as the safe
+// direction — it never causes cross-principal collisions or weaker keying.
+//
+// Fail-closed keying (no unkeyed SHA-256 fallback): because scopes are
+// persisted in github_resolution_cache, falling back to unkeyed SHA-256 would
+// allow offline PAT confirmation from DB rows. On deployments that require a
+// stable signing key (GCP secret backend or RequireStableSigningKey), a missing
+// key fails startup. On non-strict deployments (e.g. dev/workstation), an
+// ephemeral random 32-byte per-process key is generated (matching
+// initPortViewKey): cache entries are still HMAC-keyed and only miss across
+// restarts or replicas.
 func (s *Server) initGitHubScopeKey(ctx context.Context) error {
 	if s.keyringManaged() {
 		keys, err := s.managedCapabilityKeys(SecretKeyGitHubScopeKey)
@@ -59,9 +75,13 @@ func (s *Server) initGitHubScopeKey(ctx context.Context) error {
 		if isGCPBackend || s.config.RequireStableSigningKey {
 			return fmt.Errorf("github scope HMAC key: %w", err)
 		}
-		slog.Warn("GitHub scope HMAC key could not be loaded or persisted; falling back to SHA-256 credential scopes",
-			"error", err)
-		return nil
+		slog.Warn("GitHub scope HMAC key could not be loaded or persisted; using an ephemeral in-memory key "+
+			"(secret-scoped GitHub cache entries will not be shared across replicas or restarts)", "error", err)
+		key = make([]byte, 32)
+		if _, rerr := rand.Read(key); rerr != nil {
+			return fmt.Errorf("generate ephemeral github scope HMAC key: %w", rerr)
+		}
+		s.recordSigningKeySource(SecretKeyGitHubScopeKey, signingKeySourceEphemeral)
 	}
 	s.mu.Lock()
 	s.githubScopeKeys = fixedCapabilityKeys(key)
@@ -196,22 +216,45 @@ func (s *Server) scopedGitHubCredential(ctx context.Context, credScope, scopeID,
 }
 
 // secretCredentialScope returns "secret:<16-byte-hex>" keyed via HMAC-SHA256
-// from the Hub's dedicated SecretKeyGitHubScopeKey purpose key. If the key is
-// unavailable (e.g. minimal unit-test Server or failed key derivation), it logs
-// without secret material and falls back to truncated SHA-256.
+// from the Hub's dedicated SecretKeyGitHubScopeKey purpose key.
+//
+// In keyring mode this uses the active signing generation; rotating the active
+// generation changes every "secret:" scope and orphans prior DB cache rows
+// until PurgeExpired clears them (accepted as the safe direction).
+//
+// If the purpose key is unavailable (for example, a minimal unit-test Server
+// that skipped initGitHubScopeKey, or a ring whose active generation passed
+// sign_until), it lazily generates a per-Server ephemeral random 32-byte key
+// rather than falling back to unkeyed SHA-256, so persisted cache keys never
+// allow offline PAT confirmation.
 func (s *Server) secretCredentialScope(token string) string {
+	var mat []byte
 	keys := s.githubScopeCapabilityKeys()
 	if keys.configured() {
 		if k, _, err := keys.issue(); err == nil {
-			if mat := k.Bytes(); len(mat) > 0 {
-				mac := hmac.New(sha256.New, mat)
-				_, _ = mac.Write([]byte(token))
-				sum := mac.Sum(nil)
-				return "secret:" + hex.EncodeToString(sum[:16])
-			}
-		} else {
-			s.resourceLog.Warn("github scope HMAC key issuance unavailable; falling back to SHA-256 scope", "error", err)
+			mat = k.Bytes()
+		} else if s.resourceLog != nil {
+			s.resourceLog.Warn("github scope HMAC key issuance unavailable; using ephemeral per-process key", "error", err)
 		}
 	}
-	return "secret:" + githubfetch.TokenFingerprint(token)[:32]
+	if len(mat) == 0 {
+		mat = s.ephemeralGitHubScopeKey()
+	}
+	mac := hmac.New(sha256.New, mat)
+	_, _ = mac.Write([]byte(token))
+	sum := mac.Sum(nil)
+	return "secret:" + hex.EncodeToString(sum[:16])
+}
+
+func (s *Server) ephemeralGitHubScopeKey() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.githubScopeEphemeralKey) == 0 {
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			panic(fmt.Sprintf("crypto/rand failed generating ephemeral github scope key: %v", err))
+		}
+		s.githubScopeEphemeralKey = key
+	}
+	return s.githubScopeEphemeralKey
 }

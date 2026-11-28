@@ -2336,6 +2336,10 @@ type Server struct {
 	portViewKeys capabilityKeys
 	// githubScopeKeys HMAC-keys GitHub credential scopes (github_credential.go).
 	githubScopeKeys capabilityKeys
+	// githubScopeEphemeralKey is a lazily generated 32-byte per-process key used
+	// if githubScopeKeys is unconfigured or cannot issue (never falls back to
+	// unkeyed SHA-256). Guarded by mu.
+	githubScopeEphemeralKey []byte
 	// portViewClock replaces time.Now on the page view route (tests only).
 	portViewClock func() time.Time
 
@@ -3102,6 +3106,10 @@ type Server struct {
 	// templateGitHubClient fetches GitHub template sources for reimport. nil
 	// selects the default client (newTemplateGitHubClient); tests replace it.
 	templateGitHubClient *githubfetch.Client
+	// skillGitHubDoer overrides the HTTP transport used by Hub skill resolution
+	// (tests only). nil uses remotefetch (NetworkVetted hosted, NetworkSystem
+	// workstation).
+	skillGitHubDoer githubfetch.Doer
 
 	// templateDrift holds the caches and optional test seams for the Hub-side
 	// template drift check at agent creation (template_drift.go).

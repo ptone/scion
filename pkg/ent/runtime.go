@@ -2107,8 +2107,12 @@ func init() {
 	githubresolutioncacheDescTokenScope := githubresolutioncacheFields[6].Descriptor()
 	// githubresolutioncache.DefaultTokenScope holds the default value on creation for the token_scope field.
 	githubresolutioncache.DefaultTokenScope = githubresolutioncacheDescTokenScope.Default.(string)
+	// githubresolutioncacheDescEtag is the schema descriptor for etag field.
+	githubresolutioncacheDescEtag := githubresolutioncacheFields[7].Descriptor()
+	// githubresolutioncache.DefaultEtag holds the default value on creation for the etag field.
+	githubresolutioncache.DefaultEtag = githubresolutioncacheDescEtag.Default.(string)
 	// githubresolutioncacheDescCreateTime is the schema descriptor for create_time field.
-	githubresolutioncacheDescCreateTime := githubresolutioncacheFields[8].Descriptor()
+	githubresolutioncacheDescCreateTime := githubresolutioncacheFields[9].Descriptor()
 	// githubresolutioncache.DefaultCreateTime holds the default value on creation for the create_time field.
 	githubresolutioncache.DefaultCreateTime = githubresolutioncacheDescCreateTime.Default.(func() time.Time)
 	// githubresolutioncacheDescID is the schema descriptor for id field.

@@ -59515,6 +59515,7 @@ type GitHubResolutionCacheMutation struct {
 	appendfile_entries []schema.GitHubFileEntry
 	bundle_hash        *string
 	token_scope        *string
+	etag               *string
 	expires_at         *time.Time
 	create_time        *time.Time
 	clearedFields      map[string]struct{}
@@ -59858,6 +59859,42 @@ func (m *GitHubResolutionCacheMutation) ResetTokenScope() {
 	m.token_scope = nil
 }
 
+// SetEtag sets the "etag" field.
+func (m *GitHubResolutionCacheMutation) SetEtag(s string) {
+	m.etag = &s
+}
+
+// Etag returns the value of the "etag" field in the mutation.
+func (m *GitHubResolutionCacheMutation) Etag() (r string, exists bool) {
+	v := m.etag
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEtag returns the old "etag" field's value of the GitHubResolutionCache entity.
+// If the GitHubResolutionCache object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GitHubResolutionCacheMutation) OldEtag(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEtag is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEtag requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEtag: %w", err)
+	}
+	return oldValue.Etag, nil
+}
+
+// ResetEtag resets all changes to the "etag" field.
+func (m *GitHubResolutionCacheMutation) ResetEtag() {
+	m.etag = nil
+}
+
 // SetExpiresAt sets the "expires_at" field.
 func (m *GitHubResolutionCacheMutation) SetExpiresAt(t time.Time) {
 	m.expires_at = &t
@@ -59964,7 +60001,7 @@ func (m *GitHubResolutionCacheMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GitHubResolutionCacheMutation) Fields() []string {
-	fields := make([]string, 0, 8)
+	fields := make([]string, 0, 9)
 	if m.cache_key != nil {
 		fields = append(fields, githubresolutioncache.FieldCacheKey)
 	}
@@ -59982,6 +60019,9 @@ func (m *GitHubResolutionCacheMutation) Fields() []string {
 	}
 	if m.token_scope != nil {
 		fields = append(fields, githubresolutioncache.FieldTokenScope)
+	}
+	if m.etag != nil {
+		fields = append(fields, githubresolutioncache.FieldEtag)
 	}
 	if m.expires_at != nil {
 		fields = append(fields, githubresolutioncache.FieldExpiresAt)
@@ -60009,6 +60049,8 @@ func (m *GitHubResolutionCacheMutation) Field(name string) (ent.Value, bool) {
 		return m.BundleHash()
 	case githubresolutioncache.FieldTokenScope:
 		return m.TokenScope()
+	case githubresolutioncache.FieldEtag:
+		return m.Etag()
 	case githubresolutioncache.FieldExpiresAt:
 		return m.ExpiresAt()
 	case githubresolutioncache.FieldCreateTime:
@@ -60034,6 +60076,8 @@ func (m *GitHubResolutionCacheMutation) OldField(ctx context.Context, name strin
 		return m.OldBundleHash(ctx)
 	case githubresolutioncache.FieldTokenScope:
 		return m.OldTokenScope(ctx)
+	case githubresolutioncache.FieldEtag:
+		return m.OldEtag(ctx)
 	case githubresolutioncache.FieldExpiresAt:
 		return m.OldExpiresAt(ctx)
 	case githubresolutioncache.FieldCreateTime:
@@ -60088,6 +60132,13 @@ func (m *GitHubResolutionCacheMutation) SetField(name string, value ent.Value) e
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetTokenScope(v)
+		return nil
+	case githubresolutioncache.FieldEtag:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEtag(v)
 		return nil
 	case githubresolutioncache.FieldExpiresAt:
 		v, ok := value.(time.Time)
@@ -60169,6 +60220,9 @@ func (m *GitHubResolutionCacheMutation) ResetField(name string) error {
 		return nil
 	case githubresolutioncache.FieldTokenScope:
 		m.ResetTokenScope()
+		return nil
+	case githubresolutioncache.FieldEtag:
+		m.ResetEtag()
 		return nil
 	case githubresolutioncache.FieldExpiresAt:
 		m.ResetExpiresAt()

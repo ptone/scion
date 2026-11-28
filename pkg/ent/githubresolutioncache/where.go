@@ -80,6 +80,11 @@ func TokenScope(v string) predicate.GitHubResolutionCache {
 	return predicate.GitHubResolutionCache(sql.FieldEQ(FieldTokenScope, v))
 }
 
+// Etag applies equality check predicate on the "etag" field. It's identical to EtagEQ.
+func Etag(v string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldEQ(FieldEtag, v))
+}
+
 // ExpiresAt applies equality check predicate on the "expires_at" field. It's identical to ExpiresAtEQ.
 func ExpiresAt(v time.Time) predicate.GitHubResolutionCache {
 	return predicate.GitHubResolutionCache(sql.FieldEQ(FieldExpiresAt, v))
@@ -413,6 +418,71 @@ func TokenScopeEqualFold(v string) predicate.GitHubResolutionCache {
 // TokenScopeContainsFold applies the ContainsFold predicate on the "token_scope" field.
 func TokenScopeContainsFold(v string) predicate.GitHubResolutionCache {
 	return predicate.GitHubResolutionCache(sql.FieldContainsFold(FieldTokenScope, v))
+}
+
+// EtagEQ applies the EQ predicate on the "etag" field.
+func EtagEQ(v string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldEQ(FieldEtag, v))
+}
+
+// EtagNEQ applies the NEQ predicate on the "etag" field.
+func EtagNEQ(v string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldNEQ(FieldEtag, v))
+}
+
+// EtagIn applies the In predicate on the "etag" field.
+func EtagIn(vs ...string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldIn(FieldEtag, vs...))
+}
+
+// EtagNotIn applies the NotIn predicate on the "etag" field.
+func EtagNotIn(vs ...string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldNotIn(FieldEtag, vs...))
+}
+
+// EtagGT applies the GT predicate on the "etag" field.
+func EtagGT(v string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldGT(FieldEtag, v))
+}
+
+// EtagGTE applies the GTE predicate on the "etag" field.
+func EtagGTE(v string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldGTE(FieldEtag, v))
+}
+
+// EtagLT applies the LT predicate on the "etag" field.
+func EtagLT(v string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldLT(FieldEtag, v))
+}
+
+// EtagLTE applies the LTE predicate on the "etag" field.
+func EtagLTE(v string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldLTE(FieldEtag, v))
+}
+
+// EtagContains applies the Contains predicate on the "etag" field.
+func EtagContains(v string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldContains(FieldEtag, v))
+}
+
+// EtagHasPrefix applies the HasPrefix predicate on the "etag" field.
+func EtagHasPrefix(v string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldHasPrefix(FieldEtag, v))
+}
+
+// EtagHasSuffix applies the HasSuffix predicate on the "etag" field.
+func EtagHasSuffix(v string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldHasSuffix(FieldEtag, v))
+}
+
+// EtagEqualFold applies the EqualFold predicate on the "etag" field.
+func EtagEqualFold(v string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldEqualFold(FieldEtag, v))
+}
+
+// EtagContainsFold applies the ContainsFold predicate on the "etag" field.
+func EtagContainsFold(v string) predicate.GitHubResolutionCache {
+	return predicate.GitHubResolutionCache(sql.FieldContainsFold(FieldEtag, v))
 }
 
 // ExpiresAtEQ applies the EQ predicate on the "expires_at" field.

@@ -26,6 +26,8 @@ const (
 	FieldBundleHash = "bundle_hash"
 	// FieldTokenScope holds the string denoting the token_scope field in the database.
 	FieldTokenScope = "token_scope"
+	// FieldEtag holds the string denoting the etag field in the database.
+	FieldEtag = "etag"
 	// FieldExpiresAt holds the string denoting the expires_at field in the database.
 	FieldExpiresAt = "expires_at"
 	// FieldCreateTime holds the string denoting the create_time field in the database.
@@ -43,6 +45,7 @@ var Columns = []string{
 	FieldFileEntries,
 	FieldBundleHash,
 	FieldTokenScope,
+	FieldEtag,
 	FieldExpiresAt,
 	FieldCreateTime,
 }
@@ -68,6 +71,8 @@ var (
 	BundleHashValidator func(string) error
 	// DefaultTokenScope holds the default value on creation for the "token_scope" field.
 	DefaultTokenScope string
+	// DefaultEtag holds the default value on creation for the "etag" field.
+	DefaultEtag string
 	// DefaultCreateTime holds the default value on creation for the "create_time" field.
 	DefaultCreateTime func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -105,6 +110,11 @@ func ByBundleHash(opts ...sql.OrderTermOption) OrderOption {
 // ByTokenScope orders the results by the token_scope field.
 func ByTokenScope(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldTokenScope, opts...).ToFunc()
+}
+
+// ByEtag orders the results by the etag field.
+func ByEtag(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldEtag, opts...).ToFunc()
 }
 
 // ByExpiresAt orders the results by the expires_at field.

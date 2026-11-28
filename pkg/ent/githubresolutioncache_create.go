@@ -69,6 +69,20 @@ func (_c *GitHubResolutionCacheCreate) SetNillableTokenScope(v *string) *GitHubR
 	return _c
 }
 
+// SetEtag sets the "etag" field.
+func (_c *GitHubResolutionCacheCreate) SetEtag(v string) *GitHubResolutionCacheCreate {
+	_c.mutation.SetEtag(v)
+	return _c
+}
+
+// SetNillableEtag sets the "etag" field if the given value is not nil.
+func (_c *GitHubResolutionCacheCreate) SetNillableEtag(v *string) *GitHubResolutionCacheCreate {
+	if v != nil {
+		_c.SetEtag(*v)
+	}
+	return _c
+}
+
 // SetExpiresAt sets the "expires_at" field.
 func (_c *GitHubResolutionCacheCreate) SetExpiresAt(v time.Time) *GitHubResolutionCacheCreate {
 	_c.mutation.SetExpiresAt(v)
@@ -142,6 +156,10 @@ func (_c *GitHubResolutionCacheCreate) defaults() {
 		v := githubresolutioncache.DefaultTokenScope
 		_c.mutation.SetTokenScope(v)
 	}
+	if _, ok := _c.mutation.Etag(); !ok {
+		v := githubresolutioncache.DefaultEtag
+		_c.mutation.SetEtag(v)
+	}
 	if _, ok := _c.mutation.CreateTime(); !ok {
 		v := githubresolutioncache.DefaultCreateTime()
 		_c.mutation.SetCreateTime(v)
@@ -191,6 +209,9 @@ func (_c *GitHubResolutionCacheCreate) check() error {
 	}
 	if _, ok := _c.mutation.TokenScope(); !ok {
 		return &ValidationError{Name: "token_scope", err: errors.New(`ent: missing required field "GitHubResolutionCache.token_scope"`)}
+	}
+	if _, ok := _c.mutation.Etag(); !ok {
+		return &ValidationError{Name: "etag", err: errors.New(`ent: missing required field "GitHubResolutionCache.etag"`)}
 	}
 	if _, ok := _c.mutation.ExpiresAt(); !ok {
 		return &ValidationError{Name: "expires_at", err: errors.New(`ent: missing required field "GitHubResolutionCache.expires_at"`)}
@@ -257,6 +278,10 @@ func (_c *GitHubResolutionCacheCreate) createSpec() (*GitHubResolutionCache, *sq
 	if value, ok := _c.mutation.TokenScope(); ok {
 		_spec.SetField(githubresolutioncache.FieldTokenScope, field.TypeString, value)
 		_node.TokenScope = value
+	}
+	if value, ok := _c.mutation.Etag(); ok {
+		_spec.SetField(githubresolutioncache.FieldEtag, field.TypeString, value)
+		_node.Etag = value
 	}
 	if value, ok := _c.mutation.ExpiresAt(); ok {
 		_spec.SetField(githubresolutioncache.FieldExpiresAt, field.TypeTime, value)
@@ -387,6 +412,18 @@ func (u *GitHubResolutionCacheUpsert) SetTokenScope(v string) *GitHubResolutionC
 // UpdateTokenScope sets the "token_scope" field to the value that was provided on create.
 func (u *GitHubResolutionCacheUpsert) UpdateTokenScope() *GitHubResolutionCacheUpsert {
 	u.SetExcluded(githubresolutioncache.FieldTokenScope)
+	return u
+}
+
+// SetEtag sets the "etag" field.
+func (u *GitHubResolutionCacheUpsert) SetEtag(v string) *GitHubResolutionCacheUpsert {
+	u.Set(githubresolutioncache.FieldEtag, v)
+	return u
+}
+
+// UpdateEtag sets the "etag" field to the value that was provided on create.
+func (u *GitHubResolutionCacheUpsert) UpdateEtag() *GitHubResolutionCacheUpsert {
+	u.SetExcluded(githubresolutioncache.FieldEtag)
 	return u
 }
 
@@ -534,6 +571,20 @@ func (u *GitHubResolutionCacheUpsertOne) SetTokenScope(v string) *GitHubResoluti
 func (u *GitHubResolutionCacheUpsertOne) UpdateTokenScope() *GitHubResolutionCacheUpsertOne {
 	return u.Update(func(s *GitHubResolutionCacheUpsert) {
 		s.UpdateTokenScope()
+	})
+}
+
+// SetEtag sets the "etag" field.
+func (u *GitHubResolutionCacheUpsertOne) SetEtag(v string) *GitHubResolutionCacheUpsertOne {
+	return u.Update(func(s *GitHubResolutionCacheUpsert) {
+		s.SetEtag(v)
+	})
+}
+
+// UpdateEtag sets the "etag" field to the value that was provided on create.
+func (u *GitHubResolutionCacheUpsertOne) UpdateEtag() *GitHubResolutionCacheUpsertOne {
+	return u.Update(func(s *GitHubResolutionCacheUpsert) {
+		s.UpdateEtag()
 	})
 }
 
@@ -850,6 +901,20 @@ func (u *GitHubResolutionCacheUpsertBulk) SetTokenScope(v string) *GitHubResolut
 func (u *GitHubResolutionCacheUpsertBulk) UpdateTokenScope() *GitHubResolutionCacheUpsertBulk {
 	return u.Update(func(s *GitHubResolutionCacheUpsert) {
 		s.UpdateTokenScope()
+	})
+}
+
+// SetEtag sets the "etag" field.
+func (u *GitHubResolutionCacheUpsertBulk) SetEtag(v string) *GitHubResolutionCacheUpsertBulk {
+	return u.Update(func(s *GitHubResolutionCacheUpsert) {
+		s.SetEtag(v)
+	})
+}
+
+// UpdateEtag sets the "etag" field to the value that was provided on create.
+func (u *GitHubResolutionCacheUpsertBulk) UpdateEtag() *GitHubResolutionCacheUpsertBulk {
+	return u.Update(func(s *GitHubResolutionCacheUpsert) {
+		s.UpdateEtag()
 	})
 }
 

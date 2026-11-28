@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,9 +27,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/stretchr/testify/assert"
@@ -101,8 +100,7 @@ func TestSkillsResolve_GHNotFoundIsRemembered(t *testing.T) {
 	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
 	gh := newStatusGitHub(t, owner, repo, skillPath, commitSHA)
 	gh.commitStatus.Store(http.StatusNotFound)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	resolveErr := func(t *testing.T, u string) ResolveSkillError {
 		t.Helper()
@@ -123,8 +121,6 @@ func TestSkillsResolve_GHNotFoundIsRemembered(t *testing.T) {
 
 	second := resolveErr(t, uri)
 	assert.Equal(t, int64(1), gh.calls(), "the remembered not found must be served without a GitHub call")
-	// Each request has its own correlation id; the rest of the error is the
-	// original one.
 	assert.NotEmpty(t, second.CorrelationID)
 	first.CorrelationID, second.CorrelationID = "", ""
 	assert.Equal(t, first, second, "the remembered failure must be reported as the original one")
@@ -133,9 +129,8 @@ func TestSkillsResolve_GHNotFoundIsRemembered(t *testing.T) {
 	assert.Equal(t, int64(2), gh.calls(), "another ref must still be resolved against GitHub")
 }
 
-// A GitHub 404, for the ref or for the skill path, is reported with the
-// not_found per-URI code (also when the remembered failure is served), so
-// the create path maps it to 404. Other GitHub failures keep resolve_failed.
+// A GitHub 404, 401, or 403 is mapped to its ResolveSkillError code (also when
+// served from the negative memo). Other GitHub failures keep resolve_failed.
 func TestSkillsResolve_GHNotFoundCode(t *testing.T) {
 	const (
 		owner     = "acme"
@@ -152,6 +147,8 @@ func TestSkillsResolve_GHNotFoundCode(t *testing.T) {
 	}{
 		{"missing ref", "gh://" + owner + "/" + repo + "/thing@no-such-branch", http.StatusNotFound, http.StatusOK, agent.SkillErrCodeNotFound},
 		{"missing skill path", "gh://" + owner + "/" + repo + "/thing@main", http.StatusOK, http.StatusNotFound, agent.SkillErrCodeNotFound},
+		{"unauthorized ref", "gh://" + owner + "/" + repo + "/thing@unauth", http.StatusUnauthorized, http.StatusOK, agent.SkillErrCodeCredentialRejected},
+		{"forbidden ref", "gh://" + owner + "/" + repo + "/thing@forbid", http.StatusForbidden, http.StatusOK, agent.SkillErrCodeCredentialRejected},
 		{"unprocessable ref", "gh://" + owner + "/" + repo + "/thing@bad", http.StatusUnprocessableEntity, http.StatusOK, agent.SkillErrCodeResolveFailed},
 	}
 	for _, tc := range cases {
@@ -161,8 +158,7 @@ func TestSkillsResolve_GHNotFoundCode(t *testing.T) {
 			gh := newStatusGitHub(t, owner, repo, skillPath, commitSHA)
 			gh.commitStatus.Store(int64(tc.commitStatus))
 			gh.contentsStatus.Store(int64(tc.contentsStatus))
-			srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-			srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+			wireFakeSkillGitHub(srv, gh.URL)
 
 			for i := 0; i < 2; i++ {
 				rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
@@ -192,8 +188,7 @@ func TestResolveGitHubSkill_MissingSkillPathIsRemembered(t *testing.T) {
 	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
 	gh := newStatusGitHub(t, owner, repo, skillPath, commitSHA)
 	gh.contentsStatus.Store(http.StatusNotFound)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	_, err := srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
 	require.Error(t, err)
@@ -206,8 +201,8 @@ func TestResolveGitHubSkill_MissingSkillPathIsRemembered(t *testing.T) {
 	assert.Equal(t, int64(1), gh.contentsCalls.Load(), "no new contents lookup")
 }
 
-// Statuses other than 404 may succeed on the next attempt, so they are never
-// remembered: every resolve asks GitHub again.
+// Transient statuses (5xx, 422) may succeed on the next attempt, so they are
+// never remembered: every resolve asks GitHub again.
 func TestResolveGitHubSkill_OtherFailuresAreNotRemembered(t *testing.T) {
 	for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusUnprocessableEntity} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
@@ -223,14 +218,14 @@ func TestResolveGitHubSkill_OtherFailuresAreNotRemembered(t *testing.T) {
 			srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
 			gh := newStatusGitHub(t, owner, repo, skillPath, commitSHA)
 			gh.commitStatus.Store(int64(status))
-			srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-			srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+			wireFakeSkillGitHub(srv, gh.URL)
 
 			for i := 0; i < 2; i++ {
 				_, err := srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
 				require.Error(t, err)
 			}
-			assert.Equal(t, int64(2), gh.commitCalls.Load(), "each resolve must ask GitHub")
+			// 5xx retries once per resolve (MaxRetries: 1), 422 does not retry.
+			assert.GreaterOrEqual(t, gh.commitCalls.Load(), int64(2), "each resolve must ask GitHub")
 			assert.Zero(t, srv.ghFailures.Len(), "nothing may be remembered")
 		})
 	}
@@ -244,36 +239,46 @@ func TestFetchAndCacheGitHubSkill_SuccessClearsRememberedFailure(t *testing.T) {
 		skillPath = "skills/fixed"
 		uri       = "gh://" + owner + "/" + repo + "/fixed@main"
 		commitSHA = "1212121212121212121212121212121212121212"
-		cacheKey  = "fixed-key"
 	)
 
 	srv, _, _, _, _ := setupSkillAuthzTest(t)
 	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
 	gh := newStatusGitHub(t, owner, repo, skillPath, commitSHA)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
-	srv.ghFailures.Record(cacheKey, errors.New("remembered"))
-	require.Error(t, srv.ghFailures.Recent(cacheKey))
-
+	ep := srv.skillGitHubEndpoint()
 	ghRef, err := agent.ParseGitHubSkillURI(uri)
 	require.NoError(t, err)
-	entry, err := srv.fetchAndCacheGitHubSkill(context.Background(), cacheKey, uri, ghRef, "", "", true, newGHSHAMemo())
+	refKey := githubfetch.RefCacheKey(ep.APIHost(), ghRef.Owner, ghRef.Repo, ghRef.Ref, githubfetch.AnonScope)
+	flightKey := refKey + ":" + ghRef.SkillPath
+
+	srv.ghFailures.Record(flightKey, errors.New("remembered"))
+	require.Error(t, srv.ghFailures.Recent(flightKey))
+
+	entry, err := srv.fetchAndCacheGitHubSkill(
+		context.Background(), ep, flightKey, refKey, uri, ghRef,
+		githubfetch.Credential{Scope: githubfetch.AnonScope, Kind: githubfetch.CredAnonymous},
+		true, nil, nil, nil, newGHSHAMemo(),
+	)
 	require.NoError(t, err)
 	require.NotNil(t, entry)
-	assert.NoError(t, srv.ghFailures.Recent(cacheKey), "a success must clear the remembered failure")
+	assert.NoError(t, srv.ghFailures.Recent(flightKey), "a success must clear the remembered failure")
 }
 
-func TestIsGHNotFound(t *testing.T) {
-	notFound := &ghStatusError{status: http.StatusNotFound, msg: "GitHub API error 404 resolving r@x: {}"}
-	assert.True(t, isGHNotFound(notFound))
-	assert.True(t, isGHNotFound(fmt.Errorf("failed to resolve commit SHA: %w", notFound)))
-	assert.Equal(t, "GitHub API error 404 resolving r@x: {}", notFound.Error())
-
-	assert.False(t, isGHNotFound(&ghStatusError{status: http.StatusInternalServerError}))
-	assert.False(t, isGHNotFound(errors.New("GitHub API error 404")))
-	assert.False(t, isGHNotFound(&agent.GitHubRateLimitError{}))
-	assert.False(t, isGHNotFound(nil))
+func TestIsGHAuthoritativeDenialAndTransient(t *testing.T) {
+	for _, kind := range []githubfetch.Kind{githubfetch.KindNotFound, githubfetch.KindAuthRejected, githubfetch.KindForbidden} {
+		err := &githubfetch.Error{Kind: kind}
+		assert.True(t, isGHAuthoritativeDenial(err), "kind %s", kind)
+		assert.True(t, isGHAuthoritativeDenial(fmt.Errorf("wrapped: %w", err)), "wrapped %s", kind)
+		assert.False(t, isGHTransientFailure(err), "kind %s must not be transient", kind)
+	}
+	for _, kind := range []githubfetch.Kind{githubfetch.KindRateLimited, githubfetch.KindTimeout, githubfetch.KindUnreachable, githubfetch.KindUpstream} {
+		err := &githubfetch.Error{Kind: kind}
+		assert.True(t, isGHTransientFailure(err), "kind %s", kind)
+		assert.False(t, isGHAuthoritativeDenial(err), "kind %s must not be authoritative denial", kind)
+	}
+	assert.False(t, isGHAuthoritativeDenial(nil))
+	assert.False(t, isGHTransientFailure(nil))
 }
 
 // A caller that passed the pre-check before a concurrent flight recorded a
@@ -292,11 +297,8 @@ func TestResolveGitHubSkill_FlightRecheckServesRememberedFailure(t *testing.T) {
 	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
 	gh := newStatusGitHub(t, owner, repo, skillPath, commitSHA)
 	gh.commitStatus.Store(http.StatusNotFound)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
-	// The first caller to reach the join point (B) is held there; it has
-	// already passed the pre-check. Later callers pass straight through.
 	held := make(chan struct{})
 	release := make(chan struct{})
 	var joins atomic.Int64
@@ -320,7 +322,6 @@ func TestResolveGitHubSkill_FlightRecheckServesRememberedFailure(t *testing.T) {
 		t.Fatal("caller B never reached the join point")
 	}
 
-	// A's flight gets the 404, records it and finishes.
 	_, errA := srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
 	require.Error(t, errA)
 	require.Equal(t, int64(1), gh.commitCalls.Load())
@@ -337,9 +338,8 @@ func TestResolveGitHubSkill_FlightRecheckServesRememberedFailure(t *testing.T) {
 	assert.Equal(t, int64(1), gh.commitCalls.Load(), "B's flight must not ask GitHub again")
 }
 
-// A stale entry is served ahead of a remembered failure for the same key:
-// a background refresh that gets a 404 records it while the stale row is
-// still in the store.
+// For an anon scope, a stale entry is served ahead of a remembered failure,
+// and its background refresh returning 404 deletes the stale entry.
 func TestResolveGitHubSkill_StaleEntryWinsOverRememberedFailure(t *testing.T) {
 	const (
 		owner     = "acme"
@@ -353,35 +353,25 @@ func TestResolveGitHubSkill_StaleEntryWinsOverRememberedFailure(t *testing.T) {
 	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
 	gh := newStatusGitHub(t, owner, repo, skillPath, staleSHA)
 	gh.commitStatus.Store(http.StatusNotFound)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
-
-	ghRef, err := agent.ParseGitHubSkillURI(uri)
-	require.NoError(t, err)
-	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	ctx := context.Background()
-	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
-		CommitSHA:   staleSHA,
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
-		BundleHash:  "sha256:stale",
-		TokenScope:  "public",
-		ExpiresAt:   time.Now().Add(-time.Minute),
-		OriginalURI: uri,
-	}))
-	srv.ghFailures.Record(cacheKey, errors.New("remembered not found"))
+	refKey, _, flightKey := seedGHSkillCache(t, srv, uri, githubfetch.AnonScope, staleSHA, `"v1"`, time.Now().Add(-time.Minute), nil)
+	srv.ghFailures.Record(flightKey, errors.New("remembered not found"))
 
 	resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
-	require.NoError(t, err, "the stale entry must be served, not the remembered failure")
+	require.NoError(t, err, "the anon stale entry must be served immediately via SWR")
 	assert.Equal(t, safeShortSHA(staleSHA), resp.ResolvedVersion)
 
-	// Let the background refresh finish before the test returns.
-	_, _, _ = srv.ghResolveFlight.Do(cacheKey, func() (interface{}, error) { return nil, nil })
+	// Wait for the background refresh to complete; its 404 must delete the cached rows.
+	_, _, _ = srv.ghResolveFlight.Do(flightKey, func() (interface{}, error) { return nil, nil })
+	_, ok, err := srv.ghResolutionStore.GetStale(ctx, refKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
+	require.NoError(t, err)
+	assert.False(t, ok, "background 404 must purge the stale ref row")
 }
 
-// A 404 remembered for a project with no GitHub App installation (the
-// "public" scope) is not served to the same project once it is backed by an
-// installation: that is another cache key, so GitHub is asked again.
+// A 404 remembered for an anonymous scope is not served to the same project
+// once it is backed by an installation: that is another cache key, so GitHub is asked again.
 func TestResolveGitHubSkill_PublicNotFoundNotServedToInstallation(t *testing.T) {
 	const (
 		instID = int64(515151)
@@ -389,7 +379,7 @@ func TestResolveGitHubSkill_PublicNotFoundNotServedToInstallation(t *testing.T) 
 	)
 	srv, s, _, _, project := setupSkillAuthzTest(t)
 	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
-	srv.ghCooldown = agent.NewGitHubCooldown(time.Now)
+	srv.ghCooldown = githubfetch.NewCooldown(time.Now)
 
 	var repoCalls atomic.Int64
 	mux := http.NewServeMux()
@@ -422,8 +412,7 @@ func TestResolveGitHubSkill_PublicNotFoundNotServedToInstallation(t *testing.T) 
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 	srv.config.GitHubAppConfig.AppID = 1
 	srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
 
@@ -433,7 +422,7 @@ func TestResolveGitHubSkill_PublicNotFoundNotServedToInstallation(t *testing.T) 
 	require.Equal(t, int64(1), repoCalls.Load())
 	_, err = srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
 	require.Error(t, err)
-	require.Equal(t, int64(1), repoCalls.Load(), "the public 404 is remembered")
+	require.Equal(t, int64(1), repoCalls.Load(), "the anon 404 is remembered")
 
 	require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
 		InstallationID: instID,
@@ -447,10 +436,10 @@ func TestResolveGitHubSkill_PublicNotFoundNotServedToInstallation(t *testing.T) 
 	_, err = srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
 	require.Error(t, err)
 	assert.Equal(t, int64(2), repoCalls.Load(),
-		"an installation-backed resolution must not be served the public scope's remembered 404")
+		"an installation-backed resolution must not be served the anon scope's remembered 404")
 }
 
-// A large 404 body is cut, so each remembered failure stays small.
+// A large 404 body is never copied into the remembered githubfetch.Error.
 func TestResolveGitHubSkill_RememberedErrorBodyIsBounded(t *testing.T) {
 	const uri = "gh://acme/big-page/s@main"
 	srv, _, _, _, project := setupSkillAuthzTest(t)
@@ -464,67 +453,16 @@ func TestResolveGitHubSkill_RememberedErrorBodyIsBounded(t *testing.T) {
 		_, _ = w.Write([]byte(page))
 	}))
 	t.Cleanup(gh.Close)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	_, err := srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
 	require.Error(t, err)
 	require.Equal(t, 1, srv.ghFailures.Len())
 
-	// The second resolve is served from the remembered failure.
 	_, err = srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
 	require.Error(t, err)
 	require.Equal(t, int64(1), hits.Load(), "the second resolve must not ask GitHub")
-	assert.LessOrEqual(t, len(err.Error()), maxGHErrorBody+256,
-		"a remembered error must not carry the whole response body")
-	assert.Contains(t, err.Error(), "...")
-}
-
-func TestGHErrorBody(t *testing.T) {
-	assert.Equal(t, "short", ghErrorBody([]byte("short")))
-	exact := strings.Repeat("a", maxGHErrorBody)
-	assert.Equal(t, exact, ghErrorBody([]byte(exact)))
-	assert.Equal(t, exact+"...", ghErrorBody([]byte(exact+"b")))
-
-	// A two-byte character starting at byte 511 would be split by a plain
-	// cut at 512; the cut moves back to before it.
-	prefix := strings.Repeat("a", maxGHErrorBody-1)
-	got := ghErrorBody([]byte(prefix + "é" + "tail"))
-	assert.True(t, utf8.ValidString(got), "cut body %q is not valid UTF-8", got)
-	assert.Equal(t, prefix+"...", got)
-
-	// A three-byte character starting at byte 510 is also kept whole.
-	prefix = strings.Repeat("a", maxGHErrorBody-2)
-	got = ghErrorBody([]byte(prefix + "€" + "tail"))
-	assert.True(t, utf8.ValidString(got), "cut body %q is not valid UTF-8", got)
-	assert.Equal(t, prefix+"...", got)
-
-	// A character ending exactly at byte 512 is kept.
-	prefix = strings.Repeat("a", maxGHErrorBody-2)
-	assert.Equal(t, prefix+"é...", ghErrorBody([]byte(prefix+"é"+"tail")))
-
-	// A four-byte character starting at byte 509 is dropped whole rather
-	// than split: the back-off reaches its bound exactly at the start of
-	// the sequence.
-	prefix = strings.Repeat("a", maxGHErrorBody-3)
-	got = ghErrorBody([]byte(prefix + "\U0001F600" + "tail"))
-	assert.True(t, utf8.ValidString(got), "cut body %q is not valid UTF-8", got)
-	assert.Equal(t, prefix+"...", got)
-}
-
-func TestGHErrorBodyInvalidUTF8(t *testing.T) {
-	// A body of only continuation bytes has no rune start to back off to;
-	// the cut stops utf8.UTFMax-1 bytes before the limit instead of
-	// discarding the whole body.
-	body := bytes.Repeat([]byte{0x80}, maxGHErrorBody+100)
-	got := ghErrorBody(body)
-	want := string(body[:maxGHErrorBody-(utf8.UTFMax-1)]) + "..."
-	assert.Equal(t, want, got)
-	assert.Len(t, got, maxGHErrorBody-(utf8.UTFMax-1)+len("..."))
-
-	// Invalid bytes after valid text are cut at the same bound.
-	prefix := strings.Repeat("a", maxGHErrorBody-10)
-	body = append([]byte(prefix), bytes.Repeat([]byte{0xBF}, 50)...)
-	got = ghErrorBody(body)
-	assert.Equal(t, string(body[:maxGHErrorBody-(utf8.UTFMax-1)])+"...", got)
+	assert.LessOrEqual(t, len(err.Error()), 512,
+		"a remembered error must not carry the raw response body")
+	assert.NotContains(t, err.Error(), "<p>not found</p>")
 }

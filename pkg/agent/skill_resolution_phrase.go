@@ -41,6 +41,7 @@ const SkillErrCodeStorageError = "storage_error"
 var skillResolutionPhrases = map[string]string{
 	SkillErrCodeNotFound:            "skill not found",
 	SkillErrCodeForbidden:           "access denied",
+	SkillErrCodeCredentialRejected:  "credential rejected by the skill source",
 	SkillErrCodeRateLimited:         "rate limited by the skill source",
 	SkillErrCodeTimeout:             "timed out reaching the skill source",
 	SkillErrCodeUpstreamUnavailable: "skill source unavailable",

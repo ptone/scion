@@ -35,6 +35,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -113,8 +114,7 @@ func TestSkillsResolve_GHCacheHitOnSecondResolve(t *testing.T) {
 	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
 
 	gh := newFakeGitHub(t, owner, repo, skillPath, commitSHA)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	body := ResolveSkillsRequest{
 		Skills:    []ResolveSkillRef{{URI: uri}},
@@ -173,8 +173,7 @@ func TestSkillsResolve_GHCacheKeyedByURI(t *testing.T) {
 
 	// Serve any skill path under the repo.
 	gh := newFakeGitHub(t, owner, repo, "skills/any", commitSHA)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	resolve := func(t *testing.T, uri string) {
 		t.Helper()
@@ -238,8 +237,7 @@ func TestSkillsResolve_GHDeclinesTokenSecretURI(t *testing.T) {
 	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
 
 	gh := newFakeGitHub(t, owner, repo, skillPath, commitSHA)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
 		Skills:    []ResolveSkillRef{{URI: "gh://" + owner + "/" + repo + "/secret?token=MY_TOKEN"}},
@@ -303,8 +301,7 @@ func TestSkillsResolve_GHRefDedup(t *testing.T) {
 	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
 
 	gh := newFakeGitHub(t, owner, repo, "skills/any", commitSHA)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	// Three URIs in the same (owner, repo) with the same implicit ref (HEAD)
 	// but different skill paths — the common case for a skill bundle.
@@ -373,8 +370,7 @@ func TestResolveGitHubSkill_ConcurrentMissesCoalesce(t *testing.T) {
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	const n = 6
 	var wg sync.WaitGroup
@@ -452,15 +448,15 @@ func TestResolveGitHubSkill_FollowerGetsItsOwnURI(t *testing.T) {
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
 	t.Cleanup(closeProceed)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	ghRef, err := agent.ParseGitHubSkillURI(leaderURI)
 	require.NoError(t, err)
 	if ghRef.Ref == "" {
 		ghRef.Ref = "HEAD" // same default resolveGitHubSkill applies internally
 	}
-	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+	ep := srv.skillGitHubEndpoint()
+	cacheKey := githubfetch.RefCacheKey(ep.APIHost(), ghRef.Owner, ghRef.Repo, ghRef.Ref, githubfetch.AnonScope) + ":" + ghRef.SkillPath
 
 	var joinCount int32
 	allJoined := make(chan struct{})
@@ -584,8 +580,7 @@ func TestResolveGitHubSkill_CancelledRequestStartsNoNewFlights(t *testing.T) {
 	// reverse order): see the identical comment on the cancelled-leader test
 	// above for why that order matters.
 	t.Cleanup(closeProceed)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	memo := newGHSHAMemo() // one request's memo, as in handleSkillsResolve
 	ctx, cancel := context.WithCancel(context.Background())
@@ -644,9 +639,10 @@ func TestResolveGitHubSkill_CancelledRequestStartsNoNewFlights(t *testing.T) {
 	// that races the flight's resultCh, after injectGHFlightJoin/DoChan have
 	// already (synchronously, in this same call) launched it. touched is the
 	// actual proof that no flight was started for URI b at all.
+	ep := srv.skillGitHubEndpoint()
 	ghRefB, err := agent.ParseGitHubSkillURI("gh://" + owner + "/" + repo + "/b@main")
 	require.NoError(t, err)
-	cacheKeyB := computeCacheKey(ghRefB.Owner, ghRefB.Repo, ghRefB.SkillPath, ghRefB.Ref, "public")
+	cacheKeyB := githubfetch.RefCacheKey(ep.APIHost(), ghRefB.Owner, ghRefB.Repo, ghRefB.Ref, githubfetch.AnonScope) + ":" + ghRefB.SkillPath
 	touchedMu.Lock()
 	gotB := touched[cacheKeyB]
 	touchedMu.Unlock()
@@ -659,7 +655,7 @@ func TestResolveGitHubSkill_CancelledRequestStartsNoNewFlights(t *testing.T) {
 	// before the httptest server's cleanup tries to close it.
 	ghRefA, err := agent.ParseGitHubSkillURI("gh://" + owner + "/" + repo + "/a@main")
 	require.NoError(t, err)
-	cacheKeyA := computeCacheKey(ghRefA.Owner, ghRefA.Repo, ghRefA.SkillPath, ghRefA.Ref, "public")
+	cacheKeyA := githubfetch.RefCacheKey(ep.APIHost(), ghRefA.Owner, ghRefA.Repo, ghRefA.Ref, githubfetch.AnonScope) + ":" + ghRefA.SkillPath
 	_, _, _ = srv.ghResolveFlight.Do(cacheKeyA, func() (interface{}, error) { return nil, nil })
 
 	assert.Equal(t, int64(1), commitCalls.Load(),
@@ -759,12 +755,12 @@ func TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters(t *testing.T) {
 	// context that never cancels) from turning Close() into a hang instead
 	// of a clean test failure.
 	t.Cleanup(closeProceed)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	ghRef, err := agent.ParseGitHubSkillURI(uri)
 	require.NoError(t, err)
-	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+	ep := srv.skillGitHubEndpoint()
+	cacheKey := githubfetch.RefCacheKey(ep.APIHost(), ghRef.Owner, ghRef.Repo, ghRef.Ref, githubfetch.AnonScope) + ":" + ghRef.SkillPath
 
 	var joinCount int32
 	waiterJoined := make(chan struct{})
@@ -843,7 +839,7 @@ func TestResolveGitHubSkill_CancelledLeaderDoesNotFailWaiters(t *testing.T) {
 	assert.Equal(t, int64(1), commitCalls.Load(),
 		"the waiter must join the leader's flight, not make its own commit call")
 
-	_, hit, err := srv.ghResolutionStore.Get(context.Background(), cacheKey)
+	_, hit, err := srv.ghResolutionStore.Get(context.Background(), githubfetch.TreeCacheKey(ep.APIHost(), ghRef.Owner, ghRef.Repo, commitSHA, ghRef.SkillPath, githubfetch.AnonScope))
 	require.NoError(t, err)
 	assert.True(t, hit, "the flight's cache write must not be skipped because the leader was cancelled")
 }
@@ -897,12 +893,12 @@ func TestResolveGitHubSkill_ShortDeadlineLeaderDoesNotFailWaiter(t *testing.T) {
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
 	t.Cleanup(closeProceed)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	ghRef, err := agent.ParseGitHubSkillURI(uri)
 	require.NoError(t, err)
-	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+	ep := srv.skillGitHubEndpoint()
+	cacheKey := githubfetch.RefCacheKey(ep.APIHost(), ghRef.Owner, ghRef.Repo, ghRef.Ref, githubfetch.AnonScope) + ":" + ghRef.SkillPath
 
 	var joinCount int32
 	waiterJoined := make(chan struct{})
@@ -997,22 +993,10 @@ func TestResolveGitHubSkill_StaleServesImmediatelyAndRefreshesInBackground(t *te
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
-
-	ghRef, err := agent.ParseGitHubSkillURI(uri)
-	require.NoError(t, err)
-	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	ctx := context.Background()
-	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
-		CommitSHA:   staleSHA,
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
-		BundleHash:  "sha256:stale",
-		TokenScope:  "public",
-		ExpiresAt:   time.Now().Add(-time.Minute), // just past the branch-ref TTL
-		OriginalURI: uri,
-	}))
+	refKey, _, flightKey := seedGHSkillCache(t, srv, uri, githubfetch.AnonScope, staleSHA, "", time.Now().Add(-time.Minute), nil)
 
 	resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
 	require.NoError(t, err)
@@ -1021,19 +1005,13 @@ func TestResolveGitHubSkill_StaleServesImmediatelyAndRefreshesInBackground(t *te
 
 	<-refreshed // the refresh's GitHub calls have completed, but Put may not have landed yet
 
-	// Deterministically wait for the refresh's Put to land by joining its
-	// flight: ghResolveFlight is keyed by cacheKey on the hub (unlike the
-	// broker, which separates the flight key from the cache key), so a Do
-	// call for the same key either joins the still-running refresh (and so
-	// blocks until its Put completes) or, if it already finished, runs this
-	// no-op immediately — either way, Put has landed once this returns.
-	_, _, _ = srv.ghResolveFlight.Do(cacheKey, func() (interface{}, error) { return nil, nil })
+	_, _, _ = srv.ghResolveFlight.Do(flightKey, func() (interface{}, error) { return nil, nil })
 
-	entry, hit, err := srv.ghResolutionStore.Get(ctx, cacheKey)
+	entry, hit, err := srv.ghResolutionStore.Get(ctx, refKey)
 	require.NoError(t, err)
 	require.True(t, hit)
 	assert.Equal(t, freshSHA, entry.CommitSHA, "the background refresh must have updated the cache")
-	assert.Equal(t, "public", entry.TokenScope,
+	assert.Equal(t, githubfetch.AnonScope, entry.TokenScope,
 		"a background refresh must not overwrite TokenScope with an empty value")
 }
 
@@ -1067,25 +1045,13 @@ func TestResolveGitHubSkill_PastMaxStaleAgeResolvesSynchronously(t *testing.T) {
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
-
-	ghRef, err := agent.ParseGitHubSkillURI(uri)
-	require.NoError(t, err)
-	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	ctx := context.Background()
 	// ExpiresAt - DefaultResolutionCacheTTL is this entry's last successful
 	// resolution time; push it well past MaxResolutionStaleAge.
 	lastResolvedAt := time.Now().Add(-(agent.MaxResolutionStaleAge + time.Hour))
-	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
-		CommitSHA:   ancientSHA,
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
-		BundleHash:  "sha256:ancient",
-		TokenScope:  "public",
-		ExpiresAt:   lastResolvedAt.Add(agent.DefaultResolutionCacheTTL),
-		OriginalURI: uri,
-	}))
+	seedGHSkillCache(t, srv, uri, githubfetch.AnonScope, ancientSHA, "", lastResolvedAt.Add(agent.DefaultResolutionCacheTTL), nil)
 
 	resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
 	require.NoError(t, err)
@@ -1122,24 +1088,11 @@ func TestResolveGitHubSkill_SHARefNeverServedStale(t *testing.T) {
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
-
-	ghRef, err := agent.ParseGitHubSkillURI(uri)
-	require.NoError(t, err)
-	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	ctx := context.Background()
-	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
-		CommitSHA:   sha,
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "old", Size: 1, Mode: "0644"}},
-		BundleHash:  "sha256:old",
-		TokenScope:  "public",
-		// Expired, but well within MaxResolutionStaleAge — if this were a
-		// branch ref, it would be served stale. A SHA ref must not be.
-		ExpiresAt:   time.Now().Add(-time.Minute),
-		OriginalURI: uri,
-	}))
+	seedGHSkillCache(t, srv, uri, githubfetch.AnonScope, sha, "", time.Now().Add(-time.Minute),
+		[]GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "old", Size: 1, Mode: "0644"}})
 
 	resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
 	require.NoError(t, err)
@@ -1186,22 +1139,10 @@ func TestResolveGitHubSkill_RefreshFailureBackoffSkipsRetry(t *testing.T) {
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
-
-	ghRef, err := agent.ParseGitHubSkillURI(uri)
-	require.NoError(t, err)
-	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	ctx := context.Background()
-	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
-		CommitSHA:   staleSHA,
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
-		BundleHash:  "sha256:stale",
-		TokenScope:  "public",
-		ExpiresAt:   time.Now().Add(-time.Minute),
-		OriginalURI: uri,
-	}))
+	_, _, cacheKey := seedGHSkillCache(t, srv, uri, githubfetch.AnonScope, staleSHA, "", time.Now().Add(-time.Minute), nil)
 
 	srv.recordGHRefreshFailure(cacheKey)
 
@@ -1288,8 +1229,7 @@ func TestSkillsResolve_GHCacheHitForCredentialedBranchRef(t *testing.T) {
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
 
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 	srv.config.GitHubAppConfig.AppID = 1
 	srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
 
@@ -1343,8 +1283,7 @@ func TestSkillsResolve_GHCacheEntryExpiryIsJittered(t *testing.T) {
 	srv.ghResolutionStore = NewGitHubResolutionStore(client)
 
 	gh := newFakeGitHub(t, owner, repo, "skills/any", commitSHA)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	// The refs name a branch, so entries use the branch TTL.
 	ttl := agent.DefaultResolutionCacheTTL
@@ -1420,8 +1359,7 @@ func ghModesTestServer(t *testing.T, srv *Server, owner, repo, skillPath, commit
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 }
 
 func ghModesByPath(files []DownloadURLInfo) map[string]string {
@@ -1480,12 +1418,13 @@ func TestResolveGitHubSkill_SubmoduleFails(t *testing.T) {
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	_, err := srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
-	require.ErrorIs(t, err, agent.ErrGitHubTreeSubmodule)
-	assert.Contains(t, err.Error(), "vendor/lib")
+	var ghe *githubfetch.Error
+	require.ErrorAs(t, err, &ghe)
+	assert.Equal(t, githubfetch.KindUnsupportedContent, ghe.Kind)
+	assert.Contains(t, err.Error(), "submodule")
 }
 
 // TestResolveGitHubSkill_ModelessRow covers a cache row written before file
@@ -1525,31 +1464,21 @@ func TestResolveGitHubSkill_ModelessRow(t *testing.T) {
 			ghModesTestServer(t, srv, owner, repo, skillPath, commitSHA, &treeCalls, &failing)
 
 			uri := "gh://" + owner + "/" + repo + "/tool@" + tc.ref
-			ghRef, err := agent.ParseGitHubSkillURI(uri)
-			require.NoError(t, err)
-			cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
 			ctx := context.Background()
-			require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
-				CommitSHA:   commitSHA,
-				FileEntries: legacyFiles,
-				BundleHash:  "sha256:old",
-				TokenScope:  "public",
-				ExpiresAt:   time.Now().Add(tc.expiresIn),
-				OriginalURI: uri,
-			}))
+			seedGHSkillCache(t, srv, uri, githubfetch.AnonScope, commitSHA, "", time.Now().Add(tc.expiresIn), legacyFiles)
 
 			resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
 			switch {
 			case tc.served:
 				require.NoError(t, err)
-				assert.Equal(t, "sha256:old", resp.ContentHash)
+				assert.Equal(t, computeBundleHash(legacyFiles), resp.ContentHash)
 				assert.Equal(t, map[string]string{"SKILL.md": ""}, ghModesByPath(resp.Files),
 					"a legacy row carries no modes; the broker writes its files 0644 as before")
 			case tc.failing:
 				require.Error(t, err)
 			default:
 				require.NoError(t, err)
-				assert.NotEqual(t, "sha256:old", resp.ContentHash)
+				assert.NotEqual(t, computeBundleHash(legacyFiles), resp.ContentHash)
 				assert.Equal(t, map[string]string{"SKILL.md": "0644", "scripts/run.sh": "0755"}, ghModesByPath(resp.Files))
 				assert.Equal(t, int64(1), treeCalls.Load())
 			}
@@ -1578,8 +1507,7 @@ func TestSkillsResolve_GHTreeErrorCode(t *testing.T) {
 	})
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
 		Skills:    []ResolveSkillRef{{URI: uri}},
@@ -1631,11 +1559,11 @@ func TestResolveGitHubSkill_BackgroundRefreshJittersExpiryDeterministically(t *t
 
 	refreshed := make(chan string, len(cases))
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(freshSHA))
-	})
 	for _, tc := range cases {
 		skillName := tc.name
+		mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main-"+skillName, func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(freshSHA))
+		})
 		mux.HandleFunc(ghTreeTestPath(owner, repo, freshSHA, "skills/"+skillName), func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(ghTreeTestSingleFile))
@@ -1644,24 +1572,12 @@ func TestResolveGitHubSkill_BackgroundRefreshJittersExpiryDeterministically(t *t
 	}
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	ctx := context.Background()
 	for _, tc := range cases {
-		uri := "gh://" + owner + "/" + repo + "/" + tc.name + "@main"
-		ghRef, err := agent.ParseGitHubSkillURI(uri)
-		require.NoError(t, err)
-		cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
-
-		require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
-			CommitSHA:   staleSHA,
-			FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
-			BundleHash:  "sha256:stale",
-			TokenScope:  "public",
-			ExpiresAt:   fixedNow.Add(-time.Minute),
-			OriginalURI: uri,
-		}))
+		uri := "gh://" + owner + "/" + repo + "/" + tc.name + "@main-" + tc.name
+		refKey, _, flightKey := seedGHSkillCache(t, srv, uri, githubfetch.AnonScope, staleSHA, "", fixedNow.Add(-time.Minute), nil)
 
 		mu.Lock()
 		currentR = tc.r
@@ -1673,9 +1589,9 @@ func TestResolveGitHubSkill_BackgroundRefreshJittersExpiryDeterministically(t *t
 
 		gotName := <-refreshed
 		require.Equal(t, tc.name, gotName)
-		_, _, _ = srv.ghResolveFlight.Do(cacheKey, func() (interface{}, error) { return nil, nil })
+		_, _, _ = srv.ghResolveFlight.Do(flightKey, func() (interface{}, error) { return nil, nil })
 
-		entry, hit, err := srv.ghResolutionStore.Get(ctx, cacheKey)
+		entry, hit, err := srv.ghResolutionStore.Get(ctx, refKey)
 		require.NoError(t, err)
 		require.True(t, hit)
 		wantExpires := fixedNow.Add(tc.wantTTL)
@@ -1738,20 +1654,20 @@ func TestResolveGitHubSkill_BackgroundRefreshBoundsConcurrency(t *testing.T) {
 	release := make(chan struct{})
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
-		cur := inFlight.Add(1)
-		for {
-			prev := maxInFlight.Load()
-			if cur <= prev || maxInFlight.CompareAndSwap(prev, cur) {
-				break
-			}
-		}
-		entered <- struct{}{}
-		<-release
-		inFlight.Add(-1)
-		_, _ = w.Write([]byte(freshSHA))
-	})
 	for i := 0; i < total; i++ {
+		mux.HandleFunc(fmt.Sprintf("/repos/%s/%s/commits/main-%d", owner, repo, i), func(w http.ResponseWriter, _ *http.Request) {
+			cur := inFlight.Add(1)
+			for {
+				prev := maxInFlight.Load()
+				if cur <= prev || maxInFlight.CompareAndSwap(prev, cur) {
+					break
+				}
+			}
+			entered <- struct{}{}
+			<-release
+			inFlight.Add(-1)
+			_, _ = w.Write([]byte(freshSHA))
+		})
 		skillPath := fmt.Sprintf("skills/s%d", i)
 		mux.HandleFunc(ghTreeTestPath(owner, repo, freshSHA, skillPath), func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -1760,29 +1676,18 @@ func TestResolveGitHubSkill_BackgroundRefreshBoundsConcurrency(t *testing.T) {
 	}
 	gh := httptest.NewServer(mux)
 	t.Cleanup(gh.Close)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	ctx := context.Background()
 	cacheKeys := make([]string, total)
 	for i := 0; i < total; i++ {
-		uri := fmt.Sprintf("gh://%s/%s/s%d@main", owner, repo, i)
-		ghRef, err := agent.ParseGitHubSkillURI(uri)
-		require.NoError(t, err)
-		cacheKeys[i] = computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
-		require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKeys[i], GitHubCacheEntry{
-			CommitSHA:   staleSHA,
-			FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
-			BundleHash:  "sha256:stale",
-			TokenScope:  "public",
-			ExpiresAt:   time.Now().Add(-time.Minute),
-			OriginalURI: uri,
-		}))
+		uri := fmt.Sprintf("gh://%s/%s/s%d@main-%d", owner, repo, i, i)
+		_, _, cacheKeys[i] = seedGHSkillCache(t, srv, uri, githubfetch.AnonScope, staleSHA, "", time.Now().Add(-time.Minute), nil)
 	}
 
 	// Trigger all stale hits at once.
 	for i := 0; i < total; i++ {
-		uri := fmt.Sprintf("gh://%s/%s/s%d@main", owner, repo, i)
+		uri := fmt.Sprintf("gh://%s/%s/s%d@main-%d", owner, repo, i, i)
 		resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
 		require.NoError(t, err)
 		assert.Equal(t, safeShortSHA(staleSHA), resp.ResolvedVersion)

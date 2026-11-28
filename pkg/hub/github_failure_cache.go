@@ -16,58 +16,45 @@ package hub
 
 import (
 	"errors"
-	"net/http"
-	"unicode/utf8"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 )
 
-// ghStatusError is a non-OK GitHub API response from ghResolveCommitSHA or
-// ghListTree. Error() is the message those functions have always
-// returned; status lets callers tell a 404 apart without matching text.
-type ghStatusError struct {
-	status int
-	msg    string
+// isGHAuthoritativeDenial reports whether err is an authoritative GitHub
+// denial (404 not_found, 401 auth_rejected, or non-rate-limit 403 forbidden).
+// These trigger cache deletion for the same (host, owner, repo, scope) and a
+// 1-minute negative memo, and must never fall back to serving stale entries.
+func isGHAuthoritativeDenial(err error) bool {
+	var ghe *githubfetch.Error
+	if errors.As(err, &ghe) {
+		switch ghe.Kind {
+		case githubfetch.KindNotFound, githubfetch.KindAuthRejected, githubfetch.KindForbidden:
+			return true
+		}
+	}
+	return false
 }
 
-func (e *ghStatusError) Error() string { return e.msg }
-
-// isGHNotFound reports whether err comes from GitHub answering 404 for the
-// ref or the skill path. Only these are remembered: they do not change
-// between attempts made close together. Rate limits, 5xx, network errors
-// and other statuses are never remembered.
-func isGHNotFound(err error) bool {
-	var se *ghStatusError
-	return errors.As(err, &se) && se.status == http.StatusNotFound
+// isGHTransientFailure reports whether err is a transient GitHub or transport
+// failure (rate_limited, timeout, unreachable, upstream) for which a stale
+// cached entry may still be served for a credentialed scope.
+func isGHTransientFailure(err error) bool {
+	var ghe *githubfetch.Error
+	if errors.As(err, &ghe) {
+		switch ghe.Kind {
+		case githubfetch.KindRateLimited, githubfetch.KindTimeout, githubfetch.KindUnreachable, githubfetch.KindUpstream:
+			return true
+		}
+	}
+	return false
 }
 
-// rememberGHNotFound remembers err for cacheKey for agent.FailureMemoTTL
-// (see Server.ghFailures) when it is GitHub reporting the ref or skill path
-// as not found. The key is the resolution cache key (ref plus token scope,
-// see computeCacheKey).
-func (s *Server) rememberGHNotFound(cacheKey string, err error) {
-	if isGHNotFound(err) {
+// rememberGHDenial remembers err for cacheKey for agent.FailureMemoTTL
+// (see Server.ghFailures) when it is an authoritative denial (not_found,
+// auth_rejected, or forbidden). Transient failures (rate limits, 5xx, network
+// errors) are never remembered.
+func (s *Server) rememberGHDenial(cacheKey string, err error) {
+	if isGHAuthoritativeDenial(err) {
 		s.ghFailures.Record(cacheKey, err)
 	}
-}
-
-// maxGHErrorBody is how many bytes of a GitHub error response body a
-// ghStatusError message keeps. It bounds the size of each remembered
-// failure (and of the per-URI message returned to clients) when a server
-// answers with a large error page.
-const maxGHErrorBody = 512
-
-// ghErrorBody returns body for use in a ghStatusError message, cut to
-// maxGHErrorBody bytes with "..." appended when it is longer. The cut backs
-// off to the start of a UTF-8 sequence so a multi-byte character is never
-// split. The back-off is at most utf8.UTFMax-1 bytes, the longest a valid
-// sequence can reach past the cut; a body that is not valid UTF-8 there is
-// cut at that bound instead of shrinking further.
-func ghErrorBody(body []byte) string {
-	if len(body) <= maxGHErrorBody {
-		return string(body)
-	}
-	n := maxGHErrorBody
-	for n > maxGHErrorBody-(utf8.UTFMax-1) && !utf8.RuneStart(body[n]) {
-		n--
-	}
-	return string(body[:n]) + "..."
 }
