@@ -1245,6 +1245,16 @@ export class ScionPageProjectSettings extends LitElement {
       if (tab) {
         this.activeResourcesTab = tab;
       }
+      const configTab = params.get('configTab');
+      if (
+        configTab === 'general' ||
+        configTab === 'auth-security' ||
+        configTab === 'limits' ||
+        configTab === 'resources' ||
+        configTab === 'brokers'
+      ) {
+        this.activeConfigTab = configTab;
+      }
       // The leave dialog's Transfer ownership link from the project page.
       // Only that param is removed from the URL once read, so a reload or
       // Back does not open the dialog again.

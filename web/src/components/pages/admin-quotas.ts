@@ -810,17 +810,6 @@ export class ScionPageAdminQuotas extends LitElement {
       if (etag) {
         this.editingEntitlementEtag = etag;
       }
-      const latest = (await res.json()) as EntitlementBinding;
-      if (this.editingEntitlement?.id !== bindingId) return;
-      this.editingEntitlement = latest;
-      this.entitlementForm = {
-        subjectType: latest.subjectType,
-        subjectId: latest.subjectId,
-        scopeType: latest.scopeType,
-        scopeId: latest.scopeId,
-        value: latest.value,
-        tokenAction: this.normalizeTokenAction(latest.tokenAction),
-      };
     } catch {
       // Best-effort revision fetch; PUT still works unconditionally when ETag is absent.
     }

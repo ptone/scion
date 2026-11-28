@@ -169,4 +169,44 @@ describe('scion-page-admin-group-detail — pooled token budgets', () => {
       expect(breakdown?.textContent).toContain('Alice');
     });
   });
+
+  it('hides pooled budgets section on 403 Forbidden instead of showing empty message', async () => {
+    window.history.pushState({}, '', '/admin/groups/grp-1');
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    setFeatureFlag(TOKENOMICS_TOKEN_BUDGETS_FLAG, true);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (path.endsWith('/api/v1/groups/grp-1')) {
+          return Promise.resolve(jsonResponse(TEST_GROUP));
+        }
+        if (path.endsWith('/api/v1/groups/grp-1/usage/budgets')) {
+          return Promise.resolve(jsonResponse({ error: 'forbidden' }, 403));
+        }
+        if (path.includes('/members')) {
+          return Promise.resolve(jsonResponse({ members: [] }));
+        }
+        if (path.includes('/users/user-1')) {
+          return Promise.resolve(jsonResponse({ id: 'user-1', displayName: 'Owner' }));
+        }
+        return Promise.resolve(jsonResponse({}, 404));
+      })
+    );
+
+    element = document.createElement('scion-page-admin-group-detail') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    document.body.appendChild(element);
+
+    await vi.waitFor(() => {
+      expect(element?.shadowRoot?.querySelector('scion-group-member-editor')).not.toBeNull();
+    });
+    await vi.waitFor(() => {
+      expect(
+        element?.shadowRoot?.querySelector('[data-testid="group-token-budgets-section"]')
+      ).toBeNull();
+    });
+  });
 });

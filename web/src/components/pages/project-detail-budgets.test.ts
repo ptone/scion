@@ -152,6 +152,10 @@ describe('scion-page-project-detail — budget status badges', () => {
       expect(badge).not.toBeNull();
       expect(badge?.getAttribute('data-state')).toBe('exhausted');
       expect(badge?.getAttribute('variant')).toBe('danger');
+      const link = element?.shadowRoot?.querySelector(
+        '[data-testid="project-manage-budgets-link"]'
+      );
+      expect(link?.getAttribute('href')).toBe('/projects/proj-1/settings?configTab=limits');
     });
   });
 });

@@ -59,6 +59,25 @@ describe('scion-page-profile-budgets', () => {
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(element.shadowRoot?.querySelector('[data-testid="profile-budgets-page"]')).toBeNull();
+    expect(
+      element.shadowRoot?.querySelector('[data-testid="profile-budgets-disabled"]')?.textContent
+    ).toContain('not enabled');
+  });
+
+  it('stays hidden and does not fetch when tokenomics.usage_ledger is off even if token_budgets is on', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, false);
+    setFeatureFlag(TOKENOMICS_TOKEN_BUDGETS_FLAG, true);
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    element = document.createElement('scion-page-profile-budgets') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    document.body.appendChild(element);
+    await element.updateComplete;
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(element.shadowRoot?.querySelector('[data-testid="profile-budgets-page"]')).toBeNull();
   });
 
   it('fetches /api/v1/me/usage/budgets and renders personal and per-project sections when enabled', async () => {

@@ -3697,7 +3697,8 @@ export class ScionPageProjectDetail extends LitElement {
               })}
               <div style="display: flex; align-items: center; margin-left: auto;">
                 <a
-                  href="/projects/${encodeURIComponent(this.projectId)}/settings"
+                  href="/projects/${encodeURIComponent(this.projectId)}/settings?configTab=limits"
+                  data-testid="project-manage-budgets-link"
                   style="text-decoration: none;"
                 >
                   <sl-button size="small" variant="text">

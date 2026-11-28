@@ -315,6 +315,7 @@ describe('scion-page-admin-quotas — llm_tokens limits & entitlement edit (pton
       body: Record<string, unknown>;
     }> = [];
     let putCount = 0;
+    let etagGetResolved = false;
 
     vi.stubGlobal(
       'fetch',
@@ -339,6 +340,7 @@ describe('scion-page-admin-quotas — llm_tokens limits & entitlement edit (pton
           path.endsWith(`/api/v1/admin/entitlements/${BINDING_NO_ACTION.id}`) &&
           method === 'GET'
         ) {
+          etagGetResolved = true;
           return Promise.resolve(
             new Response(JSON.stringify(BINDING_NO_ACTION), {
               status: 200,
@@ -406,9 +408,13 @@ describe('scion-page-admin-quotas — llm_tokens limits & entitlement edit (pton
       ) as (HTMLElement & { value?: string }) | null;
       expect(sel?.getAttribute('value')).toBe('pause_new');
     });
-    // Wait briefly for GET ETag revision fetch
-    await new Promise((r) => setTimeout(r, 20));
-    await element.updateComplete;
+    // Wait for GET ETag revision fetch to settle without fixed setTimeout
+    await vi.waitFor(() => {
+      expect(etagGetResolved).toBe(true);
+      expect(
+        (element as unknown as { editingEntitlementEtag: string | null }).editingEntitlementEtag
+      ).toBe('"2026-11-28T10:00:00Z"');
+    });
 
     // Submit -> hits 412, verifies If-Match and explicit pause_new tokenAction
     (
@@ -478,5 +484,110 @@ describe('scion-page-admin-quotas — llm_tokens limits & entitlement edit (pton
     const subjType = element.shadowRoot?.querySelector('[data-testid="entitlement-subject-type"]');
     expect(subjType?.getAttribute('value')).toBe('group');
     expect(subjType?.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('preserves user edits made before the background ETag GET resolves', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    setFeatureFlag(TOKENOMICS_TOKEN_BUDGETS_FLAG, true);
+
+    let resolveGet!: (res: Response) => void;
+    const putCalls: Array<{ headers: Record<string, string>; body: Record<string, unknown> }> = [];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        const method = (init?.method || 'GET').toUpperCase();
+        if (path.endsWith('/api/v1/admin/limits')) {
+          return Promise.resolve(jsonResponse({ items: [TOKEN_LIMIT] }));
+        }
+        if (path.endsWith('/api/v1/admin/usage')) {
+          return Promise.resolve(jsonResponse({ items: [] }));
+        }
+        if (path.endsWith(`/api/v1/admin/limits/${TOKEN_LIMIT.id}/entitlements`)) {
+          return Promise.resolve(jsonResponse({ items: [BINDING_NO_ACTION] }));
+        }
+        if (path.endsWith(`/api/v1/admin/usage/${TOKEN_LIMIT.id}`)) {
+          return Promise.resolve(
+            jsonResponse({ limitDefinition: TOKEN_LIMIT, reservations: [], totalActive: 0 })
+          );
+        }
+        if (
+          path.endsWith(`/api/v1/admin/entitlements/${BINDING_NO_ACTION.id}`) &&
+          method === 'GET'
+        ) {
+          return new Promise<Response>((resolve) => {
+            resolveGet = resolve;
+          });
+        }
+        if (
+          path.endsWith(`/api/v1/admin/entitlements/${BINDING_NO_ACTION.id}`) &&
+          method === 'PUT'
+        ) {
+          putCalls.push({
+            headers: (init?.headers as Record<string, string>) || {},
+            body: JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as Record<
+              string,
+              unknown
+            >,
+          });
+          return Promise.resolve(jsonResponse({ ...BINDING_NO_ACTION, value: 9_000_000 }));
+        }
+        return Promise.resolve(jsonResponse({}, 404));
+      })
+    );
+
+    element = document.createElement('scion-page-admin-quotas') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    document.body.appendChild(element);
+
+    await vi.waitFor(() => {
+      expect(element?.shadowRoot?.querySelector('tr.clickable')).not.toBeNull();
+    });
+    (element.shadowRoot?.querySelector('tr.clickable') as HTMLElement).click();
+    await vi.waitFor(() => {
+      expect(
+        element?.shadowRoot?.querySelector('[data-testid="edit-entitlement-btn"]')
+      ).not.toBeNull();
+    });
+    (
+      element.shadowRoot?.querySelector('[data-testid="edit-entitlement-btn"]') as HTMLElement
+    ).click();
+    await vi.waitFor(() => {
+      expect(typeof resolveGet).toBe('function');
+    });
+
+    // User types a new value BEFORE the delayed GET resolves
+    const valueInput = element.shadowRoot?.querySelector(
+      '[data-testid="entitlement-value"]'
+    ) as HTMLInputElement;
+    valueInput.value = '9000000';
+    valueInput.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
+    await element.updateComplete;
+
+    // Now resolve the delayed GET with the old value (5_000_000) and an ETag
+    resolveGet(
+      new Response(JSON.stringify(BINDING_NO_ACTION), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', ETag: '"2026-11-28T10:00:00Z"' },
+      })
+    );
+    await vi.waitFor(() => {
+      expect(
+        (element as unknown as { editingEntitlementEtag: string | null }).editingEntitlementEtag
+      ).toBe('"2026-11-28T10:00:00Z"');
+    });
+    await element.updateComplete;
+
+    // Submit must keep user's 9000000 and still attach the fetched If-Match ETag
+    (
+      element.shadowRoot?.querySelector('[data-testid="entitlement-submit-btn"]') as HTMLElement
+    ).click();
+    await vi.waitFor(() => {
+      expect(putCalls.length).toBe(1);
+    });
+    expect(putCalls[0].body.value).toBe(9_000_000);
+    expect(putCalls[0].headers['If-Match']).toBe('"2026-11-28T10:00:00Z"');
   });
 });

@@ -410,8 +410,8 @@ export class ScionTokenBudgetsPanel extends LitElement {
   }
 
   private computePresetIso(budget: BudgetListItem, minutesFromNow: number): string {
-    const baseMs = budget.as_of ? Date.parse(budget.as_of) : Date.now();
-    const nowMs = Number.isNaN(baseMs) ? Date.now() : baseMs;
+    const asOfMs = budget.as_of ? Date.parse(budget.as_of) : NaN;
+    const nowMs = Number.isNaN(asOfMs) ? Date.now() : Math.max(Date.now(), asOfMs);
     const endMs = Date.parse(budget.window_end_utc);
     let targetMs = nowMs + minutesFromNow * 60_000;
     if (!Number.isNaN(endMs) && targetMs > endMs) {

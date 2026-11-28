@@ -103,6 +103,9 @@ export class ScionPageAdminGroupDetail extends LitElement {
   @state()
   private groupBudgetsError: string | null = null;
 
+  @state()
+  private groupBudgetsForbidden = false;
+
   private boundOnFeatureFlagsChanged = (): void => {
     const next = tokenBudgetsEnabled();
     if (next !== this.tokenBudgetsFlagEnabled) {
@@ -407,13 +410,19 @@ export class ScionPageAdminGroupDetail extends LitElement {
     const groupId = this.group.id;
     this.groupBudgetsLoading = true;
     this.groupBudgetsError = null;
+    this.groupBudgetsForbidden = false;
 
     try {
       const res = await apiFetch(`/api/v1/groups/${encodeURIComponent(groupId)}/usage/budgets`, {
         suppressAccessDeniedToast: true,
       });
       if (!this.isConnected || this.group?.id !== groupId || !this.tokenBudgetsFlagEnabled) return;
-      if (res.status === 403 || res.status === 404) {
+      if (res.status === 403) {
+        this.groupBudgets = [];
+        this.groupBudgetsForbidden = true;
+        return;
+      }
+      if (res.status === 404) {
         this.groupBudgets = [];
         return;
       }
@@ -578,7 +587,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
             ></scion-boundary-summary-notice>
           `
         : nothing}
-      ${this.tokenBudgetsFlagEnabled && !isProjectAgents
+      ${this.tokenBudgetsFlagEnabled && !isProjectAgents && !this.groupBudgetsForbidden
         ? html`
             <div style="margin-bottom: 1.5rem;" data-testid="group-token-budgets-section">
               <scion-token-budgets-panel

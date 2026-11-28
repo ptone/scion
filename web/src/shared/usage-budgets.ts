@@ -172,10 +172,10 @@ export function formatLimitDisplayName(limitName: string): string {
 export function formatTokenAmount(tokens: number): string {
   if (!Number.isFinite(tokens)) return '0';
   const abs = Math.abs(tokens);
-  if (abs >= 1_000_000_000) {
+  if (abs >= 999_995_000) {
     return `${(tokens / 1_000_000_000).toFixed(2).replace(/\.?0+$/, '')}B`;
   }
-  if (abs >= 1_000_000) {
+  if (abs >= 999_950) {
     return `${(tokens / 1_000_000).toFixed(2).replace(/\.?0+$/, '')}M`;
   }
   if (abs >= 1_000) {

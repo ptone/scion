@@ -16,7 +16,11 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import type { ScionTokenBudgetsPanel } from './token-budgets-panel.js';
-import type { GroupBudgetItem, UsageBudgetEntry } from '../../shared/usage-budgets.js';
+import {
+  formatTokenAmount,
+  type GroupBudgetItem,
+  type UsageBudgetEntry,
+} from '../../shared/usage-budgets.js';
 
 function makeBudget(overrides: Partial<UsageBudgetEntry> = {}): UsageBudgetEntry {
   return {
@@ -249,5 +253,40 @@ describe('scion-token-budgets-panel', () => {
     expect(breakdown).not.toBeNull();
     expect(breakdown?.textContent).toContain('Alice');
     expect(breakdown?.textContent).toContain('150K');
+  });
+
+  it('computes override presets from current time when as_of is stale and formats 999,950 as 1M', async () => {
+    expect(formatTokenAmount(999_950)).toBe('1M');
+    expect(formatTokenAmount(999_999)).toBe('1M');
+
+    const nowMs = Date.now();
+    const staleAsOf = new Date(nowMs - 4 * 3600_000).toISOString();
+    const windowEnd = new Date(nowMs + 12 * 3600_000).toISOString();
+
+    el = document.createElement('scion-token-budgets-panel') as ScionTokenBudgetsPanel;
+    el.budgets = [
+      makeBudget({
+        state: 'exhausted',
+        as_of: staleAsOf,
+        window_end_utc: windowEnd,
+      }),
+    ];
+    el.canOverride = true;
+    el.overrideEndpointBase = '/api/v1/projects/proj-1/usage/budgets';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const openBtn = el.shadowRoot?.querySelector(
+      '[data-testid="budget-override-btn"]'
+    ) as HTMLElement;
+    openBtn.click();
+    await el.updateComplete;
+
+    const untilInput = el.shadowRoot?.querySelector(
+      '[data-testid="budget-override-until-input"]'
+    ) as HTMLInputElement | null;
+    const chosenMs = Date.parse(untilInput?.getAttribute('value') ?? '');
+    // Default +1h preset must be in the future relative to Date.now(), not stale as_of.
+    expect(chosenMs).toBeGreaterThan(nowMs + 50 * 60_000);
   });
 });

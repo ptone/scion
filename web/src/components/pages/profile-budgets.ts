@@ -125,7 +125,14 @@ export class ScionPageProfileBudgets extends LitElement {
 
   override render(): TemplateResult | typeof nothing {
     if (!this.enabled) {
-      return nothing;
+      return html`
+        <div
+          data-testid="profile-budgets-disabled"
+          style="padding: 2rem; text-align: center; color: var(--scion-text-muted); font-size: 0.875rem;"
+        >
+          Token budgets are not enabled on this hub.
+        </div>
+      `;
     }
 
     const userBudgets = this.budgets.filter((b) => b.scope_kind === 'user');

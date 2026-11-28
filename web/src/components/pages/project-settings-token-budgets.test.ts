@@ -176,4 +176,84 @@ describe('scion-page-project-settings — token budgets & usage.unmeasured_polic
       expect(badge?.getAttribute('data-state')).toBe('warn');
     });
   });
+
+  it('hides unmeasured policy and skips budgets fetch when usage_ledger is off even if token_budgets is on', async () => {
+    window.history.pushState({}, '', '/projects/proj-1/settings');
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, false);
+    setFeatureFlag(TOKENOMICS_TOKEN_BUDGETS_FLAG, true);
+
+    const putBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = stubProjectSettingsFetch(putBodies);
+    vi.stubGlobal('fetch', fetchMock);
+
+    element = document.createElement('scion-page-project-settings') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    document.body.appendChild(element);
+
+    await vi.waitFor(() => {
+      expect(element?.shadowRoot?.querySelector('sl-tab-panel[name="limits"]')).not.toBeNull();
+    });
+
+    expect(
+      element.shadowRoot?.querySelector('[data-testid="project-unmeasured-policy-field"]')
+    ).toBeNull();
+    expect(
+      element.shadowRoot?.querySelector('[data-testid="project-settings-token-budgets-section"]')
+    ).toBeNull();
+    expect(
+      fetchMock.mock.calls.some(([u]) => {
+        const s = typeof u === 'string' ? u : u instanceof URL ? u.href : u.url;
+        return s.includes('/usage/budgets');
+      })
+    ).toBe(false);
+  });
+
+  it('saves changed usageUnmeasuredPolicy and preserves stored deny on untouched save, and honors ?configTab=limits', async () => {
+    window.history.pushState({}, '', '/projects/proj-1/settings?configTab=limits');
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    setFeatureFlag(TOKENOMICS_TOKEN_BUDGETS_FLAG, true);
+
+    const putBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', stubProjectSettingsFetch(putBodies));
+
+    element = document.createElement('scion-page-project-settings') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    document.body.appendChild(element);
+
+    await vi.waitFor(() => {
+      const limitsTab = element?.shadowRoot?.querySelector('sl-tab[panel="limits"]');
+      expect(limitsTab?.hasAttribute('active')).toBe(true);
+      const sel = element?.shadowRoot?.querySelector(
+        '[data-testid="project-unmeasured-policy-select"]'
+      );
+      expect(sel?.getAttribute('value')).toBe('deny');
+    });
+
+    // Save without touching the select -> must preserve stored 'deny' (not '')
+    const saveBtn = element.shadowRoot?.querySelector(
+      '.config-actions sl-button[variant="primary"]'
+    ) as HTMLElement;
+    expect(saveBtn).not.toBeNull();
+    saveBtn.click();
+    await vi.waitFor(() => {
+      expect(putBodies.length).toBe(1);
+    });
+    expect(putBodies[0].usageUnmeasuredPolicy).toBe('deny');
+
+    // Change select to 'allow' and save -> must send 'allow'
+    const sel = element.shadowRoot?.querySelector(
+      '[data-testid="project-unmeasured-policy-select"]'
+    ) as HTMLSelectElement;
+    sel.value = 'allow';
+    sel.dispatchEvent(new CustomEvent('sl-change', { bubbles: true }));
+    await element.updateComplete;
+
+    saveBtn.click();
+    await vi.waitFor(() => {
+      expect(putBodies.length).toBe(2);
+    });
+    expect(putBodies[1].usageUnmeasuredPolicy).toBe('allow');
+  });
 });
