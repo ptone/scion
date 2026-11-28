@@ -1375,3 +1375,115 @@ func TestProjectGitHub_RefusalStepInAuthorizeReflectedByReadModel(t *testing.T) 
 	assert.NotContains(t, incResp.Association.Reason, "sensitive backend timeout detail")
 	assert.Equal(t, githubAppStatusMessage(githubAppErrAssociationCheckFailed), incResp.Association.Reason)
 }
+
+func TestProjectGitHub_PermissionsRoundTripAndNextMint(t *testing.T) {
+	fakeAPI := newProjectGitHubFakeAPI(t, "roundtrip-app", map[string]string{
+		"contents":      "write",
+		"pull_requests": "write",
+		"issues":        "write",
+		"metadata":      "read",
+	})
+	srv, st, admin := setupProjectGitHubTestHub(t, fakeAPI)
+	ctx := context.Background()
+
+	require.NoError(t, st.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: 8304,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          1,
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+	proj := &store.Project{
+		ID:        tid("pg-perm-rt"),
+		Name:      "pg-perm-rt",
+		Slug:      tid("pg-perm-rt"),
+		GitRemote: fakeAPI.srv.URL + "/acme/rt-repo",
+		CreatedBy: admin.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, st.CreateProject(ctx, proj))
+	bindRec := doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/projects/"+proj.ID+"/github-installation", map[string]int64{"installation_id": 8304})
+	require.Equal(t, http.StatusOK, bindRec.Code, bindRec.Body.String())
+
+	// 1. Initial default mode: read model and mint both use defaults.
+	reloaded, err := st.GetProject(ctx, proj.ID)
+	require.NoError(t, err)
+	_, _, err = srv.mintGitHubAppToken(ctx, reloaded)
+	require.NoError(t, err)
+	defaultMint := fakeAPI.lastMintPerms()
+	require.Equal(t, map[string]string{
+		"contents":      "write",
+		"pull_requests": "write",
+		"issues":        "write",
+		"metadata":      "read",
+	}, defaultMint)
+
+	// 2. PUT custom permissions -> read model reflects custom, and next mint uses the new set.
+	putRec := doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/projects/"+proj.ID+"/github-permissions", map[string]string{
+		"contents": "read",
+		"metadata": "read",
+	})
+	require.Equal(t, http.StatusOK, putRec.Code, putRec.Body.String())
+
+	getCustom := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+	require.Equal(t, http.StatusOK, getCustom.Code, getCustom.Body.String())
+	var customResp ProjectGitHubResponse
+	require.NoError(t, json.Unmarshal(getCustom.Body.Bytes(), &customResp))
+	assert.Equal(t, "custom", customResp.Permissions.Mode)
+	assert.True(t, customResp.Can.EditPermissions)
+	assert.Equal(t, map[string]string{"contents": "read", "metadata": "read"}, customResp.Permissions.Requested)
+	assert.Equal(t, map[string]string{"contents": "read", "metadata": "read"}, customResp.Permissions.Effective)
+
+	reloaded, err = st.GetProject(ctx, proj.ID)
+	require.NoError(t, err)
+	_, _, err = srv.mintGitHubAppToken(ctx, reloaded)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"contents": "read", "metadata": "read"}, fakeAPI.lastMintPerms())
+
+	// 3. DELETE resets to defaults -> read model returns to default, and next mint uses defaults again.
+	delRec := doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/projects/"+proj.ID+"/github-permissions", nil)
+	require.Equal(t, http.StatusNoContent, delRec.Code, delRec.Body.String())
+
+	getReset := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+	require.Equal(t, http.StatusOK, getReset.Code, getReset.Body.String())
+	var resetResp ProjectGitHubResponse
+	require.NoError(t, json.Unmarshal(getReset.Body.Bytes(), &resetResp))
+	assert.Equal(t, "default", resetResp.Permissions.Mode)
+	assert.Equal(t, defaultMint, resetResp.Permissions.Effective)
+
+	reloaded, err = st.GetProject(ctx, proj.ID)
+	require.NoError(t, err)
+	_, _, err = srv.mintGitHubAppToken(ctx, reloaded)
+	require.NoError(t, err)
+	assert.Equal(t, defaultMint, fakeAPI.lastMintPerms())
+
+	// 4. Read-only project member gets can.edit_permissions=false and 403 on PUT/DELETE.
+	viewer := &store.User{
+		ID:          tid("pg-perm-viewer"),
+		Email:       "pg-perm-viewer@example.com",
+		DisplayName: "Perm Viewer",
+		Role:        store.UserRoleMember,
+		Status:      store.UserStatusActive,
+	}
+	require.NoError(t, st.CreateUser(ctx, viewer))
+	require.NoError(t, st.CreateProjectMembership(ctx, &store.ProjectMembership{
+		ProjectID: proj.ID,
+		UserID:    viewer.ID,
+		Role:      store.ProjectRoleViewer,
+	}))
+
+	getViewer := doRequestAsUser(t, srv, viewer, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+	require.Equal(t, http.StatusOK, getViewer.Code, getViewer.Body.String())
+	var viewerResp ProjectGitHubResponse
+	require.NoError(t, json.Unmarshal(getViewer.Body.Bytes(), &viewerResp))
+	assert.False(t, viewerResp.Can.EditPermissions)
+
+	putDenied := doRequestAsUser(t, srv, viewer, http.MethodPut, "/api/v1/projects/"+proj.ID+"/github-permissions", map[string]string{
+		"contents": "read",
+	})
+	assert.Equal(t, http.StatusForbidden, putDenied.Code, putDenied.Body.String())
+
+	delDenied := doRequestAsUser(t, srv, viewer, http.MethodDelete, "/api/v1/projects/"+proj.ID+"/github-permissions", nil)
+	assert.Equal(t, http.StatusForbidden, delDenied.Code, delDenied.Body.String())
+}
