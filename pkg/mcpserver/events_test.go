@@ -78,10 +78,27 @@ func readSSEJSONRPCFrames(body io.Reader, out chan<- sseRPCMessage) {
 	}
 }
 
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func TestEvents_CapabilitiesListPollAndStreamUnit(t *testing.T) {
 	var failWatchCount atomic.Int32
 	var forceLongPoll atomic.Bool
-	var logBuf bytes.Buffer
+	var logBuf syncBuffer
 	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

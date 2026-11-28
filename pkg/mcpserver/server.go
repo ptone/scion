@@ -127,9 +127,7 @@ func New(opts Options) (*Server, error) {
 		shutdownCh:     make(chan struct{}),
 	}
 
-	caps := &mcp.ServerCapabilities{
-		Logging: &mcp.LoggingCapabilities{},
-	}
+	caps := &mcp.ServerCapabilities{}
 	caps.AddExtension(EventsExtensionID, map[string]any{})
 
 	mcpSrv := mcp.NewServer(&mcp.Implementation{
