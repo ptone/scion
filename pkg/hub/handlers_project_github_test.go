@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -41,6 +42,7 @@ type projectGitHubFakeAPI struct {
 
 	mu             sync.Mutex
 	appSlug        string
+	appEvents      []string
 	appPermissions map[string]string
 	appStatus      int
 	repoStatus     int
@@ -66,6 +68,7 @@ func newProjectGitHubFakeAPI(t *testing.T, slug string, appPerms map[string]stri
 		for k, v := range f.appPermissions {
 			perms[k] = v
 		}
+		events := append([]string(nil), f.appEvents...)
 		s := f.appSlug
 		f.mu.Unlock()
 		if appStatus != 0 {
@@ -76,6 +79,7 @@ func newProjectGitHubFakeAPI(t *testing.T, slug string, appPerms map[string]stri
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"id":          1,
 			"slug":        s,
+			"events":      events,
 			"permissions": perms,
 		})
 	})
@@ -1166,4 +1170,242 @@ func TestProjectGitHub_CreatorCheckBoundedConcurrencyAndNegativeCache(t *testing
 	assert.True(t, warmResp.Association.Authorized)
 	assert.True(t, warmResp.Association.Verified)
 	assert.Equal(t, int32(5), calls.Load(), "warm cache after detached check must require 0 additional calls")
+}
+
+func setProjectGitHubExperiments(t *testing.T, srv *Server, triggersOn, githubTriggersOn bool) {
+	t.Helper()
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		switch e.Name {
+		case experiments.Triggers:
+			e.Default = triggersOn
+		case experiments.GitHubTriggers:
+			e.Default = githubTriggersOn
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, experiments.Default().Retired())
+	require.NoError(t, err)
+	srv.mu.Lock()
+	srv.experiments = reg
+	srv.mu.Unlock()
+}
+
+func TestProjectGitHub_TriggersReadiness(t *testing.T) {
+	allRequiredEvents := []string{
+		"issue_comment",
+		"issues",
+		"pull_request",
+		"pull_request_review",
+		"pull_request_review_comment",
+	}
+	allRequiredPerms := map[string]string{
+		"contents":      "write",
+		"issues":        "write",
+		"metadata":      "read",
+		"pull_requests": "write",
+	}
+
+	fakeAPI := newProjectGitHubFakeAPI(t, "test-scion-bot", allRequiredPerms)
+	fakeAPI.mu.Lock()
+	fakeAPI.appEvents = append([]string(nil), allRequiredEvents...)
+	fakeAPI.mu.Unlock()
+
+	srv, st, admin := setupProjectGitHubTestHub(t, fakeAPI)
+	ctx := context.Background()
+
+	// Create a non-admin project viewer with project read only.
+	viewer := &store.User{
+		ID:          tid("pg-tr-viewer"),
+		Email:       "pg-tr-viewer@example.com",
+		DisplayName: "Triggers Readiness Viewer",
+		Role:        store.UserRoleMember,
+		Status:      store.UserStatusActive,
+	}
+	require.NoError(t, st.CreateUser(ctx, viewer))
+
+	proj := &store.Project{
+		ID:        tid("pg-tr-proj"),
+		Name:      "pg-tr-proj",
+		Slug:      tid("pg-tr-proj"),
+		GitRemote: fakeAPI.srv.URL + "/acme/readiness-repo",
+		OwnerID:   admin.ID,
+		CreatedBy: admin.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, st.CreateProject(ctx, proj))
+
+	viewerRole, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)
+	require.NoError(t, err)
+	require.NotNil(t, viewerRole)
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: viewerRole.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      viewer.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          proj.ID,
+		CreatedBy:        admin.ID,
+		CreatedAt:        time.Now(),
+	})
+	require.NoError(t, err)
+
+	// Helper to assert no hub-config leakage in raw triggers_readiness JSON.
+	assertNoHubConfigLeak := func(t *testing.T, raw map[string]any) {
+		t.Helper()
+		forbidden := []string{
+			"webhooks_enabled",
+			"has_webhook_secret",
+			"webhook_secret",
+			"private_key",
+			"private_key_source",
+			"api_base_url",
+			"app_id",
+			"installation_url",
+		}
+		for _, k := range forbidden {
+			_, present := raw[k]
+			assert.False(t, present, "triggers_readiness must not expose hub config field %q", k)
+		}
+	}
+
+	// Helper to compare project triggers_readiness against GET /api/v1/github-app .triggers.
+	assertMatchesAdminTriggers := func(t *testing.T, caller *store.User) (ProjectGitHubResponse, map[string]any) {
+		t.Helper()
+		adminRec := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/github-app", nil)
+		require.Equal(t, http.StatusOK, adminRec.Code, adminRec.Body.String())
+		var adminResp GitHubAppConfigResponse
+		require.NoError(t, json.Unmarshal(adminRec.Body.Bytes(), &adminResp))
+		require.NotNil(t, adminResp.Triggers, "expected GET /api/v1/github-app .triggers when enabled")
+
+		projRec := doRequestAsUser(t, srv, caller, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+		require.Equal(t, http.StatusOK, projRec.Code, projRec.Body.String())
+
+		var rawBody map[string]any
+		require.NoError(t, json.Unmarshal(projRec.Body.Bytes(), &rawBody))
+		rawTR, ok := rawBody["triggers_readiness"].(map[string]any)
+		require.True(t, ok, "expected triggers_readiness object in JSON: %s", projRec.Body.String())
+		assertNoHubConfigLeak(t, rawTR)
+
+		var projResp ProjectGitHubResponse
+		require.NoError(t, json.Unmarshal(projRec.Body.Bytes(), &projResp))
+		require.NotNil(t, projResp.TriggersReadiness)
+
+		assert.Equal(t, adminResp.Triggers.Ready, projResp.TriggersReadiness.Ready)
+		assert.Equal(t, adminResp.Triggers.MissingEvents, projResp.TriggersReadiness.MissingEvents)
+		assert.Equal(t, adminResp.Triggers.MissingPermissions, projResp.TriggersReadiness.MissingPermissions)
+		assert.Equal(t, adminResp.Triggers.AppSlug, projResp.TriggersReadiness.AppSlug)
+		assert.Equal(t, adminResp.Triggers.Error, projResp.TriggersReadiness.Error)
+		if adminResp.Triggers.CheckedAt == nil {
+			assert.Nil(t, projResp.TriggersReadiness.CheckedAt)
+		} else {
+			require.NotNil(t, projResp.TriggersReadiness.CheckedAt)
+			assert.True(t, adminResp.Triggers.CheckedAt.Equal(*projResp.TriggersReadiness.CheckedAt))
+		}
+		return projResp, rawTR
+	}
+
+	// 1. Experiment off (default, and partial flag combinations): triggers_readiness omitted.
+	for _, tc := range []struct {
+		name             string
+		triggersOn       bool
+		githubTriggersOn bool
+	}{
+		{"both_off", false, false},
+		{"only_triggers_on", true, false},
+		{"only_github_triggers_on", false, true},
+	} {
+		t.Run("absent_when_"+tc.name, func(t *testing.T) {
+			setProjectGitHubExperiments(t, srv, tc.triggersOn, tc.githubTriggersOn)
+			for _, u := range []*store.User{admin, viewer} {
+				rec := doRequestAsUser(t, srv, u, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				var raw map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+				_, hasKey := raw["triggers_readiness"]
+				assert.False(t, hasKey, "triggers_readiness must be absent when %s (user=%s)", tc.name, u.ID)
+			}
+		})
+	}
+
+	// Enable hub.triggers + hub.github_triggers for remaining subtests.
+	setProjectGitHubExperiments(t, srv, true, true)
+
+	// 2. Ready state: webhooks enabled + secret + all required events & permissions.
+	t.Run("ready_matches_admin_and_zero_extra_github_calls", func(t *testing.T) {
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig.WebhooksEnabled = true
+		srv.config.GitHubAppConfig.WebhookSecret = "whsec_test_secret_value"
+		srv.mu.Unlock()
+
+		appBefore, _ := fakeAPI.callCounts()
+		projResp, _ := assertMatchesAdminTriggers(t, viewer)
+		appAfter, _ := fakeAPI.callCounts()
+
+		assert.True(t, projResp.TriggersReadiness.Ready)
+		assert.Empty(t, projResp.TriggersReadiness.MissingEvents)
+		assert.Empty(t, projResp.TriggersReadiness.MissingPermissions)
+		assert.Empty(t, projResp.TriggersReadiness.Error)
+		assert.Equal(t, appBefore, appAfter, "warm identity cache must require 0 additional GET /app calls")
+	})
+
+	// 3. Hub webhooks disabled: ready=false, empty missing lists, no hub-config leakage.
+	t.Run("not_ready_when_webhooks_disabled_without_leaking_config", func(t *testing.T) {
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig.WebhooksEnabled = false
+		srv.config.GitHubAppConfig.WebhookSecret = ""
+		srv.mu.Unlock()
+
+		projResp, _ := assertMatchesAdminTriggers(t, viewer)
+		assert.False(t, projResp.TriggersReadiness.Ready)
+		assert.Empty(t, projResp.TriggersReadiness.MissingEvents)
+		assert.Empty(t, projResp.TriggersReadiness.MissingPermissions)
+		assert.Empty(t, projResp.TriggersReadiness.Error)
+	})
+
+	// 4. Missing events and permissions: matches GET /api/v1/github-app .triggers verbatim.
+	t.Run("missing_events_and_permissions_match_admin", func(t *testing.T) {
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig.WebhooksEnabled = true
+		srv.config.GitHubAppConfig.WebhookSecret = "whsec_test_secret_value"
+		srv.mu.Unlock()
+
+		fakeAPI.mu.Lock()
+		fakeAPI.appEvents = []string{"issues"}
+		fakeAPI.appPermissions = map[string]string{
+			"contents": "read",
+			"metadata": "read",
+		}
+		fakeAPI.mu.Unlock()
+		srv.githubAppIdentity.reset()
+		_, ok := srv.GitHubAppIdentity(ctx)
+		require.True(t, ok)
+
+		projResp, _ := assertMatchesAdminTriggers(t, viewer)
+		assert.False(t, projResp.TriggersReadiness.Ready)
+		assert.Equal(t, []string{
+			"issue_comment",
+			"pull_request",
+			"pull_request_review",
+			"pull_request_review_comment",
+		}, projResp.TriggersReadiness.MissingEvents)
+		assert.Equal(t, []string{
+			"contents:write",
+			"issues:write",
+			"pull_requests:write",
+		}, projResp.TriggersReadiness.MissingPermissions)
+		assert.Empty(t, projResp.TriggersReadiness.Error)
+	})
+
+	// 5. Identity fetch error: ready=false with sanitized error matching GET /api/v1/github-app .triggers.
+	t.Run("identity_error_matches_admin", func(t *testing.T) {
+		fakeAPI.mu.Lock()
+		fakeAPI.appStatus = http.StatusInternalServerError
+		fakeAPI.mu.Unlock()
+		srv.githubAppIdentity.reset()
+
+		projResp, _ := assertMatchesAdminTriggers(t, viewer)
+		assert.False(t, projResp.TriggersReadiness.Ready)
+		assert.NotEmpty(t, projResp.TriggersReadiness.Error)
+	})
 }
