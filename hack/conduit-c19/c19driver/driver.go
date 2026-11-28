@@ -130,6 +130,7 @@ type MemorySample struct {
 	Source               string    `json:"source"`
 	PIDCount             int       `json:"pid_count,omitempty"`
 	ExitedAfterDrainPIDs int       `json:"exited_after_drain_pids,omitempty"`
+	ExitedAfterDrainPID  int       `json:"exited_after_drain_pid,omitempty"`
 }
 
 // Config configures a C19 load run.
@@ -203,9 +204,14 @@ type Config struct {
 	// DrainAfter triggers OnDrainTrigger after this offset into Duration.
 	DrainAfter time.Duration
 	// DrainDeadline defines the drain window [DrainTriggeredAt, DrainTriggeredAt+DrainDeadline]
-	// during which control-probe and PTY errors on drained sessions are excused
-	// and reported separately (default 30s when DrainAfter > 0).
+	// during which control-probe and PTY errors on sessions owned by the drained
+	// hub (DrainedRelayInstanceID) are excused and reported separately (default 30s).
 	DrainDeadline time.Duration
+	// DrainedRelayInstanceID identifies the hub/relay instance being drained
+	// (from Welcome.relay_instance_id). Drain-window excusal for control-probe
+	// and PTY errors applies ONLY to agents owned by this relay; sessions on
+	// surviving hubs receive no excusal.
+	DrainedRelayInstanceID string
 	// MemorySampleInterval controls how often MemorySampler is called during
 	// the load window (default 1s when MemorySampler != nil).
 	MemorySampleInterval time.Duration
@@ -243,6 +249,11 @@ type Config struct {
 	// OnDrainTrigger is invoked once at DrainAfter into the load window to
 	// initiate a planned hub drain (e.g. SIGINT to hub-b). Optional.
 	OnDrainTrigger func(ctx context.Context) error
+	// DrainAcceptedStream, when set alongside OnDrainTrigger, is started just
+	// before the drain trigger to execute a bounded exchange that must complete
+	// cleanly within the drain window ("accepted streams finish within drain
+	// deadline"). Optional.
+	DrainAcceptedStream func(ctx context.Context, agentID string) error
 }
 
 // LatencyStats summarizes a slice of recorded durations.
@@ -313,6 +324,7 @@ type Result struct {
 	EffectiveMaxConcurrentRPCs     int
 	BrokerRPCEnabled               bool
 	DeliverAttempts                int64
+	DeliverPeriodicAttempts        int64
 	DeliverSucceeded               int64
 	DeliverNonDelivered            int64
 	Deliver429s                    int64
@@ -327,6 +339,7 @@ type Result struct {
 	RotateTokenErrors              int64
 	BrokerRPCSucceeded             int64
 	BrokerRPCErrors                int64
+	DrainExcusedBrokerRPCErrors    int64
 	BrokerRPC429s                  int64
 	BaselineControlErrors          int64
 	ControlProbeSucceeded          int64
@@ -347,6 +360,8 @@ type Result struct {
 	Drain4503Reasons               []string
 	Drain4503OtherReasons          []string
 	Drain4503Delays                []time.Duration
+	DrainAcceptedStreamAttempted   bool
+	DrainAcceptedStreamFinished    bool
 	PostDrainWorkSucceeded         int64
 	PostDrainReplacementWork       int64
 	SessionReconnections           int64
@@ -357,6 +372,7 @@ type Result struct {
 	MemorySource                   string
 	MemoryPIDCount                 int
 	MemoryExitedAfterDrainPIDs     int
+	MemoryExitedAfterDrainPID      int
 	MemorySampleErrors             int64
 	MemorySamples                  []MemorySample
 
@@ -372,6 +388,14 @@ type Result struct {
 	LoadControlLatencies     []time.Duration
 	PTYLatencies             []time.Duration
 	FirstError               error
+}
+
+// ShouldExcuseDrainError reports whether a control-probe or PTY error during a
+// planned drain may be excused: ONLY when inside the drain window AND the
+// agent's session is owned by the explicitly designated drained relay. Agents
+// on surviving hubs receive zero excusal.
+func ShouldExcuseDrainError(inDrainWindow bool, agentRelayID, drainedRelayID string) bool {
+	return inDrainWindow && drainedRelayID != "" && agentRelayID == drainedRelayID
 }
 
 func updateHighWater(high *atomic.Int64, cur int64) {
@@ -467,6 +491,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		drainExcusedPTYErr       atomic.Int64
 		admittedCounts           = make([]atomic.Int64, len(cfg.Agents))
 		reAdmittedAfterDrain     = make([]atomic.Bool, len(cfg.Agents))
+		agentRelayIDs            = make([]string, len(cfg.Agents))
 		res                      = &Result{
 			Mode:                         mode,
 			RunTag:                       cfg.RunTag,
@@ -486,6 +511,16 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			return false
 		}
 		return time.Since(time.Unix(0, trig)) <= drainWindow
+	}
+
+	isDrainedAgent := func(agentIdx int) bool {
+		if cfg.DrainedRelayInstanceID == "" || agentIdx < 0 || agentIdx >= len(agentRelayIDs) {
+			return false
+		}
+		mu.Lock()
+		rid := agentRelayIDs[agentIdx]
+		mu.Unlock()
+		return ShouldExcuseDrainError(inDrainWindow(), rid, cfg.DrainedRelayInstanceID)
 	}
 
 	recordPostDrainForAgent := func(agentIdx int) {
@@ -515,7 +550,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			HTTPClient:      cfg.HTTPClient,
 			TLSClientConfig: cfg.TLSClientConfig,
 			EnablePTY:       enablePTY,
-			OnSession: func(_ *conduitv1.Welcome) {
+			OnSession: func(w *conduitv1.Welcome) {
+				if w != nil && w.GetRelayInstanceId() != "" {
+					mu.Lock()
+					agentRelayIDs[agentIdx] = w.GetRelayInstanceId()
+					mu.Unlock()
+				}
 				if admittedCounts[agentIdx].Add(1) > 1 {
 					reconnections.Add(1)
 					if drainTriggered.Load() > 0 {
@@ -668,6 +708,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		if sample.ExitedAfterDrainPIDs > res.MemoryExitedAfterDrainPIDs {
 			res.MemoryExitedAfterDrainPIDs = sample.ExitedAfterDrainPIDs
 		}
+		if sample.ExitedAfterDrainPID > 0 {
+			res.MemoryExitedAfterDrainPID = sample.ExitedAfterDrainPID
+		}
 		if sample.Bytes > res.PeakMemoryBytes {
 			res.PeakMemoryBytes = sample.Bytes
 		}
@@ -731,33 +774,38 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	res.StalledBulkBytesAtStart = stalledAtStart
 
 	var (
-		deliverAttempt      atomic.Int64
-		deliverOK           atomic.Int64
-		deliverNonDelivered atomic.Int64
-		deliver429          atomic.Int64
-		deliverErr          atomic.Int64
-		largeOK             atomic.Int64
-		largeErr            atomic.Int64
-		rotateOK            atomic.Int64
-		rotateErr           atomic.Int64
-		brokerOK            atomic.Int64
-		brokerErr           atomic.Int64
-		broker429           atomic.Int64
-		brokerInFlight      atomic.Int64
-		brokerHighWater     atomic.Int64
-		controlOK           atomic.Int64
-		controlErr          atomic.Int64
-		control429          atomic.Int64
-		controlInFlight     atomic.Int64
-		controlHighWater    atomic.Int64
-		ptyOK               atomic.Int64
-		ptyErr              atomic.Int64
-		drain4503           atomic.Int64
-		drainRelayRestart   atomic.Int64
-		drainOther          atomic.Int64
+		deliverAttempt           atomic.Int64
+		deliverPeriodicAttempt   atomic.Int64
+		deliverOK                atomic.Int64
+		deliverNonDelivered      atomic.Int64
+		deliver429               atomic.Int64
+		deliverErr               atomic.Int64
+		largeOK                  atomic.Int64
+		largeErr                 atomic.Int64
+		rotateOK                 atomic.Int64
+		rotateErr                atomic.Int64
+		brokerOK                 atomic.Int64
+		brokerErr                atomic.Int64
+		drainExcusedBrokerRPCErr atomic.Int64
+		broker429                atomic.Int64
+		brokerInFlight           atomic.Int64
+		brokerHighWater          atomic.Int64
+		controlOK                atomic.Int64
+		controlErr               atomic.Int64
+		control429               atomic.Int64
+		controlInFlight          atomic.Int64
+		controlHighWater         atomic.Int64
+		ptyOK                    atomic.Int64
+		ptyErr                   atomic.Int64
+		drain4503                atomic.Int64
+		drainRelayRestart        atomic.Int64
+		drainOther               atomic.Int64
+		drainAcceptedAttempted   atomic.Bool
+		drainAcceptedFinished    atomic.Bool
 	)
 
-	loadDeadline := time.Now().Add(cfg.Duration)
+	loadStart := time.Now()
+	loadDeadline := loadStart.Add(cfg.Duration)
 	loadCtx, loadCancel := context.WithDeadline(ctx, loadDeadline)
 	defer loadCancel()
 	atLoadEnd := func() bool {
@@ -793,6 +841,33 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			case <-loadCtx.Done():
 				return
 			case <-time.After(cfg.DrainAfter):
+			}
+			// If a bounded accepted-stream check is configured, start it just
+			// before firing the drain trigger so it is already accepted on the
+			// draining session and must complete cleanly during the drain window.
+			if cfg.DrainAcceptedStream != nil {
+				streamAgent := cfg.Agents[0].AgentID
+				if len(cfg.Agents) > 1 {
+					streamAgent = cfg.Agents[1].AgentID
+				}
+				drainAcceptedAttempted.Store(true)
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					sctx, scancel := context.WithTimeout(ctx, drainWindow+5*time.Second)
+					defer scancel()
+					if err := cfg.DrainAcceptedStream(sctx, streamAgent); err == nil {
+						drainAcceptedFinished.Store(true)
+					} else {
+						recordErr(fmt.Errorf("drain accepted stream: %w", err))
+					}
+				}()
+				// Brief pause so the stream open lands before the drain trigger.
+				select {
+				case <-loadCtx.Done():
+					return
+				case <-time.After(50 * time.Millisecond):
+				}
 			}
 			now := time.Now()
 			drainTriggered.Store(now.UnixNano())
@@ -834,10 +909,14 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 					defer cancel()
 					start := time.Now()
 					deliverAttempt.Add(1)
+					deliverPeriodicAttempt.Add(1)
 					status, outcome, err := cfg.Deliver(callCtx, agentID, fmt.Sprintf("%s-agent-%d-msg-%d", msgPrefix, idx, seq))
 					elapsed := time.Since(start)
 					seq++
-					if status == http.StatusTooManyRequests || is429(err) {
+					// When FlusherAttemptStats is wired, /deliver 429s are counted
+					// once in FlusherDeliver429s; only count /message 429s (HTTPStatusError)
+					// here to avoid double-counting.
+					if is429(err) || (cfg.FlusherAttemptStats == nil && status == http.StatusTooManyRequests) {
 						deliver429.Add(1)
 					}
 					if err != nil || status != http.StatusOK {
@@ -874,7 +953,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			}(i, target.AgentID)
 		}
 
-		// 2. Large (512 KiB) deliver-message bodies paced across agents.
+		// 2. Large (512 KiB) deliver-message bodies scheduled at absolute
+		//    offsets from loadStart so delivery latency does not drift the
+		//    schedule past Duration.
 		if cfg.LargeBodyCount > 0 {
 			largePayload := strings.Repeat("X", LargeBodyBytes)
 			pacing := cfg.LargeBodyPacing
@@ -889,11 +970,17 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				defer wg.Done()
 				for i := 0; i < cfg.LargeBodyCount; i++ {
 					if i > 0 && pacing > 0 {
-						select {
-						case <-loadCtx.Done():
-							return
-						case <-time.After(pacing):
+						targetTime := loadStart.Add(time.Duration(i) * pacing)
+						if wait := time.Until(targetTime); wait > 0 {
+							select {
+							case <-loadCtx.Done():
+								return
+							case <-time.After(wait):
+							}
 						}
+					}
+					if loadCtx.Err() != nil {
+						return
 					}
 					targetIdx := i % len(cfg.Agents)
 					target := cfg.Agents[targetIdx]
@@ -905,7 +992,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 					elapsed := time.Since(start)
 					cancel()
 					agentDeliverMu[targetIdx].Unlock()
-					if status == http.StatusTooManyRequests || is429(err) {
+					if is429(err) || (cfg.FlusherAttemptStats == nil && status == http.StatusTooManyRequests) {
 						deliver429.Add(1)
 					}
 					if err != nil || status != http.StatusOK {
@@ -1008,7 +1095,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 						if atLoadEnd() {
 							return
 						}
-						if inDrainWindow() {
+						if isDrainedAgent(0) {
 							drainExcusedControlErr.Add(1)
 						} else {
 							controlErr.Add(1)
@@ -1080,8 +1167,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 						if cfg.BrokerRPCCount == 0 && atLoadEnd() {
 							return
 						}
-						brokerErr.Add(1)
-						recordErr(fmt.Errorf("broker RPC %d: %w", seq, err))
+						if inDrainWindow() {
+							drainExcusedBrokerRPCErr.Add(1)
+						} else {
+							brokerErr.Add(1)
+							recordErr(fmt.Errorf("broker RPC %d: %w", seq, err))
+						}
 					} else {
 						brokerOK.Add(1)
 						recordPostDrainForAgent(seq % len(cfg.Agents))
@@ -1106,13 +1197,14 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	// 5. Interactive PTY echo/keepalive workers (ModePhase2 or drain observer).
 	if cfg.PTYWorker != nil && cfg.PTYCount > 0 {
 		for i := 0; i < cfg.PTYCount; i++ {
-			target := cfg.Agents[i%len(cfg.Agents)]
+			agentIdx := i % len(cfg.Agents)
+			target := cfg.Agents[agentIdx]
 			wg.Add(1)
-			go func(agentID string) {
+			go func(idx int, agentID string) {
 				defer wg.Done()
 				pr, err := cfg.PTYWorker(loadCtx, agentID)
 				if err != nil {
-					if inDrainWindow() {
+					if isDrainedAgent(idx) {
 						drainExcusedPTYErr.Add(1)
 					} else {
 						ptyErr.Add(1)
@@ -1122,7 +1214,11 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				if pr != nil {
 					ptyOK.Add(pr.EchoSucceeded)
 					ptyErr.Add(pr.EchoErrors)
-					drainExcusedPTYErr.Add(pr.DrainWindowErrors)
+					if isDrainedAgent(idx) {
+						drainExcusedPTYErr.Add(pr.DrainWindowErrors)
+					} else {
+						ptyErr.Add(pr.DrainWindowErrors)
+					}
 					if pr.PostDrainEchoSucceeded > 0 {
 						postDrainWork.Add(pr.PostDrainEchoSucceeded)
 						postDrainReplacementWork.Add(pr.PostDrainEchoSucceeded)
@@ -1148,7 +1244,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 					}
 					mu.Unlock()
 				}
-			}(target.AgentID)
+			}(agentIdx, target.AgentID)
 		}
 	}
 
@@ -1163,6 +1259,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	sampleMemory()
 
 	res.DeliverAttempts = deliverAttempt.Load()
+	res.DeliverPeriodicAttempts = deliverPeriodicAttempt.Load()
 	res.DeliverSucceeded = deliverOK.Load()
 	res.DeliverNonDelivered = deliverNonDelivered.Load()
 	res.Deliver429s = deliver429.Load()
@@ -1178,6 +1275,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	res.RotateTokenErrors = rotateErr.Load()
 	res.BrokerRPCSucceeded = brokerOK.Load()
 	res.BrokerRPCErrors = brokerErr.Load()
+	res.DrainExcusedBrokerRPCErrors = drainExcusedBrokerRPCErr.Load()
 	res.BrokerRPC429s = broker429.Load()
 	res.BaselineControlErrors = baselineControlErr.Load()
 	res.ControlProbeSucceeded = controlOK.Load()
@@ -1196,6 +1294,8 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	res.Drain4503Count = drain4503.Load()
 	res.Drain4503RelayRestartCount = drainRelayRestart.Load()
 	res.Drain4503OtherCount = drainOther.Load()
+	res.DrainAcceptedStreamAttempted = drainAcceptedAttempted.Load()
+	res.DrainAcceptedStreamFinished = drainAcceptedFinished.Load()
 	res.PostDrainWorkSucceeded = postDrainWork.Load()
 	res.PostDrainReplacementWork = postDrainReplacementWork.Load()
 	res.SessionReconnections = reconnections.Load()

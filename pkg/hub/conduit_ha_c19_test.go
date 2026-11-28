@@ -350,7 +350,7 @@ func TestConduitHA_C19_LiveCLI(t *testing.T) {
 		rep, out, err := runCLI(t,
 			"--mode=phase2",
 			"--pty-count=2",
-			"--allow-unevaluated=planned_drain_4503",
+			"--allow-unevaluated=planned_drain_4503,planned_drain_refuses_new_streams",
 		)
 		require.NoError(t, err, "phase2 CLI failed:\n%s", out)
 		assert.Equal(t, c19driver.VerdictPass, rep.Verdict, "output:\n%s", out)
@@ -368,48 +368,54 @@ func TestConduitHA_C19_LiveCLI(t *testing.T) {
 	t.Run("broker-rpc", func(t *testing.T) {
 		rep, out, err := runCLI(t,
 			"--mode=broker-rpc",
-			"--rpc-concurrency=8",
-			"--rpc-pacing=10ms",
-			"--broker-rpc-latency=150ms",
-			"--allow-unevaluated=planned_drain_4503",
+			"--duration=5s",
+			"--rpc-concurrency=128",
+			"--rpc-pacing=1200ms",
+			"--broker-rpc-latency=2500ms",
+			"--allow-unevaluated=planned_drain_4503,planned_drain_refuses_new_streams",
 		)
 		require.NoError(t, err, "broker-rpc CLI failed:\n%s", out)
 		assert.Equal(t, c19driver.VerdictPass, rep.Verdict, "output:\n%s", out)
 		assert.GreaterOrEqual(t, rep.Counts.StalledBulkBytesAtStart, int64(conduit.DefaultStreamWindow))
-		assert.Greater(t, rep.Counts.BrokerRPCSucceeded, int64(16))
+		assert.GreaterOrEqual(t, rep.Counts.BrokerRPCSucceeded, int64(128))
 		assert.Equal(t, int64(0), rep.Counts.BrokerRPCErrors)
 		assert.Equal(t, int64(0), rep.Counts.Total429s)
-		assert.GreaterOrEqual(t, rep.Counts.MaxConcurrentBrokerSessionRPCs, int64(8))
+		assert.GreaterOrEqual(t, rep.Counts.MaxConcurrentBrokerSessionRPCs, int64(116))
 	})
 
 	t.Run("deliver", func(t *testing.T) {
 		idsFile := filepath.Join(t.TempDir(), "msg-ids.txt")
+		// Exercises default large-body pacing with count=4 (R3), default
+		// MaxConcurrentRPCs=128 overlap (O1), and direct PG row verification
+		// via --pg-dsn (R2a).
 		rep, out, err := runCLI(t,
 			"--mode=deliver",
-			"--duration=4000ms",
-			"--deliver-interval=1500ms",
-			"--large-body-count=1",
-			"--large-body-pacing=-1ms",
-			"--rpc-concurrency=4",
-			"--rpc-pacing=10ms",
-			"--broker-rpc-latency=150ms",
+			"--duration=12s",
+			"--deliver-interval=2s",
+			"--large-body-count=4",
+			"--rpc-concurrency=128",
+			"--rpc-pacing=1200ms",
+			"--broker-rpc-latency=2500ms",
 			"--broker-debounce=400ms",
 			"--extra-submits=2",
 			"--extra-submit-delay=50ms",
 			"--message-ids-file="+idsFile,
-			"--allow-unevaluated=planned_drain_4503,rotate_token_mix",
+			"--pg-dsn="+env.DSN,
+			"--allow-unevaluated=planned_drain_4503,planned_drain_refuses_new_streams,rotate_token_mix",
 		)
 		require.NoError(t, err, "deliver CLI failed:\n%s", out)
 		assert.Equal(t, c19driver.VerdictPass, rep.Verdict, "output:\n%s", out)
 		assert.GreaterOrEqual(t, rep.Counts.StalledBulkBytesAtStart, int64(conduit.DefaultStreamWindow))
 		assert.GreaterOrEqual(t, rep.Counts.DeliverSucceeded, int64(numAgents))
-		assert.Equal(t, int64(1), rep.Counts.LargeBodySucceeded)
+		assert.Equal(t, int64(4), rep.Counts.LargeBodySucceeded)
 		assert.GreaterOrEqual(t, rep.Latencies.DeliverPaste512KMinBytes, c19driver.LargeBodyMinBytes)
-		assert.GreaterOrEqual(t, rep.Counts.MaxConcurrentBrokerSessionRPCs, int64(4))
+		assert.GreaterOrEqual(t, rep.Counts.MaxConcurrentBrokerSessionRPCs, int64(116))
 		assert.Equal(t, int64(0), rep.Counts.DeliverErrors)
 		assert.Equal(t, int64(0), rep.Counts.Total429s)
-		assert.Equal(t, 1, rep.Latencies.DeliverPaste512K.Count)
-		assert.Greater(t, rep.Counts.MessageRowsCreated, int64(33))
+		assert.Equal(t, 4, rep.Latencies.DeliverPaste512K.Count)
+		assert.True(t, rep.PGCheck.Checked)
+		assert.Equal(t, rep.Counts.MessageRowsCreated, rep.PGCheck.Delivered)
+		assert.Greater(t, rep.Counts.MessageRowsCreated, int64(4*33))
 
 		// Verify 100% of created message rows reached terminal delivered state in real Postgres.
 		rawIDs, rerr := os.ReadFile(idsFile)
@@ -421,5 +427,31 @@ func TestConduitHA_C19_LiveCLI(t *testing.T) {
 			require.NoError(t, gerr, "message %s", id)
 			assert.Equal(t, store.MessageDispatchDelivered, m.DispatchState, "message %s must reach delivered in Postgres", id)
 		}
+	})
+
+	// r1-R4: In deliver mode against the real Hub, a broker-session 429 on /logs
+	// churn (surfaced by Hub handleAgentLogs as HTTP 502) must be detected,
+	// counted in http_429_count, and FAIL the run.
+	t.Run("deliver_broker_session_429", func(t *testing.T) {
+		idsFile := filepath.Join(t.TempDir(), "msg-ids-429.txt")
+		rep, out, err := runCLI(t,
+			"--mode=deliver",
+			"--duration=1500ms",
+			"--deliver-interval=1s",
+			"--large-body-count=0",
+			"--rpc-concurrency=12",
+			"--broker-rpc-latency=80ms",
+			"--broker-max-concurrent-rpcs=2",
+			"--broker-debounce=200ms",
+			"--extra-submits=0",
+			"--stalled-tunnel=false",
+			"--message-ids-file="+idsFile,
+			"--allow-unevaluated=planned_drain_4503,planned_drain_refuses_new_streams,rotate_token_mix,pg_rows_delivered",
+		)
+		require.NoError(t, err, "deliver_broker_session_429 returned runtime err:\n%s", out)
+		assert.Equal(t, c19driver.VerdictFail, rep.Verdict, "broker-session 429 in deliver mode must FAIL:\n%s", out)
+		assert.False(t, rep.Pass)
+		assert.Greater(t, rep.Counts.BrokerRPC429s, int64(0), "real Hub 502-mapped broker-session 429 must be counted")
+		assert.Greater(t, rep.Counts.Total429s, int64(0))
 	})
 }

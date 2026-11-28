@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -41,6 +42,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/GoogleCloudPlatform/scion/hack/conduit-c19/c19driver"
 	"github.com/GoogleCloudPlatform/scion/internal/conduittest"
@@ -99,9 +101,11 @@ type cliConfig struct {
 	DrainCmd                string
 	DrainDeadline           time.Duration
 	DrainDeadlineTolerance  time.Duration
+	DrainedRelayID          string
 	ExpectDrain             bool
 	AllowUnevaluated        []string
 	MessageIDsFile          string
+	PGDSN                   string
 	OutputPath              string
 	JSONStdout              bool
 	InsecureSkipVerify      bool
@@ -141,7 +145,7 @@ func (e *flagParseError) Unwrap() error { return e.err }
 // RunArgs parses CLI flags and runs the C19 load driver in-process, returning
 // the evaluated Report. Used by both Main and integration tests.
 func RunArgs(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) (c19driver.Report, error) {
-	cfg, err := parseFlags(args, getenv)
+	cfg, err := parseFlags(args, getenv, stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return c19driver.Report{}, err
@@ -151,8 +155,11 @@ func RunArgs(ctx context.Context, args []string, getenv func(string) string, std
 	return run(ctx, cfg, stdout, stderr)
 }
 
-func parseFlags(args []string, getenv func(string) string) (*cliConfig, error) {
+func parseFlags(args []string, getenv func(string) string, stderr io.Writer) (*cliConfig, error) {
 	fs := flag.NewFlagSet("conduit-c19", flag.ContinueOnError)
+	if stderr != nil {
+		fs.SetOutput(stderr)
+	}
 	cfg := &cliConfig{}
 
 	var (
@@ -165,17 +172,20 @@ func parseFlags(args []string, getenv func(string) string) (*cliConfig, error) {
 		allowUnevaluatedStr string
 	)
 
+	// Non-secret flags may read env defaults; credential flags (--user-token,
+	// --broker-secret, --broker-secret-b64, --pg-dsn) MUST register empty
+	// defaults so -h / flag errors never print secrets via PrintDefaults.
 	fs.StringVar(&modeStr, "mode", string(c19driver.ModeDeliver), "Traffic mode: phase2, broker-rpc, or deliver")
 	fs.StringVar(&cfg.RunTag, "run-tag", "", "Unique tag included in message payloads and report (default: auto-generated)")
 	fs.StringVar(&cfg.HubURL, "hub-url", getenv("C19_HUB_URL"), "Hub or load-balancer base URL (env: C19_HUB_URL)")
 	fs.StringVar(&hubURLsStr, "hub-urls", getenv("C19_HUB_URLS"), "Optional comma-separated hub URLs to split agents across")
 	fs.StringVar(&cfg.AgentsFile, "agents-file", getenv("C19_AGENTS_FILE"), "Path to JSON file listing AgentTarget entries (env: C19_AGENTS_FILE)")
 	fs.IntVar(&cfg.AgentLimit, "agents", 0, "Maximum number of agents to use from --agents-file (0 = all)")
-	fs.StringVar(&cfg.UserToken, "user-token", getenv("C19_USER_TOKEN"), "User/admin bearer token for Hub API calls (prefer env C19_USER_TOKEN)")
+	fs.StringVar(&cfg.UserToken, "user-token", "", "User/admin bearer token for Hub API calls (prefer env C19_USER_TOKEN)")
 	fs.StringVar(&cfg.UserID, "user-id", getenv("C19_USER_ID"), "User principal ID for Conduit tunnel Hello (optional; resolved from GET /api/v1/auth/me when unset)")
 	fs.StringVar(&cfg.BrokerID, "broker-id", getenv("C19_BROKER_ID"), "Runtime broker ID for Conduit broker session, control channel, and /deliver (env: C19_BROKER_ID)")
-	fs.StringVar(&brokerSecretStr, "broker-secret", getenv("C19_BROKER_SECRET"), "Raw broker HMAC secret (prefer env C19_BROKER_SECRET over CLI flag)")
-	fs.StringVar(&brokerSecretB64, "broker-secret-b64", getenv("C19_BROKER_SECRET_B64"), "Base64-encoded broker HMAC secret (prefer env C19_BROKER_SECRET_B64)")
+	fs.StringVar(&brokerSecretStr, "broker-secret", "", "Raw broker HMAC secret (prefer env C19_BROKER_SECRET over CLI flag)")
+	fs.StringVar(&brokerSecretB64, "broker-secret-b64", "", "Base64-encoded broker HMAC secret (prefer env C19_BROKER_SECRET_B64)")
 	fs.DurationVar(&cfg.Duration, "duration", 30*time.Second, "Active load duration")
 	fs.DurationVar(&cfg.DeliverInterval, "deliver-interval", 2*time.Second, "Per-agent delivery cadence in deliver mode")
 	fs.IntVar(&cfg.LargeBodyCount, "large-body-count", 10, "Number of 512 KiB deliveries to inject in deliver mode")
@@ -196,22 +206,39 @@ func parseFlags(args []string, getenv func(string) string) (*cliConfig, error) {
 	fs.DurationVar(&cfg.ExtraSubmitDelay, "extra-submit-delay", 300*time.Millisecond, "Delay between extra submits (shipped default: 300ms)")
 	fs.DurationVar(&cfg.ClockSkew, "clock-skew", 0, "Known agent-minus-hub clock skew subtracted from send-to-receipt delay")
 	fs.StringVar(&hubRSSPIDsStr, "hub-rss-pids", getenv("C19_HUB_RSS_PIDS"), "Comma-separated hub PIDs to sum VmRSS from /proc/<pid>/status")
-	fs.IntVar(&cfg.DrainedHubPID, "drained-hub-pid", 0, "Optional PID in --hub-rss-pids expected to exit after --drain-cmd (auto-detected when >= 2 PIDs and drain is triggered)")
+	fs.IntVar(&cfg.DrainedHubPID, "drained-hub-pid", 0, "PID in --hub-rss-pids expected to exit after --drain-cmd (required when --drain-cmd is set with >= 2 PIDs; env: C19_DRAINED_HUB_PID)")
 	fs.StringVar(&cfg.HubRSSCmd, "hub-rss-cmd", getenv("C19_HUB_RSS_CMD"), "Optional shell command printing aggregate hub RSS in bytes")
 	fs.Int64Var(&memoryBudgetMB, "memory-budget-mb", 0, "Peak hub RSS budget in MiB (required unless hub_rss_peak is in --allow-unevaluated)")
 	fs.DurationVar(&cfg.DrainAfter, "drain-after", 0, "Delay into the load window before running --drain-cmd")
 	fs.StringVar(&cfg.DrainCmd, "drain-cmd", "", "Shell command to trigger a planned hub drain")
 	fs.DurationVar(&cfg.DrainDeadline, "drain-deadline", 30*time.Second, "Expected hub drain deadline for 4503 relay_restart closes")
 	fs.DurationVar(&cfg.DrainDeadlineTolerance, "drain-deadline-tolerance", 5*time.Second, "Tolerance added to --drain-deadline when evaluating 4503 close timing")
-	fs.BoolVar(&cfg.ExpectDrain, "expect-drain", false, "Evaluate planned_drain_4503 (relay_restart, deadline, and post-drain replacement work)")
+	fs.StringVar(&cfg.DrainedRelayID, "drained-relay-id", getenv("C19_DRAINED_RELAY_ID"), "Optional relay_instance_id being drained; drain-window probe/PTY error excusal applies only to sessions owned by this relay (env: C19_DRAINED_RELAY_ID)")
+	fs.BoolVar(&cfg.ExpectDrain, "expect-drain", false, "Evaluate planned_drain_4503 (relay_restart, deadline, accepted stream, and replacement work)")
 	fs.StringVar(&allowUnevaluatedStr, "allow-unevaluated", "", "Comma-separated bar names explicitly permitted to remain unevaluated (echoed in report)")
-	fs.StringVar(&cfg.MessageIDsFile, "message-ids-file", "", "Optional path to write created Hub message IDs (one per line) for PG audit")
+	fs.StringVar(&cfg.MessageIDsFile, "message-ids-file", "", "Path to write created Hub message IDs (one per line) for PG audit (required in deliver mode)")
+	fs.StringVar(&cfg.PGDSN, "pg-dsn", "", "Optional Postgres DSN to directly verify pg_rows_delivered (prefer env C19_PG_DSN)")
 	fs.StringVar(&cfg.OutputPath, "output", "", "Write machine-readable JSON report to this file path")
 	fs.BoolVar(&cfg.JSONStdout, "json", false, "Print JSON report to stdout instead of the human table")
 	fs.BoolVar(&cfg.InsecureSkipVerify, "insecure-skip-verify", false, "Skip TLS certificate verification (for self-signed testbed LB)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+
+	// Fill credential fields from env only AFTER fs.Parse succeeds so secrets
+	// are never printed in usage output on -h or flag parse errors.
+	if cfg.UserToken == "" {
+		cfg.UserToken = getenv("C19_USER_TOKEN")
+	}
+	if brokerSecretB64 == "" {
+		brokerSecretB64 = getenv("C19_BROKER_SECRET_B64")
+	}
+	if brokerSecretStr == "" {
+		brokerSecretStr = getenv("C19_BROKER_SECRET")
+	}
+	if cfg.PGDSN == "" {
+		cfg.PGDSN = getenv("C19_PG_DSN")
 	}
 
 	cfg.Mode = c19driver.Mode(modeStr)
@@ -312,8 +339,19 @@ func parseFlags(args []string, getenv func(string) string) (*cliConfig, error) {
 			return nil, errors.New("planned drain verification requires --expect-drain (and --drain-cmd/--drain-after), or pass --allow-unevaluated=planned_drain_4503")
 		}
 	}
+	if cfg.Mode == c19driver.ModeDeliver && cfg.MessageIDsFile == "" {
+		return nil, errors.New("--message-ids-file is required in deliver mode so created Hub message IDs are preserved for Postgres verification")
+	}
 	if cfg.DrainCmd != "" && !cfg.ExpectDrain {
 		cfg.ExpectDrain = true
+	}
+	if cfg.DrainCmd != "" && len(cfg.HubRSSPIDs) >= 2 {
+		if cfg.DrainedHubPID <= 0 {
+			return nil, errors.New("--drained-hub-pid (or C19_DRAINED_HUB_PID) is required when --drain-cmd is set with >= 2 --hub-rss-pids so a surviving hub crash cannot be mistaken for the drained hub")
+		}
+		if !slices.Contains(cfg.HubRSSPIDs, cfg.DrainedHubPID) {
+			return nil, fmt.Errorf("--drained-hub-pid %d must be listed in --hub-rss-pids", cfg.DrainedHubPID)
+		}
 	}
 
 	return cfg, nil
@@ -580,6 +618,7 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		ClockSkew:                cfg.ClockSkew,
 		DrainAfter:               cfg.DrainAfter,
 		DrainDeadline:            cfg.DrainDeadline,
+		DrainedRelayInstanceID:   cfg.DrainedRelayID,
 		MemorySampler:            makeMemorySampler(cfg.HubRSSPIDs, cfg.HubRSSCmd, cfg.DrainedHubPID, &drainTriggered),
 		// Control probe crosses agent 0's conduit session (sharing it with
 		// the stalled bulk tunnel) and is completely off the broker-RPC churn path.
@@ -606,6 +645,7 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		driverCfg.PTYWorker = makeLivePTYWorker(cfg, tlsCfg)
 	}
 	if cfg.DrainCmd != "" {
+		driverCfg.DrainAcceptedStream = makeLiveAcceptedStreamProbe(cfg, tlsCfg)
 		driverCfg.OnDrainTrigger = func(dctx context.Context) error {
 			drainTriggered.Store(true)
 			cmd := exec.CommandContext(dctx, "sh", "-c", cfg.DrainCmd)
@@ -622,13 +662,15 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		return c19driver.Report{}, err
 	}
 
+	var idsSnapshot []string
 	if cfg.MessageIDsFile != "" {
 		msgIDsMu.Lock()
-		content := strings.Join(createdMsgIDs, "\n")
-		if len(createdMsgIDs) > 0 {
+		idsSnapshot = append([]string(nil), createdMsgIDs...)
+		msgIDsMu.Unlock()
+		content := strings.Join(idsSnapshot, "\n")
+		if len(idsSnapshot) > 0 {
 			content += "\n"
 		}
-		msgIDsMu.Unlock()
 		if err := os.WriteFile(cfg.MessageIDsFile, []byte(content), 0o644); err != nil {
 			return c19driver.Report{}, fmt.Errorf("write message IDs file %s: %w", cfg.MessageIDsFile, err)
 		}
@@ -650,6 +692,18 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 	if cfg.Mode == c19driver.ModeDeliver {
 		evalOpts.BrokerFlushMode = "mirrored_v2_22_short_debounce"
 		evalOpts.BrokerDebounceMS = cfg.BrokerDebounce.Milliseconds()
+		if cfg.PGDSN != "" {
+			evalOpts.PGRowsChecked = true
+			pgCtx, pgCancel := context.WithTimeout(ctx, 15*time.Second)
+			delivered, total, qerr := queryPGRowsDelivered(pgCtx, cfg.PGDSN, idsSnapshot)
+			pgCancel()
+			if qerr != nil {
+				evalOpts.PGRowsQueryErr = qerr.Error()
+			} else {
+				evalOpts.PGRowsDelivered = delivered
+				evalOpts.PGRowsTotal = total
+			}
+		}
 	}
 	report := c19driver.BuildReport(res, evalOpts)
 
@@ -1092,10 +1146,10 @@ func recordPTYClose(pr *c19driver.PTYResult, ce *websocket.CloseError) {
 // --hub-rss-pids. It never falls back to the driver's own RSS: when neither
 // hub source is configured it returns nil so hub_rss_peak stays unevaluated.
 // When --hub-rss-pids is set, every configured PID must be readable on each
-// sample or the sample fails, EXCEPT after drainTriggered is true: an expected
-// drained PID (explicitly --drained-hub-pid, or one previously-readable PID
-// among >= 2 configured PIDs) disappearing with ENOENT is recorded as exited
-// after drain while surviving PIDs continue to be summed.
+// sample or the sample fails, EXCEPT after drainTriggered is true when the
+// explicitly configured drainedPID disappears with ENOENT after having been
+// readable pre-drain; surviving PIDs continue to be summed and the exited PID
+// is recorded in MemorySample.ExitedAfterDrainPID.
 func makeMemorySampler(pids []int, cmdStr string, drainedPID int, drainTriggered *atomic.Bool) func(context.Context) (c19driver.MemorySample, error) {
 	if cmdStr != "" {
 		return func(ctx context.Context) (c19driver.MemorySample, error) {
@@ -1119,6 +1173,7 @@ func makeMemorySampler(pids []int, cmdStr string, drainedPID int, drainTriggered
 			mu               sync.Mutex
 			seenReadable     = make(map[int]bool, len(pids))
 			exitedAfterDrain = make(map[int]bool)
+			lastExitedPID    int
 		)
 		return func(_ context.Context) (c19driver.MemorySample, error) {
 			mu.Lock()
@@ -1135,11 +1190,13 @@ func makeMemorySampler(pids []int, cmdStr string, drainedPID int, drainTriggered
 				b, err := readProcVmRSS(fmt.Sprintf("/proc/%d/status", pid))
 				if err != nil {
 					canExcuseExit := drained &&
+						drainedPID > 0 &&
+						pid == drainedPID &&
 						errors.Is(err, os.ErrNotExist) &&
-						seenReadable[pid] &&
-						(drainedPID == pid || (drainedPID == 0 && len(pids) >= 2 && len(exitedAfterDrain) < len(pids)-1))
+						seenReadable[pid]
 					if canExcuseExit {
 						exitedAfterDrain[pid] = true
+						lastExitedPID = pid
 						continue
 					}
 					return c19driver.MemorySample{}, fmt.Errorf("read VmRSS for pid %d: %w", pid, err)
@@ -1157,10 +1214,75 @@ func makeMemorySampler(pids []int, cmdStr string, drainedPID int, drainTriggered
 				Source:               "proc_hub_pids",
 				PIDCount:             aliveCount,
 				ExitedAfterDrainPIDs: len(exitedAfterDrain),
+				ExitedAfterDrainPID:  lastExitedPID,
 			}, nil
 		}
 	}
 	return nil
+}
+
+// makeLiveAcceptedStreamProbe opens a bounded PTY exchange just before the
+// planned drain trigger and verifies all 3 echoes complete cleanly during the
+// drain window ("accepted streams finish within drain deadline").
+func makeLiveAcceptedStreamProbe(cfg *cliConfig, tlsCfg *tls.Config) func(context.Context, string) error {
+	return func(ctx context.Context, agentID string) error {
+		dialer := &websocket.Dialer{
+			HandshakeTimeout: 10 * time.Second,
+			TLSClientConfig:  tlsCfg,
+		}
+		u := httpToWSURL(cfg.HubURL) + "/api/v1/agents/" + agentID + "/pty?cols=80&rows=24"
+		conn, _, err := dialer.DialContext(ctx, u, http.Header{"Authorization": {"Bearer " + cfg.UserToken}})
+		if err != nil {
+			return fmt.Errorf("dial accepted stream PTY: %w", err)
+		}
+		defer func() { _ = conn.Close() }()
+
+		for i := 0; i < 3; i++ {
+			if i > 0 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(150 * time.Millisecond):
+				}
+			}
+			payload := fmt.Sprintf("c19-accepted-%d", i)
+			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if err := conn.WriteJSON(wsprotocol.NewPTYDataMessage([]byte(payload))); err != nil {
+				return fmt.Errorf("write accepted stream echo %d: %w", i, err)
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			var got strings.Builder
+			for !strings.Contains(got.String(), payload) {
+				var msg wsprotocol.PTYDataMessage
+				if err := conn.ReadJSON(&msg); err != nil {
+					return fmt.Errorf("read accepted stream echo %d: %w", i, err)
+				}
+				if msg.Type == wsprotocol.TypeData {
+					got.Write(msg.Data)
+				}
+			}
+		}
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "done"),
+			time.Now().Add(time.Second))
+		return nil
+	}
+}
+
+func queryPGRowsDelivered(ctx context.Context, dsn string, ids []string) (delivered, total int64, err error) {
+	if len(ids) == 0 {
+		return 0, 0, nil
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return 0, 0, fmt.Errorf("open postgres: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	const q = `SELECT COUNT(*) FILTER (WHERE dispatch_state = 'delivered'), COUNT(*) FROM messages WHERE id = ANY($1)`
+	if err := db.QueryRowContext(ctx, q, ids).Scan(&delivered, &total); err != nil {
+		return 0, 0, fmt.Errorf("query messages dispatch_state: %w", err)
+	}
+	return delivered, total, nil
 }
 
 func readProcVmRSS(path string) (int64, error) {

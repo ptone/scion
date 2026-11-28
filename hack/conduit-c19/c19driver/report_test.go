@@ -95,8 +95,9 @@ func TestBuildReport_AllBarsPass(t *testing.T) {
 		ExpectedLargeBodyCount:         2,
 		ExpectedRotateTokenCount:       5,
 		BrokerRPCEnabled:               true,
-		DeliverAttempts:                250,
-		DeliverSucceeded:               250,
+		DeliverAttempts:                252,
+		DeliverPeriodicAttempts:        250,
+		DeliverSucceeded:               252,
 		LargeBodySucceeded:             2,
 		LargeBodyMinBytesObserved:      509000,
 		LargeBodyMaxBytesObserved:      511000,
@@ -120,7 +121,9 @@ func TestBuildReport_AllBarsPass(t *testing.T) {
 		Drain4503Count:                 2,
 		Drain4503RelayRestartCount:     2,
 		Drain4503Reasons:               []string{"relay_restart", "relay_restart"},
-		Drain4503Delays:                []time.Duration{10 * time.Second, 14 * time.Second},
+		Drain4503Delays:                []time.Duration{11 * time.Second, 14 * time.Second},
+		DrainAcceptedStreamAttempted:   true,
+		DrainAcceptedStreamFinished:    true,
 		PostDrainWorkSucceeded:         12,
 		PostDrainReplacementWork:       5,
 		SessionReconnections:           2,
@@ -133,9 +136,13 @@ func TestBuildReport_AllBarsPass(t *testing.T) {
 		DrainDeadlineTolerance:   5 * time.Second,
 		HubURL:                   "https://lb.test",
 		MessageRowsCreated:       314,
+		PGRowsChecked:            true,
+		PGRowsTotal:              314,
+		PGRowsDelivered:          314,
 		LargeBodyRowsPerDelivery: 33,
 		BrokerFlushMode:          "mirrored_v2_22_short_debounce",
 		BrokerDebounceMS:         150,
+		AllowUnevaluated:         []string{BarPlannedDrainRefusesNew},
 	})
 	assert.Equal(t, VerdictPass, rep.Verdict)
 	assert.True(t, rep.Pass, "all bars should pass: %+v", rep.Bars)
@@ -185,6 +192,7 @@ func TestBuildReport_UnevaluatedRequiredBarsIncomplete(t *testing.T) {
 		AgentCount:                10,
 		ExpectedLargeBodyCount:    2,
 		DeliverAttempts:           25,
+		DeliverPeriodicAttempts:   25,
 		DeliverSucceeded:          25,
 		LargePasteLatencies:       []time.Duration{500 * time.Millisecond, 600 * time.Millisecond},
 		LargeBodyMinBytesObserved: 509000,
@@ -211,7 +219,7 @@ func TestBuildReport_UnevaluatedRequiredBarsIncomplete(t *testing.T) {
 	assert.Contains(t, FormatTable(rep), "[INCOMPLETE]")
 
 	// Explicitly waiving those unevaluated bars is echoed in report and allows PASS.
-	waivers := []string{BarControlP99Added, BarSessionStall, BarHubRSSPeak, BarPlannedDrain4503, BarRotateTokenMix}
+	waivers := []string{BarControlP99Added, BarSessionStall, BarHubRSSPeak, BarPlannedDrain4503, BarPlannedDrainRefusesNew, BarRotateTokenMix, BarPGRowsDelivered}
 	repWaived := BuildReport(res, EvalOptions{
 		AllowUnevaluated: waivers,
 	})
@@ -232,17 +240,19 @@ func TestBuildReport_UnevaluatedRequiredBarsIncomplete(t *testing.T) {
 func TestBuildReport_PlannedDrainClauses(t *testing.T) {
 	base := func() *Result {
 		return &Result{
-			Mode:                       ModePhase2,
-			Duration:                   10 * time.Second,
-			AgentCount:                 2,
-			BaselineControlLatencies:   []time.Duration{5 * time.Millisecond},
-			LoadControlLatencies:       []time.Duration{8 * time.Millisecond},
-			PeakMemoryBytes:            100 * 1024 * 1024,
-			MemorySource:               "proc_hub_pids",
-			MemoryPIDCount:             1,
-			Drain4503Count:             1,
-			Drain4503RelayRestartCount: 1,
-			Drain4503Reasons:           []string{"relay_restart"},
+			Mode:                         ModePhase2,
+			Duration:                     10 * time.Second,
+			AgentCount:                   2,
+			BaselineControlLatencies:     []time.Duration{5 * time.Millisecond},
+			LoadControlLatencies:         []time.Duration{8 * time.Millisecond},
+			PeakMemoryBytes:              100 * 1024 * 1024,
+			MemorySource:                 "proc_hub_pids",
+			MemoryPIDCount:               1,
+			Drain4503Count:               1,
+			Drain4503RelayRestartCount:   1,
+			Drain4503Reasons:             []string{"relay_restart"},
+			DrainAcceptedStreamAttempted: true,
+			DrainAcceptedStreamFinished:  true,
 		}
 	}
 
@@ -286,10 +296,12 @@ func TestBuildReport_PlannedDrainClauses(t *testing.T) {
 	assert.Equal(t, VerdictFail, repNoRepl.Verdict)
 	assert.False(t, findBar(t, repNoRepl.Bars, BarPlannedDrain4503).Pass)
 
-	// 4. relay_restart within deadline AND reconnect >= 1 AND replacement work >= 1 -> PASS.
+	// 4. relay_restart within [deadline-tol, deadline+tol] AND accepted stream OK AND reconnect >= 1 AND replacement work >= 1 -> PASS.
 	rOK := base()
-	rOK.DrainTriggeredAt = time.Now().Add(-10 * time.Second)
-	rOK.Drain4503Delays = []time.Duration{8 * time.Second}
+	rOK.DrainTriggeredAt = time.Now().Add(-15 * time.Second)
+	rOK.Drain4503Delays = []time.Duration{14 * time.Second}
+	rOK.DrainAcceptedStreamAttempted = true
+	rOK.DrainAcceptedStreamFinished = true
 	rOK.PostDrainWorkSucceeded = 3
 	rOK.PostDrainReplacementWork = 3
 	rOK.SessionReconnections = 1
@@ -298,6 +310,7 @@ func TestBuildReport_PlannedDrainClauses(t *testing.T) {
 		ExpectDrain:            true,
 		DrainDeadline:          15 * time.Second,
 		DrainDeadlineTolerance: 5 * time.Second,
+		AllowUnevaluated:       []string{BarPlannedDrainRefusesNew},
 	})
 	assert.Equal(t, VerdictPass, repOK.Verdict)
 	assert.True(t, findBar(t, repOK.Bars, BarPlannedDrain4503).Pass)

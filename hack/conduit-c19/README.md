@@ -46,16 +46,18 @@ C19_USER_TOKEN="<user-jwt>" \
   --duration=30s \
   --pty-count=8 \
   --hub-rss-pids=1234,5678 \
+  --drained-hub-pid=5678 \
   --memory-budget-mb=1024 \
   --drain-after=15s \
   --drain-cmd='docker kill -s INT hub-b' \
   --drain-deadline=15s \
   --expect-drain \
+  --allow-unevaluated=planned_drain_refuses_new_streams \
   --output=/tmp/c19-phase2.json
 ```
 
 ### 2. Broker RPC traffic (`--mode=broker-rpc`)
-High-concurrency hub-to-broker RPC churn (`GET /api/v1/agents/{id}/logs?tail=1` routed over the broker's Conduit session) with client concurrency `--rpc-concurrency=128` (default) and optional `--rpc-pacing` for smooth pacing across the window. Pass `--broker-rpc-latency` to hold RPCs inside the fake broker handler so in-flight RPCs overlap on the broker session (reported separately as `counts.max_concurrent_broker_session_rpcs`, which is what `MaxConcurrentRPCs=128` limits).
+High-concurrency hub-to-broker RPC churn (`GET /api/v1/agents/{id}/logs?tail=1` routed over the broker's Conduit session) with client concurrency `--rpc-concurrency=128` (default) and optional `--rpc-pacing` for smooth pacing across the window. Pass `--broker-rpc-latency` to hold RPCs inside the fake broker handler so in-flight RPCs overlap on the broker session (reported separately as `counts.max_concurrent_broker_session_rpcs` and evaluated against `conduit.DefaultMaxConcurrentRPCs = 128`).
 
 ```bash
 C19_USER_TOKEN="<user-jwt>" \
@@ -67,42 +69,55 @@ C19_BROKER_SECRET_B64="<broker-hmac-secret-b64>" \
   --agents-file=/tmp/agents.json \
   --duration=30s \
   --rpc-concurrency=128 \
-  --broker-rpc-latency=25ms \
+  --broker-rpc-latency=300ms \
   --hub-rss-pids=1234,5678 \
+  --drained-hub-pid=5678 \
   --memory-budget-mb=1024 \
   --drain-after=15s \
   --drain-cmd='docker kill -s INT hub-b' \
   --drain-deadline=15s \
   --expect-drain \
+  --allow-unevaluated=planned_drain_refuses_new_streams \
   --output=/tmp/c19-broker-rpc.json
 ```
 
 ### 3. `deliver-message` traffic (`--mode=deliver`, v2.22 §6.2)
 Exercises the full product delivery path:
-- The CLI posts real user messages via `POST /api/v1/agents/{id}/message`. For each 512 KiB delivery, it posts **33 × 15,000-byte rows** (495,000 raw bytes, each tagged with `run_tag`); combined with the Hub's per-row `RenderDeliveryText` envelope, the coalesced `/deliver` payload lands around **507–520 KiB** (classified when `>= 496 KiB`; actual min/max bytes are recorded in `latencies.deliver_paste_512k_min_bytes` / `max_bytes` and in `deliver_paste_p99.observed`). **Prerequisite:** `messaging.offload_threshold_runes` must be disabled on the Hub so rows are not offloaded to stubs.
+- The CLI posts real user messages via `POST /api/v1/agents/{id}/message`. For each 512 KiB delivery, it posts **33 × 15,000-byte rows** (495,000 raw bytes, each tagged with `run_tag`); combined with the Hub's per-row `RenderDeliveryText` envelope, the coalesced `/deliver` payload lands around **507–520 KiB** (classified when `>= 496 KiB`; actual min/max bytes are recorded in `latencies.deliver_paste_512k_min_bytes` / `max_bytes` and in `deliver_paste_p99.observed`). Large bodies are scheduled at absolute offsets `loadStart + i * Duration/(count+1)` so delivery latency does not overrun the window. **Prerequisite:** `messaging.offload_threshold_runes` must be disabled on the Hub so rows are not offloaded to stubs.
 - The Hub persists real Postgres rows and dispatches them over the broker's **control channel** (`/api/v1/runtime-brokers/connect`).
 - The CLI's fake broker receives the control-channel dispatches, coalesces them through a mirrored v2.22 debounced flusher (`"\n\n"` join, 512 KiB / 64-id sub-flush splitting, per-agent lock, 3-attempt pre-paste retry including pre-send connection errors), and calls `POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/deliver` itself (with shipped `ExtraSubmits=2, 300ms`). The CLI never calls `/deliver` directly.
+- `--message-ids-file` is **mandatory** in `deliver` mode. Pass `C19_PG_DSN` (or `--pg-dsn`) so `pg_rows_delivered` queries Postgres directly, or verify externally with `psql`:
+
+```sql
+SELECT dispatch_state, COUNT(*)
+FROM messages
+WHERE id = ANY(string_to_array(trim(pg_read_file('/tmp/c19-deliver-msg-ids.txt')), E'\n'))
+GROUP BY dispatch_state;
+```
 
 ```bash
 C19_USER_TOKEN="<user-jwt>" \
 C19_BROKER_ID="<broker-id>" \
 C19_BROKER_SECRET_B64="<broker-hmac-secret-b64>" \
+C19_PG_DSN="postgres://postgres@pg.internal:5432/scion?sslmode=disable" \
 /tmp/conduit-c19 \
   --mode=deliver \
   --hub-url=https://lb.internal \
   --agents-file=/tmp/agents.json \
-  --duration=30s \
+  --duration=45s \
   --deliver-interval=2s \
   --large-body-count=10 \
   --rpc-concurrency=128 \
-  --broker-rpc-latency=25ms \
+  --broker-rpc-latency=300ms \
   --clock-skew=0ms \
   --hub-rss-pids=1234,5678 \
+  --drained-hub-pid=5678 \
   --memory-budget-mb=1024 \
-  --drain-after=15s \
+  --drain-after=20s \
   --drain-cmd='docker kill -s INT hub-b' \
   --drain-deadline=15s \
   --expect-drain \
+  --allow-unevaluated=rotate_token_mix,planned_drain_refuses_new_streams \
   --message-ids-file=/tmp/c19-deliver-msg-ids.txt \
   --output=/tmp/c19-deliver.json
 ```
@@ -120,13 +135,19 @@ See [BARS.md](BARS.md) for the complete per-bar audit table (every bar across al
 - **Percentiles:** Nearest-rank (`idx = ceil(p*n) - 1`), so p99 equals the maximum for `n <= 100`.
 - **512 KiB paste bar (`deliver_paste_p99`):** Evaluated strictly on 512 KiB deliveries (`deliver_paste_512k`, 33 × 15,000-byte rows + Hub `RenderDeliveryText` envelopes ≈ 507–520 KiB, offload disabled) and fails if fewer than `--large-body-count` samples are recorded or if observed payload bytes are below 496 KiB. Measures the fake-agent `RecordingTmuxRunner` handler time (including extra submits, not real `tmux`), disclosed in the JSON bar `note`.
 - **Offered load (`offered_load`) & broker-session concurrency (`broker_session_concurrency`):**
-  - `offered_load` requires `deliver_attempts >= 90%` of `agents * duration / deliver_interval` (catches closed-loop slowdown / dropped ticks).
-  - `broker_session_concurrency` requires `max_concurrent_broker_session_rpcs >= 90%` of `min(--rpc-concurrency, MaxConcurrentRPCs)` (prevents vacuous `0 × 429` with `--broker-rpc-latency=0`; set `--broker-rpc-latency` e.g. `25ms`–`500ms` so RPCs overlap on the broker session).
-  - `http_429_count` counts direct HTTP 429s from `/message`, every `/deliver` attempt (including retried attempts inside the broker flusher), control probes, and broker-session 429s surfaced by Hub `/logs` as HTTP 502 (`runtime broker returned error 429`), with per-source counts in `observed`.
+  - `offered_load` requires `deliver_periodic_attempts >= 90%` of `agents * duration / deliver_interval` (excludes large-body injections; catches closed-loop slowdown / dropped ticks).
+  - `broker_session_concurrency` is always evaluated against `conduit.DefaultMaxConcurrentRPCs` (`>= 116`, i.e., `90%` of `128`) so low `--rpc-concurrency` or `--broker-rpc-latency=0` cannot vacuously pass.
+  - `http_429_count` counts direct HTTP 429s from `/message`, every `/deliver` attempt (including retried attempts inside the broker flusher, without double-counting), control probes, and broker-session 429s surfaced by Hub `/logs` as HTTP 502. A non-default `--broker-max-concurrent-rpcs` override marks `http_429_count` `INCOMPLETE` (when 429s == 0) with `non_default_max_concurrent_rpcs` disclosed.
+- **Postgres row verification (`pg_rows_delivered`) vs `deliver_errors`:**
+  - `deliver_errors` verifies broker-observed `/deliver` HTTP outcomes only.
+  - `pg_rows_delivered` verifies 100% of recorded message IDs in `--message-ids-file` (mandatory in `deliver` mode) reached `dispatch_state = 'delivered'` in Postgres when `--pg-dsn` (`C19_PG_DSN`) is supplied; without `--pg-dsn`, `pg_rows_delivered` is `INCOMPLETE` unless waived via `--allow-unevaluated=pg_rows_delivered`.
 - **Rotate-token claim boundary (`rotate_token_mix`):** The Hub exposes no HTTP endpoint invoking `Server.RequestAgentTokenRotation`. `deliver` mode always emits `rotate_token_mix` as unevaluated (`not exercised: no Hub rotation route`), yielding `INCOMPLETE` unless waived with `--allow-unevaluated=rotate_token_mix` (echoed in the JSON report).
-- **Hub RSS (`hub_rss_peak`):** Requires `--memory-budget-mb` and either `--hub-rss-pids` or `--hub-rss-cmd`. Never falls back to driver RSS. Once `--drain-cmd` triggers, an expected drained hub PID (explicitly `--drained-hub-pid` or one previously-readable PID among `>= 2` configured PIDs) disappearing with `ENOENT` is recorded (`exited_after_drain`) while surviving PIDs continue to be summed; unreadable pre-drain or non-drained PIDs fail the bar.
-- **Planned drain (`planned_drain_4503`):** Evaluates three clauses: (1) `>= 1` PTY close with code `4503` and reason `relay_restart` (other `4503` reasons listed under `drain.other_4503`), (2) trigger-to-4503 close delay `<= --drain-deadline + --drain-deadline-tolerance`, and (3) `>= 1` agent session re-admitted after drain trigger (`session_reconnections >= 1`) AND `>= 1` replacement operation succeeding on a re-admitted session or re-dialed PTY stream. Work on untouched sessions on the surviving hub does not count.
-- **Postgres auditability:** Emits `run_tag` (included on both regular and 512 KiB rows), `counts.message_rows_created`, and optional `--message-ids-file` (recording each created row ID immediately even on partial failures).
+- **Hub RSS (`hub_rss_peak`):** Requires `--memory-budget-mb` and either `--hub-rss-pids` or `--hub-rss-cmd`. Never falls back to driver RSS. When `--drain-cmd` is set with `>= 2` PIDs, `--drained-hub-pid` is required; only that explicitly designated PID disappearing (`ENOENT`) after drain trigger is excused and recorded (`exited_after_drain_pid`), while a surviving hub crash fails the bar.
+- **Planned drain (`planned_drain_4503` + `planned_drain_refuses_new_streams`):**
+  - `planned_drain_4503` evaluates: (1) `>= 1` PTY close with code `4503` and reason `relay_restart`, (2) trigger-to-4503 close timing inside `[--drain-deadline - tolerance, --drain-deadline + tolerance]` (defeating immediate-kill at SIGINT), (3) bounded pre-trigger accepted PTY stream completes OK during the drain window, and (4) `>= 1` agent session re-admitted after drain trigger carrying `>= 1` replacement operation on a re-admitted session or re-dialed PTY stream.
+  - `planned_drain_refuses_new_streams` is split out as a separately named bar (always `INCOMPLETE` unless waived via `--allow-unevaluated=planned_drain_refuses_new_streams`; verify via direct-node L2/L3 drain check).
+- **Credential safety:** `--user-token`, `--broker-secret`, `--broker-secret-b64`, and `--pg-dsn` register empty defaults and read from environment variables only after flag parsing succeeds, so `-h` and flag parse errors never print secrets.
+- **Postgres auditability:** Emits `run_tag` (included on both regular and 512 KiB rows), `counts.message_rows_created`, and mandatory `--message-ids-file` in `deliver` mode (recording each created row ID immediately even on partial failures).
 
 ## Output & Exit Code
 

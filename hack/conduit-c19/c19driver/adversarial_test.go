@@ -33,8 +33,9 @@ func healthyDeliverResult() (*Result, EvalOptions) {
 		ExpectedBrokerRPCConcurrency:   128,
 		EffectiveMaxConcurrentRPCs:     128,
 		BrokerRPCEnabled:               true,
-		DeliverAttempts:                750,
-		DeliverSucceeded:               750,
+		DeliverAttempts:                760,
+		DeliverPeriodicAttempts:        750,
+		DeliverSucceeded:               760,
 		LargeBodySucceeded:             10,
 		LargeBodyMinBytesObserved:      509000,
 		LargeBodyMaxBytesObserved:      511000,
@@ -50,25 +51,31 @@ func healthyDeliverResult() (*Result, EvalOptions) {
 			time.Second, time.Second, time.Second, time.Second, time.Second,
 			time.Second, time.Second, time.Second, time.Second, time.Second,
 		},
-		SendToReceiptDelays:        []time.Duration{500 * time.Millisecond},
-		CombinedDeliverLatencies:   []time.Duration{1500 * time.Millisecond},
-		PeakMemoryBytes:            256 * 1024 * 1024,
-		MemorySource:               "proc_hub_pids",
-		MemoryPIDCount:             2,
-		DrainTriggeredAt:           now.Add(-10 * time.Second),
-		Drain4503Count:             2,
-		Drain4503RelayRestartCount: 2,
-		Drain4503Delays:            []time.Duration{3 * time.Second},
-		PostDrainWorkSucceeded:     10,
-		PostDrainReplacementWork:   4,
-		SessionReconnections:       2,
+		SendToReceiptDelays:          []time.Duration{500 * time.Millisecond},
+		CombinedDeliverLatencies:     []time.Duration{1500 * time.Millisecond},
+		PeakMemoryBytes:              256 * 1024 * 1024,
+		MemorySource:                 "proc_hub_pids",
+		MemoryPIDCount:               2,
+		DrainTriggeredAt:             now.Add(-35 * time.Second),
+		Drain4503Count:               2,
+		Drain4503RelayRestartCount:   2,
+		Drain4503Delays:              []time.Duration{29 * time.Second},
+		DrainAcceptedStreamAttempted: true,
+		DrainAcceptedStreamFinished:  true,
+		PostDrainWorkSucceeded:       10,
+		PostDrainReplacementWork:     4,
+		SessionReconnections:         2,
 	}
 	opts := EvalOptions{
 		MemoryBudgetBytes:      512 * 1024 * 1024,
 		ExpectDrain:            true,
 		DrainDeadline:          30 * time.Second,
 		DrainDeadlineTolerance: 5 * time.Second,
-		AllowUnevaluated:       []string{BarRotateTokenMix},
+		MessageRowsCreated:     1080,
+		PGRowsChecked:          true,
+		PGRowsTotal:            1080,
+		PGRowsDelivered:        1080,
+		AllowUnevaluated:       []string{BarRotateTokenMix, BarPlannedDrainRefusesNew},
 	}
 	return res, opts
 }
@@ -256,8 +263,38 @@ func TestAdversarial_DegradedInputsNeverPass(t *testing.T) {
 			name:        "offered_load_closed_loop_slowdown",
 			wantVerdict: VerdictFail,
 			degrade: func(res *Result, _ *EvalOptions) {
-				res.DeliverAttempts = 10
-				res.DeliverSucceeded = 10
+				res.DeliverAttempts = 20
+				res.DeliverPeriodicAttempts = 10
+				res.DeliverSucceeded = 20
+			},
+		},
+		{
+			name:        "offered_load_large_bodies_cannot_inflate_periodic_rate",
+			wantVerdict: VerdictFail,
+			degrade: func(res *Result, _ *EvalOptions) {
+				res.DeliverAttempts = 750
+				res.DeliverPeriodicAttempts = 600 // < 90% of 750 = 675
+			},
+		},
+		{
+			name:        "pg_rows_delivered_unwaived_without_dsn_is_incomplete",
+			wantVerdict: VerdictIncomplete,
+			degrade: func(_ *Result, opts *EvalOptions) {
+				opts.PGRowsChecked = false
+			},
+		},
+		{
+			name:        "pg_rows_delivered_row_not_delivered_fails_despite_200_http",
+			wantVerdict: VerdictFail,
+			degrade: func(_ *Result, opts *EvalOptions) {
+				opts.PGRowsDelivered = opts.MessageRowsCreated - 1
+			},
+		},
+		{
+			name:        "pg_rows_delivered_query_error_fails",
+			wantVerdict: VerdictFail,
+			degrade: func(_ *Result, opts *EvalOptions) {
+				opts.PGRowsQueryErr = "connection refused"
 			},
 		},
 		{
@@ -351,6 +388,71 @@ func TestAdversarial_DegradedInputsNeverPass(t *testing.T) {
 			degrade: func(res *Result, _ *EvalOptions) {
 				res.Drain4503RelayRestartCount = 0
 				res.Drain4503OtherCount = 2
+			},
+		},
+		{
+			name:        "planned_drain_immediate_kill_before_deadline",
+			wantVerdict: VerdictFail,
+			degrade: func(res *Result, _ *EvalOptions) {
+				res.Drain4503Delays = []time.Duration{100 * time.Millisecond}
+			},
+		},
+		{
+			name:        "planned_drain_accepted_stream_failed_during_drain",
+			wantVerdict: VerdictFail,
+			degrade: func(res *Result, _ *EvalOptions) {
+				res.DrainAcceptedStreamFinished = false
+			},
+		},
+		{
+			name:        "planned_drain_accepted_stream_not_attempted_is_incomplete",
+			wantVerdict: VerdictIncomplete,
+			degrade: func(res *Result, _ *EvalOptions) {
+				res.DrainAcceptedStreamAttempted = false
+				res.DrainAcceptedStreamFinished = false
+			},
+		},
+		{
+			name:        "planned_drain_refuses_new_streams_unwaived_is_incomplete",
+			wantVerdict: VerdictIncomplete,
+			degrade: func(_ *Result, opts *EvalOptions) {
+				opts.AllowUnevaluated = []string{BarRotateTokenMix}
+			},
+		},
+		{
+			name:        "broker_session_concurrency_low_rpc_concurrency_vs_default_128",
+			wantVerdict: VerdictFail,
+			degrade: func(res *Result, _ *EvalOptions) {
+				res.ExpectedBrokerRPCConcurrency = 4
+				res.MaxConcurrentBrokerRPCs = 4
+				res.MaxConcurrentBrokerSessionRPCs = 4
+			},
+		},
+		{
+			name:        "http_429_non_default_max_concurrent_rpcs_is_incomplete",
+			wantVerdict: VerdictIncomplete,
+			degrade: func(res *Result, _ *EvalOptions) {
+				res.EffectiveMaxConcurrentRPCs = 1000
+			},
+		},
+		{
+			name:        "send_to_receipt_clamped_negative_is_incomplete",
+			wantVerdict: VerdictIncomplete,
+			degrade: func(res *Result, _ *EvalOptions) {
+				res.SendToReceiptClamped = 1
+			},
+		},
+		{
+			name:        "drain_window_surviving_hub_probe_error_not_excused",
+			wantVerdict: VerdictFail,
+			degrade: func(res *Result, _ *EvalOptions) {
+				// r3-R1: errors on agents owned by the surviving hub ("hub-a")
+				// during the drain of "hub-b" must NEVER be excused.
+				if ShouldExcuseDrainError(true, "hub-a", "hub-b") {
+					res.DrainExcusedControlErrors = 1
+				} else {
+					res.ControlProbeErrors = 1
+				}
 			},
 		},
 		{

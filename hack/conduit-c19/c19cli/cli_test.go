@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -52,29 +53,36 @@ import (
 func TestParseFlags_ValidationAndEnvFallback(t *testing.T) {
 	emptyEnv := func(string) string { return "" }
 
-	_, err := parseFlags([]string{"--mode=phase2"}, emptyEnv)
+	_, err := parseFlags([]string{"--mode=phase2"}, emptyEnv, io.Discard)
 	require.ErrorContains(t, err, "--hub-url")
 
-	_, err = parseFlags([]string{"--mode=bogus", "--hub-url=http://h", "--agents-file=a.json", "--user-token=t"}, emptyEnv)
+	_, err = parseFlags([]string{"--mode=bogus", "--hub-url=http://h", "--agents-file=a.json", "--user-token=t"}, emptyEnv, io.Discard)
 	require.ErrorContains(t, err, "invalid --mode")
 
-	_, err = parseFlags([]string{"--mode=deliver", "--hub-url=http://h", "--agents-file=a.json", "--user-token=t"}, emptyEnv)
+	_, err = parseFlags([]string{"--mode=deliver", "--hub-url=http://h", "--agents-file=a.json", "--user-token=t"}, emptyEnv, io.Discard)
 	require.ErrorContains(t, err, "--broker-id")
 
-	// R1: L6 modes refuse to start without hub RSS budget/source or drain config
+	// L6 modes refuse to start without hub RSS budget/source or drain config
 	// unless waived via --allow-unevaluated.
 	_, err = parseFlags([]string{
 		"--mode=phase2", "--hub-url=http://h", "--agents-file=a.json", "--user-token=t",
-	}, emptyEnv)
+	}, emptyEnv, io.Discard)
 	require.ErrorContains(t, err, "hub RSS")
 
 	_, err = parseFlags([]string{
 		"--mode=phase2", "--hub-url=http://h", "--agents-file=a.json", "--user-token=t",
 		"--allow-unevaluated=hub_rss_peak",
-	}, emptyEnv)
+	}, emptyEnv, io.Discard)
 	require.ErrorContains(t, err, "planned drain")
 
-	// Env fallback + base64 secret + hub-rss-pids + default rpc-concurrency=128 + no misleading user-id default.
+	// O3: --drain-cmd with >= 2 PIDs requires --drained-hub-pid.
+	_, err = parseFlags([]string{
+		"--mode=phase2", "--hub-url=http://h", "--agents-file=a.json", "--user-token=t",
+		"--hub-rss-pids=12,34", "--memory-budget-mb=512", "--drain-cmd=true",
+	}, emptyEnv, io.Discard)
+	require.ErrorContains(t, err, "--drained-hub-pid")
+
+	// R2(a): --message-ids-file is mandatory in deliver mode.
 	b64 := base64.StdEncoding.EncodeToString([]byte("secret-bytes"))
 	envMap := map[string]string{
 		"C19_HUB_URL":           "http://hub.local/",
@@ -83,26 +91,56 @@ func TestParseFlags_ValidationAndEnvFallback(t *testing.T) {
 		"C19_BROKER_ID":         "brk-1",
 		"C19_BROKER_SECRET_B64": b64,
 		"C19_HUB_RSS_PIDS":      "12, 34",
+		"C19_PG_DSN":            "postgres://u:p@host/db",
 	}
+	_, err = parseFlags([]string{
+		"--mode=deliver", "--duration=10s", "--memory-budget-mb=512", "--expect-drain",
+	}, func(k string) string { return envMap[k] }, io.Discard)
+	require.ErrorContains(t, err, "--message-ids-file")
+
 	cfg, err := parseFlags([]string{
 		"--mode=deliver",
 		"--duration=10s",
 		"--clock-skew=25ms",
 		"--memory-budget-mb=512",
 		"--expect-drain",
-	}, func(k string) string { return envMap[k] })
+		"--message-ids-file=/tmp/ids.txt",
+	}, func(k string) string { return envMap[k] }, io.Discard)
 	require.NoError(t, err)
 	assert.Equal(t, c19driver.ModeDeliver, cfg.Mode)
 	assert.Equal(t, "http://hub.local", cfg.HubURL)
 	assert.Equal(t, "tok-1", cfg.UserToken)
-	assert.Empty(t, cfg.UserID, "must not set a misleading default user-id (R-2)")
+	assert.Empty(t, cfg.UserID, "must not set a misleading default user-id")
 	assert.Equal(t, "brk-1", cfg.BrokerID)
 	assert.Equal(t, []byte("secret-bytes"), cfg.BrokerSecret)
+	assert.Equal(t, "postgres://u:p@host/db", cfg.PGDSN)
 	assert.Equal(t, 128, cfg.BrokerRPCConcurrency, "default --rpc-concurrency must be 128")
 	assert.Equal(t, 25*time.Millisecond, cfg.ClockSkew)
 	assert.Equal(t, []int{12, 34}, cfg.HubRSSPIDs)
 	assert.Equal(t, int64(512*1024*1024), cfg.MemoryBudgetBytes)
 	assert.NotEmpty(t, cfg.RunTag)
+}
+
+// R1: Secrets in environment variables must NEVER appear in usage output on -h
+// or any flag parse error.
+func TestParseFlags_NoSecretsInUsageOrErrors(t *testing.T) {
+	sentinels := map[string]string{
+		"C19_USER_TOKEN":        "SENTINEL-USER-BEARER-TOKEN",
+		"C19_BROKER_SECRET":     "SENTINEL-RAW-BROKER-SECRET",
+		"C19_BROKER_SECRET_B64": "U0VOVElORUwtQjY0LVNFQ1JFVA==",
+		"C19_PG_DSN":            "postgres://sentinel:secretpass@db.internal/scion",
+	}
+	getenv := func(k string) string { return sentinels[k] }
+
+	for _, args := range [][]string{{"-h"}, {"--bogus-flag"}} {
+		var stdout, stderr bytes.Buffer
+		_, err := RunArgs(context.Background(), args, getenv, &stdout, &stderr)
+		require.Error(t, err)
+		combined := stdout.String() + "\n" + stderr.String() + "\n" + err.Error()
+		for k, v := range sentinels {
+			assert.NotContains(t, combined, v, "args=%v leaked %s into output", args, k)
+		}
+	}
 }
 
 // R-2: decodeTunnelStreamID uses shared relay.TunnelResponseStreamIDKey ("streamId")
@@ -154,9 +192,10 @@ func TestMemorySampler_NoSelfFallbackAndUnreadablePIDFails(t *testing.T) {
 	assert.Equal(t, 1, s.PIDCount)
 }
 
-// R3: Two configured hub PIDs, one exits after drain trigger -> sampler records
-// the exit and continues summing surviving PIDs (no false FAIL). Exiting before
-// drain trigger still fails the sample.
+// R3 + O3: Two configured hub PIDs, explicitly designated drainedPID exits
+// after drain trigger -> sampler records the exact exited PID and continues
+// summing surviving PIDs (no false FAIL). Exiting a non-drained PID or exiting
+// before drain trigger still fails the sample.
 func TestMemorySampler_DrainedPIDExitsCleanly(t *testing.T) {
 	child := exec.Command("sleep", "30")
 	require.NoError(t, child.Start())
@@ -167,7 +206,7 @@ func TestMemorySampler_DrainedPIDExitsCleanly(t *testing.T) {
 	})
 
 	var drainTriggered atomic.Bool
-	sampler := makeMemorySampler([]int{os.Getpid(), childPID}, "", 0, &drainTriggered)
+	sampler := makeMemorySampler([]int{os.Getpid(), childPID}, "", childPID, &drainTriggered)
 	require.NotNil(t, sampler)
 
 	// Pre-drain: both PIDs readable.
@@ -175,30 +214,34 @@ func TestMemorySampler_DrainedPIDExitsCleanly(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, s1.PIDCount)
 	assert.Equal(t, 0, s1.ExitedAfterDrainPIDs)
+	assert.Equal(t, 0, s1.ExitedAfterDrainPID)
 
-	// Trigger drain, then kill and reap the drained PID so /proc/<pid>/status returns ENOENT.
+	// Trigger drain, then kill and reap the designated drained PID.
 	drainTriggered.Store(true)
 	require.NoError(t, child.Process.Kill())
 	_ = child.Wait()
 
 	s2, err := sampler(context.Background())
-	require.NoError(t, err, "drained PID exiting after drain trigger must not fail hub_rss_peak")
+	require.NoError(t, err, "designated drained PID exiting after drain trigger must not fail hub_rss_peak")
 	assert.Greater(t, s2.Bytes, int64(0))
 	assert.Equal(t, 1, s2.PIDCount)
 	assert.Equal(t, 1, s2.ExitedAfterDrainPIDs)
+	assert.Equal(t, childPID, s2.ExitedAfterDrainPID)
 
-	// Contrast: killing a PID BEFORE drain trigger must FAIL the sample.
+	// Contrast (O3): killing a NON-drained PID (drainedPID points to self, not child2)
+	// must FAIL even after drain trigger.
 	child2 := exec.Command("sleep", "30")
 	require.NoError(t, child2.Start())
 	child2PID := child2.Process.Pid
-	var notDrained atomic.Bool
-	sampler2 := makeMemorySampler([]int{os.Getpid(), child2PID}, "", 0, &notDrained)
+	var drained2 atomic.Bool
+	sampler2 := makeMemorySampler([]int{os.Getpid(), child2PID}, "", os.Getpid(), &drained2)
 	_, err = sampler2(context.Background())
 	require.NoError(t, err)
+	drained2.Store(true)
 	require.NoError(t, child2.Process.Kill())
 	_ = child2.Wait()
 	_, err = sampler2(context.Background())
-	require.Error(t, err, "PID exiting before drain trigger must fail the sample")
+	require.Error(t, err, "non-drained PID exiting after drain trigger must fail the sample")
 }
 
 // R2 + v2.22 §2.4: A /deliver 429 that succeeds on retry must still be counted
@@ -331,6 +374,7 @@ type fakePlumbingHub struct {
 
 	mu             sync.Mutex
 	brokerSession  conduit.LocalSession
+	agentSessions  []conduit.LocalSession
 	drainPTYAfter  int
 	drainPTYReason string
 	ptyEchoDelayNS atomic.Int64
@@ -370,22 +414,54 @@ func newFakePlumbingHub(t *testing.T, drainPTYAfter int, drainPTYReason string) 
 		hello := adm.hello
 		adm.mu.Unlock()
 		h.mu.Lock()
-		if hello.GetPrincipalKind() == conduitv1.PrincipalKind_PRINCIPAL_KIND_BROKER {
+		switch hello.GetPrincipalKind() {
+		case conduitv1.PrincipalKind_PRINCIPAL_KIND_BROKER:
 			h.brokerSession = ls
+		case conduitv1.PrincipalKind_PRINCIPAL_KIND_AGENT:
+			h.agentSessions = append(h.agentSessions, ls)
 		}
 		h.mu.Unlock()
 		<-ls.Done()
 	})
 
+	mux.HandleFunc("/api/v1/runtime-brokers/connect", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	mux.HandleFunc("/api/v1/runtime-brokers/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/deliver") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"v":1,"delivery_id":"d","outcome":"delivered"}`))
+			return
+		}
+		http.NotFound(w, r)
+	})
 	mux.HandleFunc("/api/v1/agents/", func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
 		parts := strings.Split(rest, "/")
+		if len(parts) == 1 && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"id":%q,"slug":%q}`, parts[0], parts[0])
+			return
+		}
 		if len(parts) != 2 {
 			http.NotFound(w, r)
 			return
 		}
 		agentID, sub := parts[0], parts[1]
 		switch sub {
+		case "message":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"message_id":%q}`, "msg-"+uuid.NewString()[:8])
+			return
 		case "logs":
 			h.brokerRPCCalls.Add(1)
 			h.mu.Lock()
@@ -440,8 +516,10 @@ func newFakePlumbingHub(t *testing.T, drainPTYAfter int, drainPTYReason string) 
 					return
 				}
 				echoes++
-				// Only close long-lived PTY workers (not single-echo control probes).
-				if h.drainPTYAfter > 0 && echoes >= h.drainPTYAfter && !strings.Contains(string(msg.Data), "c19-ctrl-probe") {
+				// Only close long-lived PTY workers (not control probes or bounded accepted-stream checks).
+				if h.drainPTYAfter > 0 && echoes >= h.drainPTYAfter &&
+					!strings.Contains(string(msg.Data), "c19-ctrl-probe") &&
+					!strings.Contains(string(msg.Data), "c19-accepted-") {
 					_ = conn.WriteControl(websocket.CloseMessage,
 						websocket.FormatCloseMessage(wsprotocol.ClosePTYUpstreamUnavailable, h.drainPTYReason),
 						time.Now().Add(time.Second))
@@ -477,13 +555,13 @@ func writeAgentsFixture(t *testing.T, count int) string {
 	return p
 }
 
-// R5: Broker-side handler latency proves real in-flight concurrency on the
-// broker conduit session reaches >= 0.9 * configured concurrency.
+// R5 + O1: Broker-side handler latency proves real in-flight concurrency on the
+// broker conduit session reaches >= 0.9 * DefaultMaxConcurrentRPCs (128).
 func TestCLI_Plumbing_BrokerRPCConcurrency(t *testing.T) {
 	hub := newFakePlumbingHub(t, 0, "")
 	agentsFile := writeAgentsFixture(t, 4)
 
-	const wantConc = 32
+	const wantConc = 128
 	cfg, err := parseFlags([]string{
 		"--mode=broker-rpc",
 		"--hub-url=" + hub.server.URL,
@@ -491,23 +569,23 @@ func TestCLI_Plumbing_BrokerRPCConcurrency(t *testing.T) {
 		"--user-token=user-tok",
 		"--broker-id=broker-1",
 		"--broker-secret=super-secret-key",
-		"--duration=600ms",
+		"--duration=800ms",
 		"--rpc-concurrency=" + strconv.Itoa(wantConc),
-		"--broker-rpc-latency=40ms",
+		"--broker-rpc-latency=120ms",
 		"--baseline-samples=4",
 		"--control-probe-rate=10",
 		"--stalled-tunnel=false",
-		"--allow-unevaluated=hub_rss_peak,planned_drain_4503",
-	}, func(string) string { return "" })
+		"--allow-unevaluated=hub_rss_peak,planned_drain_4503,planned_drain_refuses_new_streams",
+	}, func(string) string { return "" }, io.Discard)
 	require.NoError(t, err)
 
 	var stdout, stderr bytes.Buffer
 	rep, err := run(context.Background(), cfg, &stdout, &stderr)
 	require.NoError(t, err)
 	assert.Equal(t, c19driver.VerdictPass, rep.Verdict, "table:\n%s", stdout.String())
-	const minExpected int64 = 29 // ceil(0.9 * 32)
+	const minExpected int64 = 116 // ceil(0.9 * 128)
 	assert.GreaterOrEqual(t, rep.Counts.MaxConcurrentBrokerSessionRPCs, minExpected,
-		"broker-side session high-water must reach >= 0.9x configured (%d), got %d", minExpected, rep.Counts.MaxConcurrentBrokerSessionRPCs)
+		"broker-side session high-water must reach >= 0.9x default 128 (%d), got %d", minExpected, rep.Counts.MaxConcurrentBrokerSessionRPCs)
 	assert.Greater(t, rep.Counts.BrokerRPCSucceeded, int64(wantConc))
 	assert.Equal(t, int64(0), rep.Counts.BrokerRPCErrors)
 	assert.Equal(t, int64(0), rep.Counts.Total429s)
@@ -533,8 +611,8 @@ func TestCLI_Plumbing_BrokerSession429Detected(t *testing.T) {
 		"--broker-max-concurrent-rpcs=2",
 		"--baseline-samples=2",
 		"--stalled-tunnel=false",
-		"--allow-unevaluated=hub_rss_peak,planned_drain_4503",
-	}, func(string) string { return "" })
+		"--allow-unevaluated=hub_rss_peak,planned_drain_4503,planned_drain_refuses_new_streams",
+	}, func(string) string { return "" }, io.Discard)
 	require.NoError(t, err)
 
 	var stdout, stderr bytes.Buffer
@@ -554,7 +632,7 @@ func TestCLI_Plumbing_ControlProbeDetectsSessionDelay(t *testing.T) {
 	agentsFile := writeAgentsFixture(t, 2)
 
 	// Start with 0ms delay during baseline; inject 140ms delay on agent-0 PTY
-	// once the load window begins (via DrainAfter hook).
+	// once the load window begins.
 	cfg, err := parseFlags([]string{
 		"--mode=phase2",
 		"--hub-url=" + hub.server.URL,
@@ -565,8 +643,8 @@ func TestCLI_Plumbing_ControlProbeDetectsSessionDelay(t *testing.T) {
 		"--baseline-samples=4",
 		"--control-probe-rate=8",
 		"--stalled-tunnel=false",
-		"--allow-unevaluated=hub_rss_peak,planned_drain_4503",
-	}, func(string) string { return "" })
+		"--allow-unevaluated=hub_rss_peak,planned_drain_4503,planned_drain_refuses_new_streams",
+	}, func(string) string { return "" }, io.Discard)
 	require.NoError(t, err)
 
 	// Inject 140ms delay into agent-0 PTY right after baseline finishes (~100ms).
@@ -583,10 +661,56 @@ func TestCLI_Plumbing_ControlProbeDetectsSessionDelay(t *testing.T) {
 		"injected agent-session delay must move control_p99_added >= 100ms (got %.2fms)", rep.Latencies.ControlP99AddedMS)
 }
 
-// R-5 / R4: Planned drain with trigger + deadline fails when zero agent sessions
-// reconnect (even if probes on untouched sessions succeed), and fails when
-// 4503 close reason is not relay_restart.
+// R-5 / R2(b) / O2: Planned drain tests — verifies negative cases (zero
+// reconnects, non-relay_restart 4503) FAIL and positive case (4503 in deadline
+// window + accepted stream completes + agent reconnects + PTY re-dials) PASSES.
 func TestCLI_Plumbing_PlannedDrain4503(t *testing.T) {
+	t.Run("full_drain_passes", func(t *testing.T) {
+		hub := newFakePlumbingHub(t, 2, "relay_restart")
+		agentsFile := writeAgentsFixture(t, 2)
+
+		cfg, err := parseFlags([]string{
+			"--mode=phase2",
+			"--hub-url=" + hub.server.URL,
+			"--agents-file=" + agentsFile,
+			"--user-token=user-tok",
+			"--duration=2500ms",
+			"--pty-count=2",
+			"--baseline-samples=3",
+			"--control-probe-rate=8",
+			"--stalled-tunnel=false",
+			"--drain-after=200ms",
+			"--drain-cmd=true",
+			"--drain-deadline=500ms",
+			"--drain-deadline-tolerance=500ms",
+			"--expect-drain",
+			"--allow-unevaluated=hub_rss_peak,planned_drain_refuses_new_streams",
+		}, func(string) string { return "" }, io.Discard)
+		require.NoError(t, err)
+
+		// Simulate hub-b closing an agent's Conduit session shortly after drain
+		// trigger so the fake agent reconnects (re-admits) after DrainTriggeredAt.
+		go func() {
+			time.Sleep(350 * time.Millisecond)
+			hub.mu.Lock()
+			for _, s := range hub.agentSessions {
+				_ = s.Close()
+				break
+			}
+			hub.mu.Unlock()
+		}()
+
+		var stdout, stderr bytes.Buffer
+		rep, err := run(context.Background(), cfg, &stdout, &stderr)
+		require.NoError(t, err)
+		assert.Equal(t, c19driver.VerdictPass, rep.Verdict, "positive drain test must PASS:\n%s", stdout.String())
+		assert.GreaterOrEqual(t, rep.Drain.RelayRestartCount, int64(1))
+		assert.True(t, rep.Drain.AcceptedStreamAttempted)
+		assert.True(t, rep.Drain.AcceptedStreamFinished)
+		assert.GreaterOrEqual(t, rep.Drain.Reconnects, int64(1))
+		assert.GreaterOrEqual(t, rep.Drain.ReplacementWork, int64(1))
+	})
+
 	t.Run("relay_restart_without_reconnect_fails", func(t *testing.T) {
 		hub := newFakePlumbingHub(t, 2, "relay_restart")
 		agentsFile := writeAgentsFixture(t, 2)
@@ -605,8 +729,8 @@ func TestCLI_Plumbing_PlannedDrain4503(t *testing.T) {
 			"--drain-cmd=true",
 			"--drain-deadline=5s",
 			"--expect-drain",
-			"--allow-unevaluated=hub_rss_peak",
-		}, func(string) string { return "" })
+			"--allow-unevaluated=hub_rss_peak,planned_drain_refuses_new_streams",
+		}, func(string) string { return "" }, io.Discard)
 		require.NoError(t, err)
 
 		var stdout, stderr bytes.Buffer
@@ -635,8 +759,8 @@ func TestCLI_Plumbing_PlannedDrain4503(t *testing.T) {
 			"--drain-cmd=true",
 			"--drain-deadline=5s",
 			"--expect-drain",
-			"--allow-unevaluated=hub_rss_peak",
-		}, func(string) string { return "" })
+			"--allow-unevaluated=hub_rss_peak,planned_drain_refuses_new_streams",
+		}, func(string) string { return "" }, io.Discard)
 		require.NoError(t, err)
 
 		var stdout, stderr bytes.Buffer
