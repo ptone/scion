@@ -113,6 +113,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectoryharvest"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectorysegment"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
@@ -4095,6 +4096,94 @@ func init() {
 	threadgroupmemberDescID := threadgroupmemberFields[0].Descriptor()
 	// threadgroupmember.DefaultID holds the default value on creation for the id field.
 	threadgroupmember.DefaultID = threadgroupmemberDescID.Default.(func() uuid.UUID)
+	trajectoryharvestFields := schema.TrajectoryHarvest{}.Fields()
+	_ = trajectoryharvestFields
+	// trajectoryharvestDescHarvestID is the schema descriptor for harvest_id field.
+	trajectoryharvestDescHarvestID := trajectoryharvestFields[1].Descriptor()
+	// trajectoryharvest.HarvestIDValidator is a validator for the "harvest_id" field. It is called by the builders before save.
+	trajectoryharvest.HarvestIDValidator = trajectoryharvestDescHarvestID.Validators[0].(func(string) error)
+	// trajectoryharvestDescHubID is the schema descriptor for hub_id field.
+	trajectoryharvestDescHubID := trajectoryharvestFields[2].Descriptor()
+	// trajectoryharvest.HubIDValidator is a validator for the "hub_id" field. It is called by the builders before save.
+	trajectoryharvest.HubIDValidator = trajectoryharvestDescHubID.Validators[0].(func(string) error)
+	// trajectoryharvestDescProjectID is the schema descriptor for project_id field.
+	trajectoryharvestDescProjectID := trajectoryharvestFields[3].Descriptor()
+	// trajectoryharvest.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	trajectoryharvest.ProjectIDValidator = trajectoryharvestDescProjectID.Validators[0].(func(string) error)
+	// trajectoryharvestDescAgentID is the schema descriptor for agent_id field.
+	trajectoryharvestDescAgentID := trajectoryharvestFields[4].Descriptor()
+	// trajectoryharvest.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	trajectoryharvest.AgentIDValidator = trajectoryharvestDescAgentID.Validators[0].(func(string) error)
+	// trajectoryharvestDescBrokerID is the schema descriptor for broker_id field.
+	trajectoryharvestDescBrokerID := trajectoryharvestFields[5].Descriptor()
+	// trajectoryharvest.BrokerIDValidator is a validator for the "broker_id" field. It is called by the builders before save.
+	trajectoryharvest.BrokerIDValidator = trajectoryharvestDescBrokerID.Validators[0].(func(string) error)
+	// trajectoryharvestDescRunID is the schema descriptor for run_id field.
+	trajectoryharvestDescRunID := trajectoryharvestFields[6].Descriptor()
+	// trajectoryharvest.DefaultRunID holds the default value on creation for the run_id field.
+	trajectoryharvest.DefaultRunID = trajectoryharvestDescRunID.Default.(string)
+	// trajectoryharvestDescTrigger is the schema descriptor for trigger field.
+	trajectoryharvestDescTrigger := trajectoryharvestFields[7].Descriptor()
+	// trajectoryharvest.TriggerValidator is a validator for the "trigger" field. It is called by the builders before save.
+	trajectoryharvest.TriggerValidator = trajectoryharvestDescTrigger.Validators[0].(func(string) error)
+	// trajectoryharvestDescOutcome is the schema descriptor for outcome field.
+	trajectoryharvestDescOutcome := trajectoryharvestFields[8].Descriptor()
+	// trajectoryharvest.OutcomeValidator is a validator for the "outcome" field. It is called by the builders before save.
+	trajectoryharvest.OutcomeValidator = trajectoryharvestDescOutcome.Validators[0].(func(string) error)
+	// trajectoryharvestDescTrajectory is the schema descriptor for trajectory field.
+	trajectoryharvestDescTrajectory := trajectoryharvestFields[9].Descriptor()
+	// trajectoryharvest.TrajectoryValidator is a validator for the "trajectory" field. It is called by the builders before save.
+	trajectoryharvest.TrajectoryValidator = trajectoryharvestDescTrajectory.Validators[0].(func(string) error)
+	// trajectoryharvestDescUsage is the schema descriptor for usage field.
+	trajectoryharvestDescUsage := trajectoryharvestFields[10].Descriptor()
+	// trajectoryharvest.UsageValidator is a validator for the "usage" field. It is called by the builders before save.
+	trajectoryharvest.UsageValidator = trajectoryharvestDescUsage.Validators[0].(func(string) error)
+	// trajectoryharvestDescSegmentsCommitted is the schema descriptor for segments_committed field.
+	trajectoryharvestDescSegmentsCommitted := trajectoryharvestFields[11].Descriptor()
+	// trajectoryharvest.DefaultSegmentsCommitted holds the default value on creation for the segments_committed field.
+	trajectoryharvest.DefaultSegmentsCommitted = trajectoryharvestDescSegmentsCommitted.Default.(int)
+	// trajectoryharvest.SegmentsCommittedValidator is a validator for the "segments_committed" field. It is called by the builders before save.
+	trajectoryharvest.SegmentsCommittedValidator = trajectoryharvestDescSegmentsCommitted.Validators[0].(func(int) error)
+	// trajectoryharvestDescBytesCommitted is the schema descriptor for bytes_committed field.
+	trajectoryharvestDescBytesCommitted := trajectoryharvestFields[12].Descriptor()
+	// trajectoryharvest.DefaultBytesCommitted holds the default value on creation for the bytes_committed field.
+	trajectoryharvest.DefaultBytesCommitted = trajectoryharvestDescBytesCommitted.Default.(int64)
+	// trajectoryharvest.BytesCommittedValidator is a validator for the "bytes_committed" field. It is called by the builders before save.
+	trajectoryharvest.BytesCommittedValidator = trajectoryharvestDescBytesCommitted.Validators[0].(func(int64) error)
+	// trajectoryharvestDescPendingBytes is the schema descriptor for pending_bytes field.
+	trajectoryharvestDescPendingBytes := trajectoryharvestFields[13].Descriptor()
+	// trajectoryharvest.DefaultPendingBytes holds the default value on creation for the pending_bytes field.
+	trajectoryharvest.DefaultPendingBytes = trajectoryharvestDescPendingBytes.Default.(int64)
+	// trajectoryharvest.PendingBytesValidator is a validator for the "pending_bytes" field. It is called by the builders before save.
+	trajectoryharvest.PendingBytesValidator = trajectoryharvestDescPendingBytes.Validators[0].(func(int64) error)
+	// trajectoryharvestDescUsageEventsDrained is the schema descriptor for usage_events_drained field.
+	trajectoryharvestDescUsageEventsDrained := trajectoryharvestFields[15].Descriptor()
+	// trajectoryharvest.DefaultUsageEventsDrained holds the default value on creation for the usage_events_drained field.
+	trajectoryharvest.DefaultUsageEventsDrained = trajectoryharvestDescUsageEventsDrained.Default.(int)
+	// trajectoryharvest.UsageEventsDrainedValidator is a validator for the "usage_events_drained" field. It is called by the builders before save.
+	trajectoryharvest.UsageEventsDrainedValidator = trajectoryharvestDescUsageEventsDrained.Validators[0].(func(int) error)
+	// trajectoryharvestDescUsageEventsPending is the schema descriptor for usage_events_pending field.
+	trajectoryharvestDescUsageEventsPending := trajectoryharvestFields[16].Descriptor()
+	// trajectoryharvest.DefaultUsageEventsPending holds the default value on creation for the usage_events_pending field.
+	trajectoryharvest.DefaultUsageEventsPending = trajectoryharvestDescUsageEventsPending.Default.(int)
+	// trajectoryharvest.UsageEventsPendingValidator is a validator for the "usage_events_pending" field. It is called by the builders before save.
+	trajectoryharvest.UsageEventsPendingValidator = trajectoryharvestDescUsageEventsPending.Validators[0].(func(int) error)
+	// trajectoryharvestDescErrorCode is the schema descriptor for error_code field.
+	trajectoryharvestDescErrorCode := trajectoryharvestFields[17].Descriptor()
+	// trajectoryharvest.DefaultErrorCode holds the default value on creation for the error_code field.
+	trajectoryharvest.DefaultErrorCode = trajectoryharvestDescErrorCode.Default.(string)
+	// trajectoryharvestDescError is the schema descriptor for error field.
+	trajectoryharvestDescError := trajectoryharvestFields[18].Descriptor()
+	// trajectoryharvest.DefaultError holds the default value on creation for the error field.
+	trajectoryharvest.DefaultError = trajectoryharvestDescError.Default.(string)
+	// trajectoryharvestDescCreatedAt is the schema descriptor for created_at field.
+	trajectoryharvestDescCreatedAt := trajectoryharvestFields[21].Descriptor()
+	// trajectoryharvest.DefaultCreatedAt holds the default value on creation for the created_at field.
+	trajectoryharvest.DefaultCreatedAt = trajectoryharvestDescCreatedAt.Default.(func() time.Time)
+	// trajectoryharvestDescID is the schema descriptor for id field.
+	trajectoryharvestDescID := trajectoryharvestFields[0].Descriptor()
+	// trajectoryharvest.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	trajectoryharvest.IDValidator = trajectoryharvestDescID.Validators[0].(func(string) error)
 	trajectorysegmentFields := schema.TrajectorySegment{}.Fields()
 	_ = trajectorysegmentFields
 	// trajectorysegmentDescHubID is the schema descriptor for hub_id field.
@@ -4167,28 +4256,34 @@ func init() {
 	trajectorysegmentDescSessionID := trajectorysegmentFields[17].Descriptor()
 	// trajectorysegment.DefaultSessionID holds the default value on creation for the session_id field.
 	trajectorysegment.DefaultSessionID = trajectorysegmentDescSessionID.Default.(string)
+	// trajectorysegmentDescUploadSource is the schema descriptor for upload_source field.
+	trajectorysegmentDescUploadSource := trajectorysegmentFields[18].Descriptor()
+	// trajectorysegment.DefaultUploadSource holds the default value on creation for the upload_source field.
+	trajectorysegment.DefaultUploadSource = trajectorysegmentDescUploadSource.Default.(string)
+	// trajectorysegment.UploadSourceValidator is a validator for the "upload_source" field. It is called by the builders before save.
+	trajectorysegment.UploadSourceValidator = trajectorysegmentDescUploadSource.Validators[0].(func(string) error)
 	// trajectorysegmentDescObjectPath is the schema descriptor for object_path field.
-	trajectorysegmentDescObjectPath := trajectorysegmentFields[18].Descriptor()
+	trajectorysegmentDescObjectPath := trajectorysegmentFields[19].Descriptor()
 	// trajectorysegment.ObjectPathValidator is a validator for the "object_path" field. It is called by the builders before save.
 	trajectorysegment.ObjectPathValidator = trajectorysegmentDescObjectPath.Validators[0].(func(string) error)
 	// trajectorysegmentDescManifestPath is the schema descriptor for manifest_path field.
-	trajectorysegmentDescManifestPath := trajectorysegmentFields[19].Descriptor()
+	trajectorysegmentDescManifestPath := trajectorysegmentFields[20].Descriptor()
 	// trajectorysegment.DefaultManifestPath holds the default value on creation for the manifest_path field.
 	trajectorysegment.DefaultManifestPath = trajectorysegmentDescManifestPath.Default.(string)
 	// trajectorysegmentDescStatus is the schema descriptor for status field.
-	trajectorysegmentDescStatus := trajectorysegmentFields[20].Descriptor()
+	trajectorysegmentDescStatus := trajectorysegmentFields[21].Descriptor()
 	// trajectorysegment.DefaultStatus holds the default value on creation for the status field.
 	trajectorysegment.DefaultStatus = trajectorysegmentDescStatus.Default.(string)
 	// trajectorysegment.StatusValidator is a validator for the "status" field. It is called by the builders before save.
 	trajectorysegment.StatusValidator = trajectorysegmentDescStatus.Validators[0].(func(string) error)
 	// trajectorysegmentDescNormalizeStatus is the schema descriptor for normalize_status field.
-	trajectorysegmentDescNormalizeStatus := trajectorysegmentFields[21].Descriptor()
+	trajectorysegmentDescNormalizeStatus := trajectorysegmentFields[22].Descriptor()
 	// trajectorysegment.DefaultNormalizeStatus holds the default value on creation for the normalize_status field.
 	trajectorysegment.DefaultNormalizeStatus = trajectorysegmentDescNormalizeStatus.Default.(string)
 	// trajectorysegment.NormalizeStatusValidator is a validator for the "normalize_status" field. It is called by the builders before save.
 	trajectorysegment.NormalizeStatusValidator = trajectorysegmentDescNormalizeStatus.Validators[0].(func(string) error)
 	// trajectorysegmentDescCreatedAt is the schema descriptor for created_at field.
-	trajectorysegmentDescCreatedAt := trajectorysegmentFields[22].Descriptor()
+	trajectorysegmentDescCreatedAt := trajectorysegmentFields[23].Descriptor()
 	// trajectorysegment.DefaultCreatedAt holds the default value on creation for the created_at field.
 	trajectorysegment.DefaultCreatedAt = trajectorysegmentDescCreatedAt.Default.(func() time.Time)
 	// trajectorysegmentDescID is the schema descriptor for id field.

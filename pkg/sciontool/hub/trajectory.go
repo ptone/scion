@@ -503,6 +503,9 @@ func mapTrajectoryShipError(err error) (shipper.ShipResult, error) {
 		}, nil
 
 	case http.StatusConflict:
+		// Both segment_conflict (prepare/commit identity conflict) and
+		// segment_object_conflict (corrupt/mismatched immutable object at
+		// ObjectPath) are terminal conflicts: bump generation and record error.
 		return shipper.ShipResult{
 			Outcome: shipper.OutcomeConflict,
 			Message: msg,

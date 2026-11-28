@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker/harvest"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
@@ -256,6 +257,18 @@ func (hc *HubConnection) start(ctx context.Context, server *Server) error {
 			hc.mu.Unlock()
 			hb.Start(ctx)
 			slog.Info("Heartbeat started for hub connection", "name", hc.Name, "interval", interval)
+		}
+	}
+
+	// Wire the broker harvest engine once per server when a HubClient with
+	// BrokerHarvestClient support is available and no engine was injected.
+	if hasValidCredentials && hc.HubClient != nil && hc.BrokerID != "" && server.getHarvestEngine() == nil {
+		if bhc, ok := hc.HubClient.(hubclient.BrokerHarvestClient); ok {
+			server.SetHarvestEngine(harvest.New(harvest.Config{
+				Hub:    harvest.NewHubClientAdapter(bhc, hc.BrokerID),
+				HubID:  server.config.ColocatedHubID,
+				Logger: logging.Subsystem("broker.harvest"),
+			}))
 		}
 	}
 
@@ -770,6 +783,7 @@ func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brok
 	hb.profileSAMappings = s.heartbeatProfileSAMappings
 	hb.workloadIdentityTargets = s.heartbeatWorkloadIdentityTargets
 	hb.startsInFlight = s.startsInFlightSnapshot
+	hb.onAgentListing = s.observeHeartbeatAgentsForHarvest
 	hb.defaultProfile = s.defaultProfile
 	hb.flat = s.isFlat()
 	if !hb.flat {

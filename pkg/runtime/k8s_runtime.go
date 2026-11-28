@@ -114,6 +114,11 @@ type KubernetesRuntime struct {
 	// behaviour).
 	PriorityClassName string
 
+	// HomeStorageBackend records the configured home storage backend for
+	// broker capability checks (e.g. HomeStorageNFS). Plain pods leave it
+	// empty or "local".
+	HomeStorageBackend string
+
 	// podTrack remembers the agent pods List() and Run() have seen, so a
 	// pod removed by a preemption or eviction before any List() observed
 	// it as terminal is still reported with that reason (see
@@ -238,6 +243,15 @@ func (r *KubernetesRuntime) Name() string {
 func (r *KubernetesRuntime) CopiesAgentHome() bool {
 	return true
 }
+
+// HomeReadableByBroker implements BrokerReadableHomeRuntime: Kubernetes agent
+// homes are readable by the broker only when HomeStorageBackend is
+// HomeStorageNFS (the broker then also verifies the NFS share is mounted).
+func (r *KubernetesRuntime) HomeReadableByBroker() bool {
+	return r != nil && r.HomeStorageBackend == HomeStorageNFS
+}
+
+var _ BrokerReadableHomeRuntime = (*KubernetesRuntime)(nil)
 
 func (r *KubernetesRuntime) ExecUser() string {
 	return "scion"

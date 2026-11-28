@@ -94,3 +94,37 @@ func TestHasEmptyPerAgentSupport(t *testing.T) {
 		})
 	}
 }
+
+type brokerReadableHomeRuntime struct {
+	*MockRuntime
+	readable bool
+}
+
+func (r *brokerReadableHomeRuntime) HomeReadableByBroker() bool { return r.readable }
+
+func TestHomeReadableByBroker(t *testing.T) {
+	for name, tc := range map[string]struct {
+		rt   Runtime
+		want bool
+	}{
+		"docker":                  {rt: &DockerRuntime{}, want: true},
+		"podman":                  {rt: &PodmanRuntime{}, want: true},
+		"apple container":         {rt: &AppleContainerRuntime{}, want: true},
+		"cloudrun":                {rt: &CloudRunRuntime{}, want: true},
+		"kubernetes nfs":          {rt: &KubernetesRuntime{HomeStorageBackend: HomeStorageNFS}, want: true},
+		"kubernetes plain empty":  {rt: &KubernetesRuntime{}, want: false},
+		"kubernetes plain local":  {rt: &KubernetesRuntime{HomeStorageBackend: "local"}, want: false},
+		"cloudrun-sandbox":        {rt: &CloudRunSandboxRuntime{}, want: false},
+		"substrate":               {rt: &SubstrateRuntime{}, want: false},
+		"mock":                    {rt: &MockRuntime{}, want: false},
+		"nil":                     {rt: nil, want: false},
+		"custom capability true":  {rt: &brokerReadableHomeRuntime{MockRuntime: &MockRuntime{}, readable: true}, want: true},
+		"custom capability false": {rt: &brokerReadableHomeRuntime{MockRuntime: &MockRuntime{}, readable: false}, want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := HomeReadableByBroker(tc.rt); got != tc.want {
+				t.Errorf("HomeReadableByBroker = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

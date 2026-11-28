@@ -53,6 +53,14 @@ func (r *AppleContainerRuntime) Name() string {
 	return appleContainerRuntimeName
 }
 
+// HomeReadableByBroker implements BrokerReadableHomeRuntime: Apple Container
+// mounts the broker-local agent home into the container.
+func (r *AppleContainerRuntime) HomeReadableByBroker() bool {
+	return true
+}
+
+var _ BrokerReadableHomeRuntime = (*AppleContainerRuntime)(nil)
+
 func (r *AppleContainerRuntime) ExecUser() string {
 	return "scion"
 }

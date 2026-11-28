@@ -1293,6 +1293,18 @@ func (f ThreadGroupMemberFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ThreadGroupMemberMutation", m)
 }
 
+// The TrajectoryHarvestFunc type is an adapter to allow the use of ordinary
+// function as TrajectoryHarvest mutator.
+type TrajectoryHarvestFunc func(context.Context, *ent.TrajectoryHarvestMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f TrajectoryHarvestFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.TrajectoryHarvestMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TrajectoryHarvestMutation", m)
+}
+
 // The TrajectorySegmentFunc type is an adapter to allow the use of ordinary
 // function as TrajectorySegment mutator.
 type TrajectorySegmentFunc func(context.Context, *ent.TrajectorySegmentMutation) (ent.Value, error)

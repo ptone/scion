@@ -114,6 +114,14 @@ const (
 	TrajectoryErrSegmentTooLarge         = "segment_too_large"
 	TrajectoryErrRunCapExceeded          = "run_cap_exceeded"
 	TrajectoryErrVerificationFailed      = "segment_verification_failed"
+	TrajectoryErrObjectConflict          = "segment_object_conflict"
+)
+
+// Upload source provenance values for trajectory_segments.upload_source and
+// Hub-authored segment manifests.
+const (
+	TrajectoryUploadSourceAgent         = "agent"
+	TrajectoryUploadSourceBrokerHarvest = "broker_harvest"
 )
 
 // TrajectorySegmentsPrepareAgentPath returns the agent-authenticated prepare
@@ -147,6 +155,28 @@ func TrajectorySegmentsListAgentPath(agentID string) string {
 func TrajectorySegmentDownloadAgentPath(agentID, segmentID string) string {
 	return fmt.Sprintf("/api/v1/agents/%s/trajectory/segments/%s/download",
 		url.PathEscape(agentID), url.PathEscape(segmentID))
+}
+
+// TrajectorySegmentsPrepareBrokerPath returns the broker-authenticated prepare
+// path: POST /api/v1/brokers/{bid}/agents/{id}/trajectory/segments:prepare.
+func TrajectorySegmentsPrepareBrokerPath(brokerID, agentID string) string {
+	return fmt.Sprintf("/api/v1/brokers/%s/agents/%s/trajectory/segments:prepare",
+		url.PathEscape(brokerID), url.PathEscape(agentID))
+}
+
+// TrajectorySegmentsCommitBrokerPath returns the broker-authenticated commit
+// path: POST /api/v1/brokers/{bid}/agents/{id}/trajectory/segments:commit.
+func TrajectorySegmentsCommitBrokerPath(brokerID, agentID string) string {
+	return fmt.Sprintf("/api/v1/brokers/%s/agents/%s/trajectory/segments:commit",
+		url.PathEscape(brokerID), url.PathEscape(agentID))
+}
+
+// TrajectorySegmentContentBrokerPath returns the broker-authenticated
+// Hub-proxied upload content path for local storage (and non-signBlob fallback):
+// PUT /api/v1/brokers/{bid}/agents/{id}/trajectory/segments/{segment_id}/content.
+func TrajectorySegmentContentBrokerPath(brokerID, agentID, segmentID string) string {
+	return fmt.Sprintf("/api/v1/brokers/%s/agents/%s/trajectory/segments/%s/content",
+		url.PathEscape(brokerID), url.PathEscape(agentID), url.PathEscape(segmentID))
 }
 
 // TrajectoryRawObjectPath returns the Hub-chosen canonical storage object path
@@ -219,8 +249,12 @@ func ValidateTrajectoryRelativePath(harness, relPath string) error {
 }
 
 // TrajectorySegmentPrepareRequest is the wire payload for
-// POST /api/v1/agents/{id}/trajectory/segments:prepare.
+// POST /api/v1/agents/{id}/trajectory/segments:prepare and
+// POST /api/v1/brokers/{bid}/agents/{id}/trajectory/segments:prepare.
 type TrajectorySegmentPrepareRequest struct {
+	// RunID is required on the broker-authenticated prepare route (where there
+	// is no agent JWT run claim) and ignored on the agent-authenticated route.
+	RunID              string `json:"run_id,omitempty"`
 	Harness            string `json:"harness"`
 	NativeRelativePath string `json:"native_relative_path"`
 	ArtifactKind       string `json:"artifact_kind"`
@@ -292,6 +326,7 @@ type TrajectorySegmentManifest struct {
 	ContentEncoding    string  `json:"content_encoding"`
 	IncompleteTail     bool    `json:"incomplete_tail"`
 	SessionID          string  `json:"session_id,omitempty"`
+	UploadSource       string  `json:"upload_source,omitempty"`
 	ObjectPath         string  `json:"object_path"`
 	CommittedAt        string  `json:"committed_at"`
 	// ManifestDigest is the lowercase hex SHA-256 of the JSON encoding of this

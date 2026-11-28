@@ -336,7 +336,7 @@ func TestTrajectorySegments_VerificationFailuresAndExpiry(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, commitMissing.Code, commitMissing.Body.String())
 	assert.Equal(t, telemetrycontract.TrajectoryErrVerificationFailed, decodeTrajectoryErrorCode(t, commitMissing))
 
-	// Upload corrupt bytes of the right length -> 422 segment_verification_failed.
+	// Upload corrupt bytes of the right length -> 409 segment_object_conflict (terminal).
 	corrupt := bytes.Repeat([]byte("x"), len(comp))
 	_, err := loc.Upload(ctx, prepResp.ObjectPath, bytes.NewReader(corrupt), storage.UploadOptions{})
 	require.NoError(t, err)
@@ -344,8 +344,8 @@ func TestTrajectorySegments_VerificationFailuresAndExpiry(t *testing.T) {
 	commitCorrupt := doTrajectoryAgentJSON(t, srv, http.MethodPost,
 		telemetrycontract.TrajectorySegmentsCommitAgentPath(agent.ID), tok,
 		telemetrycontract.TrajectorySegmentCommitRequest{SegmentID: prepResp.SegmentID})
-	require.Equal(t, http.StatusUnprocessableEntity, commitCorrupt.Code, commitCorrupt.Body.String())
-	assert.Equal(t, telemetrycontract.TrajectoryErrVerificationFailed, decodeTrajectoryErrorCode(t, commitCorrupt))
+	require.Equal(t, http.StatusConflict, commitCorrupt.Code, commitCorrupt.Body.String())
+	assert.Equal(t, telemetrycontract.TrajectoryErrObjectConflict, decodeTrajectoryErrorCode(t, commitCorrupt))
 
 	// Pending TTL expiry -> 410 segment_expired.
 	srv.trajectoryPrepareTTL = time.Nanosecond
@@ -627,7 +627,7 @@ func TestTrajectorySegments_CommitTOCTOUAndIntegrityEdgeCases(t *testing.T) {
 	putBOnA := doTrajectoryAgentPut(t, srv, prepRespB.Upload.URL, tok, compB, prepRespB.Upload.Headers)
 	require.Equal(t, http.StatusPreconditionFailed, putBOnA.Code, putBOnA.Body.String())
 
-	// O5: compressed_sha256 matches, but raw_sha256 is wrong -> 422.
+	// O5: compressed_sha256 matches, but raw_sha256 is wrong -> 409 segment_object_conflict.
 	badRawHashReq := prepA
 	badRawHashReq.Generation = 1
 	badRawHashReq.RawSHA256 = strings.Repeat("9", 64)
@@ -641,10 +641,10 @@ func TestTrajectorySegments_CommitTOCTOUAndIntegrityEdgeCases(t *testing.T) {
 	commitBadRaw := doTrajectoryAgentJSON(t, srv, http.MethodPost,
 		telemetrycontract.TrajectorySegmentsCommitAgentPath(agent.ID), tok,
 		telemetrycontract.TrajectorySegmentCommitRequest{SegmentID: badRawResp.SegmentID})
-	require.Equal(t, http.StatusUnprocessableEntity, commitBadRaw.Code, commitBadRaw.Body.String())
-	assert.Equal(t, telemetrycontract.TrajectoryErrVerificationFailed, decodeTrajectoryErrorCode(t, commitBadRaw))
+	require.Equal(t, http.StatusConflict, commitBadRaw.Code, commitBadRaw.Body.String())
+	assert.Equal(t, telemetrycontract.TrajectoryErrObjectConflict, decodeTrajectoryErrorCode(t, commitBadRaw))
 
-	// O5: compressed_sha256 matches, but declared decompressed length (byte_end - byte_start) is wrong -> 422.
+	// O5: compressed_sha256 matches, but declared decompressed length (byte_end - byte_start) is wrong -> 409 segment_object_conflict.
 	badRawLenReq := prepA
 	badRawLenReq.Generation = 2
 	badRawLenReq.ByteEnd = int64(len(rawA) - 1)
@@ -658,10 +658,10 @@ func TestTrajectorySegments_CommitTOCTOUAndIntegrityEdgeCases(t *testing.T) {
 	commitBadLen := doTrajectoryAgentJSON(t, srv, http.MethodPost,
 		telemetrycontract.TrajectorySegmentsCommitAgentPath(agent.ID), tok,
 		telemetrycontract.TrajectorySegmentCommitRequest{SegmentID: badLenResp.SegmentID})
-	require.Equal(t, http.StatusUnprocessableEntity, commitBadLen.Code, commitBadLen.Body.String())
-	assert.Equal(t, telemetrycontract.TrajectoryErrVerificationFailed, decodeTrajectoryErrorCode(t, commitBadLen))
+	require.Equal(t, http.StatusConflict, commitBadLen.Code, commitBadLen.Body.String())
+	assert.Equal(t, telemetrycontract.TrajectoryErrObjectConflict, decodeTrajectoryErrorCode(t, commitBadLen))
 
-	// O2: mismatched pre-existing manifest on disk -> 422.
+	// O2: mismatched pre-existing manifest on disk -> 409 segment_object_conflict.
 	badManReq := prepA
 	badManReq.Generation = 3
 	recBadMan := doTrajectoryAgentJSON(t, srv, http.MethodPost,
@@ -677,8 +677,8 @@ func TestTrajectorySegments_CommitTOCTOUAndIntegrityEdgeCases(t *testing.T) {
 	commitBadMan := doTrajectoryAgentJSON(t, srv, http.MethodPost,
 		telemetrycontract.TrajectorySegmentsCommitAgentPath(agent.ID), tok,
 		telemetrycontract.TrajectorySegmentCommitRequest{SegmentID: badManResp.SegmentID})
-	require.Equal(t, http.StatusUnprocessableEntity, commitBadMan.Code, commitBadMan.Body.String())
-	assert.Equal(t, telemetrycontract.TrajectoryErrVerificationFailed, decodeTrajectoryErrorCode(t, commitBadMan))
+	require.Equal(t, http.StatusConflict, commitBadMan.Code, commitBadMan.Body.String())
+	assert.Equal(t, telemetrycontract.TrajectoryErrObjectConflict, decodeTrajectoryErrorCode(t, commitBadMan))
 
 	// O5: expired HMAC signature on proxied PUT -> 403.
 	expiredSig, err := srv.signTrajectoryUploadURL(agent.ID, badManResp.SegmentID, int64(len(compA)), compSHAA, time.Now().Add(-time.Minute))

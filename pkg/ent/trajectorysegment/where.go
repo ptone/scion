@@ -149,6 +149,11 @@ func SessionID(v string) predicate.TrajectorySegment {
 	return predicate.TrajectorySegment(sql.FieldEQ(FieldSessionID, v))
 }
 
+// UploadSource applies equality check predicate on the "upload_source" field. It's identical to UploadSourceEQ.
+func UploadSource(v string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldEQ(FieldUploadSource, v))
+}
+
 // ObjectPath applies equality check predicate on the "object_path" field. It's identical to ObjectPathEQ.
 func ObjectPath(v string) predicate.TrajectorySegment {
 	return predicate.TrajectorySegment(sql.FieldEQ(FieldObjectPath, v))
@@ -1127,6 +1132,71 @@ func SessionIDEqualFold(v string) predicate.TrajectorySegment {
 // SessionIDContainsFold applies the ContainsFold predicate on the "session_id" field.
 func SessionIDContainsFold(v string) predicate.TrajectorySegment {
 	return predicate.TrajectorySegment(sql.FieldContainsFold(FieldSessionID, v))
+}
+
+// UploadSourceEQ applies the EQ predicate on the "upload_source" field.
+func UploadSourceEQ(v string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldEQ(FieldUploadSource, v))
+}
+
+// UploadSourceNEQ applies the NEQ predicate on the "upload_source" field.
+func UploadSourceNEQ(v string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldNEQ(FieldUploadSource, v))
+}
+
+// UploadSourceIn applies the In predicate on the "upload_source" field.
+func UploadSourceIn(vs ...string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldIn(FieldUploadSource, vs...))
+}
+
+// UploadSourceNotIn applies the NotIn predicate on the "upload_source" field.
+func UploadSourceNotIn(vs ...string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldNotIn(FieldUploadSource, vs...))
+}
+
+// UploadSourceGT applies the GT predicate on the "upload_source" field.
+func UploadSourceGT(v string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldGT(FieldUploadSource, v))
+}
+
+// UploadSourceGTE applies the GTE predicate on the "upload_source" field.
+func UploadSourceGTE(v string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldGTE(FieldUploadSource, v))
+}
+
+// UploadSourceLT applies the LT predicate on the "upload_source" field.
+func UploadSourceLT(v string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldLT(FieldUploadSource, v))
+}
+
+// UploadSourceLTE applies the LTE predicate on the "upload_source" field.
+func UploadSourceLTE(v string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldLTE(FieldUploadSource, v))
+}
+
+// UploadSourceContains applies the Contains predicate on the "upload_source" field.
+func UploadSourceContains(v string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldContains(FieldUploadSource, v))
+}
+
+// UploadSourceHasPrefix applies the HasPrefix predicate on the "upload_source" field.
+func UploadSourceHasPrefix(v string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldHasPrefix(FieldUploadSource, v))
+}
+
+// UploadSourceHasSuffix applies the HasSuffix predicate on the "upload_source" field.
+func UploadSourceHasSuffix(v string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldHasSuffix(FieldUploadSource, v))
+}
+
+// UploadSourceEqualFold applies the EqualFold predicate on the "upload_source" field.
+func UploadSourceEqualFold(v string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldEqualFold(FieldUploadSource, v))
+}
+
+// UploadSourceContainsFold applies the ContainsFold predicate on the "upload_source" field.
+func UploadSourceContainsFold(v string) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldContainsFold(FieldUploadSource, v))
 }
 
 // ObjectPathEQ applies the EQ predicate on the "object_path" field.

@@ -36,3 +36,8 @@ func (o *AnalyticsOutbox) lock() (func(), error) {
 func linksUnsupported(err error) bool {
 	return false
 }
+
+// inferOutboxOwner returns nil on non-Unix platforms.
+func inferOutboxOwner(_ string) *OutboxOwner {
+	return nil
+}

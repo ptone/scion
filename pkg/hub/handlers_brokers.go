@@ -862,12 +862,31 @@ func (s *Server) handleBrokerByIDRoutes(w http.ResponseWriter, r *http.Request) 
 	case "rotate-secret":
 		s.handleBrokerRotateSecret(w, r, brokerID)
 	default:
-		// Broker harvest usage ingest: POST /api/v1/brokers/{bid}/agents/{id}/usage/events
-		if subParts := strings.Split(action, "/"); len(subParts) == 4 &&
-			subParts[0] == "agents" && subParts[1] != "" &&
-			subParts[2] == "usage" && subParts[3] == "events" {
-			s.handleBrokerAgentUsageEvents(w, r, brokerID, subParts[1])
-			return
+		subParts := strings.Split(action, "/")
+		if len(subParts) >= 4 && subParts[0] == "agents" && subParts[1] != "" {
+			agentID := subParts[1]
+			switch {
+			// Broker harvest usage ingest: POST /api/v1/brokers/{bid}/agents/{id}/usage/events
+			case len(subParts) == 4 && subParts[2] == "usage" && subParts[3] == "events":
+				s.handleBrokerAgentUsageEvents(w, r, brokerID, agentID)
+				return
+			// Broker trajectory prepare: POST /api/v1/brokers/{bid}/agents/{id}/trajectory/segments:prepare
+			case len(subParts) == 4 && subParts[2] == "trajectory" && subParts[3] == "segments:prepare":
+				s.handleBrokerTrajectorySegmentsPrepare(w, r, brokerID, agentID)
+				return
+			// Broker trajectory commit: POST /api/v1/brokers/{bid}/agents/{id}/trajectory/segments:commit
+			case len(subParts) == 4 && subParts[2] == "trajectory" && subParts[3] == "segments:commit":
+				s.handleBrokerTrajectorySegmentsCommit(w, r, brokerID, agentID)
+				return
+			// Broker trajectory harvest report: POST /api/v1/brokers/{bid}/agents/{id}/trajectory/harvests
+			case len(subParts) == 4 && subParts[2] == "trajectory" && subParts[3] == "harvests":
+				s.handleBrokerTrajectoryHarvests(w, r, brokerID, agentID)
+				return
+			// Broker trajectory proxied content PUT: PUT /api/v1/brokers/{bid}/agents/{id}/trajectory/segments/{segment_id}/content
+			case len(subParts) == 6 && subParts[2] == "trajectory" && subParts[3] == "segments" && subParts[4] != "" && subParts[5] == "content":
+				s.handleBrokerTrajectorySegmentContent(w, r, brokerID, agentID, subParts[4])
+				return
+			}
 		}
 		NotFound(w, "broker action")
 	}

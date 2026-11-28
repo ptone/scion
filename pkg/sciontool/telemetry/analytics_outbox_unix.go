@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -120,4 +121,17 @@ func linksUnsupported(err error) bool {
 		}
 	}
 	return false
+}
+
+// inferOutboxOwner returns the UID/GID owning dir, or nil if stat fails.
+func inferOutboxOwner(dir string) *OutboxOwner {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return nil
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil
+	}
+	return &OutboxOwner{UID: int(st.Uid), GID: int(st.Gid)}
 }

@@ -2202,6 +2202,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if req.Reprovision {
 			opts.ResetHome = req.ResetHome
 			opts.ResetHomeID = req.ResetHomeID
+			if req.ResetHome {
+				s.runPreResetHarvest(ctx, sc.Manager, sc.RuntimeType, req, opts)
+			}
 			cfg, err = sc.Manager.Reprovision(ctx, opts)
 			if err != nil && errors.Is(err, agent.ErrHomeResetApplied) {
 				homeReset.markApplied()
@@ -3753,6 +3756,16 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	s.agentLifecycleLog.Debug("Agent delete: resolved target",
 		"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 		"container_id", target.containerID, "target_run_id", target.runID)
+
+	// Tokenomics P6.1 pre_delete harvest: runs after the container is stopped
+	// and before DeleteTarget or RemoveNFSAgentFiles remove files, whenever
+	// files will be deleted (including purgeRetained) and at soft-delete time.
+	// [P6.2 hook]: returns *harvest.Report for future custody-hold checks; in
+	// P6.1 the delete always proceeds regardless of outcome.
+	if (filesToDelete || softDelete) && !filesOfOtherRun {
+		_ = s.runPreDeleteHarvest(ctx, target, hubAgentID, deleteHubProjectID, runID, projectPath)
+	}
+
 	// The request's project ID is the Hub project ID the agent was started
 	// with (opts.HubProjectID); file deletion resolves the agent's state
 	// directory with it, as lookup does. Without one, nothing changes.
@@ -9533,6 +9546,7 @@ type deleteTarget struct {
 	containerID string // empty for a file-only (never started / container gone) agent
 	runID       string // the entry's scion.run_id label; empty for legacy or file-only entries
 	agentID     string // the entry's agent_id label; empty for file-only or unlabelled entries
+	harness     string // resolved harness/harness_config hint from runtime entry, if present
 	projectPath string
 	projectID   string
 }
@@ -9781,8 +9795,12 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, runID, 
 			containerID: scionrt.AgentOperationID(m.entry),
 			runID:       m.entry.RunID,
 			agentID:     m.entry.Labels[api.LabelAgentID],
+			harness:     m.entry.Harness,
 			projectPath: m.entry.ProjectPath,
 			projectID:   m.entry.ProjectID,
+		}
+		if t.harness == "" {
+			t.harness = m.entry.HarnessConfig
 		}
 		if t.projectID == "" {
 			t.projectID = m.entry.Project

@@ -118,6 +118,28 @@ func CopiesAgentHome(rt Runtime) bool {
 	return ok && c.CopiesAgentHome()
 }
 
+// BrokerReadableHomeRuntime is an optional capability a Runtime may implement
+// to report whether the Runtime Broker can directly read an agent's home
+// directory on the broker host (for example via a bind mount or a
+// broker-mounted NFS share) after the container exits.
+//
+// A runtime that does not implement this interface, or reports false, is
+// treated as not broker-readable (for example plain Kubernetes pods,
+// cloudrun-sandbox, substrate, and mock).
+type BrokerReadableHomeRuntime interface {
+	HomeReadableByBroker() bool
+}
+
+// HomeReadableByBroker reports whether rt implements
+// BrokerReadableHomeRuntime and reports true.
+func HomeReadableByBroker(rt Runtime) bool {
+	if rt == nil {
+		return false
+	}
+	r, ok := rt.(BrokerReadableHomeRuntime)
+	return ok && r.HomeReadableByBroker()
+}
+
 // AttachCapableRuntime is an optional capability a Runtime may implement to
 // report whether it supports interactive attach — a PTY or exec primitive a
 // caller can dial to reach an actor's running session. Attach has always

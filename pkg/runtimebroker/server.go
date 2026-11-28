@@ -49,6 +49,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker/harvest"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/firewallpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
@@ -578,6 +579,15 @@ type Server struct {
 	// loadMappingSettings, when set before the server starts, replaces the
 	// settings loader of the heartbeat's service account report
 	// (loadHeartbeatMappingSettings). Tests use it.
+
+	// harvestEngine performs bounded post_exit, pre_delete, and pre_reset
+	// trajectory + usage harvests (Tokenomics P6.1). Nil disables harvesting.
+	harvestEngineMu sync.RWMutex
+	harvestEngine   *harvest.Engine
+	// exitHarvestTracker tracks running->exited transitions fed by
+	// HeartbeatService and schedules at most one async post_exit harvest per
+	// (agent, run).
+	exitHarvestTracker   *exitHarvestTracker
 	loadMappingSettings  func() (*config.VersionedSettings, error)
 	saDiscoveryOnce      sync.Once
 	saDiscoveryClients   map[string]kubernetes.Interface

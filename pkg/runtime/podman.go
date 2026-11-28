@@ -304,6 +304,14 @@ func (r *PodmanRuntime) Name() string {
 	return "podman"
 }
 
+// HomeReadableByBroker implements BrokerReadableHomeRuntime: Podman bind-mounts
+// the broker-local agent home into the container.
+func (r *PodmanRuntime) HomeReadableByBroker() bool {
+	return true
+}
+
+var _ BrokerReadableHomeRuntime = (*PodmanRuntime)(nil)
+
 // ExecUser implements Runtime. Always returns "scion" because sciontool
 // init drops privileges to the scion user (via SCION_HOST_UID) before
 // launching the tmux session — even in rootless mode. The exec user must

@@ -123,6 +123,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectoryharvest"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectorysegment"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
@@ -365,6 +366,8 @@ type Client struct {
 	ThreadGroup *ThreadGroupClient
 	// ThreadGroupMember is the client for interacting with the ThreadGroupMember builders.
 	ThreadGroupMember *ThreadGroupMemberClient
+	// TrajectoryHarvest is the client for interacting with the TrajectoryHarvest builders.
+	TrajectoryHarvest *TrajectoryHarvestClient
 	// TrajectorySegment is the client for interacting with the TrajectorySegment builders.
 	TrajectorySegment *TrajectorySegmentClient
 	// Trigger is the client for interacting with the Trigger builders.
@@ -525,6 +528,7 @@ func (c *Client) init() {
 	c.TestInfraMarker = NewTestInfraMarkerClient(c.config)
 	c.ThreadGroup = NewThreadGroupClient(c.config)
 	c.ThreadGroupMember = NewThreadGroupMemberClient(c.config)
+	c.TrajectoryHarvest = NewTrajectoryHarvestClient(c.config)
 	c.TrajectorySegment = NewTrajectorySegmentClient(c.config)
 	c.Trigger = NewTriggerClient(c.config)
 	c.TriggerEvent = NewTriggerEventClient(c.config)
@@ -745,6 +749,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		TestInfraMarker:               NewTestInfraMarkerClient(cfg),
 		ThreadGroup:                   NewThreadGroupClient(cfg),
 		ThreadGroupMember:             NewThreadGroupMemberClient(cfg),
+		TrajectoryHarvest:             NewTrajectoryHarvestClient(cfg),
 		TrajectorySegment:             NewTrajectorySegmentClient(cfg),
 		Trigger:                       NewTriggerClient(cfg),
 		TriggerEvent:                  NewTriggerEventClient(cfg),
@@ -892,6 +897,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		TestInfraMarker:               NewTestInfraMarkerClient(cfg),
 		ThreadGroup:                   NewThreadGroupClient(cfg),
 		ThreadGroupMember:             NewThreadGroupMemberClient(cfg),
+		TrajectoryHarvest:             NewTrajectoryHarvestClient(cfg),
 		TrajectorySegment:             NewTrajectorySegmentClient(cfg),
 		Trigger:                       NewTriggerClient(cfg),
 		TriggerEvent:                  NewTriggerEventClient(cfg),
@@ -970,12 +976,12 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ScheduledExecRun, c.Secret, c.SecretRequest, c.Skill, c.SkillInjection,
 		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
-		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim,
-		c.UploadSession, c.UsageBudgetState, c.UsageEvent, c.UsageGroupBudgetSeed,
-		c.UsageGroupRollupDaily, c.UsageReservation, c.UsageRollupDaily,
-		c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User, c.UserAccessToken,
-		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectoryHarvest,
+		c.TrajectorySegment, c.Trigger, c.TriggerEvent, c.TriggerFire,
+		c.TriggerSubjectClaim, c.UploadSession, c.UsageBudgetState, c.UsageEvent,
+		c.UsageGroupBudgetSeed, c.UsageGroupRollupDaily, c.UsageReservation,
+		c.UsageRollupDaily, c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User,
+		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
 		c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Use(hooks...)
@@ -1014,12 +1020,12 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ScheduledExecRun, c.Secret, c.SecretRequest, c.Skill, c.SkillInjection,
 		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
-		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim,
-		c.UploadSession, c.UsageBudgetState, c.UsageEvent, c.UsageGroupBudgetSeed,
-		c.UsageGroupRollupDaily, c.UsageReservation, c.UsageRollupDaily,
-		c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User, c.UserAccessToken,
-		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectoryHarvest,
+		c.TrajectorySegment, c.Trigger, c.TriggerEvent, c.TriggerFire,
+		c.TriggerSubjectClaim, c.UploadSession, c.UsageBudgetState, c.UsageEvent,
+		c.UsageGroupBudgetSeed, c.UsageGroupRollupDaily, c.UsageReservation,
+		c.UsageRollupDaily, c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User,
+		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
 		c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Intercept(interceptors...)
@@ -1243,6 +1249,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.ThreadGroup.mutate(ctx, m)
 	case *ThreadGroupMemberMutation:
 		return c.ThreadGroupMember.mutate(ctx, m)
+	case *TrajectoryHarvestMutation:
+		return c.TrajectoryHarvest.mutate(ctx, m)
 	case *TrajectorySegmentMutation:
 		return c.TrajectorySegment.mutate(ctx, m)
 	case *TriggerMutation:
@@ -16129,6 +16137,139 @@ func (c *ThreadGroupMemberClient) mutate(ctx context.Context, m *ThreadGroupMemb
 	}
 }
 
+// TrajectoryHarvestClient is a client for the TrajectoryHarvest schema.
+type TrajectoryHarvestClient struct {
+	config
+}
+
+// NewTrajectoryHarvestClient returns a client for the TrajectoryHarvest from the given config.
+func NewTrajectoryHarvestClient(c config) *TrajectoryHarvestClient {
+	return &TrajectoryHarvestClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `trajectoryharvest.Hooks(f(g(h())))`.
+func (c *TrajectoryHarvestClient) Use(hooks ...Hook) {
+	c.hooks.TrajectoryHarvest = append(c.hooks.TrajectoryHarvest, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `trajectoryharvest.Intercept(f(g(h())))`.
+func (c *TrajectoryHarvestClient) Intercept(interceptors ...Interceptor) {
+	c.inters.TrajectoryHarvest = append(c.inters.TrajectoryHarvest, interceptors...)
+}
+
+// Create returns a builder for creating a TrajectoryHarvest entity.
+func (c *TrajectoryHarvestClient) Create() *TrajectoryHarvestCreate {
+	mutation := newTrajectoryHarvestMutation(c.config, OpCreate)
+	return &TrajectoryHarvestCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of TrajectoryHarvest entities.
+func (c *TrajectoryHarvestClient) CreateBulk(builders ...*TrajectoryHarvestCreate) *TrajectoryHarvestCreateBulk {
+	return &TrajectoryHarvestCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *TrajectoryHarvestClient) MapCreateBulk(slice any, setFunc func(*TrajectoryHarvestCreate, int)) *TrajectoryHarvestCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &TrajectoryHarvestCreateBulk{err: fmt.Errorf("calling to TrajectoryHarvestClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*TrajectoryHarvestCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &TrajectoryHarvestCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for TrajectoryHarvest.
+func (c *TrajectoryHarvestClient) Update() *TrajectoryHarvestUpdate {
+	mutation := newTrajectoryHarvestMutation(c.config, OpUpdate)
+	return &TrajectoryHarvestUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *TrajectoryHarvestClient) UpdateOne(_m *TrajectoryHarvest) *TrajectoryHarvestUpdateOne {
+	mutation := newTrajectoryHarvestMutation(c.config, OpUpdateOne, withTrajectoryHarvest(_m))
+	return &TrajectoryHarvestUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *TrajectoryHarvestClient) UpdateOneID(id string) *TrajectoryHarvestUpdateOne {
+	mutation := newTrajectoryHarvestMutation(c.config, OpUpdateOne, withTrajectoryHarvestID(id))
+	return &TrajectoryHarvestUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for TrajectoryHarvest.
+func (c *TrajectoryHarvestClient) Delete() *TrajectoryHarvestDelete {
+	mutation := newTrajectoryHarvestMutation(c.config, OpDelete)
+	return &TrajectoryHarvestDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *TrajectoryHarvestClient) DeleteOne(_m *TrajectoryHarvest) *TrajectoryHarvestDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *TrajectoryHarvestClient) DeleteOneID(id string) *TrajectoryHarvestDeleteOne {
+	builder := c.Delete().Where(trajectoryharvest.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &TrajectoryHarvestDeleteOne{builder}
+}
+
+// Query returns a query builder for TrajectoryHarvest.
+func (c *TrajectoryHarvestClient) Query() *TrajectoryHarvestQuery {
+	return &TrajectoryHarvestQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeTrajectoryHarvest},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a TrajectoryHarvest entity by its id.
+func (c *TrajectoryHarvestClient) Get(ctx context.Context, id string) (*TrajectoryHarvest, error) {
+	return c.Query().Where(trajectoryharvest.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *TrajectoryHarvestClient) GetX(ctx context.Context, id string) *TrajectoryHarvest {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *TrajectoryHarvestClient) Hooks() []Hook {
+	return c.hooks.TrajectoryHarvest
+}
+
+// Interceptors returns the client interceptors.
+func (c *TrajectoryHarvestClient) Interceptors() []Interceptor {
+	return c.inters.TrajectoryHarvest
+}
+
+func (c *TrajectoryHarvestClient) mutate(ctx context.Context, m *TrajectoryHarvestMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&TrajectoryHarvestCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&TrajectoryHarvestUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&TrajectoryHarvestUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&TrajectoryHarvestDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown TrajectoryHarvest mutation op: %q", m.Op())
+	}
+}
+
 // TrajectorySegmentClient is a client for the TrajectorySegment schema.
 type TrajectorySegmentClient struct {
 	config
@@ -19174,11 +19315,12 @@ type (
 		SecretRequest, Skill, SkillInjection, SkillRegistry, SkillVersion,
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
-		UploadSession, UsageBudgetState, UsageEvent, UsageGroupBudgetSeed,
-		UsageGroupRollupDaily, UsageReservation, UsageRollupDaily, UsageRollupHourly,
-		UsageScopeCounterDaily, User, UserAccessToken, UserDeletion, UserDeletionAgent,
-		UserExecContainer, UserTerminalWorkspace, WebhookEndpoint []ent.Hook
+		TrajectoryHarvest, TrajectorySegment, Trigger, TriggerEvent, TriggerFire,
+		TriggerSubjectClaim, UploadSession, UsageBudgetState, UsageEvent,
+		UsageGroupBudgetSeed, UsageGroupRollupDaily, UsageReservation,
+		UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily, User,
+		UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
+		UserTerminalWorkspace, WebhookEndpoint []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -19206,10 +19348,11 @@ type (
 		SecretRequest, Skill, SkillInjection, SkillRegistry, SkillVersion,
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
-		UploadSession, UsageBudgetState, UsageEvent, UsageGroupBudgetSeed,
-		UsageGroupRollupDaily, UsageReservation, UsageRollupDaily, UsageRollupHourly,
-		UsageScopeCounterDaily, User, UserAccessToken, UserDeletion, UserDeletionAgent,
-		UserExecContainer, UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
+		TrajectoryHarvest, TrajectorySegment, Trigger, TriggerEvent, TriggerFire,
+		TriggerSubjectClaim, UploadSession, UsageBudgetState, UsageEvent,
+		UsageGroupBudgetSeed, UsageGroupRollupDaily, UsageReservation,
+		UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily, User,
+		UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
+		UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
 	}
 )

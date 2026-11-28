@@ -84,6 +84,9 @@ func (TrajectorySegment) Fields() []ent.Field {
 		field.String("session_id").
 			Optional().
 			Default(""),
+		field.String("upload_source").
+			NotEmpty().
+			Default("agent"),
 		field.String("object_path").
 			NotEmpty().
 			Immutable(),

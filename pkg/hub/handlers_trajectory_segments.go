@@ -66,6 +66,8 @@ const (
 var (
 	errTrajectoryUploadSizeMismatch = errors.New("uploaded size does not match expected compressed_size")
 	errTrajectoryUploadHashMismatch = errors.New("uploaded compressed_sha256 does not match prepared segment")
+	errTrajectoryObjectNotFound     = errors.New("segment object not found")
+	errTrajectoryObjectConflict     = errors.New("segment object content mismatch")
 )
 
 func (s *Server) maxTrajectorySegmentRawBytes() int64 {
@@ -304,6 +306,48 @@ func (s *Server) resolveTrajectoryRunAttribution(ctx context.Context, agent *sto
 	return attr, nil
 }
 
+// authenticateBrokerTrajectoryAgent validates experiment gating, broker HMAC
+// identity matching {bid}, agent existence (including mid-delete and
+// soft-deleted agents), and owning broker match (agent.RuntimeBrokerID == {bid})
+// per P6.1 contract §2–§3.
+func (s *Server) authenticateBrokerTrajectoryAgent(w http.ResponseWriter, r *http.Request, allowedMethod, brokerID, agentID string) (*store.Agent, bool) {
+	if !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
+		NotFound(w, "route")
+		return nil, false
+	}
+	if r.Method != allowedMethod {
+		MethodNotAllowed(w, allowedMethod)
+		return nil, false
+	}
+
+	ctx := r.Context()
+	brokerIdent := GetBrokerIdentityFromContext(ctx)
+	if brokerIdent == nil {
+		Unauthorized(w)
+		return nil, false
+	}
+	if brokerIdent.BrokerID() != brokerID {
+		Forbidden(w)
+		return nil, false
+	}
+
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return nil, false
+	}
+	if agent == nil {
+		NotFound(w, "Agent")
+		return nil, false
+	}
+	if agent.RuntimeBrokerID != brokerID {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"Broker does not own target agent", nil)
+		return nil, false
+	}
+	return agent, true
+}
+
 // handleAgentTrajectorySegmentsPrepare serves
 // POST /api/v1/agents/{id}/trajectory/segments:prepare.
 func (s *Server) handleAgentTrajectorySegmentsPrepare(w http.ResponseWriter, r *http.Request, id string) {
@@ -340,6 +384,35 @@ func (s *Server) handleAgentTrajectorySegmentsPrepare(w http.ResponseWriter, r *
 		NotFound(w, "Agent")
 		return
 	}
+
+	s.prepareTrajectorySegmentCore(w, r, agent, trajectoryPrepareCaller{
+		uploadSource: telemetrycontract.TrajectoryUploadSourceAgent,
+		tokenRunID:   presentedAgentTokenRunID(ctx),
+	})
+}
+
+// handleBrokerTrajectorySegmentsPrepare serves
+// POST /api/v1/brokers/{bid}/agents/{id}/trajectory/segments:prepare.
+func (s *Server) handleBrokerTrajectorySegmentsPrepare(w http.ResponseWriter, r *http.Request, brokerID, agentID string) {
+	agent, ok := s.authenticateBrokerTrajectoryAgent(w, r, http.MethodPost, brokerID, agentID)
+	if !ok {
+		return
+	}
+	s.prepareTrajectorySegmentCore(w, r, agent, trajectoryPrepareCaller{
+		brokerID:     brokerID,
+		uploadSource: telemetrycontract.TrajectoryUploadSourceBrokerHarvest,
+	})
+}
+
+type trajectoryPrepareCaller struct {
+	brokerID     string
+	uploadSource string
+	tokenRunID   string
+}
+
+func (s *Server) prepareTrajectorySegmentCore(w http.ResponseWriter, r *http.Request, agent *store.Agent, caller trajectoryPrepareCaller) {
+	ctx := r.Context()
+	id := agent.ID
 
 	project, err := s.store.GetProject(ctx, agent.ProjectID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -403,15 +476,40 @@ func (s *Server) handleAgentTrajectorySegmentsPrepare(w http.ResponseWriter, r *
 		return
 	}
 
-	attr, err := s.resolveTrajectoryRunAttribution(ctx, agent, presentedAgentTokenRunID(ctx))
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
+	var attr *store.RunAttribution
+	if caller.brokerID != "" {
+		runID := strings.TrimSpace(req.RunID)
+		if runID == "" {
 			writeError(w, http.StatusBadRequest, telemetrycontract.TrajectoryErrInvalidSegment,
-				"unable to resolve run attribution for agent", nil)
+				"run_id is required", map[string]interface{}{"reason": "run_mismatch"})
 			return
 		}
-		writeErrorFromErr(w, err, "")
-		return
+		attr, err = s.store.GetRunAttribution(ctx, runID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusBadRequest, telemetrycontract.TrajectoryErrInvalidSegment,
+					"run_id does not match a known run for this agent", map[string]interface{}{"reason": "run_mismatch"})
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if attr == nil || attr.AgentID != agent.ID {
+			writeError(w, http.StatusBadRequest, telemetrycontract.TrajectoryErrInvalidSegment,
+				"run_id does not match a known run for this agent", map[string]interface{}{"reason": "run_mismatch"})
+			return
+		}
+	} else {
+		attr, err = s.resolveTrajectoryRunAttribution(ctx, agent, caller.tokenRunID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusBadRequest, telemetrycontract.TrajectoryErrInvalidSegment,
+					"unable to resolve run attribution for agent", nil)
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
 	}
 
 	stor := s.GetStorage()
@@ -426,7 +524,7 @@ func (s *Server) handleAgentTrajectorySegmentsPrepare(w http.ResponseWriter, r *
 	if originHubID == "" {
 		originHubID = hubID
 	} else if originHubID != hubID {
-		// P5 wave 1 has no relocation records (P6). Reject any client-supplied
+		// P5 wave 1 has no relocation records (P6.3). Reject any client-supplied
 		// origin_hub_id other than this Hub's ID so Hub-authored manifests
 		// never carry unverified foreign provenance.
 		writeError(w, http.StatusBadRequest, telemetrycontract.TrajectoryErrInvalidSegment,
@@ -558,6 +656,7 @@ func (s *Server) handleAgentTrajectorySegmentsPrepare(w http.ResponseWriter, r *
 		CompressedSHA256:   req.CompressedSHA256,
 		IncompleteTail:     req.IncompleteTail,
 		SessionID:          req.SessionID,
+		UploadSource:       caller.uploadSource,
 		ObjectPath:         objectPath,
 		Status:             telemetrycontract.TrajectorySegmentStatusPending,
 		NormalizeStatus:    telemetrycontract.TrajectoryNormalizeStatusPending,
@@ -583,7 +682,7 @@ func (s *Server) handleAgentTrajectorySegmentsPrepare(w http.ResponseWriter, r *
 		return
 	}
 
-	uploadInst, err := s.buildTrajectoryUploadInstruction(ctx, r, stor, seg, now)
+	uploadInst, err := s.buildTrajectoryUploadInstruction(ctx, r, stor, seg, caller.brokerID, now)
 	if err != nil {
 		slog.ErrorContext(ctx, "trajectory segment prepare: failed to issue upload URL",
 			"agent_id", seg.AgentID, "segment_id", seg.ID, "provider", stor.Provider(), "error", err)
@@ -667,6 +766,7 @@ func (s *Server) buildTrajectoryUploadInstruction(
 	r *http.Request,
 	stor storage.Storage,
 	seg *store.TrajectorySegment,
+	brokerID string,
 	now time.Time,
 ) (*telemetrycontract.TrajectorySegmentUploadInstruction, error) {
 	ttl := s.trajectoryUploadURLTTLDuration()
@@ -711,7 +811,11 @@ func (s *Server) buildTrajectoryUploadInstruction(
 	if err != nil {
 		return nil, err
 	}
-	uploadURL := s.trajectoryProxyBaseURL(r) + telemetrycontract.TrajectorySegmentContentAgentPath(seg.AgentID, seg.ID) + "?" + sigQuery
+	contentPath := telemetrycontract.TrajectorySegmentContentAgentPath(seg.AgentID, seg.ID)
+	if brokerID != "" {
+		contentPath = telemetrycontract.TrajectorySegmentContentBrokerPath(brokerID, seg.AgentID, seg.ID)
+	}
+	uploadURL := s.trajectoryProxyBaseURL(r) + contentPath + "?" + sigQuery
 	return &telemetrycontract.TrajectorySegmentUploadInstruction{
 		Method: http.MethodPut,
 		URL:    uploadURL,
@@ -824,6 +928,21 @@ func (s *Server) handleAgentTrajectorySegmentContent(w http.ResponseWriter, r *h
 			"Agents can only upload their own trajectory segments", nil)
 		return
 	}
+
+	s.putTrajectorySegmentContentCore(w, r, id, segmentID)
+}
+
+// handleBrokerTrajectorySegmentContent serves
+// PUT /api/v1/brokers/{bid}/agents/{id}/trajectory/segments/{segment_id}/content.
+func (s *Server) handleBrokerTrajectorySegmentContent(w http.ResponseWriter, r *http.Request, brokerID, agentID, segmentID string) {
+	if _, ok := s.authenticateBrokerTrajectoryAgent(w, r, http.MethodPut, brokerID, agentID); !ok {
+		return
+	}
+	s.putTrajectorySegmentContentCore(w, r, agentID, segmentID)
+}
+
+func (s *Server) putTrajectorySegmentContentCore(w http.ResponseWriter, r *http.Request, id, segmentID string) {
+	ctx := r.Context()
 
 	seg, err := s.store.GetTrajectorySegment(ctx, segmentID)
 	if err != nil {
@@ -1021,6 +1140,21 @@ func (s *Server) handleAgentTrajectorySegmentsCommit(w http.ResponseWriter, r *h
 		return
 	}
 
+	s.commitTrajectorySegmentCore(w, r, id)
+}
+
+// handleBrokerTrajectorySegmentsCommit serves
+// POST /api/v1/brokers/{bid}/agents/{id}/trajectory/segments:commit.
+func (s *Server) handleBrokerTrajectorySegmentsCommit(w http.ResponseWriter, r *http.Request, brokerID, agentID string) {
+	if _, ok := s.authenticateBrokerTrajectoryAgent(w, r, http.MethodPost, brokerID, agentID); !ok {
+		return
+	}
+	s.commitTrajectorySegmentCore(w, r, agentID)
+}
+
+func (s *Server) commitTrajectorySegmentCore(w http.ResponseWriter, r *http.Request, id string) {
+	ctx := r.Context()
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, trajectorySegmentRequestMaxBody+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, telemetrycontract.TrajectoryErrInvalidSegment,
@@ -1078,6 +1212,11 @@ func (s *Server) handleAgentTrajectorySegmentsCommit(w http.ResponseWriter, r *h
 	}
 
 	if err := s.verifyStoredTrajectorySegment(ctx, stor, seg); err != nil {
+		if errors.Is(err, errTrajectoryObjectConflict) {
+			writeError(w, http.StatusConflict, telemetrycontract.TrajectoryErrObjectConflict,
+				err.Error(), nil)
+			return
+		}
 		writeError(w, http.StatusUnprocessableEntity, telemetrycontract.TrajectoryErrVerificationFailed,
 			err.Error(), nil)
 		return
@@ -1120,6 +1259,11 @@ func (s *Server) handleAgentTrajectorySegmentsCommit(w http.ResponseWriter, r *h
 		// so the DB row agrees with the immutable manifest.
 		existingCommittedAt, verr := verifyExistingTrajectoryManifest(ctx, stor, manifestPath, seg, attr)
 		if verr != nil {
+			if errors.Is(verr, errTrajectoryObjectConflict) {
+				writeError(w, http.StatusConflict, telemetrycontract.TrajectoryErrObjectConflict,
+					"existing trajectory manifest mismatch: "+verr.Error(), nil)
+				return
+			}
 			writeError(w, http.StatusUnprocessableEntity, telemetrycontract.TrajectoryErrVerificationFailed,
 				"existing trajectory manifest mismatch: "+verr.Error(), nil)
 			return
@@ -1168,18 +1312,18 @@ func (s *Server) verifyStoredTrajectorySegment(ctx context.Context, stor storage
 	obj, err := stor.GetObject(ctx, seg.ObjectPath)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			return fmt.Errorf("segment object not found")
+			return fmt.Errorf("%w", errTrajectoryObjectNotFound)
 		}
 		return fmt.Errorf("failed to stat segment object: %w", err)
 	}
 	if obj.Size != seg.CompressedSize {
-		return fmt.Errorf("segment object size %d does not match expected %d", obj.Size, seg.CompressedSize)
+		return fmt.Errorf("%w: segment object size %d does not match expected %d", errTrajectoryObjectConflict, obj.Size, seg.CompressedSize)
 	}
 
 	rc, _, err := stor.Download(ctx, seg.ObjectPath)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			return fmt.Errorf("segment object not found")
+			return fmt.Errorf("%w", errTrajectoryObjectNotFound)
 		}
 		return fmt.Errorf("failed to download segment object: %w", err)
 	}
@@ -1194,7 +1338,7 @@ func (s *Server) verifyStoredTrajectorySegment(ctx context.Context, stor storage
 
 	gz, err := gzip.NewReader(compReader)
 	if err != nil {
-		return fmt.Errorf("invalid gzip content: %w", err)
+		return fmt.Errorf("%w: invalid gzip content: %w", errTrajectoryObjectConflict, err)
 	}
 	defer func() { _ = gz.Close() }()
 
@@ -1202,13 +1346,13 @@ func (s *Server) verifyStoredTrajectorySegment(ctx context.Context, stor storage
 	rawHash := sha256.New()
 	rawLen, err := io.Copy(rawHash, io.LimitReader(gz, expectedRawLen+1))
 	if err != nil {
-		return fmt.Errorf("failed to decompress gzip content: %w", err)
+		return fmt.Errorf("%w: failed to decompress gzip content: %w", errTrajectoryObjectConflict, err)
 	}
 	if rawLen != expectedRawLen {
-		return fmt.Errorf("decompressed raw length %d does not match expected %d", rawLen, expectedRawLen)
+		return fmt.Errorf("%w: decompressed raw length %d does not match expected %d", errTrajectoryObjectConflict, rawLen, expectedRawLen)
 	}
 	if err := gz.Close(); err != nil {
-		return fmt.Errorf("corrupt gzip trailer: %w", err)
+		return fmt.Errorf("%w: corrupt gzip trailer: %w", errTrajectoryObjectConflict, err)
 	}
 	// Drain any remaining compressed bytes (up to the +1 limit) so compLen and
 	// compHash cover the entire stored object without buffering it in memory.
@@ -1216,13 +1360,13 @@ func (s *Server) verifyStoredTrajectorySegment(ctx context.Context, stor storage
 		return fmt.Errorf("failed to read segment object: %w", err)
 	}
 	if compLen != seg.CompressedSize {
-		return fmt.Errorf("segment object byte length %d does not match expected %d", compLen, seg.CompressedSize)
+		return fmt.Errorf("%w: segment object byte length %d does not match expected %d", errTrajectoryObjectConflict, compLen, seg.CompressedSize)
 	}
 	if hex.EncodeToString(compHash.Sum(nil)) != seg.CompressedSHA256 {
-		return fmt.Errorf("compressed_sha256 mismatch")
+		return fmt.Errorf("%w: compressed_sha256 mismatch", errTrajectoryObjectConflict)
 	}
 	if hex.EncodeToString(rawHash.Sum(nil)) != seg.RawSHA256 {
-		return fmt.Errorf("raw_sha256 mismatch")
+		return fmt.Errorf("%w: raw_sha256 mismatch", errTrajectoryObjectConflict)
 	}
 	return nil
 }
@@ -1233,6 +1377,10 @@ func (s *Server) verifyStoredTrajectorySegment(ctx context.Context, stor storage
 // not omit it). Both the object path and the manifest use seg.Harness as the
 // single canonical harness source.
 func buildTrajectorySegmentManifestJSON(seg *store.TrajectorySegment, attr *store.RunAttribution, committedAt time.Time) ([]byte, error) {
+	uploadSource := seg.UploadSource
+	if uploadSource == "" {
+		uploadSource = telemetrycontract.TrajectoryUploadSourceAgent
+	}
 	m := telemetrycontract.TrajectorySegmentManifest{
 		SchemaVersion:      telemetrycontract.TrajectoryManifestSchemaVersion,
 		HubID:              seg.HubID,
@@ -1255,6 +1403,7 @@ func buildTrajectorySegmentManifestJSON(seg *store.TrajectorySegment, attr *stor
 		ContentEncoding:    telemetrycontract.TrajectoryContentEncodingGzip,
 		IncompleteTail:     seg.IncompleteTail,
 		SessionID:          seg.SessionID,
+		UploadSource:       uploadSource,
 		ObjectPath:         seg.ObjectPath,
 		CommittedAt:        committedAt.UTC().Format(time.RFC3339),
 	}
@@ -1279,11 +1428,11 @@ func verifyExistingTrajectoryManifest(ctx context.Context, stor storage.Storage,
 		return time.Time{}, fmt.Errorf("read existing manifest: %w", err)
 	}
 	if len(data) > trajectorySegmentRequestMaxBody {
-		return time.Time{}, fmt.Errorf("existing manifest exceeds maximum size")
+		return time.Time{}, fmt.Errorf("%w: existing manifest exceeds maximum size", errTrajectoryObjectConflict)
 	}
 	var m telemetrycontract.TrajectorySegmentManifest
 	if err := json.Unmarshal(data, &m); err != nil {
-		return time.Time{}, fmt.Errorf("parse existing manifest: %w", err)
+		return time.Time{}, fmt.Errorf("%w: parse existing manifest: %w", errTrajectoryObjectConflict, err)
 	}
 	if m.ProjectID != attr.ProjectID ||
 		m.AgentID != attr.AgentID ||
@@ -1299,7 +1448,7 @@ func verifyExistingTrajectoryManifest(ctx context.Context, stor storage.Storage,
 		m.IncompleteTail != seg.IncompleteTail ||
 		m.SessionID != seg.SessionID ||
 		m.ObjectPath != seg.ObjectPath {
-		return time.Time{}, fmt.Errorf("existing manifest identity or hashes do not match segment")
+		return time.Time{}, fmt.Errorf("%w: existing manifest identity or hashes do not match segment", errTrajectoryObjectConflict)
 	}
 	if m.CommittedAt != "" {
 		if ts, err := time.Parse(time.RFC3339, m.CommittedAt); err == nil {

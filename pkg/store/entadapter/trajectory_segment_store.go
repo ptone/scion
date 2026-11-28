@@ -72,6 +72,7 @@ func entTrajectorySegmentToStore(row *ent.TrajectorySegment) *store.TrajectorySe
 		CompressedSHA256:   row.CompressedSha256,
 		IncompleteTail:     row.IncompleteTail,
 		SessionID:          row.SessionID,
+		UploadSource:       row.UploadSource,
 		ObjectPath:         row.ObjectPath,
 		ManifestPath:       row.ManifestPath,
 		Status:             row.Status,
@@ -120,6 +121,10 @@ func (s *TrajectorySegmentStore) PrepareTrajectorySegment(ctx context.Context, s
 	if normStatus == "" {
 		normStatus = telemetrycontract.TrajectoryNormalizeStatusPending
 	}
+	uploadSource := seg.UploadSource
+	if uploadSource == "" {
+		uploadSource = telemetrycontract.TrajectoryUploadSourceAgent
+	}
 
 	reqCharged := max(seg.ByteEnd-seg.ByteStart, seg.CompressedSize)
 	if seg.ChargedBytes > reqCharged {
@@ -148,6 +153,7 @@ func (s *TrajectorySegmentStore) PrepareTrajectorySegment(ctx context.Context, s
 			trajectorysegment.FieldCompressedSha256,
 			trajectorysegment.FieldIncompleteTail,
 			trajectorysegment.FieldSessionID,
+			trajectorysegment.FieldUploadSource,
 			trajectorysegment.FieldObjectPath,
 			trajectorysegment.FieldManifestPath,
 			trajectorysegment.FieldStatus,
@@ -174,6 +180,7 @@ func (s *TrajectorySegmentStore) PrepareTrajectorySegment(ctx context.Context, s
 			seg.CompressedSHA256,
 			seg.IncompleteTail,
 			seg.SessionID,
+			uploadSource,
 			seg.ObjectPath,
 			"",
 			status,
@@ -206,6 +213,7 @@ func (s *TrajectorySegmentStore) PrepareTrajectorySegment(ctx context.Context, s
 		out := *seg
 		out.ID = id
 		out.ChargedBytes = reqCharged
+		out.UploadSource = uploadSource
 		out.Status = status
 		out.NormalizeStatus = normStatus
 		out.CreatedAt = now
@@ -252,6 +260,7 @@ func (s *TrajectorySegmentStore) PrepareTrajectorySegment(ctx context.Context, s
 		SetCompressedSha256(seg.CompressedSHA256).
 		SetIncompleteTail(seg.IncompleteTail).
 		SetSessionID(seg.SessionID).
+		SetUploadSource(uploadSource).
 		SetOriginHubID(seg.OriginHubID).
 		SetPrepareExpiresAt(expiresAt).
 		Save(ctx)

@@ -157,6 +157,20 @@ func (_c *TrajectorySegmentCreate) SetNillableSessionID(v *string) *TrajectorySe
 	return _c
 }
 
+// SetUploadSource sets the "upload_source" field.
+func (_c *TrajectorySegmentCreate) SetUploadSource(v string) *TrajectorySegmentCreate {
+	_c.mutation.SetUploadSource(v)
+	return _c
+}
+
+// SetNillableUploadSource sets the "upload_source" field if the given value is not nil.
+func (_c *TrajectorySegmentCreate) SetNillableUploadSource(v *string) *TrajectorySegmentCreate {
+	if v != nil {
+		_c.SetUploadSource(*v)
+	}
+	return _c
+}
+
 // SetObjectPath sets the "object_path" field.
 func (_c *TrajectorySegmentCreate) SetObjectPath(v string) *TrajectorySegmentCreate {
 	_c.mutation.SetObjectPath(v)
@@ -296,6 +310,10 @@ func (_c *TrajectorySegmentCreate) defaults() {
 		v := trajectorysegment.DefaultSessionID
 		_c.mutation.SetSessionID(v)
 	}
+	if _, ok := _c.mutation.UploadSource(); !ok {
+		v := trajectorysegment.DefaultUploadSource
+		_c.mutation.SetUploadSource(v)
+	}
 	if _, ok := _c.mutation.ManifestPath(); !ok {
 		v := trajectorysegment.DefaultManifestPath
 		_c.mutation.SetManifestPath(v)
@@ -430,6 +448,14 @@ func (_c *TrajectorySegmentCreate) check() error {
 	}
 	if _, ok := _c.mutation.IncompleteTail(); !ok {
 		return &ValidationError{Name: "incomplete_tail", err: errors.New(`ent: missing required field "TrajectorySegment.incomplete_tail"`)}
+	}
+	if _, ok := _c.mutation.UploadSource(); !ok {
+		return &ValidationError{Name: "upload_source", err: errors.New(`ent: missing required field "TrajectorySegment.upload_source"`)}
+	}
+	if v, ok := _c.mutation.UploadSource(); ok {
+		if err := trajectorysegment.UploadSourceValidator(v); err != nil {
+			return &ValidationError{Name: "upload_source", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.upload_source": %w`, err)}
+		}
 	}
 	if _, ok := _c.mutation.ObjectPath(); !ok {
 		return &ValidationError{Name: "object_path", err: errors.New(`ent: missing required field "TrajectorySegment.object_path"`)}
@@ -569,6 +595,10 @@ func (_c *TrajectorySegmentCreate) createSpec() (*TrajectorySegment, *sqlgraph.C
 	if value, ok := _c.mutation.SessionID(); ok {
 		_spec.SetField(trajectorysegment.FieldSessionID, field.TypeString, value)
 		_node.SessionID = value
+	}
+	if value, ok := _c.mutation.UploadSource(); ok {
+		_spec.SetField(trajectorysegment.FieldUploadSource, field.TypeString, value)
+		_node.UploadSource = value
 	}
 	if value, ok := _c.mutation.ObjectPath(); ok {
 		_spec.SetField(trajectorysegment.FieldObjectPath, field.TypeString, value)
@@ -773,6 +803,18 @@ func (u *TrajectorySegmentUpsert) UpdateSessionID() *TrajectorySegmentUpsert {
 // ClearSessionID clears the value of the "session_id" field.
 func (u *TrajectorySegmentUpsert) ClearSessionID() *TrajectorySegmentUpsert {
 	u.SetNull(trajectorysegment.FieldSessionID)
+	return u
+}
+
+// SetUploadSource sets the "upload_source" field.
+func (u *TrajectorySegmentUpsert) SetUploadSource(v string) *TrajectorySegmentUpsert {
+	u.Set(trajectorysegment.FieldUploadSource, v)
+	return u
+}
+
+// UpdateUploadSource sets the "upload_source" field to the value that was provided on create.
+func (u *TrajectorySegmentUpsert) UpdateUploadSource() *TrajectorySegmentUpsert {
+	u.SetExcluded(trajectorysegment.FieldUploadSource)
 	return u
 }
 
@@ -1073,6 +1115,20 @@ func (u *TrajectorySegmentUpsertOne) UpdateSessionID() *TrajectorySegmentUpsertO
 func (u *TrajectorySegmentUpsertOne) ClearSessionID() *TrajectorySegmentUpsertOne {
 	return u.Update(func(s *TrajectorySegmentUpsert) {
 		s.ClearSessionID()
+	})
+}
+
+// SetUploadSource sets the "upload_source" field.
+func (u *TrajectorySegmentUpsertOne) SetUploadSource(v string) *TrajectorySegmentUpsertOne {
+	return u.Update(func(s *TrajectorySegmentUpsert) {
+		s.SetUploadSource(v)
+	})
+}
+
+// UpdateUploadSource sets the "upload_source" field to the value that was provided on create.
+func (u *TrajectorySegmentUpsertOne) UpdateUploadSource() *TrajectorySegmentUpsertOne {
+	return u.Update(func(s *TrajectorySegmentUpsert) {
+		s.UpdateUploadSource()
 	})
 }
 
@@ -1552,6 +1608,20 @@ func (u *TrajectorySegmentUpsertBulk) UpdateSessionID() *TrajectorySegmentUpsert
 func (u *TrajectorySegmentUpsertBulk) ClearSessionID() *TrajectorySegmentUpsertBulk {
 	return u.Update(func(s *TrajectorySegmentUpsert) {
 		s.ClearSessionID()
+	})
+}
+
+// SetUploadSource sets the "upload_source" field.
+func (u *TrajectorySegmentUpsertBulk) SetUploadSource(v string) *TrajectorySegmentUpsertBulk {
+	return u.Update(func(s *TrajectorySegmentUpsert) {
+		s.SetUploadSource(v)
+	})
+}
+
+// UpdateUploadSource sets the "upload_source" field to the value that was provided on create.
+func (u *TrajectorySegmentUpsertBulk) UpdateUploadSource() *TrajectorySegmentUpsertBulk {
+	return u.Update(func(s *TrajectorySegmentUpsert) {
+		s.UpdateUploadSource()
 	})
 }
 

@@ -4369,6 +4369,49 @@ var (
 			},
 		},
 	}
+	// TrajectoryHarvestsColumns holds the columns for the "trajectory_harvests" table.
+	TrajectoryHarvestsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "harvest_id", Type: field.TypeString},
+		{Name: "hub_id", Type: field.TypeString},
+		{Name: "project_id", Type: field.TypeString},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "broker_id", Type: field.TypeString},
+		{Name: "run_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "trigger", Type: field.TypeString},
+		{Name: "outcome", Type: field.TypeString},
+		{Name: "trajectory", Type: field.TypeString},
+		{Name: "usage", Type: field.TypeString},
+		{Name: "segments_committed", Type: field.TypeInt, Default: 0},
+		{Name: "bytes_committed", Type: field.TypeInt64, Default: 0},
+		{Name: "pending_bytes", Type: field.TypeInt64, Default: 0},
+		{Name: "oldest_pending_at", Type: field.TypeTime, Nullable: true},
+		{Name: "usage_events_drained", Type: field.TypeInt, Default: 0},
+		{Name: "usage_events_pending", Type: field.TypeInt, Default: 0},
+		{Name: "error_code", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "error", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "finished_at", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// TrajectoryHarvestsTable holds the schema information for the "trajectory_harvests" table.
+	TrajectoryHarvestsTable = &schema.Table{
+		Name:       "trajectory_harvests",
+		Columns:    TrajectoryHarvestsColumns,
+		PrimaryKey: []*schema.Column{TrajectoryHarvestsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "trajectoryharvest_agent_id_harvest_id",
+				Unique:  true,
+				Columns: []*schema.Column{TrajectoryHarvestsColumns[4], TrajectoryHarvestsColumns[1]},
+			},
+			{
+				Name:    "trajectoryharvest_agent_id_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{TrajectoryHarvestsColumns[4], TrajectoryHarvestsColumns[21]},
+			},
+		},
+	}
 	// TrajectorySegmentsColumns holds the columns for the "trajectory_segments" table.
 	TrajectorySegmentsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeString},
@@ -4389,6 +4432,7 @@ var (
 		{Name: "compressed_sha256", Type: field.TypeString},
 		{Name: "incomplete_tail", Type: field.TypeBool, Default: false},
 		{Name: "session_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "upload_source", Type: field.TypeString, Default: "agent"},
 		{Name: "object_path", Type: field.TypeString},
 		{Name: "manifest_path", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "status", Type: field.TypeString, Default: "pending"},
@@ -4416,7 +4460,7 @@ var (
 			{
 				Name:    "trajectorysegment_agent_id_created_at",
 				Unique:  false,
-				Columns: []*schema.Column{TrajectorySegmentsColumns[4], TrajectorySegmentsColumns[22]},
+				Columns: []*schema.Column{TrajectorySegmentsColumns[4], TrajectorySegmentsColumns[23]},
 			},
 		},
 	}
@@ -5537,6 +5581,7 @@ var (
 		TestInfraMarkerTable,
 		ThreadGroupsTable,
 		ThreadGroupMembersTable,
+		TrajectoryHarvestsTable,
 		TrajectorySegmentsTable,
 		TriggersTable,
 		TriggerEventsTable,
@@ -5843,6 +5888,9 @@ func init() {
 	}
 	ThreadGroupMembersTable.Annotation = &entsql.Annotation{
 		Table: "thread_group_members",
+	}
+	TrajectoryHarvestsTable.Annotation = &entsql.Annotation{
+		Table: "trajectory_harvests",
 	}
 	TrajectorySegmentsTable.Annotation = &entsql.Annotation{
 		Table: "trajectory_segments",
