@@ -563,6 +563,8 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"server.hub.stalled_threshold":                     testAdminPolicyDeny,
 	"server.hub.auto_suspend_idle":                     testAdminPolicyDeny,
 	"server.hub.idle_suspend_after":                    testAdminPolicyDeny,
+	"server.hub.background_liveness_cap_local":         testAdminPolicyDeny,
+	"server.hub.background_liveness_cap_reserved":      testAdminPolicyDeny,
 	"server.hub.soft_delete_retention":                 testAdminPolicyDeny,
 	"server.hub.soft_delete_retain_files":              testAdminPolicyDeny,
 	"server.hub.start_claim_lease_ttl":                 testAdminPolicyDeny,

@@ -363,6 +363,17 @@ type ServerConfig struct {
 	// activity before idle auto-suspend applies (default: 15 minutes,
 	// minimum: 5 minutes; lower values use the default).
 	IdleSuspendAfter time.Duration
+	// BackgroundLivenessCapLocal caps how long a low-CPU post-startup
+	// background process keeps a local-runtime agent (docker, podman,
+	// container) from auto-suspending after its last activity/CPU work.
+	// Nil means store.DefaultBackgroundLivenessCapLocal (2h); 0 disables.
+	BackgroundLivenessCapLocal *time.Duration
+	// BackgroundLivenessCapReserved caps how long a low-CPU post-startup
+	// background process keeps a reserving-runtime agent (kubernetes,
+	// cloudrun, substrate) from auto-suspending after its last activity/CPU
+	// work. Nil means store.DefaultBackgroundLivenessCapReserved (30m);
+	// 0 disables.
+	BackgroundLivenessCapReserved *time.Duration
 	// SoftDeleteRetention is how long soft-deleted agents are retained before purging.
 	// Zero means soft-delete is disabled (hard-delete immediately).
 	SoftDeleteRetention time.Duration
@@ -868,6 +879,28 @@ func (s *Server) idleSuspendSettings() (bool, time.Duration) {
 		after = DefaultIdleSuspendAfter
 	}
 	return enabled, after
+}
+
+// backgroundLivenessCaps returns the current runtime-tiered caps for Tier 3
+// ("background") live work under s.mu.RLock(). Nil fields fall back to
+// compiled defaults (2h local, 30m reserved); 0 disables that tier.
+func (s *Server) backgroundLivenessCaps() store.BackgroundLivenessCaps {
+	s.mu.RLock()
+	localPtr := s.config.BackgroundLivenessCapLocal
+	reservedPtr := s.config.BackgroundLivenessCapReserved
+	s.mu.RUnlock()
+
+	caps := store.BackgroundLivenessCaps{
+		Local:    store.DefaultBackgroundLivenessCapLocal,
+		Reserved: store.DefaultBackgroundLivenessCapReserved,
+	}
+	if localPtr != nil {
+		caps.Local = max(*localPtr, 0)
+	}
+	if reservedPtr != nil {
+		caps.Reserved = max(*reservedPtr, 0)
+	}
+	return caps
 }
 
 // stalledThreshold returns the current StalledThreshold duration under s.mu.RLock().

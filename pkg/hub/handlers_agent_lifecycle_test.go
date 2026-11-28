@@ -323,7 +323,7 @@ func TestStatusUpdateIsEmpty_EveryFieldCounts(t *testing.T) {
 	statusUpdatePreconditionFields := map[string]bool{"IfPhase": true, "IfRunID": true, "IfIdleSuspendCommit": true, "IfIdleSuspendRecover": true,
 		"IfNoStartClaim": true, "IfNoActiveIdleClaim": true, "IfAutoWakeReason": true, "StartWrite": true, "GuardReincarnation": true,
 		"ReportSource": true, "ReportRunID": true, "ReportAgentToken": true, "Restore": true, "Result": true,
-		"SuspendReason": true, "RetainedActivity": true}
+		"SuspendReason": true, "RetainedActivity": true, "BackgroundLivenessCaps": true}
 
 	typ := reflect.TypeOf(store.AgentStatusUpdate{})
 	for i := 0; i < typ.NumField(); i++ {

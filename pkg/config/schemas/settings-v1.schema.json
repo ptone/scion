@@ -1750,6 +1750,18 @@
           "x-env-var": "SCION_SERVER_HUB_IDLESUSPENDAFTER",
           "x-since": "1"
         },
+        "background_liveness_cap_local": {
+          "type": "string",
+          "description": "Maximum duration a low-CPU post-startup background process keeps a local-runtime agent (docker, podman, container) from auto-suspending after its last activity or CPU work (default '2h', '0s' disables).",
+          "x-env-var": "SCION_SERVER_HUB_BACKGROUNDLIVENESSCAPLOCAL",
+          "x-since": "1"
+        },
+        "background_liveness_cap_reserved": {
+          "type": "string",
+          "description": "Maximum duration a low-CPU post-startup background process keeps a reserving-runtime agent (kubernetes, cloudrun, substrate) from auto-suspending after its last activity or CPU work (default '30m', '0s' disables).",
+          "x-env-var": "SCION_SERVER_HUB_BACKGROUNDLIVENESSCAPRESERVED",
+          "x-since": "1"
+        },
         "start_claim_lease_ttl": {
           "type": "string",
           "description": "Lease of the claim every agent start holds; the holder renews it every third of this. Default '90s', allowed 30s to 5m.",

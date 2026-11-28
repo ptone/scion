@@ -496,8 +496,16 @@ Every 5 minutes, the Hub suspends each `running` agent that meets all of these:
   default applies). The grace is measured from when the activity last changed,
   not from the last hook event.
 - Its heartbeat is fresh (an offline agent is left alone).
-- Its container reported no live work (a tool call in flight or CPU work) in the
-  last 90 seconds.
+- Its container reported no live work in the last 90 seconds. Live work
+  includes a tool call in flight, CPU work (at least ~1% of one core), or a
+  low-CPU post-startup background process (such as a job waiting on a build lock
+  or an exposed dev server; startup MCP/LSP servers are excluded). Low-CPU
+  background protection never suppresses the `stalled` marker and is bounded by
+  runtime tier from the agent's last activity or CPU work: default **2 hours**
+  on local runtimes (`server.hub.background_liveness_cap_local`) and **30
+  minutes** on reserving runtimes such as Kubernetes, Cloud Run, and Substrate
+  (`server.hub.background_liveness_cap_reserved`; set either to `"0s"` to
+  disable). Both stalled and idle auto-suspend honor this guard.
 - Its harness supports session resume, judged by the harness type behind its
   harness config, so a custom-named config of a resumable harness qualifies.
 - No other lifecycle operation is in progress for it.

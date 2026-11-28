@@ -229,6 +229,10 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// A reincarnation that starts after the read above must still win: the
 	// store re-checks Guard 0b on the row it locks (ptone/scion#2887).
 	status.GuardReincarnation = true
+	if status.LiveWork != nil && status.LiveWork.Kind == store.LiveWorkKindBackground {
+		caps := s.backgroundLivenessCaps()
+		status.BackgroundLivenessCaps = &caps
+	}
 	var result store.AgentStatusResult
 	status.Result = &result
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {

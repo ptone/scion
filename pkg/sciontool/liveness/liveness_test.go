@@ -198,11 +198,16 @@ func TestSample_NewProcessCountsFromStart(t *testing.T) {
 	require.Nil(t, f.sample(idleTree(0)...))
 
 	small := fakeProc{pid: 80, ppid: 42, comm: "ls", uid: agentUID, ticks: 2, start: 60}
-	assert.Nil(t, f.sample(append(idleTree(100), small)...), "a new process with little CPU")
+	lwSmall := f.sample(append(idleTree(100), small)...)
+	require.NotNil(t, lwSmall, "a post-startup low-CPU process is Tier 3 background work")
+	assert.Equal(t, KindBackground, lwSmall.Kind)
+	assert.False(t, lwSmall.SuppressStall)
 
 	born := fakeProc{pid: 81, ppid: 42, comm: "cc1", uid: agentUID, ticks: 80, start: 61}
 	lw := f.sample(append(idleTree(200), born)...)
 	require.NotNil(t, lw, "a process born between samples counts from its start")
+	assert.Equal(t, KindProcess, lw.Kind)
+	assert.True(t, lw.SuppressStall)
 	assert.Equal(t, "cc1 (pid 81, 0.8s cpu)", lw.Detail)
 }
 
@@ -237,9 +242,15 @@ func TestSample_NestedWrapperExcludesHarnessRoot(t *testing.T) {
 	assert.Nil(t, f.sample(tree(100)...), "the harness TUI spinning is not work")
 
 	tool := fakeProc{pid: 44, ppid: 43, comm: "npm", uid: agentUID, ticks: 0, start: 18}
-	require.Nil(t, f.sample(append(tree(200), tool)...))
+	lwBg := f.sample(append(tree(200), tool)...)
+	require.NotNil(t, lwBg)
+	assert.Equal(t, KindBackground, lwBg.Kind)
+	assert.False(t, lwBg.SuppressStall)
 	tool.ticks += 300
-	assert.NotNil(t, f.sample(append(tree(300), tool)...), "a child of the harness root counts")
+	lw := f.sample(append(tree(300), tool)...)
+	require.NotNil(t, lw, "a child of the harness root counts")
+	assert.Equal(t, KindProcess, lw.Kind)
+	assert.True(t, lw.SuppressStall)
 }
 
 // A command line naming the exit-code file marks a wrapper only in the
@@ -390,4 +401,71 @@ func TestSample_ParentCycleTerminates(t *testing.T) {
 	assert.Nil(t, f.sample(tree...))
 	tree[3].ticks += 500
 	assert.Nil(t, f.sample(tree...), "the harness root stays excluded")
+}
+
+func TestSample_BackgroundLowCPUProcess(t *testing.T) {
+	t.Run("agent-started low-CPU process and reparented daemon report KindBackground", func(t *testing.T) {
+		f := newFakeProcTree(t, idleManaged...)
+		require.Nil(t, f.sample(idleTree(0)...), "first sample records startup snapshot")
+
+		// Startup MCP (pid 43) and LSP (pid 44) stay silent.
+		assert.Nil(t, f.sample(idleTree(100)...))
+
+		// Agent spawns a sleeping lock-wait job (0 CPU).
+		lockWait := fakeProc{pid: 90, ppid: 42, comm: "flock", uid: agentUID, ticks: 0, start: 120}
+		lw := f.sample(append(idleTree(200), lockWait)...)
+		require.NotNil(t, lw)
+		assert.Equal(t, KindBackground, lw.Kind)
+		assert.False(t, lw.SuppressStall, "KindBackground must not suppress STALLED")
+		assert.Equal(t, "flock (pid 90, background)", lw.Detail)
+
+		// If CPU rises above MinCPUTicks, Tier 2 KindProcess wins; dropping back
+		// to 0 CPU returns to KindBackground.
+		lockWait.ticks += MinCPUTicks + 10
+		lw = f.sample(append(idleTree(300), lockWait)...)
+		require.NotNil(t, lw)
+		assert.Equal(t, KindProcess, lw.Kind)
+		assert.True(t, lw.SuppressStall)
+
+		lw = f.sample(append(idleTree(400), lockWait)...)
+		require.NotNil(t, lw)
+		assert.Equal(t, KindBackground, lw.Kind)
+		assert.False(t, lw.SuppressStall)
+
+		// Daemonized server reparented to PID 1 also reports KindBackground.
+		server := fakeProc{pid: 91, ppid: 1, comm: "python3", uid: agentUID, ticks: 0, start: 150}
+		lw = f.sample(append(idleTree(500), server)...)
+		require.NotNil(t, lw)
+		assert.Equal(t, KindBackground, lw.Kind)
+		assert.False(t, lw.SuppressStall)
+		assert.Equal(t, "python3 (pid 91, background)", lw.Detail)
+
+		// Once background jobs exit, only startup MCP/LSP remain -> nil.
+		assert.Nil(t, f.sample(idleTree(600)...))
+	})
+
+	t.Run("startup MCP/LSP spawned during initializing are excluded", func(t *testing.T) {
+		f := newFakeProcTree(t, idleManaged...)
+		f.act = state.ActivityInitializing
+		require.Nil(t, f.sample(idleTree(0)...))
+
+		// A late-starting MCP server appears while still initializing.
+		lateMCP := fakeProc{pid: 46, ppid: 42, comm: "mcp-server", uid: agentUID, ticks: 1, start: 25}
+		assert.Nil(t, f.sample(append(idleTree(100), lateMCP)...))
+
+		// Harness transitions to working: snapshot seals on this sample.
+		f.act = state.ActivityWorking
+		assert.Nil(t, f.sample(append(idleTree(200), lateMCP)...))
+
+		// Subsequent idle samples still ignore the startup MCP server.
+		f.act = state.ActivityIdle
+		assert.Nil(t, f.sample(append(idleTree(300), lateMCP)...))
+
+		// Reusing that PID with a newer starttime is detected as background work.
+		reused := fakeProc{pid: 46, ppid: 42, comm: "sleep", uid: agentUID, ticks: 0, start: 500}
+		lw := f.sample(append(idleTree(400), reused)...)
+		require.NotNil(t, lw)
+		assert.Equal(t, KindBackground, lw.Kind)
+		assert.Equal(t, "sleep (pid 46, background)", lw.Detail)
+	})
 }

@@ -79,6 +79,18 @@ func TestPutServerConfigDB_DurationSettingsValidated(t *testing.T) {
 			clears: []string{`""`, `null`},
 		},
 		{
+			name: "background_liveness_cap_local", section: "lifecycle", key: "background_liveness_cap_local",
+			field:  "server.hub.background_liveness_cap_local",
+			body:   func(v string) string { return `{"server": {"hub": {"background_liveness_cap_local": ` + v + `}}}` },
+			clears: []string{`""`, `null`},
+		},
+		{
+			name: "background_liveness_cap_reserved", section: "lifecycle", key: "background_liveness_cap_reserved",
+			field:  "server.hub.background_liveness_cap_reserved",
+			body:   func(v string) string { return `{"server": {"hub": {"background_liveness_cap_reserved": ` + v + `}}}` },
+			clears: []string{`""`, `null`},
+		},
+		{
 			name: "soft_delete_retention", section: "lifecycle", key: "soft_delete_retention",
 			field:  "server.hub.soft_delete_retention",
 			body:   func(v string) string { return `{"server": {"hub": {"soft_delete_retention": ` + v + `}}}` },

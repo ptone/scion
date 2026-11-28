@@ -197,6 +197,18 @@ type HubServerConfig struct {
 	// (minimum 5 minutes).
 	IdleSuspendAfter time.Duration `json:"idleSuspendAfter" yaml:"idleSuspendAfter" koanf:"idleSuspendAfter"`
 
+	// BackgroundLivenessCapLocal caps how long a low-CPU post-startup
+	// background process keeps a local-runtime agent (docker, podman,
+	// container) from auto-suspending after its last activity/CPU work.
+	// Nil means default (2h); 0 disables.
+	BackgroundLivenessCapLocal *time.Duration `json:"backgroundLivenessCapLocal,omitempty" yaml:"backgroundLivenessCapLocal,omitempty" koanf:"backgroundLivenessCapLocal"`
+
+	// BackgroundLivenessCapReserved caps how long a low-CPU post-startup
+	// background process keeps a reserving/billed-runtime agent (kubernetes,
+	// cloudrun, substrate) from auto-suspending after its last activity/CPU
+	// work. Nil means default (30m); 0 disables.
+	BackgroundLivenessCapReserved *time.Duration `json:"backgroundLivenessCapReserved,omitempty" yaml:"backgroundLivenessCapReserved,omitempty" koanf:"backgroundLivenessCapReserved"`
+
 	// MissingAgentGrace is how long a running agent must be continuously
 	// absent from its runtime broker's complete heartbeat inventory before
 	// the Hub marks it phase=error with exit reason container_missing.

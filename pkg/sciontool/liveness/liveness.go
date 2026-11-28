@@ -55,6 +55,12 @@ const (
 	// exec tombstone. Guards auto-suspend only (SuppressStall: false),
 	// matching KindAttached semantics.
 	KindExec Kind = "exec"
+	// KindBackground (Tier 3) is a non-baseline process started after the
+	// harness startup snapshot, regardless of CPU usage (for example a job
+	// waiting on a build lock or an exposed dev server; ptone/scion#9751).
+	// It never suppresses STALLED (SuppressStall: false); the Hub caps how
+	// long it guards auto-suspend per runtime tier.
+	KindBackground Kind = "background"
 )
 
 // ToolCallStallCap is how long after a tool call began its live process
@@ -145,6 +151,12 @@ type Sampler struct {
 	// prev holds each process's CPU time at the previous sample; nil until
 	// the first sample, which only records the baseline.
 	prev map[int]procSample
+	// startup holds the non-excluded processes (pid -> starttime) present
+	// during harness startup (while initializing and on the first post-init
+	// sample), so startup MCP/LSP servers are excluded from Tier 3
+	// KindBackground. Frozen once startupSealed is true.
+	startup       map[int]uint64
+	startupSealed bool
 	// tool tracks the progress of the tool call Tier 1 last saw.
 	tool toolProgress
 	// boot caches the boot time from /proc/stat once it has been read; it
@@ -231,7 +243,9 @@ func (s *Sampler) sample(now time.Time, act state.Activity, actSince time.Time) 
 		}
 	}
 	excluded, harness := s.baseline(procs)
-	tool := s.toolCall(procs, excluded, harness, now, act, actSince)
+	tool, toolPIDs := s.toolCall(procs, excluded, harness, now, act, actSince)
+	startupWasSealed := s.startupSealed
+	s.recordStartup(procs, excluded, act, toolPIDs)
 	if tool != nil && tool.SuppressStall {
 		s.recordCPU(procs)
 		return tool
@@ -247,7 +261,64 @@ func (s *Sampler) sample(now time.Time, act state.Activity, actSince time.Time) 
 			return work
 		}
 	}
-	return tool
+	if tool != nil {
+		return tool
+	}
+	if startupWasSealed {
+		return s.backgroundWork(procs, excluded)
+	}
+	return nil
+}
+
+// recordStartup snapshots non-excluded processes present while the harness is
+// initializing and on the first post-init sample, then seals the snapshot so
+// startup MCP/LSP servers do not trigger Tier 3 KindBackground. Processes
+// belonging to an active Tier 1 tool call (skip) are excluded from the
+// snapshot so a tool running during the first sample is not misclassified as
+// a startup helper.
+func (s *Sampler) recordStartup(procs map[int]*proc, excluded map[int]bool, act state.Activity, skip map[int]bool) {
+	if s.startupSealed {
+		return
+	}
+	if s.startup == nil {
+		s.startup = make(map[int]uint64)
+	}
+	for pid, p := range procs {
+		if excluded[pid] || skip[pid] {
+			continue
+		}
+		s.startup[pid] = p.start
+	}
+	if act != state.ActivityInitializing {
+		s.startupSealed = true
+	}
+}
+
+// backgroundWork is Tier 3 (ptone/scion#9751): any non-excluded process that
+// was not present in the startup snapshot, regardless of CPU usage. Returns
+// SuppressStall: false so STALLED visibility is preserved while the Hub's
+// runtime-tiered cap guards auto-suspend.
+func (s *Sampler) backgroundWork(procs map[int]*proc, excluded map[int]bool) *LiveWork {
+	var oldest *proc
+	for pid, p := range procs {
+		if excluded[pid] {
+			continue
+		}
+		if start, ok := s.startup[pid]; ok && start == p.start {
+			continue
+		}
+		if oldest == nil || p.start < oldest.start || (p.start == oldest.start && pid < oldest.pid) {
+			oldest = p
+		}
+	}
+	if oldest == nil {
+		return nil
+	}
+	return &LiveWork{
+		Kind:          KindBackground,
+		SuppressStall: false,
+		Detail:        fmt.Sprintf("%s (pid %d, background)", oldest.comm, oldest.pid),
+	}
 }
 
 // recordCPU records every process's CPU time for the next sample's Tier 2
@@ -306,10 +377,10 @@ func (s *Sampler) cpuWork(procs map[int]*proc, excluded map[int]bool) *LiveWork 
 // the tool call's. It reports them, and whether they still suppress STALLED
 // (ToolCallStallCap, ToolCallNoProgress), or returns nil when there are
 // none. It also tracks the tree's progress fingerprint across samples.
-func (s *Sampler) toolCall(procs map[int]*proc, excluded, harness map[int]bool, now time.Time, act state.Activity, actSince time.Time) *LiveWork {
+func (s *Sampler) toolCall(procs map[int]*proc, excluded, harness map[int]bool, now time.Time, act state.Activity, actSince time.Time) (*LiveWork, map[int]bool) {
 	if act != state.ActivityExecuting || actSince.IsZero() || len(harness) == 0 {
 		s.tool = toolProgress{}
-		return nil
+		return nil, nil
 	}
 	if s.boot.IsZero() {
 		s.boot = readBootTime(s.procRoot)
@@ -317,7 +388,7 @@ func (s *Sampler) toolCall(procs map[int]*proc, excluded, harness map[int]bool, 
 	boot := s.boot
 	if boot.IsZero() {
 		s.tool = toolProgress{}
-		return nil
+		return nil, nil
 	}
 	minStart := uint64(0)
 	if d := actSince.Add(-toolStartSlack).Sub(boot); d > 0 {
@@ -325,15 +396,20 @@ func (s *Sampler) toolCall(procs map[int]*proc, excluded, harness map[int]bool, 
 	}
 
 	var tree []*proc
+	var treePIDs map[int]bool
 	for pid, p := range procs {
 		if excluded[pid] || p.start < minStart || !descendsFrom(procs, pid, harness) {
 			continue
 		}
+		if treePIDs == nil {
+			treePIDs = make(map[int]bool)
+		}
+		treePIDs[pid] = true
 		tree = append(tree, p)
 	}
 	if len(tree) == 0 {
 		s.tool = toolProgress{}
-		return nil
+		return nil, nil
 	}
 	// The oldest process is the one the harness spawned for the call.
 	slices.SortFunc(tree, func(a, b *proc) int {
@@ -361,7 +437,7 @@ func (s *Sampler) toolCall(procs map[int]*proc, excluded, harness map[int]bool, 
 	}
 	work.Detail = fmt.Sprintf("%s (pid %d, tool call running %s%s)", tree[0].comm, tree[0].pid,
 		running.Truncate(time.Second), note)
-	return work
+	return work, treePIDs
 }
 
 // toolPrint computes the progress fingerprint of a tool call's processes.

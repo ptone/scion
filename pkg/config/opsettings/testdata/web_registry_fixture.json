@@ -130,6 +130,8 @@
       "server.hub.stalled_threshold",
       "server.hub.auto_suspend_idle",
       "server.hub.idle_suspend_after",
+      "server.hub.background_liveness_cap_local",
+      "server.hub.background_liveness_cap_reserved",
       "server.hub.soft_delete_retention",
       "server.hub.soft_delete_retain_files",
       "server.hub.start_claim_lease_ttl",

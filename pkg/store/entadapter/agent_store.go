@@ -2493,7 +2493,8 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// timestamp is refreshed. This only restores stalled_from_activity; it
 	// never writes any other activity (no idle or blocked; ptone/scion#7826).
 	unstalled := false
-	if su.LiveWork != nil && su.LiveWork.SuppressStall && statusOwned && !activityProvided && !halting &&
+	if su.LiveWork != nil && su.LiveWork.SuppressStall && su.LiveWork.Kind != store.LiveWorkKindBackground &&
+		statusOwned && !activityProvided && !halting &&
 		current.Activity == string(state.ActivityStalled) && current.Phase == string(state.PhaseRunning) &&
 		(su.Phase == "" || su.Phase == string(state.PhaseRunning)) {
 		upd.SetActivity(current.StalledFromActivity)
@@ -2669,13 +2670,24 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetStartedAt(t)
 		}
 	}
-	// Live work from the container's heartbeat (ptone/scion#7855): any
-	// live work guards auto-suspend; work that suppresses STALLED also
-	// keeps the stall sweep off the agent (MarkStalledAgents).
+	// Live work from the container's heartbeat (ptone/scion#7855,
+	// ptone/scion#9751): Tier 1/2/attached/exec live work guards auto-suspend;
+	// Tier 3 ("background") guards auto-suspend only while within the runtime's
+	// BackgroundLivenessCaps and never suppresses STALLED. Work with
+	// SuppressStall also keeps the stall sweep off the agent (MarkStalledAgents).
 	if su.LiveWork != nil {
-		upd.SetLastLiveProcessAt(now)
-		if su.LiveWork.SuppressStall {
-			upd.SetLastLiveWorkAt(now)
+		if su.LiveWork.Kind == store.LiveWorkKindBackground {
+			if store.BackgroundLivenessAllowed(
+				now, current.Runtime, su.BackgroundLivenessCaps,
+				current.LastActivityEvent, current.LastLiveWorkAt, current.LastDeliveryAt, current.StartedAt,
+			) {
+				upd.SetLastLiveProcessAt(now)
+			}
+		} else {
+			upd.SetLastLiveProcessAt(now)
+			if su.LiveWork.SuppressStall {
+				upd.SetLastLiveWorkAt(now)
+			}
 		}
 	}
 
