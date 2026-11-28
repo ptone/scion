@@ -28,37 +28,37 @@ import (
 type Trigger string
 
 const (
-	TriggerPostExit  Trigger = "post_exit"
-	TriggerPreDelete Trigger = "pre_delete"
-	TriggerPreReset  Trigger = "pre_reset"
+	TriggerPostExit  Trigger = telemetrycontract.TrajectoryHarvestTriggerPostExit
+	TriggerPreDelete Trigger = telemetrycontract.TrajectoryHarvestTriggerPreDelete
+	TriggerPreReset  Trigger = telemetrycontract.TrajectoryHarvestTriggerPreReset
 )
 
 // Outcome classifies the overall result of a harvest attempt.
 const (
-	OutcomeComplete       = "complete"
-	OutcomeNothingPending = "nothing_pending"
-	OutcomePartial        = "partial"
-	OutcomeFailed         = "failed"
-	OutcomeUnavailable    = "unavailable"
+	OutcomeComplete       = telemetrycontract.TrajectoryHarvestOutcomeComplete
+	OutcomeNothingPending = telemetrycontract.TrajectoryHarvestOutcomeNothingPending
+	OutcomePartial        = telemetrycontract.TrajectoryHarvestOutcomePartial
+	OutcomeFailed         = telemetrycontract.TrajectoryHarvestOutcomeFailed
+	OutcomeUnavailable    = telemetrycontract.TrajectoryHarvestOutcomeUnavailable
 )
 
 // TrajectoryOutcome classifies the trajectory-shipping half of a harvest.
 const (
-	TrajectoryShipped        = "shipped"
-	TrajectoryNothingPending = "nothing_pending"
-	TrajectoryNoState        = "no_state"
-	TrajectoryCaptureRefused = "capture_refused"
-	TrajectoryError          = "error"
-	TrajectorySkipped        = "skipped"
+	TrajectoryShipped        = telemetrycontract.TrajectoryHarvestTrajectoryShipped
+	TrajectoryNothingPending = telemetrycontract.TrajectoryHarvestTrajectoryNothingPending
+	TrajectoryNoState        = telemetrycontract.TrajectoryHarvestTrajectoryNoState
+	TrajectoryCaptureRefused = telemetrycontract.TrajectoryHarvestTrajectoryCaptureRefused
+	TrajectoryError          = telemetrycontract.TrajectoryHarvestTrajectoryError
+	TrajectorySkipped        = telemetrycontract.TrajectoryHarvestTrajectorySkipped
 )
 
 // UsageOutcome classifies the usage-outbox-drain half of a harvest.
 const (
-	UsageDrained        = "drained"
-	UsageNothingPending = "nothing_pending"
-	UsageNoOutbox       = "no_outbox"
-	UsageError          = "error"
-	UsageSkipped        = "skipped"
+	UsageDrained        = telemetrycontract.TrajectoryHarvestUsageDrained
+	UsageNothingPending = telemetrycontract.TrajectoryHarvestUsageNothingPending
+	UsageNoOutbox       = telemetrycontract.TrajectoryHarvestUsageNoOutbox
+	UsageError          = telemetrycontract.TrajectoryHarvestUsageError
+	UsageSkipped        = telemetrycontract.TrajectoryHarvestUsageSkipped
 )
 
 // Machine-readable error codes reported in Report.ErrorCode.
@@ -87,32 +87,10 @@ type Target struct {
 // Report is the wire payload posted to
 // POST /api/v1/brokers/{bid}/agents/{id}/trajectory/harvests and returned to
 // broker lifecycle callers (such as the P6.2 pre-delete custody-hold hook).
-type Report struct {
-	HarvestID          string  `json:"harvest_id"`
-	RunID              string  `json:"run_id"`
-	Trigger            string  `json:"trigger"`
-	Outcome            string  `json:"outcome"`
-	Trajectory         string  `json:"trajectory"`
-	Usage              string  `json:"usage"`
-	SegmentsCommitted  int     `json:"segments_committed"`
-	BytesCommitted     int64   `json:"bytes_committed"`
-	PendingBytes       int64   `json:"pending_bytes"`
-	OldestPendingAt    *string `json:"oldest_pending_at"`
-	UsageEventsDrained int     `json:"usage_events_drained"`
-	UsageEventsPending int     `json:"usage_events_pending"`
-	ErrorCode          string  `json:"error_code"`
-	Error              string  `json:"error"`
-	StartedAt          string  `json:"started_at"`
-	FinishedAt         string  `json:"finished_at"`
-}
+type Report = telemetrycontract.TrajectoryHarvestReportRequest
 
 // PrepareSegmentRequest is the broker trajectory segments:prepare payload.
-// It mirrors telemetrycontract.TrajectorySegmentPrepareRequest with the
-// broker-required run_id field.
-type PrepareSegmentRequest struct {
-	telemetrycontract.TrajectorySegmentPrepareRequest
-	RunID string `json:"run_id"`
-}
+type PrepareSegmentRequest = telemetrycontract.TrajectorySegmentPrepareRequest
 
 // HTTPError represents a non-2xx HTTP response from the Hub or upload target.
 type HTTPError struct {

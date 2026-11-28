@@ -41,22 +41,20 @@ var (
 
 func (u *brokerUploader) buildPrepareRequest(seg shipper.Segment) PrepareSegmentRequest {
 	return PrepareSegmentRequest{
-		TrajectorySegmentPrepareRequest: telemetrycontract.TrajectorySegmentPrepareRequest{
-			Harness:            seg.Harness,
-			NativeRelativePath: seg.NativeRelativePath,
-			ArtifactKind:       string(seg.ArtifactKind),
-			Generation:         seg.Generation,
-			ByteStart:          seg.ByteStart,
-			ByteEnd:            seg.ByteEnd,
-			RawSHA256:          seg.RawSHA256,
-			CompressedSize:     seg.CompressedSize,
-			CompressedSHA256:   seg.CompressedSHA256,
-			ContentEncoding:    seg.ContentEncoding,
-			IncompleteTail:     seg.IncompleteTail,
-			SessionID:          seg.SessionID,
-			OriginHubID:        seg.OriginHubID,
-		},
-		RunID: u.runID,
+		RunID:              u.runID,
+		Harness:            seg.Harness,
+		NativeRelativePath: seg.NativeRelativePath,
+		ArtifactKind:       string(seg.ArtifactKind),
+		Generation:         seg.Generation,
+		ByteStart:          seg.ByteStart,
+		ByteEnd:            seg.ByteEnd,
+		RawSHA256:          seg.RawSHA256,
+		CompressedSize:     seg.CompressedSize,
+		CompressedSHA256:   seg.CompressedSHA256,
+		ContentEncoding:    seg.ContentEncoding,
+		IncompleteTail:     seg.IncompleteTail,
+		SessionID:          seg.SessionID,
+		OriginHubID:        seg.OriginHubID,
 	}
 }
 
