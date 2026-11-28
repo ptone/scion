@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/harnesses"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -158,7 +159,7 @@ usage:
 			},
 		},
 		{
-			name: "unknown keys and opaque trajectory section ignored",
+			name: "unknown keys and full normalizer block",
 			yaml: `schema_version: 1
 future_root_key: "ignored"
 usage:
@@ -169,13 +170,20 @@ usage:
     counts_failed_calls: true
     future_live_flag: true
   trajectory:
+    future_trajectory_key: "ignored"
     artifacts:
       - key: claude-projects
         glob: ".claude/projects/**/*.jsonl"
         kind: jsonl_append
     normalizer:
+      command: ["/opt/scion/venv/bin/python3", "-I", "{bundle_dir}/normalize.py"]
       interface_version: 1
       parser_version: "claude-1"
+      tested_harness_versions: ["2.1.*"]
+      timeout: 45s
+      limits: {cpu_seconds: 20, max_address_space_mib: 512, max_rss_mib: 128}
+      outputs: [usage_record, atif_step, session_meta]
+      future_normalizer_key: true
 `,
 			want: &api.HarnessUsageCapabilities{
 				SchemaVersion: 1,
@@ -183,6 +191,87 @@ usage:
 					Source:            api.UsageLiveSourceNative,
 					TokenTypes:        []string{"input", "output", "cache_read", "cache_write"},
 					CountsFailedCalls: true,
+				},
+				Trajectory: &api.HarnessUsageTrajectoryCapabilities{
+					Normalizer: &api.HarnessUsageNormalizerConfig{
+						Command:               []string{"/opt/scion/venv/bin/python3", "-I", "{bundle_dir}/normalize.py"},
+						InterfaceVersion:      1,
+						ParserVersion:         "claude-1",
+						TestedHarnessVersions: []string{"2.1.*"},
+						Timeout:               "45s",
+						Limits: api.HarnessUsageNormalizerLimits{
+							CPUSeconds:         20,
+							MaxAddressSpaceMiB: 512,
+							MaxRSSMiB:          128,
+						},
+						Outputs: []string{"usage_record", "atif_step", "session_meta"},
+					},
+				},
+			},
+		},
+		{
+			name: "normalizer without command (optional) with defaults",
+			yaml: `schema_version: 1
+usage:
+  live:
+    source: native
+    token_types: [input, output]
+  trajectory:
+    normalizer:
+      interface_version: 1
+      parser_version: "claude-1"
+`,
+			want: &api.HarnessUsageCapabilities{
+				SchemaVersion: 1,
+				Live: api.HarnessUsageLiveCapabilities{
+					Source:     api.UsageLiveSourceNative,
+					TokenTypes: []string{"input", "output"},
+				},
+				Trajectory: &api.HarnessUsageTrajectoryCapabilities{
+					Normalizer: &api.HarnessUsageNormalizerConfig{
+						InterfaceVersion: 1,
+						ParserVersion:    "claude-1",
+						Timeout:          DefaultUsageNormalizerTimeoutString,
+						Limits: api.HarnessUsageNormalizerLimits{
+							CPUSeconds:         DefaultUsageNormalizerCPUSeconds,
+							MaxAddressSpaceMiB: DefaultUsageNormalizerMaxAddressSpaceMiB,
+							MaxRSSMiB:          DefaultUsageNormalizerMaxRSSMiB,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "normalizer defaults applied when timeout and limits omitted",
+			yaml: `schema_version: 1
+usage:
+  live:
+    source: native
+    token_types: [input, output]
+  trajectory:
+    normalizer:
+      command: ["{bundle_dir}/normalize.py"]
+      interface_version: 1
+      parser_version: "claude-code-2"
+`,
+			want: &api.HarnessUsageCapabilities{
+				SchemaVersion: 1,
+				Live: api.HarnessUsageLiveCapabilities{
+					Source:     api.UsageLiveSourceNative,
+					TokenTypes: []string{"input", "output"},
+				},
+				Trajectory: &api.HarnessUsageTrajectoryCapabilities{
+					Normalizer: &api.HarnessUsageNormalizerConfig{
+						Command:          []string{"{bundle_dir}/normalize.py"},
+						InterfaceVersion: 1,
+						ParserVersion:    "claude-code-2",
+						Timeout:          DefaultUsageNormalizerTimeoutString,
+						Limits: api.HarnessUsageNormalizerLimits{
+							CPUSeconds:         DefaultUsageNormalizerCPUSeconds,
+							MaxAddressSpaceMiB: DefaultUsageNormalizerMaxAddressSpaceMiB,
+							MaxRSSMiB:          DefaultUsageNormalizerMaxRSSMiB,
+						},
+					},
 				},
 			},
 		},
@@ -219,6 +308,22 @@ func TestParseUsageSidecar_Invalid(t *testing.T) {
 		{"overlapping token_types and not_applicable", "schema_version: 1\nusage:\n  live:\n    source: native\n    token_types: [input, cache_write]\n    not_applicable_token_types: [cache_write]\n"},
 		{"source none with token_types", "schema_version: 1\nusage:\n  live:\n    source: none\n    token_types: [input]\n"},
 		{"source none with counts_failed_calls", "schema_version: 1\nusage:\n  live:\n    source: none\n    counts_failed_calls: true\n"},
+		{"normalizer empty command arg", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\", \"\"]\n      interface_version: 1\n      parser_version: claude-1\n"},
+		{"normalizer relative command", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"python3\", \"{bundle_dir}/normalize.py\"]\n      interface_version: 1\n      parser_version: claude-1\n"},
+		{"normalizer dot-relative command", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"./normalize.py\"]\n      interface_version: 1\n      parser_version: claude-1\n"},
+		{"normalizer wrong interface_version", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\"]\n      interface_version: 2\n      parser_version: claude-1\n"},
+		{"normalizer missing interface_version", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\"]\n      parser_version: claude-1\n"},
+		{"normalizer empty parser_version", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\"]\n      interface_version: 1\n      parser_version: \"\"\n"},
+		{"normalizer invalid parser_version no suffix", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\"]\n      interface_version: 1\n      parser_version: \"claude\"\n"},
+		{"normalizer invalid parser_version uppercase", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\"]\n      interface_version: 1\n      parser_version: \"Claude-1\"\n"},
+		{"normalizer invalid timeout", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\"]\n      interface_version: 1\n      parser_version: claude-1\n      timeout: not-a-duration\n"},
+		{"normalizer non-positive timeout", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\"]\n      interface_version: 1\n      parser_version: claude-1\n      timeout: 0s\n"},
+		{"normalizer negative cpu_seconds", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\"]\n      interface_version: 1\n      parser_version: claude-1\n      limits: {cpu_seconds: -1}\n"},
+		{"normalizer negative max_address_space_mib", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\"]\n      interface_version: 1\n      parser_version: claude-1\n      limits: {max_address_space_mib: -1}\n"},
+		{"normalizer negative max_rss_mib", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\"]\n      interface_version: 1\n      parser_version: claude-1\n      limits: {max_rss_mib: -1}\n"},
+		{"normalizer bad tested_harness_versions glob", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\"]\n      interface_version: 1\n      parser_version: claude-1\n      tested_harness_versions: [\"[\"]\n"},
+		{"normalizer unknown output", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\"]\n      interface_version: 1\n      parser_version: claude-1\n      outputs: [usage_record, bogus]\n"},
+		{"normalizer duplicate output", "schema_version: 1\nusage:\n  live:\n    source: none\n  trajectory:\n    normalizer:\n      command: [\"/usr/bin/python3\"]\n      interface_version: 1\n      parser_version: claude-1\n      outputs: [usage_record, usage_record]\n"},
 	}
 
 	for _, tt := range tests {
@@ -372,5 +477,71 @@ func TestUpgradeHarnessConfig_UsageSidecar(t *testing.T) {
 			}
 			assertFileContents(t, hcDir, map[string]string{UsageSidecarFile: bundled})
 		})
+	}
+}
+
+func TestResolveNormalizerCommandAndTimeout(t *testing.T) {
+	cfg := &api.HarnessUsageNormalizerConfig{
+		Command: []string{"/opt/scion/venv/bin/python3", "-I", "{bundle_dir}/normalize.py"},
+		Timeout: "45s",
+	}
+	bundleDir := filepath.Join(t.TempDir(), ".scion", "harness")
+	got, err := ResolveNormalizerCommand(cfg, bundleDir)
+	if err != nil {
+		t.Fatalf("ResolveNormalizerCommand: %v", err)
+	}
+	want := []string{"/opt/scion/venv/bin/python3", "-I", filepath.Clean(bundleDir) + "/normalize.py"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ResolveNormalizerCommand() = %v, want %v", got, want)
+	}
+
+	if _, err := ResolveNormalizerCommand(cfg, "relative/dir"); err == nil {
+		t.Error("expected error for relative bundle_dir")
+	}
+	if _, err := ResolveNormalizerCommand(&api.HarnessUsageNormalizerConfig{Command: []string{"python3"}}, bundleDir); err == nil {
+		t.Error("expected error for relative command[0]")
+	}
+
+	d, err := ParseNormalizerTimeout(cfg)
+	if err != nil || d != 45*time.Second {
+		t.Errorf("ParseNormalizerTimeout = (%v, %v), want (45s, nil)", d, err)
+	}
+	d, err = ParseNormalizerTimeout(&api.HarnessUsageNormalizerConfig{})
+	if err != nil || d != DefaultUsageNormalizerTimeout {
+		t.Errorf("ParseNormalizerTimeout(default) = (%v, %v), want (%v, nil)", d, err, DefaultUsageNormalizerTimeout)
+	}
+}
+
+func TestLoadHarnessConfigDir_InvalidNormalizerDisablesNormalizerOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: claude\nimage: scion-claude:latest\nuser: scion\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := `schema_version: 1
+usage:
+  live:
+    source: native
+    token_types: [input, output]
+  trajectory:
+    normalizer:
+      command: ["relative-cmd"]
+      interface_version: 99
+      parser_version: "bad"
+`
+	if err := os.WriteFile(filepath.Join(dir, UsageSidecarFile), []byte(sidecar), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hc, err := LoadHarnessConfigDir(dir)
+	if err != nil {
+		t.Fatalf("LoadHarnessConfigDir failed: %v", err)
+	}
+	if hc.Config.UsageSidecar == nil {
+		t.Fatal("UsageSidecar = nil, want Live preserved")
+	}
+	if hc.Config.UsageSidecar.Live.Source != api.UsageLiveSourceNative {
+		t.Errorf("Live.Source = %q, want native", hc.Config.UsageSidecar.Live.Source)
+	}
+	if hc.Config.UsageSidecar.Trajectory != nil {
+		t.Errorf("Trajectory = %+v, want nil (normalizer disabled)", hc.Config.UsageSidecar.Trajectory)
 	}
 }

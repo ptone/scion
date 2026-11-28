@@ -22,6 +22,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -43,56 +46,90 @@ const UsageSidecarFile = "usage.yaml"
 // UsageSidecarSchemaVersion is the supported schema_version of usage.yaml.
 const UsageSidecarSchemaVersion = 1
 
+// Normalizer defaults and validation constants per P7.1 contract §1 and D4.
+const (
+	UsageNormalizerInterfaceVersion     = 1
+	UsageNormalizerBundleDirPlaceholder = "{bundle_dir}"
+
+	DefaultUsageNormalizerTimeout            = api.DefaultUsageNormalizerTimeout
+	DefaultUsageNormalizerTimeoutString      = api.DefaultUsageNormalizerTimeoutString
+	DefaultUsageNormalizerCPUSeconds         = api.DefaultUsageNormalizerCPUSeconds
+	DefaultUsageNormalizerMaxAddressSpaceMiB = api.DefaultUsageNormalizerMaxAddressSpaceMiB
+	DefaultUsageNormalizerMaxRSSMiB          = api.DefaultUsageNormalizerMaxRSSMiB
+)
+
+var usageNormalizerParserVersionRe = regexp.MustCompile(`^[a-z0-9-]+-[0-9]+$`)
+
 // usageSidecarFileDoc is the on-disk shape of UsageSidecarFile. Unknown keys
-// (including the future usage.trajectory section) are ignored by yaml.Unmarshal
-// so newer bundle additions do not break older binaries.
+// are ignored by yaml.Unmarshal so newer bundle additions do not break older
+// binaries.
 type usageSidecarFileDoc struct {
 	SchemaVersion int              `yaml:"schema_version"`
 	Usage         usageSidecarBody `yaml:"usage"`
 }
 
 type usageSidecarBody struct {
-	Live api.HarnessUsageLiveCapabilities `yaml:"live"`
+	Live       api.HarnessUsageLiveCapabilities `yaml:"live"`
+	Trajectory *usageSidecarTrajectoryBody      `yaml:"trajectory"`
+}
+
+type usageSidecarTrajectoryBody struct {
+	Normalizer *api.HarnessUsageNormalizerConfig `yaml:"normalizer"`
 }
 
 // ParseUsageSidecar strictly parses and validates the bytes of a
-// UsageSidecarFile (schema_version: 1). Unknown keys at any level (including
-// usage.trajectory) are ignored for forward compatibility. Runtime loaders do
-// not fail on its error (they warn and leave the capability nil/unknown); tests
-// of the bundled files call it directly so a bad bundled file fails CI.
+// UsageSidecarFile (schema_version: 1), including usage.trajectory.normalizer
+// when present. Unknown keys at any level are ignored for forward
+// compatibility. Runtime loaders do not fail on its error (they warn and leave
+// the capability or normalizer nil/disabled); tests of the bundled files call
+// it directly so a bad bundled file fails CI.
 func ParseUsageSidecar(data []byte) (*api.HarnessUsageCapabilities, error) {
+	out, liveErr, normalizerErr := parseUsageSidecar(data)
+	if liveErr != nil {
+		return nil, liveErr
+	}
+	if normalizerErr != nil {
+		return nil, normalizerErr
+	}
+	return out, nil
+}
+
+// parseUsageSidecar parses data and separates live-section errors from
+// trajectory.normalizer errors so runtime loaders can degrade an invalid
+// normalizer block to disabled without losing Track 1 live capabilities.
+func parseUsageSidecar(data []byte) (*api.HarnessUsageCapabilities, error, error) {
 	var doc usageSidecarFileDoc
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("invalid %s: %w", UsageSidecarFile, err)
+		return nil, fmt.Errorf("invalid %s: %w", UsageSidecarFile, err), nil
 	}
 	if doc.SchemaVersion != UsageSidecarSchemaVersion {
-		return nil, fmt.Errorf("invalid %s: schema_version must be %d, got %d", UsageSidecarFile, UsageSidecarSchemaVersion, doc.SchemaVersion)
+		return nil, fmt.Errorf("invalid %s: schema_version must be %d, got %d", UsageSidecarFile, UsageSidecarSchemaVersion, doc.SchemaVersion), nil
 	}
 	live := doc.Usage.Live
 	if !api.ValidUsageLiveSource(live.Source) {
-		return nil, fmt.Errorf("invalid %s: usage.live.source must be one of native, hooks, sqlite_native, file_tailer, none; got %q", UsageSidecarFile, live.Source)
+		return nil, fmt.Errorf("invalid %s: usage.live.source must be one of native, hooks, sqlite_native, file_tailer, none; got %q", UsageSidecarFile, live.Source), nil
 	}
 
 	seenTokens, err := validateUsageTokenTypeList("usage.live.token_types", live.TokenTypes)
 	if err != nil {
-		return nil, fmt.Errorf("invalid %s: %w", UsageSidecarFile, err)
+		return nil, fmt.Errorf("invalid %s: %w", UsageSidecarFile, err), nil
 	}
 	seenNA, err := validateUsageTokenTypeList("usage.live.not_applicable_token_types", live.NotApplicableTokenTypes)
 	if err != nil {
-		return nil, fmt.Errorf("invalid %s: %w", UsageSidecarFile, err)
+		return nil, fmt.Errorf("invalid %s: %w", UsageSidecarFile, err), nil
 	}
 	for tt := range seenNA {
 		if seenTokens[tt] {
-			return nil, fmt.Errorf("invalid %s: token type %q cannot appear in both token_types and not_applicable_token_types", UsageSidecarFile, tt)
+			return nil, fmt.Errorf("invalid %s: token type %q cannot appear in both token_types and not_applicable_token_types", UsageSidecarFile, tt), nil
 		}
 	}
 
 	if live.Source == api.UsageLiveSourceNone {
 		if len(live.TokenTypes) > 0 {
-			return nil, fmt.Errorf("invalid %s: usage.live.token_types must be empty when source is none", UsageSidecarFile)
+			return nil, fmt.Errorf("invalid %s: usage.live.token_types must be empty when source is none", UsageSidecarFile), nil
 		}
 		if live.CountsFailedCalls {
-			return nil, fmt.Errorf("invalid %s: usage.live.counts_failed_calls must be false when source is none", UsageSidecarFile)
+			return nil, fmt.Errorf("invalid %s: usage.live.counts_failed_calls must be false when source is none", UsageSidecarFile), nil
 		}
 	}
 
@@ -109,7 +146,150 @@ func ParseUsageSidecar(data []byte) (*api.HarnessUsageCapabilities, error) {
 	if len(live.NotApplicableTokenTypes) > 0 {
 		out.Live.NotApplicableTokenTypes = append([]string(nil), live.NotApplicableTokenTypes...)
 	}
-	return out, nil
+
+	if doc.Usage.Trajectory != nil && doc.Usage.Trajectory.Normalizer != nil {
+		norm, normErr := validateUsageNormalizer(doc.Usage.Trajectory.Normalizer)
+		if normErr != nil {
+			return out, nil, fmt.Errorf("invalid %s: %w", UsageSidecarFile, normErr)
+		}
+		out.Trajectory = &api.HarnessUsageTrajectoryCapabilities{
+			Normalizer: norm,
+		}
+	}
+
+	return out, nil, nil
+}
+
+func validateUsageNormalizer(raw *api.HarnessUsageNormalizerConfig) (*api.HarnessUsageNormalizerConfig, error) {
+	if len(raw.Command) > 0 {
+		for i, arg := range raw.Command {
+			if arg == "" {
+				return nil, fmt.Errorf("usage.trajectory.normalizer.command[%d] must be non-empty", i)
+			}
+		}
+		cmd0 := raw.Command[0]
+		if !strings.HasPrefix(cmd0, "/") && !strings.HasPrefix(cmd0, UsageNormalizerBundleDirPlaceholder+"/") {
+			return nil, fmt.Errorf("usage.trajectory.normalizer.command[0] must be an absolute path (or start with %s/), got %q", UsageNormalizerBundleDirPlaceholder, cmd0)
+		}
+	}
+
+	if raw.InterfaceVersion != UsageNormalizerInterfaceVersion {
+		return nil, fmt.Errorf("usage.trajectory.normalizer.interface_version must be %d, got %d", UsageNormalizerInterfaceVersion, raw.InterfaceVersion)
+	}
+
+	if raw.ParserVersion == "" {
+		return nil, errors.New("usage.trajectory.normalizer.parser_version must be non-empty")
+	}
+	if !usageNormalizerParserVersionRe.MatchString(raw.ParserVersion) {
+		return nil, fmt.Errorf("usage.trajectory.normalizer.parser_version %q must match %s", raw.ParserVersion, usageNormalizerParserVersionRe.String())
+	}
+
+	timeoutStr := strings.TrimSpace(raw.Timeout)
+	if timeoutStr == "" {
+		timeoutStr = DefaultUsageNormalizerTimeoutString
+	} else {
+		d, err := time.ParseDuration(timeoutStr)
+		if err != nil {
+			return nil, fmt.Errorf("usage.trajectory.normalizer.timeout %q: %w", timeoutStr, err)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("usage.trajectory.normalizer.timeout must be positive, got %q", timeoutStr)
+		}
+	}
+
+	limits := raw.Limits
+	if limits.CPUSeconds < 0 {
+		return nil, fmt.Errorf("usage.trajectory.normalizer.limits.cpu_seconds must be non-negative, got %d", limits.CPUSeconds)
+	}
+	if limits.CPUSeconds == 0 {
+		limits.CPUSeconds = DefaultUsageNormalizerCPUSeconds
+	}
+	if limits.MaxAddressSpaceMiB < 0 {
+		return nil, fmt.Errorf("usage.trajectory.normalizer.limits.max_address_space_mib must be non-negative, got %d", limits.MaxAddressSpaceMiB)
+	}
+	if limits.MaxAddressSpaceMiB == 0 {
+		limits.MaxAddressSpaceMiB = DefaultUsageNormalizerMaxAddressSpaceMiB
+	}
+	if limits.MaxRSSMiB < 0 {
+		return nil, fmt.Errorf("usage.trajectory.normalizer.limits.max_rss_mib must be non-negative, got %d", limits.MaxRSSMiB)
+	}
+	if limits.MaxRSSMiB == 0 {
+		limits.MaxRSSMiB = DefaultUsageNormalizerMaxRSSMiB
+	}
+
+	for i, pat := range raw.TestedHarnessVersions {
+		if strings.TrimSpace(pat) == "" {
+			return nil, fmt.Errorf("usage.trajectory.normalizer.tested_harness_versions[%d] must be non-empty", i)
+		}
+		if _, err := path.Match(pat, ""); err != nil {
+			return nil, fmt.Errorf("usage.trajectory.normalizer.tested_harness_versions[%d] %q: %w", i, pat, err)
+		}
+	}
+
+	seenOutputs := make(map[string]bool, len(raw.Outputs))
+	for _, outType := range raw.Outputs {
+		if !api.ValidUsageNormalizerOutput(outType) {
+			return nil, fmt.Errorf("usage.trajectory.normalizer.outputs contains unknown output %q", outType)
+		}
+		if seenOutputs[outType] {
+			return nil, fmt.Errorf("usage.trajectory.normalizer.outputs contains duplicate output %q", outType)
+		}
+		seenOutputs[outType] = true
+	}
+
+	norm := &api.HarnessUsageNormalizerConfig{
+		InterfaceVersion: raw.InterfaceVersion,
+		ParserVersion:    raw.ParserVersion,
+		Timeout:          timeoutStr,
+		Limits:           limits,
+	}
+	if len(raw.Command) > 0 {
+		norm.Command = append([]string(nil), raw.Command...)
+	}
+	if len(raw.TestedHarnessVersions) > 0 {
+		norm.TestedHarnessVersions = append([]string(nil), raw.TestedHarnessVersions...)
+	}
+	if len(raw.Outputs) > 0 {
+		norm.Outputs = append([]string(nil), raw.Outputs...)
+	}
+	return norm, nil
+}
+
+// ResolveNormalizerCommand substitutes {bundle_dir} in cfg.Command with
+// bundleDir (which must be an absolute path) and verifies that the resulting
+// command[0] is an absolute path.
+func ResolveNormalizerCommand(cfg *api.HarnessUsageNormalizerConfig, bundleDir string) ([]string, error) {
+	if cfg == nil || len(cfg.Command) == 0 {
+		return nil, errors.New("normalizer command is empty")
+	}
+	if bundleDir == "" || !filepath.IsAbs(bundleDir) {
+		return nil, fmt.Errorf("bundle_dir must be an absolute path, got %q", bundleDir)
+	}
+	cleanBundleDir := filepath.Clean(bundleDir)
+	resolved := make([]string, len(cfg.Command))
+	for i, arg := range cfg.Command {
+		resolved[i] = strings.ReplaceAll(arg, UsageNormalizerBundleDirPlaceholder, cleanBundleDir)
+	}
+	if !filepath.IsAbs(resolved[0]) {
+		return nil, fmt.Errorf("resolved normalizer command[0] must be an absolute path, got %q", resolved[0])
+	}
+	return resolved, nil
+}
+
+// ParseNormalizerTimeout parses cfg.Timeout, defaulting to
+// DefaultUsageNormalizerTimeout when empty.
+func ParseNormalizerTimeout(cfg *api.HarnessUsageNormalizerConfig) (time.Duration, error) {
+	if cfg == nil || strings.TrimSpace(cfg.Timeout) == "" {
+		return DefaultUsageNormalizerTimeout, nil
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(cfg.Timeout))
+	if err != nil {
+		return 0, fmt.Errorf("invalid normalizer timeout %q: %w", cfg.Timeout, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("normalizer timeout must be positive, got %q", cfg.Timeout)
+	}
+	return d, nil
 }
 
 func validateUsageTokenTypeList(field string, list []string) (map[string]bool, error) {
@@ -128,14 +308,19 @@ func validateUsageTokenTypeList(field string, list []string) (map[string]bool, e
 
 // ApplyUsageSidecarBytes parses raw usage.yaml bytes and records the
 // capability on entry. Invalid or unsupported-version content logs a
-// deduplicated warning and leaves entry.UsageSidecar nil (unknown capability);
-// it never fails the harness-config load.
+// deduplicated warning and leaves entry.UsageSidecar nil (unknown capability)
+// when the live section is invalid, or disables the trajectory normalizer
+// (Trajectory == nil) while preserving Live when only the normalizer block is
+// invalid. It never fails the harness-config load.
 func ApplyUsageSidecarBytes(entry *HarnessConfigEntry, data []byte, where string) {
-	caps, err := ParseUsageSidecar(data)
-	if err != nil {
-		warnUsageSidecar(where, err)
+	caps, liveErr, normalizerErr := parseUsageSidecar(data)
+	if liveErr != nil {
+		warnUsageSidecar(where, liveErr)
 		entry.UsageSidecar = nil
 		return
+	}
+	if normalizerErr != nil {
+		warnUsageNormalizer(where, normalizerErr)
 	}
 	entry.UsageSidecar = caps
 }
@@ -193,6 +378,13 @@ func applyUsageSidecarFromReader(entry *HarnessConfigEntry, read func(name strin
 func warnUsageSidecar(where string, err error) {
 	if _, seen := invalidSidecarWarned.LoadOrStore(where+"\x00"+err.Error(), true); !seen {
 		slog.Warn("ignoring invalid harness-config usage.yaml; usage capability treated as unknown",
+			"path", where, "error", err)
+	}
+}
+
+func warnUsageNormalizer(where string, err error) {
+	if _, seen := invalidSidecarWarned.LoadOrStore(where+"\x00normalizer\x00"+err.Error(), true); !seen {
+		slog.Warn("ignoring invalid usage.trajectory.normalizer in usage.yaml; trajectory normalizer disabled",
 			"path", where, "error", err)
 	}
 }
