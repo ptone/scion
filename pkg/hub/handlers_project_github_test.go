@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1467,11 +1468,19 @@ func TestProjectGitHub_PermissionsRoundTripAndNextMint(t *testing.T) {
 		Status:      store.UserStatusActive,
 	}
 	require.NoError(t, st.CreateUser(ctx, viewer))
-	require.NoError(t, st.CreateProjectMembership(ctx, &store.ProjectMembership{
-		ProjectID: proj.ID,
-		UserID:    viewer.ID,
-		Role:      store.ProjectRoleViewer,
-	}))
+	viewerRole, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)
+	require.NoError(t, err)
+	require.NotNil(t, viewerRole)
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: viewerRole.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      viewer.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          proj.ID,
+		CreatedBy:        admin.ID,
+		CreatedAt:        time.Now(),
+	})
+	require.NoError(t, err)
 
 	getViewer := doRequestAsUser(t, srv, viewer, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
 	require.Equal(t, http.StatusOK, getViewer.Code, getViewer.Body.String())
