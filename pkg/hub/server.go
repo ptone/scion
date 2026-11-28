@@ -3285,6 +3285,10 @@ type Server struct {
 	// kept here too so Start can run its cleanup goroutine, the same way
 	// geExchangeRateLimiter's is started below.
 	externalBearerRateLimiter *externalBearerRateLimiter
+	// GitHub App setup callback rate limiter (per-client-IP token bucket,
+	// github_app_setup_ratelimit.go). Kept here so StartBackgroundServices runs
+	// its cleanup goroutine.
+	githubAppSetupRateLimiter *githubAppSetupRateLimiter
 
 	// cspReports is the browser policy report endpoint (csp_reports.go),
 	// and cspReportLimiter its rate limit, kept here so Start can run its
@@ -4496,6 +4500,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.clientIPTrustedNets = parseTrustedProxies(cfg.TrustedProxies)
 	srv.externalBearerRateLimiter = newExternalBearerRateLimiter(cfg.TrustedProxies)
 	srv.authConfig.ExternalBearerLimiter = srv.externalBearerRateLimiter
+	srv.githubAppSetupRateLimiter = newGitHubAppSetupRateLimiter(cfg.TrustedProxies)
 
 	srv.cspReportLimiter = newCSPReportLimiter(cfg.TrustedProxies)
 
@@ -8027,6 +8032,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	}
 	if s.externalBearerRateLimiter != nil {
 		s.externalBearerRateLimiter.StartCleanup(ctx)
+	}
+	if s.githubAppSetupRateLimiter != nil {
+		s.githubAppSetupRateLimiter.StartCleanup(ctx)
 	}
 	if s.cspReportLimiter != nil {
 		s.cspReportLimiter.StartCleanup(ctx)

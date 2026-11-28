@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -550,4 +551,131 @@ func TestCombinedWebServer_GitHubAppSetupForwardsToHub(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestHandleGitHubAppSetup_RateLimitBlocksGitHubCallsAndIsPerIP(t *testing.T) {
+	var ghCalls atomic.Int32
+	fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ghCalls.Add(1)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/77777":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":77777,"app_id":42,"account":{"login":"acme","type":"Organization"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/77777/access_tokens":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprintf(w, `{"token":"ghs_test_token","expires_at":%q}`,
+				time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+		case r.Method == http.MethodGet && r.URL.Path == "/installation/repositories":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"total_count":1,"repositories":[{"full_name":"acme/rate-limit"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer fakeGH.Close()
+
+	srv, _ := setupTestServer(t, fakeGH.URL)
+	if srv.githubAppSetupRateLimiter == nil {
+		t.Fatal("expected srv.githubAppSetupRateLimiter to be initialized")
+	}
+	now := time.Now()
+	srv.githubAppSetupRateLimiter.buckets.nowFunc = func() time.Time { return now }
+
+	ws := newTestWebServer(t, WebServerConfig{AssetsDir: t.TempDir()})
+	ws.MountHubAPI(srv.Handler(), func(context.Context) error { return nil })
+	handler := ws.Handler()
+
+	// Requests within burst from IP A succeed and call GitHub.
+	for i := range githubAppSetupBurst {
+		req := httptest.NewRequest(http.MethodGet, "/github-app/setup?installation_id=77777&setup_action=install", nil)
+		req.RemoteAddr = "198.51.100.10:1234"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("IP A request %d: expected %d, got %d: %s", i+1, http.StatusFound, rec.Code, rec.Body.String())
+		}
+	}
+
+	callsBeforeLimit := ghCalls.Load()
+	if callsBeforeLimit == 0 {
+		t.Fatal("expected GitHub API calls for requests within limit")
+	}
+
+	// Next request from IP A is rejected with 429 and makes zero GitHub API calls.
+	reqOver := httptest.NewRequest(http.MethodGet, "/github-app/setup?installation_id=77777&setup_action=install", nil)
+	reqOver.RemoteAddr = "198.51.100.10:5678"
+	recOver := httptest.NewRecorder()
+	handler.ServeHTTP(recOver, reqOver)
+	if recOver.Code != http.StatusTooManyRequests {
+		t.Fatalf("over-limit request: expected %d, got %d: %s", http.StatusTooManyRequests, recOver.Code, recOver.Body.String())
+	}
+	if recOver.Header().Get("Retry-After") == "" {
+		t.Error("expected Retry-After header on 429 response")
+	}
+	if !strings.Contains(recOver.Body.String(), "too many setup callbacks") {
+		t.Errorf("expected generic 429 message, got %q", recOver.Body.String())
+	}
+	if got := ghCalls.Load(); got != callsBeforeLimit {
+		t.Fatalf("rate-limited request must not call GitHub: calls went from %d to %d", callsBeforeLimit, got)
+	}
+
+	// Spoofing X-Forwarded-For from the same untrusted peer must still be 429 with no GitHub calls.
+	reqSpoof := httptest.NewRequest(http.MethodGet, "/github-app/setup?installation_id=77777&setup_action=install", nil)
+	reqSpoof.RemoteAddr = "198.51.100.10:9999"
+	reqSpoof.Header.Set("X-Forwarded-For", "203.0.113.50")
+	recSpoof := httptest.NewRecorder()
+	handler.ServeHTTP(recSpoof, reqSpoof)
+	if recSpoof.Code != http.StatusTooManyRequests {
+		t.Fatalf("spoofed XFF request: expected %d, got %d: %s", http.StatusTooManyRequests, recSpoof.Code, recSpoof.Body.String())
+	}
+	if got := ghCalls.Load(); got != callsBeforeLimit {
+		t.Fatalf("spoofed XFF request must not call GitHub: calls went from %d to %d", callsBeforeLimit, got)
+	}
+
+	// A different IP B has its own budget and succeeds.
+	reqOtherIP := httptest.NewRequest(http.MethodGet, "/github-app/setup?installation_id=77777&setup_action=install", nil)
+	reqOtherIP.RemoteAddr = "198.51.100.20:4321"
+	recOtherIP := httptest.NewRecorder()
+	handler.ServeHTTP(recOtherIP, reqOtherIP)
+	if recOtherIP.Code != http.StatusFound {
+		t.Fatalf("IP B request: expected %d, got %d: %s", http.StatusFound, recOtherIP.Code, recOtherIP.Body.String())
+	}
+	if got := ghCalls.Load(); got <= callsBeforeLimit {
+		t.Fatalf("expected IP B request to reach GitHub API, calls stayed at %d", got)
+	}
+}
+
+func TestServer_GitHubAppSetupRateLimiter_CleanupRunsInBackground(t *testing.T) {
+	srv, _ := webhookTestServer(t)
+	if srv.githubAppSetupRateLimiter == nil {
+		t.Fatal("expected srv.githubAppSetupRateLimiter to be set")
+	}
+	srv.githubAppSetupRateLimiter.buckets.cleanupInterval = 5 * time.Millisecond
+	srv.githubAppSetupRateLimiter.buckets.maxEntries = 1
+	srv.githubAppSetupRateLimiter.buckets.maxAge = 10 * time.Millisecond
+
+	req1 := httptest.NewRequest(http.MethodGet, "/github-app/setup?installation_id=1", nil)
+	req1.RemoteAddr = "198.51.100.9:1"
+	if allowed, _ := srv.githubAppSetupRateLimiter.Allow(req1); !allowed {
+		t.Fatal("first IP should be allowed")
+	}
+	req2 := httptest.NewRequest(http.MethodGet, "/github-app/setup?installation_id=1", nil)
+	req2.RemoteAddr = "198.51.100.10:1"
+	if allowed, _ := srv.githubAppSetupRateLimiter.Allow(req2); allowed {
+		t.Fatal("second IP should be refused when limiter is at capacity (maxEntries=1)")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv.StartBackgroundServices(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if allowed, _ := srv.githubAppSetupRateLimiter.Allow(req2); allowed {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("second IP was still refused after 2s; StartBackgroundServices did not run githubAppSetupRateLimiter.StartCleanup")
 }
