@@ -466,3 +466,61 @@ func (b *colocatedBrokerStop) beforeHTTPDrain(clk clock.Clock, fallback time.Dur
 		}
 	}
 }
+
+// embeddedMCPStop tracks the embedded MCP HTTP listener so the Hub front
+// waits for MCP to finish draining (within the HTTP-drain budget) before
+// proceeding to Hub teardown.
+type embeddedMCPStop struct {
+	mu      sync.Mutex
+	started bool
+	stopped chan struct{}
+	once    sync.Once
+}
+
+func newEmbeddedMCPStop() *embeddedMCPStop {
+	return &embeddedMCPStop{stopped: make(chan struct{})}
+}
+
+func (m *embeddedMCPStop) markStarted() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.started = true
+}
+
+func (m *embeddedMCPStop) markStopped() {
+	if m == nil {
+		return
+	}
+	m.once.Do(func() { close(m.stopped) })
+}
+
+// waitBeforeHubTeardown waits for the embedded MCP listener to finish
+// draining, bounded by ctx (teardown context) and drainCtx (the HTTP-drain
+// phase of the shutdown plan). If MCP was not started it returns immediately.
+func (m *embeddedMCPStop) waitBeforeHubTeardown(ctx context.Context, drainCtx func(context.Context) (context.Context, context.CancelFunc)) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	started := m.started
+	m.mu.Unlock()
+	if !started {
+		return
+	}
+	dctx := ctx
+	if drainCtx != nil {
+		var cancel context.CancelFunc
+		dctx, cancel = drainCtx(ctx)
+		defer cancel()
+	}
+	select {
+	case <-m.stopped:
+	case <-dctx.Done():
+		log.Printf("HTTP drain deadline reached while waiting for embedded MCP server to stop")
+	case <-ctx.Done():
+		log.Printf("Shutdown deadline reached while waiting for embedded MCP server to stop")
+	}
+}

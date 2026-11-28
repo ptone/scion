@@ -41,16 +41,22 @@ const (
 
 // Options configures a Scion MCP server.
 type Options struct {
-	Host            string
-	Port            int
-	Path            string
-	PublicURL       string
-	AllowedOrigins  []string
-	Version         string
-	Backend         HubBackend
-	Logger          *slog.Logger
-	PrincipalTTL    time.Duration
-	ShutdownTimeout time.Duration
+	Host                   string
+	Port                   int
+	Path                   string
+	PublicURL              string
+	AllowedOrigins         []string
+	Version                string
+	Backend                HubBackend
+	Logger                 *slog.Logger
+	PrincipalTTL           time.Duration
+	ShutdownTimeout        time.Duration
+	MaxStreamsPerPrincipal int
+	StreamWait             time.Duration
+	// ShutdownContext, when set, returns the context bounding http.Server.Shutdown
+	// during graceful shutdown (e.g., the server shutdown plan's HTTP drain
+	// context). When nil, ShutdownTimeout is used.
+	ShutdownContext func(context.Context) (context.Context, context.CancelFunc)
 	// ExtraTools is an optional extension hook allowing callers (e.g. custom
 	// wrappers) to register additional tools on the underlying *mcp.Server.
 	ExtraTools func(*mcp.Server)
@@ -64,6 +70,7 @@ type Server struct {
 	logger         *slog.Logger
 	allowedOrigins map[string]struct{}
 	principalCache *principalCache
+	streams        *StreamLimiter
 	mcpServer      *mcp.Server
 	handler        http.Handler
 
@@ -98,6 +105,18 @@ func New(opts Options) (*Server, error) {
 	if opts.ShutdownTimeout <= 0 {
 		opts.ShutdownTimeout = 10 * time.Second
 	}
+	if opts.MaxStreamsPerPrincipal < 0 {
+		return nil, fmt.Errorf("mcpserver: MaxStreamsPerPrincipal must be non-negative, got %d", opts.MaxStreamsPerPrincipal)
+	}
+	if opts.MaxStreamsPerPrincipal == 0 {
+		opts.MaxStreamsPerPrincipal = DefaultMaxStreamsPerPrincipal
+	}
+	if opts.StreamWait < 0 {
+		return nil, fmt.Errorf("mcpserver: StreamWait must be non-negative, got %s", opts.StreamWait)
+	}
+	if opts.StreamWait == 0 {
+		opts.StreamWait = DefaultStreamWait
+	}
 
 	origins := make(map[string]struct{}, len(opts.AllowedOrigins))
 	for _, o := range opts.AllowedOrigins {
@@ -112,6 +131,7 @@ func New(opts Options) (*Server, error) {
 		logger:         opts.Logger,
 		allowedOrigins: origins,
 		principalCache: newPrincipalCache(opts.PrincipalTTL),
+		streams:        NewStreamLimiter(opts.MaxStreamsPerPrincipal),
 	}
 
 	mcpSrv := mcp.NewServer(&mcp.Implementation{
@@ -121,6 +141,7 @@ func New(opts Options) (*Server, error) {
 		Logger: opts.Logger,
 	})
 	s.registerTools(mcpSrv)
+	s.registerResources(mcpSrv)
 	if opts.ExtraTools != nil {
 		opts.ExtraTools(mcpSrv)
 	}
@@ -135,6 +156,10 @@ func New(opts Options) (*Server, error) {
 			// (e.g. host.docker.internal) or service hostnames; Origin allowlist
 			// and required bearer/federation auth enforce DNS-rebinding defense.
 			DisableLocalhostProtection: true,
+			// Tie in-flight handler contexts (wait_for_messages, events/stream)
+			// to the originating HTTP request context so client disconnects
+			// cancel upstream Hub long-polls promptly.
+			PropagateRequestCancellation: true,
 		},
 	)
 
@@ -204,9 +229,18 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		return err
 	case <-ctx.Done():
 		s.BeginShutdown()
-		shutCtx, cancel := context.WithTimeout(context.Background(), s.opts.ShutdownTimeout)
+		var shutCtx context.Context
+		var cancel context.CancelFunc
+		if s.opts.ShutdownContext != nil {
+			shutCtx, cancel = s.opts.ShutdownContext(context.Background())
+		} else {
+			shutCtx, cancel = context.WithTimeout(context.Background(), s.opts.ShutdownTimeout)
+		}
 		defer cancel()
 		shutErr := httpSrv.Shutdown(shutCtx)
+		if shutErr != nil {
+			_ = httpSrv.Close()
+		}
 		serveErr := <-errCh
 		if shutErr != nil {
 			return shutErr

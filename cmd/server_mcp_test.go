@@ -15,6 +15,9 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,4 +79,41 @@ func TestV1ServerMCPRoundTrip(t *testing.T) {
 	if !back.MCP.Enabled || back.MCP.Port != 9821 || back.MCP.StreamWait != "45s" {
 		t.Fatalf("unexpected round-tripped V1ServerMCPConfig: %+v", back.MCP)
 	}
+}
+
+func TestLoadGlobalConfig_MCPStreamWaitValidation(t *testing.T) {
+	t.Run("rejects_unparseable_stream_wait", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("HOME", dir)
+		scionDir := filepath.Join(dir, ".scion")
+		if err := os.MkdirAll(scionDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		yaml := "schema_version: \"1\"\nserver:\n  mcp:\n    enabled: true\n    stream_wait: \"not-a-duration\"\n"
+		if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(yaml), 0o600); err != nil {
+			t.Fatalf("write settings.yaml: %v", err)
+		}
+		_, err := config.LoadGlobalConfig(scionDir)
+		if err == nil {
+			t.Fatal("expected error for unparseable server.mcp.stream_wait")
+		}
+		if !strings.Contains(err.Error(), "stream_wait") {
+			t.Fatalf("expected error mentioning stream_wait, got: %v", err)
+		}
+	})
+
+	t.Run("rejects_non_positive_stream_wait_and_negative_max_streams", func(t *testing.T) {
+		if err := config.ValidateV1MCPConfig(&config.V1ServerMCPConfig{StreamWait: "0s"}); err == nil {
+			t.Fatal("expected error for stream_wait=0s")
+		}
+		if err := config.ValidateV1MCPConfig(&config.V1ServerMCPConfig{StreamWait: "-5s"}); err == nil {
+			t.Fatal("expected error for stream_wait=-5s")
+		}
+		if err := config.ValidateV1MCPConfig(&config.V1ServerMCPConfig{MaxStreamsPerPrincipal: -1}); err == nil {
+			t.Fatal("expected error for negative max_streams_per_principal")
+		}
+		if err := config.ValidateV1MCPConfig(&config.V1ServerMCPConfig{StreamWait: "30s", MaxStreamsPerPrincipal: 8}); err != nil {
+			t.Fatalf("valid MCP config rejected: %v", err)
+		}
+	})
 }

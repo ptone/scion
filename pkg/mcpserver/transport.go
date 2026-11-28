@@ -29,8 +29,9 @@ type transportMetaKey struct{}
 // transportMeta carries per-request client metadata from the front door to
 // the outbound Hub RoundTripper without forwarding raw inbound headers.
 type transportMeta struct {
-	RemoteAddr string
-	ClientName string
+	RemoteAddr   string
+	ClientName   string
+	ForwardedFor []string
 }
 
 func withTransportMeta(ctx context.Context, meta transportMeta) context.Context {
@@ -195,9 +196,11 @@ func (w *pipeResponseWriter) abort(err error) {
 
 // AllowlistTransport wraps a base http.RoundTripper and enforces the MCP->Hub
 // header allowlist (§4.1, §10 AC4): only Authorization or
-// X-Scion-Federation-Token, User-Agent, X-Scion-Client: mcp, and standard
-// JSON content negotiation headers (Content-Type, Accept) may leave on a Hub
-// request. Cookies, IAP assertion headers, and all other headers are dropped.
+// X-Scion-Federation-Token, User-Agent, X-Scion-Client: mcp, X-Forwarded-For
+// (honoured by the Hub only when RemoteAddr is in trusted_proxies), and
+// standard JSON content negotiation headers (Content-Type, Accept) may leave
+// on a Hub request. Cookies, IAP assertion headers, and all other headers are
+// dropped.
 type AllowlistTransport struct {
 	Base    http.RoundTripper
 	Version string
@@ -226,12 +229,22 @@ func (t *AllowlistTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if acc := req.Header.Get("Accept"); acc != "" {
 		h.Set("Accept", acc)
 	}
+	meta := transportMetaFromContext(req.Context())
+	if len(meta.ForwardedFor) > 0 {
+		for _, v := range meta.ForwardedFor {
+			h.Add("X-Forwarded-For", v)
+		}
+	} else {
+		for _, v := range req.Header.Values("X-Forwarded-For") {
+			h.Add("X-Forwarded-For", v)
+		}
+	}
 
 	ver := t.Version
 	if ver == "" {
 		ver = "dev"
 	}
-	clientName := sanitizeHeaderValue(transportMetaFromContext(req.Context()).ClientName)
+	clientName := sanitizeHeaderValue(meta.ClientName)
 	if clientName == "" {
 		clientName = "unknown"
 	}

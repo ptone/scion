@@ -42,6 +42,7 @@ type requestAuth struct {
 	Credential Credential
 	Principal  Principal
 	UserAgent  string
+	httpDone   <-chan struct{}
 }
 
 func withRequestAuth(ctx context.Context, ra requestAuth) context.Context {
@@ -95,8 +96,9 @@ func (s *Server) frontDoor(next http.Handler) http.Handler {
 
 		ua := r.Header.Get("User-Agent")
 		ctx := withTransportMeta(r.Context(), transportMeta{
-			RemoteAddr: r.RemoteAddr,
-			ClientName: ua,
+			RemoteAddr:   r.RemoteAddr,
+			ClientName:   ua,
+			ForwardedFor: append([]string(nil), r.Header.Values("X-Forwarded-For")...),
 		})
 
 		principal, err := s.resolvePrincipal(ctx, cred)
@@ -122,6 +124,7 @@ func (s *Server) frontDoor(next http.Handler) http.Handler {
 			Credential: cred,
 			Principal:  principal,
 			UserAgent:  ua,
+			httpDone:   r.Context().Done(),
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
