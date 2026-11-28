@@ -415,6 +415,12 @@ func deriveOrigin(in MessageInput, convSurface string, isHubTrigger, isHubSchedu
 	if in.IsBridgeSender && convSurface != "" && convSurface != "native" {
 		return OriginBridge, nil
 	}
+	// Real hub delivery/artifact notices (messages.NewSystemMessage("system", ...))
+	// carry bare Sender="system", empty SenderID, and Type="system". Narrowly admit
+	// that exact tuple; any other bare "system" shape fails closed below.
+	if in.Sender == "system" && in.Type == "system" && in.SenderID == "" {
+		return OriginSystem, nil
+	}
 	switch {
 	case strings.HasPrefix(in.Sender, "user:"):
 		return OriginUser, nil

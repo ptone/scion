@@ -372,6 +372,16 @@ func TestProject_RecipientInvariance_Out(t *testing.T) {
 		func() (string, rulefacts.TemplateLookupStatus) { return "", rulefacts.TemplateLookupNotFound },
 	)
 
+	// Hold End.Kind, ConversationInfo, and DeliveryInfo constant (A2 §2.1 + C3).
+	fixedConv := rulefacts.ConversationInfo{
+		Ref:        "dm:fixed:key",
+		ID:         "conv-dm-fixed",
+		Kind:       "direct",
+		Surface:    "native",
+		ProjectID:  "proj-A",
+		AgentCount: 2,
+	}
+
 	buildFacts := func(recip *rulefacts.End) rulefacts.Facts {
 		f, err := rulefacts.FromMessage(
 			rulefacts.MessageInput{
@@ -384,14 +394,7 @@ func TestProject_RecipientInvariance_Out(t *testing.T) {
 				SenderEnd:    &sender,
 				RecipientEnd: recip,
 			},
-			rulefacts.ConversationInfo{
-				Ref:        "dm:agent:" + sender.ID + ":agent:" + recip.ID,
-				ID:         "conv-dm-" + recip.ID,
-				Kind:       "direct",
-				Surface:    "native",
-				ProjectID:  "proj-A",
-				AgentCount: 2,
-			},
+			fixedConv,
 			rulefacts.DeliveryInfo{
 				Surface: "agent_dm",
 				Via:     "direct",
@@ -410,7 +413,181 @@ func TestProject_RecipientInvariance_Out(t *testing.T) {
 	require.NoError(t, err)
 	b2, err := json.Marshal(rulefacts.Project(f2, rulefacts.ScopePolicyOut).Map())
 	require.NoError(t, err)
-	assert.Equal(t, string(b1), string(b2), "policy_out projection must be byte-identical when only the recipient end changes")
+	assert.Equal(t, string(b1), string(b2), "policy_out projection must be byte-identical when only the recipient end identity/attributes change")
+}
+
+// flattenLeafPaths returns a map of dotted leaf path -> canonical JSON value
+// for comparing two projected activation maps path-by-path.
+func flattenLeafPaths(t *testing.T, m map[string]any) map[string]string {
+	t.Helper()
+	out := make(map[string]string)
+	var walk func(prefix string, v any)
+	walk = func(prefix string, v any) {
+		if sub, ok := v.(map[string]any); ok {
+			for k, val := range sub {
+				next := k
+				if prefix != "" {
+					next = prefix + "." + k
+				}
+				walk(next, val)
+			}
+			return
+		}
+		b, err := json.Marshal(v)
+		require.NoError(t, err)
+		out[prefix] = string(b)
+	}
+	walk("", m)
+	return out
+}
+
+func diffPaths(a, b map[string]string) []string {
+	var diff []string
+	for k, va := range a {
+		if vb, ok := b[k]; !ok || va != vb {
+			diff = append(diff, k)
+		}
+	}
+	for k := range b {
+		if _, ok := a[k]; !ok {
+			diff = append(diff, k)
+		}
+	}
+	return diff
+}
+
+// TestProject_RecipientKindVariation_Out_C3 verifies joint ruling C3
+// (working-copy §0a alongside A2 dab1ced9): varying ONLY the recipient kind
+// (agent <-> user, with realistic hub delivery path for each) in policy_out
+// may differ ONLY on the exact allow-list:
+//   - {delivery.surface, delivery.via} for non-reply message types
+//   - {delivery.surface, delivery.via, message.intent} for message.type == reply
+//
+// and recipient.* is absent in both variants.
+func TestProject_RecipientKindVariation_Out_C3(t *testing.T) {
+	sender := rulefacts.EndFromAgentWithLookup(
+		rulefacts.AgentInput{
+			ID:        "agent-sender-1",
+			Slug:      "dev-worker",
+			Name:      "Dev Worker",
+			ProjectID: "proj-A",
+		},
+		nil,
+		func() (string, rulefacts.TemplateLookupStatus) { return "developer", rulefacts.TemplateLookupOK },
+	)
+	recipAgent := rulefacts.EndFromAgentWithLookup(
+		rulefacts.AgentInput{ID: "recip-1", Slug: "peer", Name: "Peer", ProjectID: "proj-A"},
+		nil,
+		func() (string, rulefacts.TemplateLookupStatus) { return "reviewer", rulefacts.TemplateLookupOK },
+	)
+	recipUser := rulefacts.EndFromUser(rulefacts.UserInput{
+		ID: "recip-1", Slug: "peer", DisplayName: "Peer", ProjectID: "proj-A",
+	})
+	fixedConv := rulefacts.ConversationInfo{
+		Ref: "dm:fixed", ID: "conv-fixed", Kind: "direct", Surface: "native", ProjectID: "proj-A", AgentCount: 1, UserCount: 1,
+	}
+
+	for _, msgType := range []string{messages.TypeInstruction, messages.TypeChat, messages.TypeReply} {
+		t.Run("type_"+msgType, func(t *testing.T) {
+			fAgent, err := rulefacts.FromMessage(rulefacts.MessageInput{
+				Type: msgType, Sender: "agent:dev-worker", SenderID: sender.ID,
+				Recipient: "agent:peer", Body: "hello", BodySource: rulefacts.BodySourceEvaluatedInput,
+				SenderEnd: &sender, RecipientEnd: &recipAgent,
+			}, fixedConv, rulefacts.DeliveryInfo{Surface: "agent_dm", Via: "direct"})
+			require.NoError(t, err)
+
+			fUser, err := rulefacts.FromMessage(rulefacts.MessageInput{
+				Type: msgType, Sender: "agent:dev-worker", SenderID: sender.ID,
+				Recipient: "user:peer", Body: "hello", BodySource: rulefacts.BodySourceEvaluatedInput,
+				SenderEnd: &sender, RecipientEnd: &recipUser,
+			}, fixedConv, rulefacts.DeliveryInfo{Surface: "agent_to_user", Via: "direct"})
+			require.NoError(t, err)
+
+			outAgent := rulefacts.Project(fAgent, rulefacts.ScopePolicyOut).Map()
+			outUser := rulefacts.Project(fUser, rulefacts.ScopePolicyOut).Map()
+			assert.NotContains(t, outAgent, "recipient")
+			assert.NotContains(t, outUser, "recipient")
+
+			allowed := map[string]bool{
+				"delivery.surface": true,
+				"delivery.via":     true,
+			}
+			if msgType == messages.TypeReply {
+				allowed["message.intent"] = true
+			}
+			for _, p := range diffPaths(flattenLeafPaths(t, outAgent), flattenLeafPaths(t, outUser)) {
+				assert.Truef(t, allowed[p], "type=%s: unexpected differing path %q in policy_out when varying recipient kind (allowed: %v)", msgType, p, allowed)
+			}
+		})
+	}
+}
+
+// TestProject_SenderKindVariation_In_C3 verifies joint ruling C3 for policy_in:
+// varying ONLY the sender kind (agent <-> user, with realistic hub delivery
+// path for each) may differ ONLY on the exact allow-list {delivery.surface,
+// delivery.via, message.intent (only when reply)}, and sender.* is absent in
+// both variants.
+func TestProject_SenderKindVariation_In_C3(t *testing.T) {
+	recipient := rulefacts.EndFromAgentWithLookup(
+		rulefacts.AgentInput{
+			ID:        "agent-recip-1",
+			Slug:      "dev-worker",
+			Name:      "Dev Worker",
+			ProjectID: "proj-A",
+		},
+		nil,
+		func() (string, rulefacts.TemplateLookupStatus) { return "developer", rulefacts.TemplateLookupOK },
+	)
+	senderAgent := rulefacts.EndFromAgentWithLookup(
+		rulefacts.AgentInput{ID: "sender-1", Slug: "peer", Name: "Peer", ProjectID: "proj-A"},
+		nil,
+		func() (string, rulefacts.TemplateLookupStatus) { return "reviewer", rulefacts.TemplateLookupOK },
+	)
+	senderUser := rulefacts.EndFromUser(rulefacts.UserInput{
+		ID: "sender-1", Slug: "peer", DisplayName: "Peer", ProjectID: "proj-A",
+	})
+	fixedConv := rulefacts.ConversationInfo{
+		Ref: "dm:fixed", ID: "conv-fixed", Kind: "direct", Surface: "native", ProjectID: "proj-A", AgentCount: 1, UserCount: 1,
+	}
+
+	for _, msgType := range []string{messages.TypeInstruction, messages.TypeReply} {
+		t.Run("type_"+msgType, func(t *testing.T) {
+			fAgent, err := rulefacts.FromMessage(rulefacts.MessageInput{
+				Type: msgType, Sender: "agent:peer", SenderID: senderAgent.ID,
+				Recipient: "agent:dev-worker", Body: "hello", BodySource: rulefacts.BodySourceEvaluatedInput,
+				SenderEnd: &senderAgent, RecipientEnd: &recipient,
+			}, fixedConv, rulefacts.DeliveryInfo{Surface: "agent_dm", Via: "direct"})
+			require.NoError(t, err)
+
+			fUser, err := rulefacts.FromMessage(rulefacts.MessageInput{
+				Type: msgType, Sender: "user:peer", SenderID: senderUser.ID,
+				Recipient: "agent:dev-worker", Body: "hello", BodySource: rulefacts.BodySourceEvaluatedInput,
+				SenderEnd: &senderUser, RecipientEnd: &recipient,
+			}, fixedConv, rulefacts.DeliveryInfo{Surface: "web_chat", Via: "explicit"})
+			require.NoError(t, err)
+
+			inAgent := rulefacts.Project(fAgent, rulefacts.ScopePolicyIn).Map()
+			inUser := rulefacts.Project(fUser, rulefacts.ScopePolicyIn).Map()
+			assert.NotContains(t, inAgent, "sender")
+			assert.NotContains(t, inUser, "sender")
+
+			// Note: message.origin is sender-derived (authority: "agent" vs "user"),
+			// so in policy_in when varying sender kind, message.origin reflects the
+			// sender's authenticated principal kind; all other non-delivery fields
+			// must remain invariant.
+			allowed := map[string]bool{
+				"delivery.surface": true,
+				"delivery.via":     true,
+				"message.origin":   true,
+			}
+			if msgType == messages.TypeReply {
+				allowed["message.intent"] = true
+			}
+			for _, p := range diffPaths(flattenLeafPaths(t, inAgent), flattenLeafPaths(t, inUser)) {
+				assert.Truef(t, allowed[p], "type=%s: unexpected differing path %q in policy_in when varying sender kind", msgType, p)
+			}
+		})
+	}
 }
 
 // TestProject_SenderInvariance_In verifies Amendment A2 §2.1 & §3.1:
@@ -461,6 +638,15 @@ func TestProject_SenderInvariance_In(t *testing.T) {
 		func() (string, rulefacts.TemplateLookupStatus) { return "", rulefacts.TemplateLookupError },
 	)
 
+	fixedConv := rulefacts.ConversationInfo{
+		Ref:        "dm:fixed:key",
+		ID:         "conv-dm-fixed",
+		Kind:       "direct",
+		Surface:    "native",
+		ProjectID:  "proj-A",
+		AgentCount: 2,
+	}
+
 	buildFacts := func(s *rulefacts.End) rulefacts.Facts {
 		f, err := rulefacts.FromMessage(
 			rulefacts.MessageInput{
@@ -473,14 +659,7 @@ func TestProject_SenderInvariance_In(t *testing.T) {
 				SenderEnd:    s,
 				RecipientEnd: &recipient,
 			},
-			rulefacts.ConversationInfo{
-				Ref:        "dm:agent:" + s.ID + ":agent:" + recipient.ID,
-				ID:         "conv-dm-" + s.ID,
-				Kind:       "direct",
-				Surface:    "native",
-				ProjectID:  "proj-A",
-				AgentCount: 2,
-			},
+			fixedConv,
 			rulefacts.DeliveryInfo{
 				Surface: "agent_dm",
 				Via:     "direct",
@@ -747,24 +926,48 @@ func TestFromMessage_AllLegacyTypesParityWithMapLegacyEnvelope(t *testing.T) {
 }
 
 func TestProject_BodyTruncationUTF8Safe(t *testing.T) {
-	prefix := strings.Repeat("a", rulefacts.MaxBodyBytes-2)
-	rawBody := prefix + "🚀tail"
+	t.Run("4byte_emoji_straddling_cap", func(t *testing.T) {
+		prefix := strings.Repeat("a", rulefacts.MaxBodyBytes-2)
+		rawBody := prefix + "🚀tail"
 
-	facts, err := rulefacts.FromMessage(rulefacts.MessageInput{
-		Type:   messages.TypeInstruction,
-		Sender: "agent:dev",
-		Body:   rawBody,
-	}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_to_user"})
-	require.NoError(t, err)
+		facts, err := rulefacts.FromMessage(rulefacts.MessageInput{
+			Type:   messages.TypeInstruction,
+			Sender: "agent:dev",
+			Body:   rawBody,
+		}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_to_user"})
+		require.NoError(t, err)
 
-	act := rulefacts.Project(facts, rulefacts.ScopePolicyOut)
-	msg := act.Map()["message"].(map[string]any)
-	trunc := msg["body"].(string)
-	assert.True(t, utf8.ValidString(trunc))
-	assert.Equal(t, rulefacts.MaxBodyBytes-2, len(trunc))
-	assert.Equal(t, true, msg["body_truncated"])
-	assert.Equal(t, int64(len(rawBody)), msg["bytes"])
-	assert.Equal(t, string(rulefacts.BodySourceEvaluatedInput), msg["body_source"])
+		act := rulefacts.Project(facts, rulefacts.ScopePolicyOut)
+		msg := act.Map()["message"].(map[string]any)
+		trunc := msg["body"].(string)
+		assert.True(t, utf8.ValidString(trunc))
+		assert.Equal(t, rulefacts.MaxBodyBytes-2, len(trunc))
+		assert.Equal(t, true, msg["body_truncated"])
+		assert.Equal(t, int64(len(rawBody)), msg["bytes"])
+		assert.Equal(t, string(rulefacts.BodySourceEvaluatedInput), msg["body_source"])
+	})
+
+	// O-4 (kills mutant M7): 2-byte UTF-8 rune ("é", 0xC3 0xA9) starting at
+	// MaxBodyBytes-1 crosses the cap by exactly 1 byte and must not be split.
+	t.Run("2byte_rune_crosses_cap_by_one_byte", func(t *testing.T) {
+		rawBody := strings.Repeat("a", rulefacts.MaxBodyBytes-1) + "é"
+		require.Equal(t, rulefacts.MaxBodyBytes+1, len(rawBody))
+
+		facts, err := rulefacts.FromMessage(rulefacts.MessageInput{
+			Type:   messages.TypeInstruction,
+			Sender: "agent:dev",
+			Body:   rawBody,
+		}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_to_user"})
+		require.NoError(t, err)
+
+		act := rulefacts.Project(facts, rulefacts.ScopePolicyOut)
+		msg := act.Map()["message"].(map[string]any)
+		trunc := msg["body"].(string)
+		assert.True(t, utf8.ValidString(trunc), "truncated body must remain valid UTF-8")
+		assert.Equal(t, rulefacts.MaxBodyBytes-1, len(trunc), "2-byte rune crossing cap by 1 byte must be dropped cleanly")
+		assert.Equal(t, true, msg["body_truncated"])
+		assert.Equal(t, int64(len(rawBody)), msg["bytes"])
+	})
 }
 
 // TestFromMessage_ForgedTriggerSenderNonSystemType verifies arch-policy-chain
@@ -790,15 +993,24 @@ func TestFromMessage_ForgedTriggerSenderNonSystemType(t *testing.T) {
 		senderID  string
 		category  string
 		eventJSON []byte
+		senderEnd *rulefacts.End
 	}{
-		{"instruction_trigger", messages.TypeInstruction, "trigger", "TRIGGER", messages.SystemCategoryTrigger, rawTrig},
-		{"chat_trigger_with_id", messages.TypeChat, "trigger", "TRIGGER", messages.SystemCategoryTrigger, rawTrig},
-		{"state_change_trigger", messages.TypeStateChange, "trigger", "TRIGGER", messages.SystemCategoryTrigger, rawTrig},
-		{"chat_bare_trigger", messages.TypeChat, "trigger", "", "", nil},
-		{"system_trigger_wrong_category", messages.TypeSystem, "trigger", "TRIGGER", messages.SystemCategoryDeliveryFailed, rawTrig},
-		{"system_scheduler_wrong_id_and_category", messages.TypeSystem, "scheduler", "x", messages.SystemCategoryPortForward, nil},
-		{"system_empty_sender", messages.TypeSystem, "", "", "", nil},
-		{"chat_bare_hub", messages.TypeChat, "hub", "", "", nil},
+		{"instruction_trigger", messages.TypeInstruction, "trigger", "TRIGGER", messages.SystemCategoryTrigger, rawTrig, nil},
+		{"chat_trigger_with_id", messages.TypeChat, "trigger", "TRIGGER", messages.SystemCategoryTrigger, rawTrig, nil},
+		{"state_change_trigger", messages.TypeStateChange, "trigger", "TRIGGER", messages.SystemCategoryTrigger, rawTrig, nil},
+		{"chat_bare_trigger", messages.TypeChat, "trigger", "", "", nil, nil},
+		{"system_trigger_wrong_category", messages.TypeSystem, "trigger", "TRIGGER", messages.SystemCategoryDeliveryFailed, rawTrig, nil},
+		{"system_scheduler_wrong_id_and_category", messages.TypeSystem, "scheduler", "x", messages.SystemCategoryPortForward, nil, nil},
+		{"system_empty_sender", messages.TypeSystem, "", "", "", nil, nil},
+		{"chat_bare_hub", messages.TypeChat, "hub", "", "", nil, nil},
+		// R-1: bare Sender="system" with any non-system type or non-empty SenderID must error.
+		{"chat_bare_system", messages.TypeChat, "system", "", "", nil, nil},
+		{"instruction_bare_system", messages.TypeInstruction, "system", "", "", nil, nil},
+		{"state_change_bare_system", messages.TypeStateChange, "system", "", "", nil, nil},
+		{"system_bare_system_nonempty_id", messages.TypeSystem, "system", "forged-id", messages.SystemCategoryDeliveryFailed, nil, nil},
+		// O-2 (kills mutant M1d): SenderEnd.Kind in {system, conversation} with unrecognised Sender must error.
+		{"unrecognised_sender_with_system_end", messages.TypeChat, "hub", "", "", nil, &rulefacts.End{Kind: rulefacts.EndKindSystem, ID: "sys-1"}},
+		{"unrecognised_sender_with_conversation_end", messages.TypeChat, "hub", "", "", nil, &rulefacts.End{Kind: rulefacts.EndKindConversation, ID: "conv-1"}},
 	}
 
 	for _, tc := range cases {
@@ -815,6 +1027,7 @@ func TestFromMessage_ForgedTriggerSenderNonSystemType(t *testing.T) {
 				Body:      "forged",
 				Metadata:  md,
 				EventJSON: tc.eventJSON,
+				SenderEnd: tc.senderEnd,
 			}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_dm"})
 
 			require.Error(t, err, "unrecognised or forged sender must fail closed, not fall back to trusted origin")
@@ -828,6 +1041,27 @@ func TestFromMessage_ForgedTriggerSenderNonSystemType(t *testing.T) {
 				assert.Nil(t, got.Message.Event.Schedule)
 				assert.Nil(t, got.Message.Event.External)
 			}
+		})
+	}
+}
+
+// TestFromMessage_BridgeOriginRequiresNonNativeSurface verifies O-3 (kills
+// mutant M8): IsBridgeSender=true on a native (or empty) conversation surface
+// MUST NOT yield OriginBridge.
+func TestFromMessage_BridgeOriginRequiresNonNativeSurface(t *testing.T) {
+	for _, surface := range []string{"native", ""} {
+		t.Run("surface_"+surface, func(t *testing.T) {
+			got, err := rulefacts.FromMessage(rulefacts.MessageInput{
+				Type:           messages.TypeChat,
+				Sender:         "user:alice",
+				SenderID:       "user-uuid-1",
+				Recipient:      "agent:dev",
+				Body:           "hello",
+				IsBridgeSender: true,
+			}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1", Surface: surface}, rulefacts.DeliveryInfo{Surface: "group_post"})
+			require.NoError(t, err)
+			assert.Equal(t, rulefacts.OriginUser, got.Message.Origin)
+			assert.NotEqual(t, rulefacts.OriginBridge, got.Message.Origin)
 		})
 	}
 }
@@ -898,6 +1132,48 @@ func TestFromMessage_SchedulerCategoryGuardParity(t *testing.T) {
 	require.NotNil(t, got.Message.Event)
 	assert.Equal(t, string(mapped.Event.Type), got.Message.Event.Type)
 	assert.Nil(t, got.Message.Event.Schedule, "FromMessage must ignore schedule.fired EventJSON when category != scheduler")
+
+	// 3. O-1 (kills mutant M1c): single-variable SenderID mismatch —
+	// Type=system, Sender=scheduler, SenderID="x", category=scheduler with
+	// schedule.fired EventJSON must NOT yield OriginScheduler or a Schedule block.
+	legacyBadID := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: ts.Format(time.RFC3339),
+		Sender:    "scheduler",
+		SenderID:  "x",
+		Recipient: "agent:dev",
+		Type:      messages.TypeSystem,
+		Metadata:  map[string]string{"system_category": messages.SystemCategoryScheduler},
+		Event:     rawSched,
+	}
+	mappedBadID, _, err := messaging.MapLegacyEnvelope(legacyBadID, messaging.PersistedIdentity{MessageID: "id-sched-bad-id"})
+	require.NoError(t, err)
+	require.NotNil(t, mappedBadID.Event)
+	assert.Nil(t, mappedBadID.Event.Schedule, "MapLegacyEnvelope must ignore schedule.fired EventJSON when SenderID != SCHEDULER")
+
+	_, err = rulefacts.FromMessage(rulefacts.MessageInput{
+		Type:      legacyBadID.Type,
+		Sender:    legacyBadID.Sender,
+		SenderID:  legacyBadID.SenderID,
+		Recipient: legacyBadID.Recipient,
+		Metadata:  legacyBadID.Metadata,
+		EventJSON: legacyBadID.Event,
+	}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_dm"})
+	require.Error(t, err, "Sender=scheduler with wrong SenderID must fail closed without SenderEnd")
+
+	gotBadID, err := rulefacts.FromMessage(rulefacts.MessageInput{
+		Type:      legacyBadID.Type,
+		Sender:    legacyBadID.Sender,
+		SenderID:  legacyBadID.SenderID,
+		Recipient: legacyBadID.Recipient,
+		Metadata:  legacyBadID.Metadata,
+		EventJSON: legacyBadID.Event,
+		SenderEnd: &agentEnd,
+	}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_dm"})
+	require.NoError(t, err)
+	assert.NotEqual(t, rulefacts.OriginScheduler, gotBadID.Message.Origin)
+	require.NotNil(t, gotBadID.Message.Event)
+	assert.Nil(t, gotBadID.Message.Event.Schedule, "FromMessage must ignore schedule.fired EventJSON when SenderID != SCHEDULER")
 }
 
 // TestProject_AllEmittedPathsMatchSchema verifies O-1: every emitted path

@@ -172,19 +172,28 @@ func goldenFixtureCases(t *testing.T) []fixtureCase {
 		Event: rawSchedEvent,
 	}
 
-	// 3. event_system_delivery_failed: system delivery-failed notice
-	legacyDeliveryFailed := &messages.StructuredMessage{
-		Version:   messages.Version,
-		Timestamp: ts.Format(time.RFC3339),
-		Sender:    "system:hub",
-		SenderID:  "HUB",
-		Recipient: "agent:dev-worker",
-		Type:      messages.TypeSystem,
-		Msg:       "Delivery failed for agent:tech-lead",
-		Metadata: map[string]string{
-			"system_category": messages.SystemCategoryDeliveryFailed,
-		},
-	}
+	// 3. event_system_delivery_failed: real hub newDeliveryNotice shape (Sender="system", SenderID="", Status="DELIVERY_FAILED")
+	legacyDeliveryFailed := messages.NewSystemMessage("system", "agent:dev-worker", "Delivery failed for agent:tech-lead", messages.SystemCategoryDeliveryFailed)
+	legacyDeliveryFailed.Timestamp = ts.Format(time.RFC3339)
+	legacyDeliveryFailed.RecipientID = "agent-uuid-worker"
+	legacyDeliveryFailed.Status = "DELIVERY_FAILED"
+
+	// 3b. event_system_delivery_deferred: real hub newDeliveryNotice shape (Status="DELIVERY_DEFERRED")
+	legacyDeliveryDeferred := messages.NewSystemMessage("system", "agent:dev-worker", "agent \"tech-lead\" is reincarnating; message saved to history", messages.SystemCategoryDeliveryDeferred)
+	legacyDeliveryDeferred.Timestamp = ts.Format(time.RFC3339)
+	legacyDeliveryDeferred.RecipientID = "agent-uuid-worker"
+	legacyDeliveryDeferred.Status = "DELIVERY_DEFERRED"
+
+	// 3c. event_system_delivery_unconfirmed: real hub newDeliveryNotice shape (Status="DELIVERY_UNCONFIRMED")
+	legacyDeliveryUnconfirmed := messages.NewSystemMessage("system", "agent:dev-worker", "Message delivery to agent \"tech-lead\" is unconfirmed", messages.SystemCategoryDeliveryUnconfirmed)
+	legacyDeliveryUnconfirmed.Timestamp = ts.Format(time.RFC3339)
+	legacyDeliveryUnconfirmed.RecipientID = "agent-uuid-worker"
+	legacyDeliveryUnconfirmed.Status = "DELIVERY_UNCONFIRMED"
+
+	// 3d. event_system_artifact_review: real hub artifact-review notice shape (Sender="system", SenderID="")
+	legacyArtifactReview := messages.NewSystemMessage("system", "agent:dev-worker", "Artifact review published for design-doc", messages.SystemCategoryArtifactReview)
+	legacyArtifactReview.Timestamp = ts.Format(time.RFC3339)
+	legacyArtifactReview.RecipientID = "agent-uuid-worker"
 
 	// 4. event_agent_state_change: Q3 keep — agent-originated state-change event
 	legacyStateChange := &messages.StructuredMessage{
@@ -342,8 +351,95 @@ func goldenFixtureCases(t *testing.T) []fixtureCase {
 				Sender:       legacyDeliveryFailed.Sender,
 				SenderID:     legacyDeliveryFailed.SenderID,
 				Recipient:    legacyDeliveryFailed.Recipient,
+				Status:       legacyDeliveryFailed.Status,
 				Body:         legacyDeliveryFailed.Msg,
 				Metadata:     legacyDeliveryFailed.Metadata,
+				RecipientEnd: &agentWorker,
+			},
+			conv: rulefacts.ConversationInfo{
+				Ref:                 "conv-group-1",
+				ID:                  "conv-group-1",
+				Kind:                "group",
+				Surface:             "native",
+				ProjectID:           "proj-uuid-1",
+				AgentCount:          1,
+				AgentParticipantIDs: []string{"agent-uuid-worker"},
+			},
+			deliv: rulefacts.DeliveryInfo{
+				Surface: "agent_dm",
+				Via:     "direct",
+			},
+		},
+		{
+			name:   "event_system_delivery_deferred",
+			legacy: legacyDeliveryDeferred,
+			input: rulefacts.MessageInput{
+				ID:           "msg-event-delivery-deferred-1",
+				CreatedAt:    ts,
+				Type:         legacyDeliveryDeferred.Type,
+				Sender:       legacyDeliveryDeferred.Sender,
+				SenderID:     legacyDeliveryDeferred.SenderID,
+				Recipient:    legacyDeliveryDeferred.Recipient,
+				Status:       legacyDeliveryDeferred.Status,
+				Body:         legacyDeliveryDeferred.Msg,
+				Metadata:     legacyDeliveryDeferred.Metadata,
+				RecipientEnd: &agentWorker,
+			},
+			conv: rulefacts.ConversationInfo{
+				Ref:                 "conv-group-1",
+				ID:                  "conv-group-1",
+				Kind:                "group",
+				Surface:             "native",
+				ProjectID:           "proj-uuid-1",
+				AgentCount:          1,
+				AgentParticipantIDs: []string{"agent-uuid-worker"},
+			},
+			deliv: rulefacts.DeliveryInfo{
+				Surface: "agent_dm",
+				Via:     "direct",
+			},
+		},
+		{
+			name:   "event_system_delivery_unconfirmed",
+			legacy: legacyDeliveryUnconfirmed,
+			input: rulefacts.MessageInput{
+				ID:           "msg-event-delivery-unconfirmed-1",
+				CreatedAt:    ts,
+				Type:         legacyDeliveryUnconfirmed.Type,
+				Sender:       legacyDeliveryUnconfirmed.Sender,
+				SenderID:     legacyDeliveryUnconfirmed.SenderID,
+				Recipient:    legacyDeliveryUnconfirmed.Recipient,
+				Status:       legacyDeliveryUnconfirmed.Status,
+				Body:         legacyDeliveryUnconfirmed.Msg,
+				Metadata:     legacyDeliveryUnconfirmed.Metadata,
+				RecipientEnd: &agentWorker,
+			},
+			conv: rulefacts.ConversationInfo{
+				Ref:                 "conv-group-1",
+				ID:                  "conv-group-1",
+				Kind:                "group",
+				Surface:             "native",
+				ProjectID:           "proj-uuid-1",
+				AgentCount:          1,
+				AgentParticipantIDs: []string{"agent-uuid-worker"},
+			},
+			deliv: rulefacts.DeliveryInfo{
+				Surface: "agent_dm",
+				Via:     "direct",
+			},
+		},
+		{
+			name:   "event_system_artifact_review",
+			legacy: legacyArtifactReview,
+			input: rulefacts.MessageInput{
+				ID:           "msg-event-artifact-review-1",
+				CreatedAt:    ts,
+				Type:         legacyArtifactReview.Type,
+				Sender:       legacyArtifactReview.Sender,
+				SenderID:     legacyArtifactReview.SenderID,
+				Recipient:    legacyArtifactReview.Recipient,
+				Body:         legacyArtifactReview.Msg,
+				Metadata:     legacyArtifactReview.Metadata,
 				RecipientEnd: &agentWorker,
 			},
 			conv: rulefacts.ConversationInfo{
