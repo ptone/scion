@@ -462,8 +462,7 @@ func TestAgentRefresh_DeletedAgentDenied(t *testing.T) {
 	claims, err := srv.agentTokenService.ValidateAgentToken(token)
 	require.NoError(t, err)
 
-	agent.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+	markAgentSoftDeletedAt(t, context.Background(), s, agent.ID, time.Now())
 
 	req := buildAgentRefreshRequest(agentID, claims, "")
 	rec := httptest.NewRecorder()

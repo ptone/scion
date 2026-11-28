@@ -1436,8 +1436,7 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 		// active; only the handler's agentStandingForbidden check refuses it.
 		a, err := f.s.GetAgent(ctx, f.agentA.ID)
 		require.NoError(t, err)
-		a.DeletedAt = time.Now().UTC()
-		require.NoError(t, f.s.UpdateAgent(ctx, a))
+		markAgentSoftDeletedAt(t, ctx, f.s, a.ID, time.Now().UTC())
 		require.False(t, f.held(f.agentA.ID))
 		requireStandingReason(t, f.srv.agentStanding(ctx, f.agentA.ID), standingReasonAgentDeleted)
 

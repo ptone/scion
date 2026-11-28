@@ -636,8 +636,8 @@ func TestLifecycleStore2_UpdateAgentInTxObservedOnce(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		got.DeletedAt = time.Time{}
-		return tx.UpdateAgent(ctx, got)
+		_, err = tx.RestoreAgent(ctx, got.ID, got.StateVersion)
+		return err
 	}))
 	assert.Equal(t, "created@1[/1] deleted@2(soft)[/1] restored@3[/1]", lcFull(f.events(a.ID)))
 }
@@ -655,14 +655,14 @@ func TestLifecycleStore2_FinalizeHookObservedWrite(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		got.Message = "finalized"
-		return tx.UpdateAgent(ctx, got)
+		_, err = tx.RestoreAgent(ctx, got.ID, got.StateVersion)
+		return err
 	}
 	n, err := f.cs.FinalizeAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFinalizeSoft,
 		store.DeletionFields{DeletedAt: &now}, hook)
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
-	assert.Equal(t, "created@1[/1] deleted@2(soft)[/1]", lcFull(f.events(a.ID)))
+	assert.Equal(t, "created@1[/1] deleted@2(soft)[/1] restored@3[/1]", lcFull(f.events(a.ID)))
 	assert.Zero(t, f.counters.Get(telemetryemit.MetricResyncs, tc.CauseUnobservedChange))
 }
 

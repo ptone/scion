@@ -712,8 +712,7 @@ func TestTriggerLimits_RateConcurrencyAndProjectCap(t *testing.T) {
 		}
 		require.NoError(t, f.sched.store.CreateAgent(ctx, ag))
 		if deleted {
-			ag.DeletedAt = time.Now().UTC()
-			require.NoError(t, f.sched.store.UpdateAgent(ctx, ag))
+			markAgentSoftDeletedAt(t, ctx, f.sched.store, ag.ID, time.Now().UTC())
 		}
 	}
 	seedLabeledAgent("conc-live-1", "running", false, map[string]string{"trigger": concTr.ID})

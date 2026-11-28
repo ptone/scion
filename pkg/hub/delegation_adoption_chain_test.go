@@ -247,8 +247,7 @@ func TestRevokedAdoptedAncestorDeniesDescendant(t *testing.T) {
 	runBootAdoption(t, g.store)
 	legacy, err := g.store.GetAgent(ctx, g.legacy.ID)
 	require.NoError(t, err)
-	legacy.DeletedAt = time.Now()
-	require.NoError(t, g.store.UpdateAgent(ctx, legacy))
+	markAgentSoftDeletedAt(t, ctx, g.store, legacy.ID, time.Now())
 	assert.Equal(t, http.StatusForbidden, g.createAsParent(t, gToken, g.assignBody("adopt-revoke-del-x")).Code)
 }
 

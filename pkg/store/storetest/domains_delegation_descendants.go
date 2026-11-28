@@ -214,14 +214,12 @@ func DelegationDescendantsConformance(t *testing.T, factory Factory) {
 			require.NoError(t, s.DeleteAgent(ctx, hard))
 			ag, err := s.GetAgent(ctx, gone)
 			require.NoError(t, err)
-			ag.DeletedAt = now
-			require.NoError(t, s.UpdateAgent(ctx, ag))
+			softDeleteAgentAt(t, ctx, s, ag.ID, now)
 			// A soft-deleted legacy child of the user.
 			legacyGone := f.agent(t, ctx, f.project, func(ag *store.Agent) { ag.OwnerID = f.user })
 			lg, err := s.GetAgent(ctx, legacyGone)
 			require.NoError(t, err)
-			lg.DeletedAt = now
-			require.NoError(t, s.UpdateAgent(ctx, lg))
+			softDeleteAgentAt(t, ctx, s, lg.ID, now)
 
 			q := f.query()
 			q.LegacyLinks = true
@@ -258,8 +256,7 @@ func DelegationDescendantsConformance(t *testing.T, factory Factory) {
 			f.agentEdge(t, ctx, hardChild, hardGrand)
 			ag, err := s.GetAgent(ctx, softChild)
 			require.NoError(t, err)
-			ag.DeletedAt = now
-			require.NoError(t, s.UpdateAgent(ctx, ag))
+			softDeleteAgentAt(t, ctx, s, ag.ID, now)
 			require.NoError(t, s.DeleteAgent(ctx, hardChild))
 
 			for _, includeSoftDeleted := range []bool{false, true} {
@@ -294,8 +291,7 @@ func DelegationDescendantsConformance(t *testing.T, factory Factory) {
 			f.agentEdge(t, ctx, purged, grand)
 			ag, err := s.GetAgent(ctx, purged)
 			require.NoError(t, err)
-			ag.DeletedAt = deletedAt
-			require.NoError(t, s.UpdateAgent(ctx, ag))
+			softDeleteAgentAt(t, ctx, s, ag.ID, deletedAt)
 			n, err := s.PurgeDeletedAgents(ctx, time.Now())
 			require.NoError(t, err)
 			require.GreaterOrEqual(t, n, 1)
@@ -334,8 +330,7 @@ func DelegationDescendantsConformance(t *testing.T, factory Factory) {
 			f.agentEdge(t, ctx, purged, grand)
 			ag, err := s.GetAgent(ctx, purged)
 			require.NoError(t, err)
-			ag.DeletedAt = deletedAt
-			require.NoError(t, s.UpdateAgent(ctx, ag))
+			softDeleteAgentAt(t, ctx, s, ag.ID, deletedAt)
 			n, err := s.PurgeDeletedAgents(ctx, time.Now())
 			require.NoError(t, err)
 			require.GreaterOrEqual(t, n, 1)
@@ -368,8 +363,7 @@ func DelegationDescendantsConformance(t *testing.T, factory Factory) {
 			f.agentEdge(t, ctx, x, child)
 			ag, err := s.GetAgent(ctx, x)
 			require.NoError(t, err)
-			ag.DeletedAt = time.Now()
-			require.NoError(t, s.UpdateAgent(ctx, ag))
+			softDeleteAgentAt(t, ctx, s, ag.ID, time.Now())
 
 			res, err := listDescendants(t, s, f.query())
 			require.NoError(t, err)

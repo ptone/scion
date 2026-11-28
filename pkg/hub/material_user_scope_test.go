@@ -218,8 +218,7 @@ func TestAgentSecretRead_AgentAuthoredRowRefusedByChain_DeletedSource(t *testing
 
 	creator, err := f.Store.GetAgent(ctx, creatorAgentID)
 	require.NoError(t, err)
-	creator.DeletedAt = time.Now()
-	require.NoError(t, f.Store.UpdateAgent(ctx, creator))
+	markAgentSoftDeletedAt(t, ctx, f.Store, creator.ID, time.Now())
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+grandchildID+"/secrets/SOURCE_DELETED_KEY?scope=user", nil, grandchildToken)
 	if rec.Code != http.StatusNotFound {

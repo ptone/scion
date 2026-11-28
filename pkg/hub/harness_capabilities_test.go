@@ -322,8 +322,7 @@ func TestUpdateAgent_AllowsConfigUpdateWhenStoppedAndRejectsWhenRunning(t *testi
 		dbAgent, err := s.GetAgent(ctx, agent.ID)
 		require.NoError(t, err)
 		dbAgent.Phase = string(state.PhaseStopped)
-		dbAgent.DeletedAt = dbAgent.Created
-		require.NoError(t, s.UpdateAgent(ctx, dbAgent))
+		markAgentSoftDeletedAt(t, ctx, s, dbAgent.ID, dbAgent.Created)
 
 		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
 			"config": map[string]interface{}{

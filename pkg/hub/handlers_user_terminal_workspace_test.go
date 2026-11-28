@@ -364,8 +364,7 @@ func TestTerminalWorkspace_Pruning(t *testing.T) {
 
 	agentA := twAgent(t, s, alice.ID) // kept: owned by alice
 	agentB := twAgent(t, s, alice.ID) // soft-deleted
-	agentB.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, agentB))
+	markAgentSoftDeletedAt(t, ctx, s, agentB.ID, time.Now())
 	agentCID := api.NewUUID()   // does not exist at all
 	agentD := twAgent(t, s, "") // exists, but alice cannot attach (not owned by her, no binding)
 	agentE := twAgent(t, s, alice.ID)

@@ -530,8 +530,7 @@ func TestAgentSecrets_LifecyclePersistenceHardDeletePurgeAndCleanup(t *testing.T
 
 	// 3. Retention purge of soft-deleted agentY: local DB rows MUST be removed.
 	past := time.Now().Add(-48 * time.Hour)
-	agentY.DeletedAt = past
-	require.NoError(t, s.UpdateAgent(ctx, agentY))
+	markAgentSoftDeletedAt(t, ctx, s, agentY.ID, past)
 	n, err := s.PurgeDeletedAgentsByID(ctx, []string{agentY.ID}, time.Now().Add(-24*time.Hour))
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
@@ -823,8 +822,7 @@ func TestAgentSecrets_HardDeleteRouteAndPurgeExpiredAgentsCallExternalCleanup(t 
 		"hard delete route must invoke post-commit backend.Delete via deletionEngine.finish")
 
 	// 2. Retention purge of soft-deleted agentY through purgeExpiredAgents.
-	agentY.DeletedAt = time.Now().Add(-48 * time.Hour)
-	require.NoError(t, s.UpdateAgent(ctx, agentY))
+	markAgentSoftDeletedAt(t, ctx, s, agentY.ID, time.Now().Add(-48*time.Hour))
 	purged, err := srv.purgeExpiredAgents(ctx, time.Now().Add(-24*time.Hour))
 	require.NoError(t, err)
 	assert.Equal(t, 1, purged)

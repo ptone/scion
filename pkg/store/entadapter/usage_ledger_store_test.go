@@ -1085,8 +1085,7 @@ func TestBackfillActiveRunAttributions_Idempotent(t *testing.T) {
 	now := time.Now().UTC()
 	loaded4, err := cs.GetAgent(ctx, ag4.ID)
 	require.NoError(t, err)
-	loaded4.DeletedAt = now
-	require.NoError(t, cs.UpdateAgent(ctx, loaded4))
+	softDeleteAgentAt(t, ctx, cs, loaded4.ID, now)
 
 	// Agent 5: active, already has an attribution row (must remain untouched).
 	ag5 := makeAgent(projectID, "bf-5")

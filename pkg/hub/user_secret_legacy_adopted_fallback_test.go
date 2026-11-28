@@ -545,8 +545,7 @@ func TestLegacyAdoptedFallback_CohortStillRefusedOnS2S4S4a(t *testing.T) {
 		{"deleted agent (S2)", DenyCauseCeilingOrphaned, func(t *testing.T, f *lafFixture, agentID string) {
 			a, err := f.Store.GetAgent(context.Background(), agentID)
 			require.NoError(t, err)
-			a.DeletedAt = time.Now()
-			require.NoError(t, f.Store.UpdateAgent(context.Background(), a))
+			markAgentSoftDeletedAt(t, context.Background(), f.Store, a.ID, time.Now())
 		}},
 		{"inactive owner (S4)", DenyCauseCeilingOrphaned, func(t *testing.T, f *lafFixture, _ string) {
 			u, err := f.Store.GetUser(context.Background(), f.UserID)

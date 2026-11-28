@@ -196,8 +196,7 @@ func TestConduitAgentRefresh_RefusalsClose4401(t *testing.T) {
 			tok := f.agentToken(t, f.launched)
 			a, err := f.store.GetAgent(context.Background(), f.launched.ID)
 			require.NoError(t, err)
-			a.DeletedAt = time.Now()
-			require.NoError(t, f.store.UpdateAgent(context.Background(), a))
+			markAgentSoftDeletedAt(t, context.Background(), f.store, a.ID, time.Now())
 			return tok
 		}},
 		{name: "agent held", token: func(t *testing.T, f *relayFixture) string {

@@ -89,8 +89,7 @@ func lgSoftDelete(t *testing.T, m *ldFixture, id string) {
 	t.Helper()
 	ag, err := m.store.GetAgent(context.Background(), id)
 	require.NoError(t, err)
-	ag.DeletedAt = time.Now()
-	require.NoError(t, m.store.UpdateAgent(context.Background(), ag))
+	markAgentSoftDeletedAt(t, context.Background(), m.store, ag.ID, time.Now())
 }
 
 // lgV1Row is the compatibility policy V1 row of role (no assigned service

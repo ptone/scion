@@ -113,8 +113,7 @@ func TestRuntimeOrphans_Classification(t *testing.T) {
 	require.NoError(t, f.s.DeleteAgent(ctx, gone.ID)) // a forced, hard delete
 	reused := f.addAgent("reused", "running", "working")
 	soft := f.addAgent("soft", "running", "working")
-	soft.DeletedAt = time.Now()
-	require.NoError(t, f.s.UpdateAgent(ctx, soft))
+	markAgentSoftDeletedAt(t, ctx, f.s, soft.ID, time.Now())
 	elsewhere := f.addAgent("elsewhere", "running", "working", func(a *store.Agent) { a.RuntimeBrokerID = other.ID })
 	lease := time.Now().Add(time.Hour)
 	deleting := f.addAgent("deleting", "running", "working", func(a *store.Agent) { a.RuntimeBrokerID = other.ID })

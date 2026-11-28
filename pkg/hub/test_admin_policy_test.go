@@ -733,8 +733,7 @@ func TestTestSuperAdmin_AE1Scenario(t *testing.T) {
 			ProjectID: projectID, Phase: "stopped", CreatedBy: human.ID, OwnerID: human.ID}
 		require.NoError(t, s.CreateAgent(ctx, a))
 		if i >= 4 {
-			a.DeletedAt = time.Now()
-			require.NoError(t, s.UpdateAgent(ctx, a))
+			markAgentSoftDeletedAt(t, ctx, s, a.ID, time.Now())
 			deleted = append(deleted, a.ID)
 			continue
 		}

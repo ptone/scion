@@ -411,8 +411,7 @@ func TestRestoreNullOpIDReactivatesNothing(t *testing.T) {
 		store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, At: &now, OpID: "unrecorded"})
 	require.NoError(t, err)
 	row := mustGetAgent(t, s, agent.ID)
-	row.DeletedAt = now
-	require.NoError(t, s.UpdateAgent(ctx, row))
+	markAgentSoftDeletedAt(t, ctx, s, row.ID, now)
 	require.Empty(t, mustGetAgent(t, s, agent.ID).SoftDeleteOpID)
 
 	rec := restoreForTest(t, srv, agent.ID)

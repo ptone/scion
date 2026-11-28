@@ -1019,6 +1019,11 @@ func (r *userLockRecordingStore) UpdateAgent(ctx context.Context, a *store.Agent
 	return r.Store.UpdateAgent(ctx, a)
 }
 
+func (r *userLockRecordingStore) RestoreAgent(ctx context.Context, id string, expectedVersion int64) (int64, error) {
+	r.record("update:" + id)
+	return r.Store.RestoreAgent(ctx, id, expectedVersion)
+}
+
 // requireBefore asserts both events were recorded, first before second.
 func requireBefore(t *testing.T, r *userLockRecordingStore, first, second string) {
 	t.Helper()

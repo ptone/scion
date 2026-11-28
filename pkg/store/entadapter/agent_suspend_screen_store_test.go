@@ -130,8 +130,7 @@ func TestAgentSuspendScreenStore_CascadeOnDelete(t *testing.T) {
 		// Soft-delete the agent with a past timestamp so PurgeDeletedAgents removes it.
 		ag, err := cs.GetAgent(ctx, aid)
 		require.NoError(t, err)
-		ag.DeletedAt = time.Now().UTC().Add(-2 * time.Hour)
-		require.NoError(t, cs.UpdateAgent(ctx, ag))
+		softDeleteAgentAt(t, ctx, cs, ag.ID, time.Now().UTC().Add(-2*time.Hour))
 
 		// Soft-deleted agent still has its row until purge.
 		got, err := cs.GetAgentSuspendScreen(ctx, aid)

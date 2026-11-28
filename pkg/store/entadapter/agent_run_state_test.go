@@ -46,8 +46,7 @@ func TestGetAgentRunState(t *testing.T) {
 	require.NoError(t, err)
 	row, err := s.GetAgent(ctx, deleted.ID)
 	require.NoError(t, err)
-	row.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, row))
+	softDeleteAgentAt(t, ctx, s, row.ID, time.Now())
 
 	norun := makeAgent(projectID, "run-state-norun")
 	require.NoError(t, s.CreateAgent(ctx, norun))

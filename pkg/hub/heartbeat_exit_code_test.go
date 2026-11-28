@@ -77,10 +77,9 @@ func TestHeartbeatExitCode_SuppressedDuringReincarnation(t *testing.T) {
 				oldLastSeen := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
 				agent := getAgentState(t, s, agentSlug, projectID)
 				agent.ReincarnationState = state
-				agent.LastSeen = oldLastSeen
 				require.NoError(t, s.UpdateAgent(context.Background(), agent))
 				before := getAgentState(t, s, agentSlug, projectID)
-				require.True(t, before.LastSeen.Equal(oldLastSeen), "sanity: the known old LastSeen must be stored")
+				require.True(t, before.LastSeen.IsZero(), "sanity: LastSeen starts unset before the heartbeat")
 
 				ec := 137
 				code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{

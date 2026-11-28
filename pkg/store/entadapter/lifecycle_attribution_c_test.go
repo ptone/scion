@@ -127,8 +127,8 @@ func TestLifecycleAttribution_T14Rollback(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			a.DeletedAt = time.Time{}
-			return f.cs.UpdateAgent(context.Background(), a)
+			_, err = f.cs.RestoreAgent(context.Background(), a.ID, a.StateVersion)
+			return err
 		}},
 		{"establishing mint", heldAfterSoftFinish, func(f *lifecycleFixture, id string) error {
 			_, err := f.cs.SetAgentRunID(context.Background(), id, "R2", nil)

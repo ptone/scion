@@ -43,8 +43,7 @@ func TestHold_DescendantTree(t *testing.T) {
 	ctx := context.Background()
 	sched := f.newAgentRow("tree-sched", "", f.childC.ID, nil)
 	deleted := f.newAgentRow("tree-deleted", sched.ID, sched.ID, nil)
-	deleted.DeletedAt = time.Now()
-	require.NoError(t, f.s.UpdateAgent(ctx, deleted))
+	markAgentSoftDeletedAt(t, ctx, f.s, deleted.ID, time.Now())
 	otherProject := tid("ms-tree-other-project")
 	createRS1Project(t, f.s, otherProject, tid("ms-tree-other-owner"))
 

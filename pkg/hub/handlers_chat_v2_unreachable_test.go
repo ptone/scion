@@ -338,10 +338,7 @@ func TestUnreachableNC_DM_DeletedPeerAgent(t *testing.T) {
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatal(err)
 	}
-	agent.DeletedAt = time.Now()
-	if err := s.UpdateAgent(ctx, agent); err != nil {
-		t.Fatal(err)
-	}
+	markAgentSoftDeletedAt(t, ctx, s, agent.ID, time.Now())
 
 	dmKey := "dm:agent:" + agent.ID + ":user:" + DevUserID
 	setDMConversationID(t, s, dmKey, proj.ID)
@@ -547,8 +544,7 @@ func TestUnreachableNC_DM_DeletedAndMissingAgentSameOutcome(t *testing.T) {
 	soft := &store.Agent{ID: tid("dm-soft-gone"), ProjectID: proj.ID, Name: "Soft", Slug: "soft-gone",
 		Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID}
 	require.NoError(t, s.CreateAgent(ctx, soft))
-	soft.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, soft))
+	markAgentSoftDeletedAt(t, ctx, s, soft.ID, time.Now())
 
 	hard := &store.Agent{ID: tid("dm-hard-gone"), ProjectID: proj.ID, Name: "Hard", Slug: "hard-gone",
 		Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID}

@@ -152,8 +152,7 @@ func TestAgentStore_UpdateAgentConfig_SoftDeletedIsNotFound(t *testing.T) {
 	a := seedPendingConfigAgent(t, ctx, cs)
 	cur, err := cs.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
-	cur.DeletedAt = time.Now()
-	require.NoError(t, cs.UpdateAgent(ctx, cur))
+	softDeleteAgentAt(t, ctx, cs, cur.ID, time.Now())
 
 	_, err = cs.UpdateAgentConfig(ctx, a.ID, cur.StateVersion, cur.AppliedConfig, samplePendingConfig())
 	assert.ErrorIs(t, err, store.ErrNotFound)

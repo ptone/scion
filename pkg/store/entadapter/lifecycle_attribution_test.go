@@ -80,14 +80,16 @@ func checkLaunchMap(t *testing.T, evs []*tc.LifecycleEvent, banned ...string) {
 	}
 }
 
-// restore clears deleted_at as restoreAgentTx does (UpdateAgent; run_id is
+// restore clears deleted_at as restoreAgentTx does (RestoreAgent; run_id is
 // not written).
 func (f *lifecycleFixture) restore(id string) {
 	f.t.Helper()
-	f.update(context.Background(), id, func(a *store.Agent) {
-		a.DeletedAt = time.Time{}
-		a.SoftDeleteOpID = ""
-	})
+	ctx := context.Background()
+	a, err := f.cs.GetAgent(ctx, id)
+	require.NoError(f.t, err)
+	_, err = f.cs.RestoreAgent(ctx, a.ID, a.StateVersion)
+	require.NoError(f.t, err)
+	require.NoError(f.t, f.cs.SetAgentSoftDeleteOpID(ctx, a.ID, ""))
 }
 
 // metaEdit is a metadata-only edit of the row (metadata_changed).

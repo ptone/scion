@@ -293,8 +293,7 @@ func TestDescendantRead_AgentDelegatorChecksStillApply(t *testing.T) {
 
 	l, err := d.store.GetAgent(ctx, d.l.ID)
 	require.NoError(t, err)
-	l.DeletedAt = time.Now()
-	require.NoError(t, d.store.UpdateAgent(ctx, l))
+	markAgentSoftDeletedAt(t, ctx, d.store, l.ID, time.Now())
 
 	var explain []DecisionStep
 	var cause DenyCause

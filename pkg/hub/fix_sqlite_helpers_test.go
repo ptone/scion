@@ -448,8 +448,7 @@ func rollbackDeletes() []rollbackDelete {
 		{name: "soft deleted", apply: func(t *testing.T, s store.Store, id string) {
 			a, err := s.GetAgent(context.Background(), id)
 			require.NoError(t, err)
-			a.DeletedAt = time.Now()
-			require.NoError(t, s.UpdateAgent(context.Background(), a))
+			markAgentSoftDeletedAt(t, context.Background(), s, a.ID, time.Now())
 		}, held: true, softDeleted: true},
 		{name: "hard deleted", apply: func(t *testing.T, s store.Store, id string) {
 			require.NoError(t, s.DeleteAgent(context.Background(), id))

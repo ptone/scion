@@ -427,8 +427,7 @@ func TestPublishAgentCreatedIfLive_DeletionStates(t *testing.T) {
 			}
 			if tc.soft {
 				row := mustGetAgent(t, s, agent.ID)
-				row.DeletedAt = time.Now()
-				require.NoError(t, s.UpdateAgent(ctx, row))
+				markAgentSoftDeletedAt(t, ctx, s, row.ID, time.Now())
 				require.False(t, mustGetAgent(t, s, agent.ID).DeletedAt.IsZero())
 			}
 			if tc.gone {

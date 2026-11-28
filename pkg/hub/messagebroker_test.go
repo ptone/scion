@@ -1390,8 +1390,7 @@ func TestMessageBrokerProxy_CreatedForDeletedAgentDoesNotSubscribe(t *testing.T)
 			require.NoError(t, s.DeleteAgent(context.Background(), a.ID))
 		}, false},
 		{"soft-deleted", func(t *testing.T, s store.Store, a *store.Agent) {
-			a.DeletedAt = time.Now()
-			require.NoError(t, s.UpdateAgent(context.Background(), a))
+			markAgentSoftDeletedAt(t, context.Background(), s, a.ID, time.Now())
 		}, false},
 		{"delete-claimed", func(t *testing.T, s store.Store, a *store.Agent) {
 			lease := time.Now().Add(time.Minute)

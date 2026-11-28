@@ -62,8 +62,7 @@ func TestAgentSecretRead_ProjectScopeSoftDeletedParentDenies(t *testing.T) {
 
 	parent, err := f.Store.GetAgent(ctx, parentID)
 	require.NoError(t, err)
-	parent.DeletedAt = time.Now()
-	require.NoError(t, f.Store.UpdateAgent(ctx, parent))
+	markAgentSoftDeletedAt(t, ctx, f.Store, parent.ID, time.Now())
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+childID+"/secrets/SOFT_DEL_PARENT_KEY", nil, childToken)
 	require.Equal(t, http.StatusNotFound, rec.Code, "retained soft-deleted parent supplies no authority: %s", rec.Body.String())
@@ -106,8 +105,7 @@ func TestAgentSecretRead_ProjectScopeSoftDeletedGrandparentDenies(t *testing.T) 
 
 	grandparent, err := f.Store.GetAgent(ctx, grandparentID)
 	require.NoError(t, err)
-	grandparent.DeletedAt = time.Now()
-	require.NoError(t, f.Store.UpdateAgent(ctx, grandparent))
+	markAgentSoftDeletedAt(t, ctx, f.Store, grandparent.ID, time.Now())
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+childID+"/secrets/SOFT_DEL_GRANDPARENT_KEY", nil, childToken)
 	require.Equal(t, http.StatusNotFound, rec.Code, "retained soft-deleted grandparent supplies no authority: %s", rec.Body.String())

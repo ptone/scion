@@ -57,8 +57,7 @@ var landingDeletes = []struct {
 	{"soft-deleted", func(t *testing.T, s store.Store, id string) {
 		a, err := s.GetAgent(context.Background(), id)
 		require.NoError(t, err)
-		a.DeletedAt = time.Now()
-		require.NoError(t, s.UpdateAgent(context.Background(), a))
+		markAgentSoftDeletedAt(t, context.Background(), s, a.ID, time.Now())
 	}, true},
 	{"delete-claimed", func(t *testing.T, s store.Store, id string) {
 		claimForTest(t, s, id, store.DeletionStateDeleting, time.Minute)

@@ -125,8 +125,7 @@ func TestStanding_DeletedAgentDenied(t *testing.T) {
 	ctx := context.Background()
 	a, err := f.s.GetAgent(ctx, f.agentA.ID)
 	require.NoError(t, err)
-	a.DeletedAt = time.Now()
-	require.NoError(t, f.s.UpdateAgent(ctx, a))
+	markAgentSoftDeletedAt(t, ctx, f.s, a.ID, time.Now())
 	requireStandingReason(t, f.srv.agentStanding(ctx, f.agentA.ID), standingReasonAgentDeleted)
 	requireStandingReason(t, f.srv.agentStanding(ctx, f.childC.ID), standingReasonChainDeleted)
 }

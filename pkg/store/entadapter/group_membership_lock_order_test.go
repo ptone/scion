@@ -185,8 +185,7 @@ func newLoHiProject(t *testing.T, cs *CompositeStore, softDeleted bool) string {
 		if softDeleted {
 			got, err := cs.GetAgent(ctx, a.ID)
 			require.NoError(t, err)
-			got.DeletedAt = time.Now().Add(-48 * time.Hour)
-			require.NoError(t, cs.UpdateAgent(ctx, got))
+			softDeleteAgentAt(t, ctx, cs, got.ID, time.Now().Add(-48*time.Hour))
 		}
 	}
 	return pid

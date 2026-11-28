@@ -1513,11 +1513,7 @@ func readRuleSetup(t *testing.T, n int, callerOwns func(i int) bool) *readRuleFi
 
 func markAgentSoftDeleted(t *testing.T, s store.Store, agentID string) {
 	t.Helper()
-	ctx := context.Background()
-	a, err := s.GetAgent(ctx, agentID)
-	require.NoError(t, err)
-	a.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, a))
+	markAgentSoftDeletedAt(t, context.Background(), s, agentID, time.Now())
 }
 
 // createFillerAgents adds n agents to projectID, all created after any agent

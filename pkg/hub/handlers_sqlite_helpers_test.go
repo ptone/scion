@@ -2424,10 +2424,7 @@ func unreachableTestSetup(t *testing.T, phase string, deleted bool, disp AgentDi
 		t.Fatal(err)
 	}
 	if deleted {
-		a.DeletedAt = time.Now()
-		if err := s.UpdateAgent(ctx, a); err != nil {
-			t.Fatal(err)
-		}
+		markAgentSoftDeletedAt(t, ctx, s, a.ID, time.Now())
 	}
 	topicID := tid("unreachable-topic-" + phase)
 	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "unreachable-" + phase,

@@ -573,8 +573,7 @@ func TestAgentListSecrets_UnrecordedChainMatchesPerItemCheck(t *testing.T) {
 
 	deletedLineageAgent, err := f.Store.GetAgent(ctx, deletedLineageAgentID)
 	require.NoError(t, err)
-	deletedLineageAgent.DeletedAt = time.Now()
-	require.NoError(t, f.Store.UpdateAgent(ctx, deletedLineageAgent))
+	markAgentSoftDeletedAt(t, ctx, f.Store, deletedLineageAgent.ID, time.Now())
 
 	listRec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+childID+"/secrets?scope=user", nil, childToken)
 	if listRec.Code != http.StatusOK {

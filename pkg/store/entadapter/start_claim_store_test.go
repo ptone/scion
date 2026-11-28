@@ -170,11 +170,15 @@ func TestStartClaim_PredicateMismatch(t *testing.T) {
 	// CreateAgent may not persist every field above; write them back whole.
 	persist := func(t *testing.T, a *store.Agent) {
 		t.Helper()
-		cur, err := s.GetAgent(ctx, a.ID)
-		require.NoError(t, err)
-		cur.ReincarnationState = a.ReincarnationState
-		cur.DeletedAt = a.DeletedAt
-		require.NoError(t, s.UpdateAgent(ctx, cur))
+		if a.ReincarnationState != "" {
+			cur, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			cur.ReincarnationState = a.ReincarnationState
+			require.NoError(t, s.UpdateAgent(ctx, cur))
+		}
+		if !a.DeletedAt.IsZero() {
+			softDeleteAgentAt(t, ctx, s, a.ID, a.DeletedAt)
+		}
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -940,8 +944,7 @@ func TestStartClaim_WritesKeepUpdatedAndListSkipsDeleted(t *testing.T) {
 	require.NoError(t, err)
 	cur, err := s.GetAgent(ctx, gone.ID)
 	require.NoError(t, err)
-	cur.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, cur))
+	softDeleteAgentAt(t, ctx, s, cur.ID, time.Now())
 	list, err := s.ListAgentsWithStartClaim(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, list, "soft-deleted agents are not listed")

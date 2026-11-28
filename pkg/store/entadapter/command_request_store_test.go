@@ -1130,10 +1130,7 @@ func TestCommandRequest_PurgeDeletedAgentsWithdrawsPending(t *testing.T) {
 	if err := cs.CreateAgent(ctx, purgedAgent); err != nil {
 		t.Fatalf("CreateAgent(purged): %v", err)
 	}
-	purgedAgent.DeletedAt = now.Add(-48 * time.Hour)
-	if err := cs.UpdateAgent(ctx, purgedAgent); err != nil {
-		t.Fatalf("UpdateAgent(purged): %v", err)
-	}
+	softDeleteAgentAt(t, ctx, cs, purgedAgent.ID, now.Add(-48*time.Hour))
 
 	liveAgent := makeAgent(projectID, "live-asker")
 	if err := cs.CreateAgent(ctx, liveAgent); err != nil {

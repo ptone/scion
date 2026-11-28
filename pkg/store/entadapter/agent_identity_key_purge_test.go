@@ -128,8 +128,7 @@ func TestCompositeStore_PurgeDeletedAgents_FreesIdentityKeys(t *testing.T) {
 	require.NoError(t, cs.ReplaceAgentIdentityKeys(ctx, agentID, projectID, []string{"purge-me"}))
 
 	// Soft-delete, old enough to be in scope for the purge cutoff below.
-	agent.DeletedAt = time.Now().Add(-48 * time.Hour)
-	require.NoError(t, cs.UpdateAgent(ctx, agent))
+	softDeleteAgentAt(t, ctx, cs, agent.ID, time.Now().Add(-48*time.Hour))
 
 	purged, err := cs.PurgeDeletedAgents(ctx, time.Now().Add(-24*time.Hour))
 	require.NoError(t, err)
@@ -182,8 +181,7 @@ func TestCompositeStore_PurgeDeletedAgents_RetainsRecentAgentsAndKeys(t *testing
 	require.NoError(t, cs.CreateAgent(ctx, agent))
 	require.NoError(t, cs.ReplaceAgentIdentityKeys(ctx, agentID, projectID, []string{"recently-deleted"}))
 
-	agent.DeletedAt = time.Now().Add(-1 * time.Hour)
-	require.NoError(t, cs.UpdateAgent(ctx, agent))
+	softDeleteAgentAt(t, ctx, cs, agent.ID, time.Now().Add(-1*time.Hour))
 
 	purged, err := cs.PurgeDeletedAgents(ctx, time.Now().Add(-24*time.Hour))
 	require.NoError(t, err)
@@ -237,8 +235,7 @@ func TestCompositeStore_PurgeDeletedAgents_RestoreDuringPurgeSurvives(t *testing
 	require.NoError(t, cs.CreateAgent(ctx, raceAgent))
 	require.NoError(t, cs.ReplaceAgentIdentityKeys(ctx, agentID, projectID, []string{"race-agent"}))
 
-	raceAgent.DeletedAt = time.Now().Add(-48 * time.Hour)
-	require.NoError(t, cs.UpdateAgent(ctx, raceAgent))
+	softDeleteAgentAt(t, ctx, cs, raceAgent.ID, time.Now().Add(-48*time.Hour))
 
 	// A second equally-eligible agent, in the same batch, that is never
 	// touched by the hook: it must still be purged normally. This is what
@@ -256,8 +253,7 @@ func TestCompositeStore_PurgeDeletedAgents_RestoreDuringPurgeSurvives(t *testing
 	require.NoError(t, cs.CreateAgent(ctx, stayDeletedAgent))
 	require.NoError(t, cs.ReplaceAgentIdentityKeys(ctx, stayDeletedID, projectID, []string{"stay-deleted-agent"}))
 
-	stayDeletedAgent.DeletedAt = time.Now().Add(-48 * time.Hour)
-	require.NoError(t, cs.UpdateAgent(ctx, stayDeletedAgent))
+	softDeleteAgentAt(t, ctx, cs, stayDeletedAgent.ID, time.Now().Add(-48*time.Hour))
 
 	purgeDeletedAgentsTestHook = func(tx *ent.Tx, batchCandidateIDs []uuid.UUID) {
 		require.NoError(t, tx.Agent.UpdateOneID(agentUID).ClearDeletedAt().Exec(ctx))
@@ -330,8 +326,7 @@ func TestCompositeStore_PurgeDeletedAgents_ScopesRemovedSetToBatch(t *testing.T)
 		require.NoError(t, cs.CreateAgent(ctx, a))
 		require.NoError(t, cs.ReplaceAgentIdentityKeys(ctx, id, projectID, []string{slug}))
 
-		a.DeletedAt = time.Now().Add(-48 * time.Hour)
-		require.NoError(t, cs.UpdateAgent(ctx, a))
+		softDeleteAgentAt(t, ctx, cs, a.ID, time.Now().Add(-48*time.Hour))
 	}
 
 	// On the first batch invocation only, restore whichever known agent ID is

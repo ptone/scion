@@ -815,7 +815,7 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 			return mapError(err)
 		}
 		if affected == 0 {
-			return agentUpdateConflictError(ctx, s.client.Agent, uid)
+			return agentUpdateConflictError(ctx, s.client.Agent, uid, expectedVersion)
 		}
 		a.Updated = now
 		a.StateVersion = newVersion
@@ -848,7 +848,7 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 	// it needs (state_version, launch_state) rather than the full row, and
 	// wraps a read error the same way main's Exist-based check does.
 	injectAgentRunningRace("before_probe")
-	probeVersion, probeLaunchState, err := s.probeAgentVersionAndLaunchState(ctx, uid)
+	probeVersion, probeLaunchState, probeDeleted, err := s.probeAgentVersionAndLaunchState(ctx, uid)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return store.ErrNotFound
@@ -857,6 +857,9 @@ func (s *AgentStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
 	}
 	if probeVersion != expectedVersion {
 		return store.ErrVersionConflict
+	}
+	if probeDeleted {
+		return store.ErrNotFound
 	}
 	if probeLaunchState != store.LaunchStateActive {
 		// The version still matches, but launch_state is no longer active —
@@ -955,29 +958,30 @@ func (s *AgentStore) tryRunningFastPath(ctx context.Context, uid uuid.UUID, a *s
 // agentVersionAndLaunchState is the projection probeAgentVersionAndLaunchState
 // reads; struct tags name the columns for ent's generated Select+Scan.
 type agentVersionAndLaunchState struct {
-	StateVersion int64  `sql:"state_version"`
-	LaunchState  string `sql:"launch_state"`
+	StateVersion int64      `sql:"state_version"`
+	LaunchState  string     `sql:"launch_state"`
+	DeletedAt    *time.Time `sql:"deleted_at"`
 }
 
-// probeAgentVersionAndLaunchState reads just state_version and launch_state
-// for uid — the two columns UpdateAgent's running-write fast-path miss needs
-// to disambiguate a conflict from a genuinely active launch — rather than
-// the full row. Returns store.ErrNotFound if the row doesn't exist; any
-// other read error is wrapped the same way agentUpdateConflictError's
-// Exist-based check wraps main's.
-func (s *AgentStore) probeAgentVersionAndLaunchState(ctx context.Context, uid uuid.UUID) (int64, string, error) {
+// probeAgentVersionAndLaunchState reads just state_version, launch_state, and
+// deleted_at for uid — the columns UpdateAgent's running-write fast-path miss
+// needs to disambiguate a conflict, a soft-deleted row, or a genuinely active
+// launch — rather than the full row. Returns store.ErrNotFound if the row
+// doesn't exist; any other read error is wrapped the same way
+// agentUpdateConflictError's check wraps reads.
+func (s *AgentStore) probeAgentVersionAndLaunchState(ctx context.Context, uid uuid.UUID) (int64, string, bool, error) {
 	var rows []agentVersionAndLaunchState
 	err := s.client.Agent.Query().
 		Where(agent.IDEQ(uid)).
-		Select(agent.FieldStateVersion, agent.FieldLaunchState).
+		Select(agent.FieldStateVersion, agent.FieldLaunchState, agent.FieldDeletedAt).
 		Scan(ctx, &rows)
 	if err != nil {
-		return 0, "", fmt.Errorf("ent: check existence: %w", err)
+		return 0, "", false, fmt.Errorf("ent: check existence: %w", err)
 	}
 	if len(rows) == 0 {
-		return 0, "", store.ErrNotFound
+		return 0, "", false, store.ErrNotFound
 	}
-	return rows[0].StateVersion, rows[0].LaunchState, nil
+	return rows[0].StateVersion, rows[0].LaunchState, rows[0].DeletedAt != nil, nil
 }
 
 // agentRunningTxFailureHook, when non-nil, is called inside
@@ -1040,7 +1044,7 @@ func (s *AgentStore) updateAgentRunningTx(ctx context.Context, client *ent.Clien
 		return time.Time{}, mapError(err)
 	}
 	if affected == 0 {
-		return time.Time{}, agentUpdateConflictError(ctx, client.Agent, uid)
+		return time.Time{}, agentUpdateConflictError(ctx, client.Agent, uid, expectedVersion)
 	}
 
 	if err := injectAgentRunningTxFailure(); err != nil {
@@ -1090,7 +1094,7 @@ func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWri
 			if affected, err = update.Save(ctx); err != nil {
 				err = mapError(err)
 			} else if affected == 0 {
-				err = agentUpdateConflictError(ctx, client.Agent, uid)
+				err = agentUpdateConflictError(ctx, client.Agent, uid, expectedVersion)
 			}
 		}
 	}
@@ -1130,7 +1134,7 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 		a.AppliedConfig.NativeCloudRun = native
 	}
 	update := ac.Update().
-		Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), keepNative).
+		Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), agent.DeletedAtIsNil(), keepNative).
 		SetSlug(a.Slug).
 		SetName(a.Name).
 		SetTemplate(a.Template).
@@ -1196,11 +1200,6 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 		hc = a.HarnessConfig
 	}
 	update.SetHarnessConfig(hc)
-	if a.LastSeen.IsZero() {
-		update.ClearLastSeen()
-	} else {
-		update.SetLastSeen(a.LastSeen)
-	}
 	// Whole-row LastActivityEvent writes are monotonic: never rewind below the
 	// stored row's LastActivityEvent (for example when sciontool's first
 	// running status report lands before afterStart's stale-snapshot
@@ -1223,11 +1222,6 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 		update.ClearLastActivityEvent()
 	} else {
 		update.SetLastActivityEvent(effectiveLAE)
-	}
-	if a.DeletedAt.IsZero() {
-		update.ClearDeletedAt()
-	} else {
-		update.SetDeletedAt(a.DeletedAt)
 	}
 	// Execution containers hold human CLI credentials (ptone/scion#8812 §3.4 S8):
 	// changing or clearing owner_id of an execution container is refused at the
@@ -1273,17 +1267,90 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 	return update, effectiveLAE, nil
 }
 
-// agentUpdateConflictError distinguishes a missing agent from a stale write
-// so callers can retry conflicts, for a CAS update that matched zero rows.
-func agentUpdateConflictError(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID) error {
-	exists, err := ac.Query().Where(agent.IDEQ(uid)).Exist(ctx)
+// agentVersionAndDeletedAt is the projection agentUpdateConflictError and
+// RestoreAgent read to disambiguate missing rows, version conflicts, and
+// soft-deleted rows.
+type agentVersionAndDeletedAt struct {
+	StateVersion int64      `sql:"state_version"`
+	DeletedAt    *time.Time `sql:"deleted_at"`
+}
+
+// agentUpdateConflictError distinguishes a missing or soft-deleted agent from
+// a stale write so callers can retry conflicts, for a CAS update that matched
+// zero rows. When state_version differs (including after a concurrent soft
+// delete that bumped state_version), it returns store.ErrVersionConflict so
+// callers that branch on ErrVersionConflict to detect delete-won continue to
+// do so; when state_version matches on a soft-deleted row, it returns
+// store.ErrNotFound.
+func agentUpdateConflictError(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, expectedVersion int64) error {
+	var rows []agentVersionAndDeletedAt
+	err := ac.Query().
+		Where(agent.IDEQ(uid)).
+		Select(agent.FieldStateVersion, agent.FieldDeletedAt).
+		Scan(ctx, &rows)
 	if err != nil {
 		return err
 	}
-	if !exists {
+	if len(rows) == 0 {
+		return store.ErrNotFound
+	}
+	if rows[0].StateVersion != expectedVersion {
+		return store.ErrVersionConflict
+	}
+	if rows[0].DeletedAt != nil {
 		return store.ErrNotFound
 	}
 	return store.ErrVersionConflict
+}
+
+// RestoreAgent clears deleted_at on a soft-deleted agent, compare-and-set on
+// expectedVersion, and bumps state_version. It is the only post-create writer
+// that clears deleted_at. When a lifecycle observer is installed, the write is
+// observed in its own transaction (or the caller's), matching UpdateAgent and
+// UpdateAgentConfig.
+func (s *AgentStore) RestoreAgent(ctx context.Context, id string, expectedVersion int64) (int64, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now()
+	newVersion := expectedVersion + 1
+	write := func(ac *ent.AgentClient) (int, error) {
+		n, err := ac.Update().
+			Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), agent.DeletedAtNotNil()).
+			ClearDeletedAt().
+			SetStateVersion(newVersion).
+			SetUpdated(now).
+			Save(ctx)
+		return n, mapError(err)
+	}
+	var affected int
+	if obs := s.lifecycle.load(); obs != nil {
+		affected, err = s.observedAgentWrite(ctx, obs, uid, store.AgentWriteUpdate, store.AgentWriteHints{},
+			func(c *ent.Client) (int, error) { return write(c.Agent) })
+	} else {
+		affected, err = write(s.client.Agent)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if affected == 0 {
+		var rows []agentVersionAndDeletedAt
+		if err := s.client.Agent.Query().
+			Where(agent.IDEQ(uid)).
+			Select(agent.FieldStateVersion, agent.FieldDeletedAt).
+			Scan(ctx, &rows); err != nil {
+			return 0, err
+		}
+		if len(rows) == 0 {
+			return 0, store.ErrNotFound
+		}
+		if rows[0].StateVersion != expectedVersion {
+			return 0, store.ErrVersionConflict
+		}
+		return 0, store.ErrNotFound
+	}
+	return newVersion, nil
 }
 
 // DeleteAgent permanently removes an agent by ID (hard delete).

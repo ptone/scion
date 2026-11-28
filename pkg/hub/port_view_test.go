@@ -415,8 +415,7 @@ func TestPortView_UniformFailure(t *testing.T) {
 	require.NoError(t, f.store.UpdateAgentExposedPorts(ctx, deleted.ID, []store.ExposedPort{{Port: port, Host: conduitProxyHost, Mode: "rw"}}))
 	got, err := f.store.GetAgent(ctx, deleted.ID)
 	require.NoError(t, err)
-	got.DeletedAt = now
-	require.NoError(t, f.store.UpdateAgent(ctx, got))
+	markAgentSoftDeletedAt(t, ctx, f.store, got.ID, now)
 	got, err = f.store.GetAgent(ctx, deleted.ID)
 	require.NoError(t, err)
 	require.False(t, got.DeletedAt.IsZero(), "the agent is soft-deleted")

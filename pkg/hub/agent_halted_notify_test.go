@@ -230,8 +230,7 @@ func TestDispatchHalted_CreatorFallback(t *testing.T) {
 		e.watched.CreatedBy = e.subscriber.ID
 		creator, err := e.store.GetAgent(ctx, e.subscriber.ID)
 		require.NoError(t, err)
-		creator.DeletedAt = time.Now()
-		require.NoError(t, e.store.UpdateAgent(ctx, creator))
+		markAgentSoftDeletedAt(t, ctx, e.store, creator.ID, time.Now())
 		e.nd.dispatchHalted(ctx, e.watched, "stopped")
 		assert.Empty(t, e.dispatcher.getCalls())
 		assert.Empty(t, e.statuses(t, store.SubscriberTypeAgent, e.subscriber.Slug))

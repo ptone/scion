@@ -106,8 +106,7 @@ func TestProjectDelete_SoftDeletedAgentDoesNotBlock(t *testing.T) {
 	disp := &deleteDispatcher{}
 	srv.SetDispatcher(disp)
 	project, _, agent := setupOnlineBrokerAgent(t, s, "pd-guard-tomb")
-	agent.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, agent))
+	markAgentSoftDeletedAt(t, ctx, s, agent.ID, time.Now())
 
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())

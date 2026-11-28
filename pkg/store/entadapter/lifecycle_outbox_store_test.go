@@ -599,9 +599,9 @@ func TestLifecycleStore_DeleteOfSoftDeletedAndRestore(t *testing.T) {
 	f.finalize(context.Background(), b.ID, store.DeletionFinalizeSoft)
 	got, err := f.cs.GetAgent(context.Background(), b.ID)
 	require.NoError(t, err)
-	// Restore is UpdateAgent clearing deleted_at (observed since slice 2).
-	got.DeletedAt = time.Time{}
-	require.NoError(t, f.cs.UpdateAgent(context.Background(), got))
+	// Restore clears deleted_at via RestoreAgent (observed since slice 2).
+	_, err = f.cs.RestoreAgent(context.Background(), got.ID, got.StateVersion)
+	require.NoError(t, err)
 	f.finalize(context.Background(), b.ID, store.DeletionFinalizeHard)
 	evs, _ = lifecycleEvents(t, f.cs, b.ID)
 	assert.Equal(t, "created@1 deleted@2(soft) restored@3 deleted@4(hard)", lcSeq(evs))

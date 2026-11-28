@@ -306,7 +306,7 @@ func TestAgentStore_UpdateAgentRacesNativeRecord(t *testing.T) {
 	n, err := update.Save(ctx)
 	require.NoError(t, err)
 	assert.Zero(t, n, "the write built before the record matches nothing")
-	assert.ErrorIs(t, agentUpdateConflictError(ctx, s.client.Agent, uid), store.ErrVersionConflict)
+	assert.ErrorIs(t, agentUpdateConflictError(ctx, s.client.Agent, uid, cur.StateVersion), store.ErrVersionConflict)
 	assert.True(t, storedNativeCloudRun(t, s, a.ID))
 
 	require.NoError(t, s.UpdateAgent(ctx, cur), "a retry reads the row again")

@@ -393,8 +393,7 @@ func TestDecisionPromptDismiss_GoneAsker(t *testing.T) {
 	before := len(f.dispatcher.getMessages())
 
 	// 1. Soft-deleted asking agent -> 200 delivered=false, stored, NOT marked failed, NOT dispatched.
-	f.agent.DeletedAt = time.Now().UTC()
-	require.NoError(t, f.store.UpdateAgent(ctx, f.agent))
+	markAgentSoftDeletedAt(t, ctx, f.store, f.agent.ID, time.Now().UTC())
 
 	softOut := decodeDismissResponse(t, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+softMsg.ID+"/dismiss", map[string]interface{}{
 		"reason": "Agent was soft-deleted",

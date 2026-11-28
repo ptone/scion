@@ -57,8 +57,7 @@ func addRetainedPurgeAgent(t *testing.T, s store.Store, suffix string, deletedAg
 	_, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
 	require.NoError(t, err)
 	a = mustGetAgent(t, s, a.ID)
-	a.DeletedAt = time.Now().Add(-deletedAgo)
-	require.NoError(t, s.UpdateAgent(ctx, a))
+	markAgentSoftDeletedAt(t, ctx, s, a.ID, time.Now().Add(-deletedAgo))
 	got := mustGetAgent(t, s, a.ID)
 	require.Equal(t, "run-1", got.RunID)
 	return got
@@ -162,8 +161,7 @@ func TestPurgeExpiredAgents_PurgesEachRecordWhileClaimed(t *testing.T) {
 func TestPurgeExpiredAgents_NoRunIDPurgesWithoutDispatch(t *testing.T) {
 	srv, s, disp, _ := retainedPurgeFixture(t, "norun-x", 2*time.Hour)
 	legacy := setupBrokerAgentInPhase(t, s, "rp-norun", state.PhaseStopped)
-	legacy.DeletedAt = time.Now().Add(-2 * time.Hour)
-	require.NoError(t, s.UpdateAgent(context.Background(), legacy))
+	markAgentSoftDeletedAt(t, context.Background(), s, legacy.ID, time.Now().Add(-2*time.Hour))
 	require.Empty(t, mustGetAgent(t, s, legacy.ID).RunID)
 
 	var dispatched []string

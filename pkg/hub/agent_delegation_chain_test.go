@@ -791,15 +791,15 @@ func TestAgentDelegation_AgentAndIssuerStateAtExchangeAndUse(t *testing.T) {
 func (f *adtFixture) mutateAgentDeleted(t *testing.T, agentID string) func() {
 	t.Helper()
 	ctx := context.Background()
-	a, err := f.store.GetAgent(ctx, agentID)
+	now := time.Now()
+	n, err := f.store.UpdateAgentDeletion(ctx, agentID, store.DeletionPredicate{}, store.DeletionFields{DeletedAt: &now})
 	require.NoError(t, err)
-	a.DeletedAt = time.Now()
-	require.NoError(t, f.store.UpdateAgent(ctx, a))
+	require.Equal(t, 1, n)
 	return func() {
 		again, err := f.store.GetAgent(ctx, agentID)
 		require.NoError(t, err)
-		again.DeletedAt = time.Time{}
-		require.NoError(t, f.store.UpdateAgent(ctx, again))
+		_, err = f.store.RestoreAgent(ctx, again.ID, again.StateVersion)
+		require.NoError(t, err)
 	}
 }
 

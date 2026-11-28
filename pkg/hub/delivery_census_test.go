@@ -206,8 +206,7 @@ func TestLaunchDeliveryCensus_SkipsDeletedAgents(t *testing.T) {
 	hdAgent(t, f.store, gone, f.projectAlpha.ID, []string{f.projectOwnerID})
 	ag, err := f.store.GetAgent(ctx, gone)
 	require.NoError(t, err)
-	ag.DeletedAt = time.Now()
-	require.NoError(t, f.store.UpdateAgent(ctx, ag))
+	markAgentSoftDeletedAt(t, ctx, f.store, ag.ID, time.Now())
 
 	rep, err := f.authz.LaunchDeliveryCensus(ctx, false)
 	require.NoError(t, err)

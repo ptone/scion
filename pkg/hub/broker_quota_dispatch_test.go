@@ -1309,8 +1309,7 @@ func TestRestart_FinalReassertSkippedWhenDeleteOwnsRow(t *testing.T) {
 				}
 				row, err := s.GetAgent(ctx, a.ID)
 				require.NoError(t, err)
-				row.DeletedAt = time.Now()
-				require.NoError(t, s.UpdateAgent(ctx, row))
+				markAgentSoftDeletedAt(t, ctx, s, row.ID, time.Now())
 			}
 
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
