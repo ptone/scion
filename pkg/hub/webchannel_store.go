@@ -287,9 +287,17 @@ type WebChatStore interface {
 	// Returns the number of rows affected.
 	UpdateThreadID(ctx context.Context, oldThreadID, newThreadID string) (int, error)
 
-	// DeleteDM removes all webchat_dm rows for the given conversation key,
-	// and the scheduled messages of that conversation.
-	DeleteDM(ctx context.Context, conversationKey string) error
+	// SoftDeleteDM atomically soft-deletes a native DM's live conversation row
+	// (when present), removes its thread-group membership, and clears its
+	// webchat_dm, webchat_read_state, and webchat_mention rows.
+	//
+	// If inactiveBefore is non-nil, the delete only proceeds when a live native
+	// conversation row exists with last_activity_at < *inactiveBefore; otherwise
+	// the transaction rolls back and ErrLifecycleSkipped is returned.
+	//
+	// A pre-conversation legacy DM with registry rows but no conversation row
+	// (when inactiveBefore is nil) still clears the registry and returns "".
+	SoftDeleteDM(ctx context.Context, dmKey string, inactiveBefore *time.Time) (convID string, err error)
 
 	// MigrateReadState re-keys all webchat_read_state rows from oldKey to newKey.
 	// Uses UPDATE rather than DELETE+INSERT to preserve pinned/muted flags.
@@ -1476,8 +1484,12 @@ ON CONFLICT DO NOTHING`
 // The conversations table is Ent-managed and may not exist in test
 // environments or during initial setup.
 func (s *sqliteWebChatStore) hasConversationsTable() bool {
+	return s.hasTable("conversations")
+}
+
+func (s *sqliteWebChatStore) hasTable(name string) bool {
 	var count int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='conversations'").Scan(&count)
+	err := s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", name).Scan(&count)
 	return err == nil && count > 0
 }
 
@@ -2977,22 +2989,115 @@ func (s *sqliteWebChatStore) UpdateThreadID(ctx context.Context, oldThreadID, ne
 	return int(n), nil
 }
 
-// DeleteDM removes all webchat_dm rows for the given conversation key,
-// and the scheduled messages and stars of that conversation.
-func (s *sqliteWebChatStore) DeleteDM(ctx context.Context, conversationKey string) error {
-	const query = `DELETE FROM webchat_dm WHERE conversation_key = ?`
-	_, err := s.db.ExecContext(ctx, query, conversationKey)
+// ErrLifecycleSkipped is returned by predicated lifecycle store writes (such as
+// SoftDeleteDM with a non-nil inactiveBefore) when no live conversation matched
+// the predicate (for example, it became active concurrently).
+var ErrLifecycleSkipped = errors.New("webchat store: conversation did not match lifecycle predicate")
+
+// parseSQLiteTimestamp parses a timestamp value scanned from an Ent or webchat
+// SQLite column (which may be a time.Time or an RFC3339/SQLite timestamp string).
+func parseSQLiteTimestamp(v any) (time.Time, bool) {
+	switch t := v.(type) {
+	case time.Time:
+		return t.UTC(), !t.IsZero()
+	case string:
+		for _, layout := range []string{
+			time.RFC3339Nano,
+			time.RFC3339,
+			"2006-01-02 15:04:05.999999999-07:00",
+			"2006-01-02 15:04:05.999999999Z07:00",
+			"2006-01-02 15:04:05.999999999+00:00",
+			"2006-01-02 15:04:05-07:00",
+			"2006-01-02 15:04:05",
+		} {
+			if parsed, err := time.Parse(layout, t); err == nil {
+				return parsed.UTC(), true
+			}
+		}
+	case []byte:
+		return parseSQLiteTimestamp(string(t))
+	}
+	return time.Time{}, false
+}
+
+// SoftDeleteDM atomically soft-deletes a native DM's live conversation row,
+// removes its thread-group membership, and clears its webchat_dm,
+// webchat_read_state, and webchat_mention rows.
+func (s *sqliteWebChatStore) SoftDeleteDM(ctx context.Context, dmKey string, inactiveBefore *time.Time) (string, error) {
+	// Check for optional Ent tables BEFORE starting the transaction to avoid
+	// ambient pool access inside the tx (INVARIANT U-TX-1).
+	hasConv := s.hasTable("conversations")
+	hasTGM := s.hasTable("thread_group_members")
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return fmt.Errorf("webchat store: delete DM: %w", err)
+		return "", fmt.Errorf("webchat store: soft-delete DM begin tx: %w", err)
 	}
-	// The conversation's scheduled messages and stars go with it.
-	if _, err := s.DeleteScheduledMessagesForConversation(ctx, conversationKey); err != nil {
-		return fmt.Errorf("webchat store: delete DM: %w", err)
+	defer tx.Rollback() //nolint:errcheck
+
+	var convID string
+	if hasConv {
+		var id string
+		var rawLastActivity any
+		err := tx.QueryRowContext(ctx,
+			`SELECT id, last_activity_at FROM conversations
+			  WHERE surface = 'native' AND external_ref = ? AND deleted_at IS NULL
+			  LIMIT 1`,
+			dmKey).Scan(&id, &rawLastActivity)
+		switch {
+		case err == nil:
+			if inactiveBefore != nil {
+				lastActivity, ok := parseSQLiteTimestamp(rawLastActivity)
+				if !ok || !lastActivity.Before(*inactiveBefore) {
+					return "", ErrLifecycleSkipped
+				}
+			}
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			res, err := tx.ExecContext(ctx,
+				`UPDATE conversations SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`,
+				now, id)
+			if err != nil {
+				return "", fmt.Errorf("webchat store: soft-delete DM conversation: %w", err)
+			}
+			if n, _ := res.RowsAffected(); n == 0 && inactiveBefore != nil {
+				return "", ErrLifecycleSkipped
+			}
+			convID = id
+		case errors.Is(err, sql.ErrNoRows):
+			if inactiveBefore != nil {
+				return "", ErrLifecycleSkipped
+			}
+		default:
+			return "", fmt.Errorf("webchat store: soft-delete DM lookup: %w", err)
+		}
+	} else if inactiveBefore != nil {
+		return "", ErrLifecycleSkipped
 	}
-	if _, err := s.DeleteMessageStarsForConversation(ctx, conversationKey); err != nil {
-		return fmt.Errorf("webchat store: delete DM: %w", err)
+
+	if convID != "" && hasTGM {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM thread_group_members WHERE conversation_id = ?`, convID); err != nil {
+			return "", fmt.Errorf("webchat store: soft-delete DM thread group members: %w", err)
+		}
 	}
-	return nil
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM webchat_dm WHERE conversation_key = ?`, dmKey); err != nil {
+		return "", fmt.Errorf("webchat store: soft-delete DM registry: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM webchat_read_state WHERE conversation_key = ?`, dmKey); err != nil {
+		return "", fmt.Errorf("webchat store: soft-delete DM read state: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM webchat_mention WHERE conversation_key = ?`, dmKey); err != nil {
+		return "", fmt.Errorf("webchat store: soft-delete DM mentions: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("webchat store: soft-delete DM commit: %w", err)
+	}
+	return convID, nil
 }
 
 // MigrateReadState re-keys all webchat_read_state rows from oldKey to newKey.

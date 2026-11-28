@@ -176,6 +176,7 @@
 - [inbox.conversation.defaultagent.set](#inboxconversationdefaultagentset) — Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it. A user on a project conversation then needs the set_default_agent action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action set_default_agent and reason read_only without it), decided before the body is read; agents and groups with no project are not decided by it
 - [inbox.conversation.participant.add](#inboxconversationparticipantadd) — Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer. A user on a project conversation then needs the add_participant action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action add_participant and reason read_only without it), decided before the body is read; agents and groups with no project are not decided by it
 - [inbox.conversation.leave](#inboxconversationleave) — Leave a conversation the caller takes part in. A token needs inbox:write for the conversation
+- [inbox.conversation.delete](#inboxconversationdelete) — Soft-delete a native DM conversation (both participants) behind hub.conversation_lifecycle. Human callers only (session or scoped UAT with inbox:write for the conversation and agent:read on the peer agent); agents are refused with 403 and non-participants get 404
 - [inbox.conversation.resolve](#inboxconversationresolve) — Resolve a conversation reference. A group reference needs project:read on its project and an agent reference needs agent:read on the agent, for every user caller; a token also needs inbox:read for the result
 - [project.threadgroup.list](#projectthreadgrouplist) — List a project's chat thread groups. Needs project:read on the project; an agent must belong to it
 - [project.threadgroup.read](#projectthreadgroupread) — Read a chat thread group. Needs project:read on the group's project; an agent must belong to it
@@ -7095,6 +7096,46 @@
 ### Tests
 
 - `pkg/hub:TestConversationLeaveToken_RequiresInboxWrite`
+
+---
+
+## inbox.conversation.delete
+
+**Domain:** inbox
+
+**Description:** Soft-delete a native DM conversation (both participants) behind hub.conversation_lifecycle. Human callers only (session or scoped UAT with inbox:write for the conversation and agent:read on the peer agent); agents are refused with 403 and non-participants get 404
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/conversations/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `inbox.conversation.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** conversation_id
+- **Atomic:** No
+- **Non-Atomic Justification:** DM soft-delete records conversations.deleted_at in one transaction; messages remain until chat retention Phase B and lifecycle events publish post-commit
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestConversationLifecycle_DeleteDM_AuthzMatrix`
 
 ---
 

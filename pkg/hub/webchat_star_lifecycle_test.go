@@ -463,8 +463,8 @@ func TestMessageStarStore_SQLite_SingleConnection(t *testing.T) {
 	assert.EqualValues(t, 1, n)
 }
 
-// TestMessageStarStore_SQLite_DeleteDMClearsStars: removing a DM removes
-// the stars listed under it, as it removes its scheduled messages.
+// TestMessageStarStore_SQLite_DeleteDMClearsStars: deleting a DM's stars clears
+// the stars listed under that DM key.
 func TestMessageStarStore_SQLite_DeleteDMClearsStars(t *testing.T) {
 	wcs, db := newPromoteTestStore(t)
 	defer db.Close() //nolint:errcheck
@@ -475,7 +475,11 @@ func TestMessageStarStore_SQLite_DeleteDMClearsStars(t *testing.T) {
 	_, _, err := stars.AddMessageStar(ctx, "user-uuid-1", StarTarget{MessageID: "msg-2",
 		Selector: StarSelector{ConversationKey: dmKey, Channel: "web", ThreadID: dmKey}})
 	require.NoError(t, err)
-	require.NoError(t, wcs.DeleteDM(ctx, dmKey))
+	_, err = wcs.SoftDeleteDM(ctx, dmKey, nil)
+	require.NoError(t, err)
+	n, err := stars.DeleteMessageStarsForConversation(ctx, dmKey)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, n)
 	got, err := stars.GetMessageStar(ctx, "user-uuid-1", "msg-2")
 	require.NoError(t, err)
 	assert.Nil(t, got)

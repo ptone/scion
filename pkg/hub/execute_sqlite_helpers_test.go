@@ -316,6 +316,9 @@ func (e *agentKeysEventSpy) PublishChatMessageDeleted(_ context.Context, _, _ st
 func (e *agentKeysEventSpy) PublishDMPromotedEvent(_ context.Context, _ string, _ WebChatTopic) {
 	e.record("PublishDMPromotedEvent")
 }
+func (e *agentKeysEventSpy) PublishChatDMLifecycleEvent(_ context.Context, _, _, _ string) {
+	e.record("PublishChatDMLifecycleEvent")
+}
 func (e *agentKeysEventSpy) PublishChatScheduledEvent(_ context.Context, _ string, _ ChatScheduledEvent) {
 	e.record("PublishChatScheduledEvent")
 }

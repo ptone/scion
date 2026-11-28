@@ -361,6 +361,32 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
+		ID:          "inbox.conversation.delete",
+		Domain:      "inbox",
+		Description: "Soft-delete a native DM conversation (both participants) behind hub.conversation_lifecycle. Human callers only (session or scoped UAT with inbox:write for the conversation and agent:read on the peer agent); agents are refused with 403 and non-participants get 404",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/{id}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "self-principal",
+		BasePermission:   "inbox.write",
+		Effects:          []SecurityEffect{EffectDeleteResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:              "inbox.conversation.delete",
+			ContextFields:          []string{"actor_id"},
+			BeforeFields:           []string{"conversation_id"},
+			NonAtomicJustification: "DM soft-delete records conversations.deleted_at in one transaction; messages remain until chat retention Phase B and lifecycle events publish post-commit",
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestConversationLifecycle_DeleteDM_AuthzMatrix"},
+		},
+		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
 		ID:          "inbox.conversation.resolve",
 		Domain:      "inbox",
 		Description: "Resolve a conversation reference. A group reference needs project:read on its project and an agent reference needs agent:read on the agent, for every user caller; a token also needs inbox:read for the result",

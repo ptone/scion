@@ -558,9 +558,7 @@ func TestThreadGroups_AddThreadValidation(t *testing.T) {
 
 	// A soft-deleted conversation.
 	goneConv, _ := f.thread(t, f.projA, "gone-conversation")
-	now := time.Now().UTC()
-	goneConv.DeletedAt = &now
-	require.NoError(t, f.s.UpdateConversation(ctx, goneConv))
+	require.NoError(t, f.s.DeleteConversation(ctx, goneConv.ID))
 	assert.Equal(t, http.StatusNotFound, add(map[string]string{"conversationId": goneConv.ID}).Code)
 
 	// Unknown IDs and bad bodies.

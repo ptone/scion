@@ -86,6 +86,7 @@ Commands:
   scion conversation get <conv-ref>             Get conversation details
   scion conversation get-message <ref> <msg-id> Get a message from a conversation
   scion conversation create <name>              Create a new group conversation
+  scion conversation delete <ref>...            Delete one or more conversations
   scion conversation set-default <ref> <agent>  Set default agent for a conversation
   scion conversation group ...                  Manage project thread groups
 

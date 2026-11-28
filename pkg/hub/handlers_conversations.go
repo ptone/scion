@@ -434,7 +434,14 @@ func (s *Server) handleConversationRoutes(w http.ResponseWriter, r *http.Request
 
 	switch action {
 	case "":
-		s.handleGetConversation(w, r, id)
+		switch r.Method {
+		case http.MethodGet:
+			s.handleGetConversation(w, r, id)
+		case http.MethodDelete:
+			s.handleDeleteConversation(w, r, id)
+		default:
+			MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
+		}
 	case "messages":
 		s.handleConvListMessages(w, r, id)
 	case "watch":

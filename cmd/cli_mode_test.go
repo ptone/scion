@@ -867,6 +867,7 @@ func TestAgentModeGatedSubcommandsFail(t *testing.T) {
 		"project.init",
 		"shared-dir.create",
 		"skills.create",
+		"conversation.delete",
 		"conversation.group.delete",
 		"hub.test-identity.delegate",
 		"artifact.share",

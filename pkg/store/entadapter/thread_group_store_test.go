@@ -778,7 +778,7 @@ func TestDeleteConversation_MembershipRemovalInSameTransaction(t *testing.T) {
 	assert.Equal(t, 1, memberRows(t, cs, conv))
 }
 
-func TestUpdateConversation_SettingDeletedAtRemovesMembership(t *testing.T) {
+func TestUpdateConversation_DoesNotModifyLifecycleOrMembership(t *testing.T) {
 	ctx := context.Background()
 	cs := newThreadGroupTestStore(t)
 	projectID := uuid.NewString()
@@ -786,53 +786,46 @@ func TestUpdateConversation_SettingDeletedAtRemovesMembership(t *testing.T) {
 	conv := newGroupConversation(t, cs, projectID)
 	require.NoError(t, cs.SetThreadGroupMember(ctx, g.ID, conv, "u"))
 
-	// An update that does not delete keeps the membership.
+	// An update keeps membership and ignores DeletedAt on the struct.
 	c, err := cs.GetConversation(ctx, conv)
 	require.NoError(t, err)
 	c.DisplayName = "renamed"
-	require.NoError(t, cs.UpdateConversation(ctx, c))
-	assert.Equal(t, 1, memberRows(t, cs, conv))
-
 	now := time.Now()
 	c.DeletedAt = &now
 	require.NoError(t, cs.UpdateConversation(ctx, c))
-	assert.Zero(t, memberRows(t, cs, conv))
-
-	// Restoring the conversation does not bring the membership back.
-	c.DeletedAt = nil
-	require.NoError(t, cs.UpdateConversation(ctx, c))
-	_, err = cs.GetConversation(ctx, conv)
+	assert.Equal(t, 1, memberRows(t, cs, conv))
+	gotConv, err := cs.GetConversation(ctx, conv)
 	require.NoError(t, err)
+	assert.Nil(t, gotConv.DeletedAt, "UpdateConversation must not write deleted_at")
+
+	// Soft-deleting via DeleteConversation removes membership.
+	require.NoError(t, cs.DeleteConversation(ctx, conv))
 	assert.Zero(t, memberRows(t, cs, conv))
 	got, err := cs.GetThreadGroup(ctx, g.ID)
 	require.NoError(t, err)
 	assert.Empty(t, got.Members)
 }
 
-// TestUpdateConversation_DeletedAtInsideWithTx covers the ambient
-// transaction path (ConversationStore.inTx).
-func TestUpdateConversation_DeletedAtInsideWithTx(t *testing.T) {
+// TestDeleteConversation_InsideWithTx covers the ambient transaction path
+// (ConversationStore.inTx).
+func TestDeleteConversation_InsideWithTx(t *testing.T) {
 	ctx := context.Background()
 	cs := newThreadGroupTestStore(t)
 	projectID := uuid.NewString()
 	g := newThreadGroup(t, cs, projectID, "one")
 	conv := newGroupConversation(t, cs, projectID)
 	require.NoError(t, cs.SetThreadGroupMember(ctx, g.ID, conv, "u"))
-	c, err := cs.GetConversation(ctx, conv)
-	require.NoError(t, err)
 
 	rollback := errors.New("rollback")
-	err = cs.WithTx(ctx, func(tx store.Store) error {
-		now := time.Now()
-		c.DeletedAt = &now
-		require.NoError(t, tx.UpdateConversation(ctx, c))
+	err := cs.WithTx(ctx, func(tx store.Store) error {
+		require.NoError(t, tx.DeleteConversation(ctx, conv))
 		return rollback
 	})
 	require.ErrorIs(t, err, rollback)
 	assert.Equal(t, 1, memberRows(t, cs, conv), "rolled back with the transaction")
 
 	require.NoError(t, cs.WithTx(ctx, func(tx store.Store) error {
-		return tx.UpdateConversation(ctx, c)
+		return tx.DeleteConversation(ctx, conv)
 	}))
 	assert.Zero(t, memberRows(t, cs, conv))
 }
@@ -873,12 +866,11 @@ func TestThreadGroupReads_SkipDeletedKeepArchived(t *testing.T) {
 		require.NoError(t, cs.SetThreadGroupMember(ctx, g.ID, c, "u"))
 	}
 
-	// Archive through the store (keeps membership).
-	ac, err := cs.GetConversation(ctx, archived)
-	require.NoError(t, err)
+	// Archive directly (keeps membership).
 	now := time.Now()
-	ac.ArchivedAt = &now
-	require.NoError(t, cs.UpdateConversation(ctx, ac))
+	require.NoError(t, cs.client.Conversation.UpdateOneID(uuid.MustParse(archived)).
+		SetArchivedAt(now).
+		Exec(ctx))
 
 	// Soft-delete behind the store's back, as a missed cleanup would leave it.
 	require.NoError(t, cs.client.Conversation.UpdateOneID(uuid.MustParse(deleted)).

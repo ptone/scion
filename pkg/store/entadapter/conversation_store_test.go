@@ -968,6 +968,51 @@ func TestUpdateConversation_ValidInput(t *testing.T) {
 	require.NoError(t, err, "valid input must succeed")
 }
 
+// TestUpdateConversation_PreservesConcurrentLifecycleColumns is the regression
+// test for design §3.2 / criterion 5: a generic UpdateConversation with a stale
+// Conversation snapshot (e.g. changing defaultAgentID or displayName) must not
+// clear archived_at or deleted_at set concurrently.
+func TestUpdateConversation_PreservesConcurrentLifecycleColumns(t *testing.T) {
+	s := newTestConversationStore(t)
+	ctx := context.Background()
+
+	// 1. Concurrent archive is preserved when a stale copy is saved.
+	convA := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, convA))
+	staleA, err := s.GetConversation(ctx, convA.ID)
+	require.NoError(t, err)
+	assert.Nil(t, staleA.ArchivedAt)
+
+	archivedAt := time.Now().UTC().Truncate(time.Microsecond)
+	require.NoError(t, s.client.Conversation.UpdateOneID(uuid.MustParse(convA.ID)).
+		SetArchivedAt(archivedAt).
+		Exec(ctx))
+
+	staleA.DisplayName = "renamed-after-archive"
+	require.NoError(t, s.UpdateConversation(ctx, staleA))
+
+	gotA, err := s.GetConversation(ctx, convA.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "renamed-after-archive", gotA.DisplayName)
+	require.NotNil(t, gotA.ArchivedAt, "UpdateConversation must not clear concurrent archived_at")
+	assert.True(t, gotA.ArchivedAt.UTC().Equal(archivedAt))
+
+	// 2. Concurrent soft-delete is preserved (never resurrected) when a stale copy is saved.
+	convB := newTestConversation()
+	require.NoError(t, s.CreateConversation(ctx, convB))
+	staleB, err := s.GetConversation(ctx, convB.ID)
+	require.NoError(t, err)
+	assert.Nil(t, staleB.DeletedAt)
+
+	require.NoError(t, s.DeleteConversation(ctx, convB.ID))
+
+	staleB.DisplayName = "renamed-after-delete"
+	require.NoError(t, s.UpdateConversation(ctx, staleB))
+
+	_, err = s.GetConversation(ctx, convB.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "UpdateConversation must not resurrect a soft-deleted conversation")
+}
+
 func TestUpsertConversationByExternalRef_NilInput(t *testing.T) {
 	s := newTestConversationStore(t)
 	_, err := s.UpsertConversationByExternalRef(context.Background(), nil)

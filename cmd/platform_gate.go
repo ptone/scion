@@ -59,6 +59,7 @@ var windowsAllowed = map[string]bool{
 	"conversation.list":         true,
 	"conversation.messages":     true,
 	"conversation.create":       true,
+	"conversation.delete":       true,
 	"conversation.get":          true,
 	"conversation.get-message":  true,
 	"conversation.set-default":  true,

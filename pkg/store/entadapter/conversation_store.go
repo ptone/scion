@@ -212,12 +212,13 @@ func (s *ConversationStore) GetConversation(ctx context.Context, id string) (*st
 	return entConversationToStore(e), nil
 }
 
-// UpdateConversation updates an existing conversation.
+// UpdateConversation updates an existing conversation's mutable metadata.
 //
-// When the update carries a deleted_at, the conversation's thread group
-// membership is removed in the same transaction (ptone/scion#4424, design
-// section 7a). This is idempotent: a conversation that is already deleted
-// has no members. Clearing deleted_at does not bring the membership back.
+// Lifecycle timestamps (archived_at and deleted_at) are intentionally NOT
+// written here: they are owned solely by the lifecycle store methods
+// (DeleteConversation, SoftDeleteDM, DeleteTopic, and archive helpers) so a
+// caller with a stale Conversation snapshot (such as default-agent updates or
+// ref repair) can never clear or resurrect a concurrent archive or delete.
 func (s *ConversationStore) UpdateConversation(ctx context.Context, conv *store.Conversation) error {
 	if conv == nil {
 		return fmt.Errorf("conversation is nil: %w", store.ErrInvalidInput)
@@ -232,15 +233,7 @@ func (s *ConversationStore) UpdateConversation(ctx context.Context, conv *store.
 		return err
 	}
 
-	if conv.DeletedAt == nil {
-		return s.updateConversation(ctx, s.client, uid, agentUID, conv)
-	}
-	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
-		if err := s.updateConversation(ctx, c, uid, agentUID, conv); err != nil {
-			return err
-		}
-		return removeThreadGroupMembersForConversation(ctx, c, uid)
-	})
+	return s.updateConversation(ctx, s.client, uid, agentUID, conv)
 }
 
 // updateConversation is UpdateConversation's single predicated UPDATE, run
@@ -278,16 +271,6 @@ func (s *ConversationStore) updateConversation(ctx context.Context, c *ent.Clien
 		update.SetDefaultAgentID(*agentUID)
 	} else {
 		update.ClearDefaultAgentID()
-	}
-	if conv.ArchivedAt != nil {
-		update.SetArchivedAt(*conv.ArchivedAt)
-	} else {
-		update.ClearArchivedAt()
-	}
-	if conv.DeletedAt != nil {
-		update.SetDeletedAt(*conv.DeletedAt)
-	} else {
-		update.ClearDeletedAt()
 	}
 
 	_, err := update.Save(ctx)

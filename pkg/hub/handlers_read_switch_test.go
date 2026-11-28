@@ -206,10 +206,12 @@ func (s *rsWebChatStore) PromoteDM(context.Context, WebChatTopic, PromoteKeys) (
 	return nil, nil
 }
 func (s *rsWebChatStore) UpdateThreadID(context.Context, string, string) (int, error) { return 0, nil }
-func (s *rsWebChatStore) DeleteDM(context.Context, string) error                      { return nil }
-func (s *rsWebChatStore) MigrateReadState(context.Context, string, string) error      { return nil }
-func (s *rsWebChatStore) CountPendingMessages(context.Context, string) (int, error)   { return 0, nil }
-func (s *rsWebChatStore) CountMessages(context.Context, string) (int, error)          { return 0, nil }
+func (s *rsWebChatStore) SoftDeleteDM(context.Context, string, *time.Time) (string, error) {
+	return "", nil
+}
+func (s *rsWebChatStore) MigrateReadState(context.Context, string, string) error    { return nil }
+func (s *rsWebChatStore) CountPendingMessages(context.Context, string) (int, error) { return 0, nil }
+func (s *rsWebChatStore) CountMessages(context.Context, string) (int, error)        { return 0, nil }
 func (s *rsWebChatStore) RecordMentions(context.Context, string, string, []string) error {
 	return nil
 }

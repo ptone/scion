@@ -115,6 +115,10 @@ type EventPublisher interface {
 	// participant of the DM on user.<id>.chat.dm.promoted so the client
 	// can close the DM view and navigate to the new thread.
 	PublishDMPromotedEvent(ctx context.Context, dmKey string, topic WebChatTopic)
+	// PublishChatDMLifecycleEvent publishes a DM lifecycle event (deleted,
+	// archived, unarchived) to each user participant on
+	// user.<id>.chat.dm.lifecycle.
+	PublishChatDMLifecycleEvent(ctx context.Context, dmKey, action, conversationID string)
 	// PublishChatScheduledEvent publishes a change to one of a user's
 	// scheduled chat messages on user.<id>.chat.scheduled. Only the
 	// sender is ever told about a scheduled message.
@@ -177,6 +181,7 @@ func (noopEventPublisher) PublishChatMessageEdited(_ context.Context, _ string, 
 func (noopEventPublisher) PublishChatMessageDeleted(_ context.Context, _ string, _ string, _ ChatMessageDeletedEvent) {
 }
 func (noopEventPublisher) PublishDMPromotedEvent(_ context.Context, _ string, _ WebChatTopic) {}
+func (noopEventPublisher) PublishChatDMLifecycleEvent(_ context.Context, _, _, _ string)      {}
 func (noopEventPublisher) PublishRaw(_ string, _ interface{})                                 {}
 func (noopEventPublisher) Close()                                                             {}
 
@@ -1327,6 +1332,19 @@ func (p *eventBuilder) PublishDMPromotedEvent(_ context.Context, dmKey string, t
 	}
 	for _, userID := range dmUserParticipants(dmKey) {
 		p.sink("user."+userID+".chat.dm.promoted", evt)
+	}
+}
+
+// PublishChatDMLifecycleEvent publishes a DM lifecycle event to each user
+// participant of the DM on user.<id>.chat.dm.lifecycle.
+func (p *eventBuilder) PublishChatDMLifecycleEvent(_ context.Context, dmKey, action, conversationID string) {
+	evt := ChatDMLifecycleEvent{
+		ConversationKey: dmKey,
+		ConversationID:  conversationID,
+		Action:          action,
+	}
+	for _, userID := range dmUserParticipants(dmKey) {
+		p.sink("user."+userID+".chat.dm.lifecycle", evt)
 	}
 }
 
