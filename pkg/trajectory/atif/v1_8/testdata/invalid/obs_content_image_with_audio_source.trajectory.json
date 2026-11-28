@@ -1,0 +1,1 @@
+{"schema_version":"ATIF-v1.8","agent":{"name":"claude-code","version":"2.1.296"},"steps":[{"step_id":1,"source":"agent","message":"hi","observation":{"results":[{"content":[{"type":"image","source":{"media_type":"audio/wav","path":"audio/a.wav"}}]}]}}]}
