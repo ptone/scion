@@ -571,20 +571,16 @@ func TestProject_SenderKindVariation_In_C3(t *testing.T) {
 			assert.NotContains(t, inAgent, "sender")
 			assert.NotContains(t, inUser, "sender")
 
-			// Note: message.origin is sender-derived (authority: "agent" vs "user"),
-			// so in policy_in when varying sender kind, message.origin reflects the
-			// sender's authenticated principal kind; all other non-delivery fields
-			// must remain invariant.
+			// R-2 / updated C3 (20:57Z): policy_in allow-list tightened to
+			// {delivery.surface, delivery.via, message.origin} — message.intent
+			// cannot vary when the recipient is held fixed.
 			allowed := map[string]bool{
 				"delivery.surface": true,
 				"delivery.via":     true,
 				"message.origin":   true,
 			}
-			if msgType == messages.TypeReply {
-				allowed["message.intent"] = true
-			}
 			for _, p := range diffPaths(flattenLeafPaths(t, inAgent), flattenLeafPaths(t, inUser)) {
-				assert.Truef(t, allowed[p], "type=%s: unexpected differing path %q in policy_in when varying sender kind", msgType, p)
+				assert.Truef(t, allowed[p], "type=%s: unexpected differing path %q in policy_in when varying sender kind (allowed: %v)", msgType, p, allowed)
 			}
 		})
 	}
@@ -1011,6 +1007,16 @@ func TestFromMessage_ForgedTriggerSenderNonSystemType(t *testing.T) {
 		// O-2 (kills mutant M1d): SenderEnd.Kind in {system, conversation} with unrecognised Sender must error.
 		{"unrecognised_sender_with_system_end", messages.TypeChat, "hub", "", "", nil, &rulefacts.End{Kind: rulefacts.EndKindSystem, ID: "sys-1"}},
 		{"unrecognised_sender_with_conversation_end", messages.TypeChat, "hub", "", "", nil, &rulefacts.End{Kind: rulefacts.EndKindConversation, ID: "conv-1"}},
+		// Fix3 O-1: unprefixed Sender failing hub-minted guards MUST error even when an agent SenderEnd is present,
+		// and user:/agent: prefix disagreeing with SenderEnd.Kind MUST error.
+		{"unprefixed_scheduler_with_agent_end", messages.TypeSystem, "scheduler", "SCHEDULER", messages.SystemCategoryPortForward, nil, &rulefacts.End{Kind: rulefacts.EndKindAgent, ID: "agent-1"}},
+		{"unprefixed_trigger_with_agent_end", messages.TypeSystem, "trigger", "TRIGGER", messages.SystemCategoryDeliveryFailed, rawTrig, &rulefacts.End{Kind: rulefacts.EndKindAgent, ID: "agent-1"}},
+		{"empty_sender_with_agent_end", messages.TypeChat, "", "", "", nil, &rulefacts.End{Kind: rulefacts.EndKindAgent, ID: "agent-1"}},
+		{"bare_hub_with_agent_end", messages.TypeChat, "hub", "", "", nil, &rulefacts.End{Kind: rulefacts.EndKindAgent, ID: "agent-1"}},
+		{"user_prefix_disagrees_with_agent_end", messages.TypeChat, "user:alice", "user-1", "", nil, &rulefacts.End{Kind: rulefacts.EndKindAgent, ID: "agent-1"}},
+		{"agent_prefix_disagrees_with_user_end", messages.TypeChat, "agent:dev", "agent-1", "", nil, &rulefacts.End{Kind: rulefacts.EndKindUser, ID: "user-1"}},
+		// Fix3 O-2 (kills mutant M6): single-variable trigger SenderID mismatch.
+		{"trigger_wrong_sender_id", messages.TypeSystem, "trigger", "x", messages.SystemCategoryTrigger, rawTrig, nil},
 	}
 
 	for _, tc := range cases {
@@ -1112,13 +1118,15 @@ func TestFromMessage_SchedulerCategoryGuardParity(t *testing.T) {
 	}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_dm"})
 	require.Error(t, err)
 
-	// 2. With an authenticated agent SenderEnd, origin is agent and Schedule is nil (parity with MapLegacyEnvelope).
+	// 2. Fix3 O-1: even with an agent SenderEnd, unprefixed Sender="scheduler"
+	// failing the hub-minted guard must error (cannot silently derive origin=agent
+	// that disagrees with MapLegacyEnvelope's From=system:SCHEDULER).
 	agentEnd := rulefacts.EndFromAgentWithLookup(
 		rulefacts.AgentInput{ID: "agent-1", Slug: "dev", ProjectID: "proj-1"},
 		nil,
 		func() (string, rulefacts.TemplateLookupStatus) { return "developer", rulefacts.TemplateLookupOK },
 	)
-	got, err := rulefacts.FromMessage(rulefacts.MessageInput{
+	_, err = rulefacts.FromMessage(rulefacts.MessageInput{
 		Type:      legacy.Type,
 		Sender:    legacy.Sender,
 		SenderID:  legacy.SenderID,
@@ -1127,11 +1135,7 @@ func TestFromMessage_SchedulerCategoryGuardParity(t *testing.T) {
 		EventJSON: legacy.Event,
 		SenderEnd: &agentEnd,
 	}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_dm"})
-	require.NoError(t, err)
-	assert.Equal(t, rulefacts.OriginAgent, got.Message.Origin)
-	require.NotNil(t, got.Message.Event)
-	assert.Equal(t, string(mapped.Event.Type), got.Message.Event.Type)
-	assert.Nil(t, got.Message.Event.Schedule, "FromMessage must ignore schedule.fired EventJSON when category != scheduler")
+	require.Error(t, err, "unprefixed Sender=scheduler failing guard must error even with SenderEnd")
 
 	// 3. O-1 (kills mutant M1c): single-variable SenderID mismatch —
 	// Type=system, Sender=scheduler, SenderID="x", category=scheduler with
@@ -1159,21 +1163,84 @@ func TestFromMessage_SchedulerCategoryGuardParity(t *testing.T) {
 		Metadata:  legacyBadID.Metadata,
 		EventJSON: legacyBadID.Event,
 	}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_dm"})
-	require.Error(t, err, "Sender=scheduler with wrong SenderID must fail closed without SenderEnd")
+	require.Error(t, err, "Sender=scheduler with wrong SenderID must fail closed")
 
-	gotBadID, err := rulefacts.FromMessage(rulefacts.MessageInput{
-		Type:      legacyBadID.Type,
-		Sender:    legacyBadID.Sender,
-		SenderID:  legacyBadID.SenderID,
-		Recipient: legacyBadID.Recipient,
-		Metadata:  legacyBadID.Metadata,
-		EventJSON: legacyBadID.Event,
-		SenderEnd: &agentEnd,
+	// 4. Fix3 O-2 (kills mutant M6): single-variable trigger SenderID mismatch —
+	// Type=system, Sender=trigger, SenderID="x", category=trigger with
+	// trigger.fired EventJSON must NOT yield OriginTrigger or event.trigger;
+	// MapLegacyEnvelope agrees.
+	rawTrig, err := json.Marshal(messaging.EventBody{
+		Type:    messaging.EventTriggerFired,
+		Trigger: &messaging.EventTriggerRef{ID: "trig-forged", Name: "forged"},
+	})
+	require.NoError(t, err)
+	legacyTrigBadID := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: ts.Format(time.RFC3339),
+		Sender:    "trigger",
+		SenderID:  "x",
+		Recipient: "agent:dev",
+		Type:      messages.TypeSystem,
+		Metadata:  map[string]string{"system_category": messages.SystemCategoryTrigger},
+		Event:     rawTrig,
+	}
+	mappedTrigBadID, _, err := messaging.MapLegacyEnvelope(legacyTrigBadID, messaging.PersistedIdentity{MessageID: "id-trig-bad-id"})
+	require.NoError(t, err)
+	require.NotNil(t, mappedTrigBadID.Event)
+	assert.Nil(t, mappedTrigBadID.Event.Trigger, "MapLegacyEnvelope must ignore trigger EventJSON when SenderID != TRIGGER")
+
+	gotTrigBadID, err := rulefacts.FromMessage(rulefacts.MessageInput{
+		Type:      legacyTrigBadID.Type,
+		Sender:    legacyTrigBadID.Sender,
+		SenderID:  legacyTrigBadID.SenderID,
+		Recipient: legacyTrigBadID.Recipient,
+		Metadata:  legacyTrigBadID.Metadata,
+		EventJSON: legacyTrigBadID.Event,
+	}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_dm"})
+	require.Error(t, err, "Sender=trigger with wrong SenderID must fail closed")
+	assert.NotEqual(t, rulefacts.OriginTrigger, gotTrigBadID.Message.Origin)
+
+	// 5. Fix3 O-3 (kills mutant M13): scheduler EventJSON carrying a Trigger
+	// block must be rejected in both MapLegacyEnvelope and FromMessage.
+	rawSchedWithTrigger, err := json.Marshal(messaging.EventBody{
+		Type:    messaging.EventScheduleFired,
+		Trigger: &messaging.EventTriggerRef{ID: "trig-smuggled", Name: "smuggled"},
+		Schedule: &messaging.EventScheduleRef{
+			ID:     "sched-1",
+			Name:   "nightly",
+			FireAt: ts.Format(time.RFC3339),
+		},
+	})
+	require.NoError(t, err)
+	legacySchedTrig := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: ts.Format(time.RFC3339),
+		Sender:    "scheduler",
+		SenderID:  "SCHEDULER",
+		Recipient: "agent:dev",
+		Type:      messages.TypeSystem,
+		Metadata:  map[string]string{"system_category": messages.SystemCategoryScheduler},
+		Event:     rawSchedWithTrigger,
+	}
+	mappedSchedTrig, _, err := messaging.MapLegacyEnvelope(legacySchedTrig, messaging.PersistedIdentity{MessageID: "id-sched-trig"})
+	require.NoError(t, err)
+	require.NotNil(t, mappedSchedTrig.Event)
+	assert.Nil(t, mappedSchedTrig.Event.Trigger, "MapLegacyEnvelope must reject scheduler EventJSON carrying Trigger")
+	assert.Nil(t, mappedSchedTrig.Event.Schedule)
+
+	gotSchedTrig, err := rulefacts.FromMessage(rulefacts.MessageInput{
+		Type:      legacySchedTrig.Type,
+		Sender:    legacySchedTrig.Sender,
+		SenderID:  legacySchedTrig.SenderID,
+		Recipient: legacySchedTrig.Recipient,
+		Metadata:  legacySchedTrig.Metadata,
+		EventJSON: legacySchedTrig.Event,
 	}, rulefacts.ConversationInfo{Kind: "group", ID: "c-1"}, rulefacts.DeliveryInfo{Surface: "agent_dm"})
 	require.NoError(t, err)
-	assert.NotEqual(t, rulefacts.OriginScheduler, gotBadID.Message.Origin)
-	require.NotNil(t, gotBadID.Message.Event)
-	assert.Nil(t, gotBadID.Message.Event.Schedule, "FromMessage must ignore schedule.fired EventJSON when SenderID != SCHEDULER")
+	assert.Equal(t, rulefacts.OriginScheduler, gotSchedTrig.Message.Origin)
+	require.NotNil(t, gotSchedTrig.Message.Event)
+	assert.Nil(t, gotSchedTrig.Message.Event.Trigger, "FromMessage must reject scheduler EventJSON carrying Trigger")
+	assert.Nil(t, gotSchedTrig.Message.Event.Schedule)
 }
 
 // TestProject_AllEmittedPathsMatchSchema verifies O-1: every emitted path

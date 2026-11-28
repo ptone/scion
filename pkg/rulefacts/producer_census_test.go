@@ -23,7 +23,7 @@
 // | pkg/hub/artifacts_review.go:305 (messages.NewSystemMessage) | "system" | "" | system | artifact-review | system |
 // | pkg/hub/artifacts_review.go:442 (messages.NewSystemMessage) | "system" | "" | system | artifact-review | system |
 // | pkg/hub/artifacts_transfer.go:342 (messages.NewSystemMessage) | "system" | "" | system | artifact-review | system |
-// | pkg/messages/types.go:133 (port-forward notice) | "system" | "" | system | port-forward | system |
+// | pkg/sciontool/autoexpose/reconciler.go:523 -> cmd/sciontool/commands/init.go:5149 -> POST /agents/{id}/message -> hub restamp pkg/hub/handlers_agent_messaging.go:2407-2424 | "agent:<slug>" | "<uuid>" | system | port-forward | agent |
 // | pkg/hub/command_run_exec.go:1041 (command response) | "system:hub" | "system:hub" | command-response | "" | system |
 // | pkg/hub/trigger_dispatch.go:1372-1398 (ApplyDispatchedEventEnvelope) | "trigger" | "TRIGGER" | system | trigger | trigger |
 // | pkg/hub/action_message.go:329-339 (buildMessageActionMessage) | "scheduler" | "SCHEDULER" | system | scheduler | scheduler |
@@ -160,10 +160,19 @@ func TestProducerCensus_OriginMatchesMapLegacyEnvelope(t *testing.T) {
 				msg.RecipientID = "agent-uuid-1"
 				msg.Status = "DELIVERY_UNCONFIRMED"
 				wantOrigin = rulefacts.OriginSystem
-			case messages.SystemCategoryArtifactReview, messages.SystemCategoryPortForward:
+			case messages.SystemCategoryArtifactReview:
 				msg = messages.NewSystemMessage("system", "agent:dev-worker", "System notice: "+catVal, catVal)
 				msg.RecipientID = "agent-uuid-1"
 				wantOrigin = rulefacts.OriginSystem
+			case messages.SystemCategoryPortForward:
+				// Real chain: reconciler.go:523 -> init.go:5149 builds NewSystemMessage("system", ...)
+				// -> POST /agents/{id}/message -> hub restamp handlers_agent_messaging.go:2407-2424
+				// overwrites Sender="agent:<slug>" and SenderID=<uuid>.
+				msg = messages.NewSystemMessage("system", "agent:dev-worker", "Port 8080 exposed", catVal)
+				msg.Sender = "agent:dev-worker"
+				msg.SenderID = "agent-uuid-1"
+				msg.RecipientID = "agent-uuid-1"
+				wantOrigin = rulefacts.OriginAgent
 			default:
 				t.Fatalf("uncovered SystemCategory constant %s = %q in pkg/messages/types.go; add its real producer shape here", constName, catVal)
 			}
@@ -194,6 +203,8 @@ func TestProducerCensus_OriginMatchesMapLegacyEnvelope(t *testing.T) {
 				assert.Equal(t, "system:SCHEDULER", from)
 			case rulefacts.OriginSystem:
 				assert.Truef(t, strings.HasPrefix(from, "system:"), "expected system: prefix in MapLegacyEnvelope.From, got %q", from)
+			case rulefacts.OriginAgent:
+				assert.Truef(t, strings.HasPrefix(from, "agent:"), "expected agent: prefix in MapLegacyEnvelope.From, got %q", from)
 			}
 		})
 	}

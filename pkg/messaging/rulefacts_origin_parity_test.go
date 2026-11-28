@@ -147,9 +147,16 @@ func TestRulefactsOriginParityWithMapLegacyEnvelope(t *testing.T) {
 				msg = messages.NewSystemMessage("system", "agent:dev", "delivery unconfirmed", catVal)
 				msg.Status = "DELIVERY_UNCONFIRMED"
 				wantOrigin = rulefacts.OriginSystem
-			case messages.SystemCategoryArtifactReview, messages.SystemCategoryPortForward:
+			case messages.SystemCategoryArtifactReview:
 				msg = messages.NewSystemMessage("system", "agent:dev", "notice", catVal)
 				wantOrigin = rulefacts.OriginSystem
+			case messages.SystemCategoryPortForward:
+				// Real chain: reconciler.go:523 -> init.go:5149 -> hub restamp
+				// handlers_agent_messaging.go:2407-2424 sets Sender="agent:<slug>", SenderID=<uuid>.
+				msg = messages.NewSystemMessage("system", "agent:dev", "Port 8080 exposed", catVal)
+				msg.Sender = "agent:dev"
+				msg.SenderID = "agent-uuid-1"
+				wantOrigin = rulefacts.OriginAgent
 			default:
 				t.Fatalf("uncovered SystemCategory constant %s = %q; update messaging parity test", constName, catVal)
 			}
@@ -173,7 +180,11 @@ func TestRulefactsOriginParityWithMapLegacyEnvelope(t *testing.T) {
 
 			assert.Equal(t, wantOrigin, facts.Message.Origin)
 			assert.Equal(t, rulefacts.MessageKind(mapped.Kind), facts.Message.Kind)
-			assert.Truef(t, strings.HasPrefix(string(mapped.From), "system:"), "MapLegacyEnvelope.From = %q, want system:* prefix", mapped.From)
+			if wantOrigin == rulefacts.OriginAgent {
+				assert.Truef(t, strings.HasPrefix(string(mapped.From), "agent:"), "MapLegacyEnvelope.From = %q, want agent:* prefix", mapped.From)
+			} else {
+				assert.Truef(t, strings.HasPrefix(string(mapped.From), "system:"), "MapLegacyEnvelope.From = %q, want system:* prefix", mapped.From)
+			}
 		})
 	}
 
@@ -200,6 +211,21 @@ func TestRulefactsOriginParityWithMapLegacyEnvelope(t *testing.T) {
 			surface:        "native",
 			wantOrigin:     rulefacts.OriginSystem,
 			wantFromPrefix: "system:",
+		},
+		{
+			name: "agent_state_change_notification",
+			msg: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: ts.Format(time.RFC3339),
+				Sender:    "agent:dev",
+				SenderID:  "agent-uuid-1",
+				Recipient: "user:alice",
+				Msg:       "COMPLETED",
+				Type:      messages.TypeStateChange,
+			},
+			surface:        "native",
+			wantOrigin:     rulefacts.OriginAgent,
+			wantFromPrefix: "agent:",
 		},
 		{
 			name: "agent_sender",

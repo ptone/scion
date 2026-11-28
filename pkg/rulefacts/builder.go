@@ -423,19 +423,20 @@ func deriveOrigin(in MessageInput, convSurface string, isHubTrigger, isHubSchedu
 	}
 	switch {
 	case strings.HasPrefix(in.Sender, "user:"):
+		if in.SenderEnd != nil && in.SenderEnd.Kind != EndKindUser {
+			return "", fmt.Errorf("rulefacts: sender prefix \"user:\" disagrees with SenderEnd.Kind %q", in.SenderEnd.Kind)
+		}
 		return OriginUser, nil
 	case strings.HasPrefix(in.Sender, "agent:"):
+		if in.SenderEnd != nil && in.SenderEnd.Kind != EndKindAgent {
+			return "", fmt.Errorf("rulefacts: sender prefix \"agent:\" disagrees with SenderEnd.Kind %q", in.SenderEnd.Kind)
+		}
 		return OriginAgent, nil
 	case strings.HasPrefix(in.Sender, "system:"):
-		return OriginSystem, nil
-	}
-	if in.SenderEnd != nil {
-		switch in.SenderEnd.Kind {
-		case EndKindUser:
-			return OriginUser, nil
-		case EndKindAgent:
-			return OriginAgent, nil
+		if in.SenderEnd != nil && in.SenderEnd.Kind != EndKindSystem {
+			return "", fmt.Errorf("rulefacts: sender prefix \"system:\" disagrees with SenderEnd.Kind %q", in.SenderEnd.Kind)
 		}
+		return OriginSystem, nil
 	}
 	return "", fmt.Errorf("rulefacts: unrecognised sender %q", in.Sender)
 }
