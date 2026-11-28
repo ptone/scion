@@ -322,9 +322,10 @@ func budgetCrossedThresholdBits(
 		return 0
 	}
 	nextBits := budgetThresholdBitsForRatio(nextConsumed, nextCap)
-	if nextState == store.UsageBudgetStateExhausted {
+	switch nextState {
+	case store.UsageBudgetStateExhausted:
 		nextBits |= store.UsageBudgetThresholdBit50 | store.UsageBudgetThresholdBit80 | store.UsageBudgetThresholdBit100
-	} else if nextState == store.UsageBudgetStateWarn {
+	case store.UsageBudgetStateWarn:
 		// Warn state cannot cross 100%; ensure 50% bit is present if warn was entered.
 		nextBits &^= store.UsageBudgetThresholdBit100
 		if nextBits == 0 {
