@@ -48,6 +48,7 @@ const (
 type DecisionSetAnswerRequest struct {
 	IdempotencyKey string                  `json:"idempotency_key,omitempty"`
 	Surface        string                  `json:"surface,omitempty"`
+	Comment        string                  `json:"comment,omitempty"`
 	Answers        []DecisionSetAnswerItem `json:"answers"`
 }
 
@@ -226,6 +227,14 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 			map[string]interface{}{"field": "surface"})
 		return
 	}
+	comment, verr := messages.NormalizeDecisionComment(req.Comment)
+	if verr != nil {
+		ValidationError(w, verr.Message, map[string]interface{}{
+			"field": verr.Field,
+			"code":  verr.Code,
+		})
+		return
+	}
 
 	// Steps 1 and 2: the prompt, its conversation, the caller's send rights.
 	ds, chatKey, ok := s.loadAuthorizedDecisionPrompt(w, ctx, user, msgID)
@@ -311,7 +320,7 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 	// 422. Another user's answers under the same key are not this user's.
 	if req.IdempotencyKey != "" {
 		if prior := setAnswersWithIdempotencyKey(ds, req.IdempotencyKey, user.ID()); len(prior) > 0 {
-			if !sameSetAnswers(prior, user.ID(), choices, otherTexts) {
+			if !sameSetAnswers(prior, user.ID(), choices, otherTexts, comment) {
 				writeError(w, http.StatusUnprocessableEntity, ErrCodeIdempotencyMismatch,
 					"the idempotency key was used for other answers", nil)
 				return
@@ -366,8 +375,9 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 	}
 	// The decision-response is a message from the user to the asking agent:
 	// the chat send's messaging check, unless nothing is delivered (a gone
-	// asker or an all-confirm set).
-	willDeliver := !askerGone && !allConfirm
+	// asker or a comment-free all-confirm set; confirming with a comment
+	// delivers it to the asking agent, ptone/scion#9834 D4).
+	willDeliver := !askerGone && (!allConfirm || comment != "")
 	if willDeliver {
 		if allowed, reason, _ := s.authorizeAgentMessage(ctx, user, asker, false); !allowed {
 			writeError(w, http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
@@ -378,7 +388,7 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	responseMsg := s.decisionSetResponseStoreMessage(ctx, user, ds, chatKey, requested, choices, otherTexts, asker, askerGone, willDeliver)
+	responseMsg := s.decisionSetResponseStoreMessage(ctx, user, ds, chatKey, requested, choices, otherTexts, comment, asker, askerGone, willDeliver)
 
 	// Steps 5 to 7 in one transaction.
 	res, err := s.store.RecordAnswerSet(ctx, &store.RecordAnswerSetInput{
@@ -388,6 +398,7 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 		AnsweredByEmail:  user.Email(),
 		Surface:          surface,
 		Answers:          items,
+		Comment:          comment,
 		ResponseMessage:  responseMsg,
 		IdempotencyKey:   req.IdempotencyKey,
 	})
@@ -421,12 +432,13 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Step 8, after commit: the response row's chat events, the delivery
-	// to the asker (not for an all-confirm set: the agent already acted on
-	// those answers), then decision.updated once per answered row, in
+	// to the asker (not for a comment-free all-confirm set: the agent
+	// already acted on those answers; a confirm with a comment is
+	// delivered), then decision.updated once per answered row, in
 	// position order.
 	setView := decisionResponseSetView(msgID, res.BatchID, ds, res.Answers)
 	s.publishDecisionResponseSet(ctx, responseMsg, setView)
-	if !askerGone && !allConfirm {
+	if willDeliver {
 		s.deliverDecisionSetResponse(ctx, asker, responseMsg, msgID, res, overridden)
 	}
 	for _, v := range views {
@@ -466,19 +478,29 @@ func setAnswersWithIdempotencyKey(ds []*store.Decision, key, userID string) []*s
 }
 
 // sameSetAnswers reports whether the recorded set is userID's answers with
-// exactly the requested (choice_id, other_text) pairs.
-func sameSetAnswers(prior []*store.DecisionAnswer, userID string, choices map[string]messages.Choice, otherTexts map[string]string) bool {
+// exactly the requested (choice_id, other_text) pairs and comment.
+func sameSetAnswers(prior []*store.DecisionAnswer, userID string, choices map[string]messages.Choice, otherTexts map[string]string, comment string) bool {
 	if len(prior) != len(choices) {
 		return false
 	}
 	batch := prior[0].BatchID
 	for _, a := range prior {
 		c, ok := choices[a.DecisionRowID]
-		if !ok || c.ID != a.ChoiceID || otherTexts[a.DecisionRowID] != a.OtherText || a.AnsweredByUserID != userID || a.BatchID != batch {
+		if !ok || c.ID != a.ChoiceID || otherTexts[a.DecisionRowID] != a.OtherText || a.Comment != comment || a.AnsweredByUserID != userID || a.BatchID != batch {
 			return false
 		}
 	}
 	return true
+}
+
+// firstSetComment returns the comment carried by a set's answer rows, or "".
+func firstSetComment(answers []*store.DecisionAnswer) string {
+	for _, a := range answers {
+		if a != nil && a.Comment != "" {
+			return a.Comment
+		}
+	}
+	return ""
 }
 
 // decisionSetResponseStoreMessage builds the one decision-response row of a set
@@ -487,7 +509,7 @@ func sameSetAnswers(prior []*store.DecisionAnswer, userID string, choices map[st
 // position order. A gone asker (askerGone; asker is then unused) or one
 // that cannot take a message gets the row born failed, as for a one-click
 // answer.
-func (s *Server) decisionSetResponseStoreMessage(ctx context.Context, user UserIdentity, ds []*store.Decision, chatKey string, requested map[string]bool, choices map[string]messages.Choice, otherTexts map[string]string, asker *store.Agent, askerGone, willDeliver bool) *store.Message {
+func (s *Server) decisionSetResponseStoreMessage(ctx context.Context, user UserIdentity, ds []*store.Decision, chatKey string, requested map[string]bool, choices map[string]messages.Choice, otherTexts map[string]string, comment string, asker *store.Agent, askerGone, willDeliver bool) *store.Message {
 	var parts []string
 	for _, d := range ds {
 		if requested[d.ID] {
@@ -506,13 +528,17 @@ func (s *Server) decisionSetResponseStoreMessage(ctx context.Context, user UserI
 	if len(parts) == 1 {
 		noun = "decision"
 	}
+	body := fmt.Sprintf("%s answered %d %s: %s", userDisplay(user), len(parts), noun, strings.Join(parts, " · "))
+	if comment != "" {
+		body += fmt.Sprintf(" — comment: \"%s\"", messages.EscapeMarkdownPlain(comment))
+	}
 	m := &store.Message{
 		ID:             api.NewUUID(),
 		ProjectID:      ds[0].ProjectID,
 		Sender:         userSenderAddress(user),
 		SenderID:       user.ID(),
 		RecipientID:    ds[0].AskerAgentID,
-		Msg:            fmt.Sprintf("%s answered %d %s: %s", userDisplay(user), len(parts), noun, strings.Join(parts, " · ")),
+		Msg:            body,
 		Type:           messages.TypeDecisionResponse,
 		AgentID:        ds[0].AskerAgentID,
 		Channel:        "web",
@@ -544,7 +570,12 @@ func decisionResponseSetView(promptID, batchID string, ds []*store.Decision, ans
 	for _, a := range answers {
 		byRow[a.DecisionRowID] = a
 	}
-	v := &DecisionResponseSetView{PromptMessageID: promptID, BatchID: batchID, Answers: []DecisionResponseSetAnswer{}}
+	v := &DecisionResponseSetView{
+		PromptMessageID: promptID,
+		BatchID:         batchID,
+		Comment:         firstSetComment(answers),
+		Answers:         []DecisionResponseSetAnswer{},
+	}
 	for _, d := range ds {
 		a, ok := byRow[d.ID]
 		if !ok {
@@ -609,6 +640,9 @@ func decisionSetAgentLines(promptID string, answers []*store.DecisionAnswer, ove
 		lines = append(lines, fmt.Sprintf("%s v%d (%q) answer=%s (%s)%s",
 			a.Key, a.Version, truncateRunes(plainLine(a.QuestionText), decisionResponseQuestionMax), a.ChoiceLabel, strings.Join(notes, ", "), otherPart))
 	}
+	if setComment := firstSetComment(answers); setComment != "" {
+		lines = append(lines, "comment="+strconv.Quote(setComment))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -651,6 +685,9 @@ func (s *Server) deliverDecisionSetResponse(ctx context.Context, asker *store.Ag
 	_, _ = s.dispatchDecisionResponse(ctx, asker, m, text, sm, func(meta map[string]string) {
 		meta[messages.MetadataDecisionBatch] = res.BatchID
 		meta[messages.MetadataDecisionAnswers] = decisionAnswersMetadata(res.Answers)
+		if setComment := firstSetComment(res.Answers); setComment != "" {
+			meta[messages.MetadataDecisionComment] = setComment
+		}
 	}, "set decision-response")
 }
 

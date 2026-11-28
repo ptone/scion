@@ -2017,6 +2017,7 @@ export interface DecisionResponseSetAnswer {
 export interface DecisionResponseSetView {
   promptMessageId?: string;
   batchId: string;
+  comment?: string;
   answers: DecisionResponseSetAnswer[];
 }
 

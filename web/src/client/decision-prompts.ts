@@ -368,7 +368,8 @@ export async function answerDecisionSet(
   messageId: string,
   answers: readonly SetAnswer[],
   idempotencyKey: string,
-  surface?: DecisionAnswerSurface
+  surface?: DecisionAnswerSurface,
+  comment?: string
 ): Promise<AnswerDecisionSetResult> {
   let res: Response;
   try {
@@ -383,6 +384,7 @@ export async function answerDecisionSet(
           ...(a.otherText !== undefined ? { other_text: a.otherText } : {}),
         })),
         ...(surface && surface !== 'native' ? { surface } : {}),
+        ...(comment ? { comment } : {}),
       }),
     });
   } catch {
