@@ -48,7 +48,8 @@ func unknownSubcommandHelpError(root *cobra.Command, args []string) error {
 		return nil
 	}
 	target, rest, err := root.Find(args)
-	if err != nil || target == nil || !target.HasSubCommands() || !target.Runnable() {
+	hasRemoved := target != nil && target.Annotations[agentRemovedSubcommandsAnnotation] != ""
+	if err != nil || target == nil || (!target.HasSubCommands() && !hasRemoved) || !target.Runnable() {
 		return nil
 	}
 	positional := positionalArgs(target, rest)
@@ -70,6 +71,9 @@ func unknownSubcommandHelpError(root *cobra.Command, args []string) error {
 	}
 	if isAgentModeUnavailableError(verr) {
 		return verr
+	}
+	if !target.HasSubCommands() {
+		return nil
 	}
 	return fmt.Errorf("unknown command %q for %q", positional[0], target.CommandPath())
 }
