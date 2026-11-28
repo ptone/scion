@@ -187,6 +187,33 @@ run "client_id_set_installs_the_hub" {
     condition     = google_storage_bucket.artifacts.name == "tfha-test-project-tfha-gke-h3-artifacts" && google_storage_bucket.artifacts.uniform_bucket_level_access
     error_message = "artifacts bucket must be <project>-<hub>-artifacts with UBLA."
   }
+
+  assert {
+    condition = anytrue([
+      for r in google_storage_bucket.artifacts.lifecycle_rule :
+      one(r.condition).with_state == "ARCHIVED" && one(r.condition).age == 30 && one(r.action).type == "Delete"
+    ])
+    error_message = "artifacts bucket must keep the ARCHIVED Delete (age 30) lifecycle rule."
+  }
+
+  assert {
+    condition = anytrue([
+      for r in google_storage_bucket.artifacts.lifecycle_rule :
+      one(r.condition).with_state == "ANY" && one(r.condition).age == 7 && one(r.action).type == "AbortIncompleteMultipartUpload"
+    ])
+    error_message = "artifacts bucket must keep the AbortIncompleteMultipartUpload (age 7) lifecycle rule."
+  }
+
+  assert {
+    condition = anytrue([
+      for r in google_storage_bucket.artifacts.lifecycle_rule :
+      one(r.action).type == "Delete" &&
+      one(r.condition).age == 2 &&
+      one(r.condition).with_state == "ANY" &&
+      one(r.condition).matches_prefix == tolist(["uploads-staging/"])
+    ])
+    error_message = "artifacts bucket must include a Delete lifecycle rule with age = 2 and matches_prefix = [\"uploads-staging/\"] (ptone/scion#8654 §3.13)."
+  }
 }
 
 run "hub_run_as_ids_reach_the_security_context" {

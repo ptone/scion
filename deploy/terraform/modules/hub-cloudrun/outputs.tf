@@ -14,6 +14,6 @@ output "bucket_name" {
 }
 
 output "bucket_lifecycle_rules" {
-  description = "The artifacts bucket's lifecycle_rule blocks as configured, for fresh_hub_plan.tftest.hcl to assert the noncurrent-version cleanup rule exists and is scoped to ARCHIVED objects only — never CURRENT/live data. Returns local.artifacts_lifecycle_rules (config-derived, main.tf) rather than google_storage_bucket.artifacts.lifecycle_rule (the resource attribute): reading the resource attribute made this output change on every fresh deployment's first post-apply plan, because the provider normalises unset condition fields on refresh even though the resource itself has 0 changes (see the local's comment in main.tf)."
+  description = "The artifacts bucket's lifecycle_rule blocks as configured, for fresh_hub_plan.tftest.hcl to assert the noncurrent-version cleanup rule (ARCHIVED only), the multipart abort rule, and the uploads-staging/ Delete rule (age 2). Returns local.artifacts_lifecycle_rules (config-derived, main.tf) rather than google_storage_bucket.artifacts.lifecycle_rule (the resource attribute): reading the resource attribute made this output change on every fresh deployment's first post-apply plan, because the provider normalises unset condition fields on refresh even though the resource itself has 0 changes (see the local's comment in main.tf)."
   value       = local.artifacts_lifecycle_rules
 }

@@ -90,6 +90,21 @@ locals {
         type = "AbortIncompleteMultipartUpload"
       }
     },
+    {
+      # Backstop for resumable large-upload staging parts (ptone/scion#8654
+      # §3.13): the hub's upload-session-sweep deletes staging prefixes
+      # normally, and this rule expires any orphaned staging objects after
+      # 2 days. Scoped strictly to uploads-staging/ so live artifacts,
+      # templates, skills, and workspace objects are untouched.
+      condition = {
+        with_state     = "ANY"
+        age            = 2
+        matches_prefix = ["uploads-staging/"]
+      }
+      action = {
+        type = "Delete"
+      }
+    },
   ]
 }
 
@@ -109,27 +124,29 @@ resource "google_storage_bucket" "artifacts" {
   # configs (pkg/storage's ResourceStorageURI family) referenced by live DB
   # rows, plus per-agent workspace files (WorkspaceStorageURI) that an
   # in-flight agent may still be reading or writing — none of that is safe
-  # to expire on a blanket age/prefix rule, so no rule targets CURRENT
-  # objects. Versioning is on (above), so overwriting or deleting a live
-  # object leaves its prior content as a NONCURRENT (ARCHIVED) version
-  # instead of freeing it — those accumulate forever with no rule. The
-  # Delete rule only ever touches ARCHIVED (non-live) versions, so it
-  # cannot delete live data: the current version of every object is
-  # untouched regardless of age. The AbortIncompleteMultipartUpload rule is
-  # belt-and-suspenders, also CURRENT-object-safe: an interrupted
-  # resumable/multipart upload has no live reader by definition, so
-  # aborting it after a week reclaims storage with zero risk to anything
-  # the hub or an agent might still be using. Both are in-place updates
-  # (lifecycle_rule is a normal, non-ForceNew field on
-  # google_storage_bucket) — no bucket replace. Rendered from
+  # to expire on a blanket age/prefix rule, so no blanket rule targets CURRENT
+  # objects (only the ephemeral uploads-staging/ prefix is expired as a
+  # backstop for abandoned chunked uploads). Versioning is on (above), so
+  # overwriting or deleting a live object leaves its prior content as a
+  # NONCURRENT (ARCHIVED) version instead of freeing it — those accumulate
+  # forever with no rule. The noncurrent Delete rule only ever touches
+  # ARCHIVED (non-live) versions, so it cannot delete live data: the current
+  # version of every object outside uploads-staging/ is untouched regardless
+  # of age. The AbortIncompleteMultipartUpload rule is belt-and-suspenders,
+  # also CURRENT-object-safe: an interrupted resumable/multipart upload has no
+  # live reader by definition, so aborting it after a week reclaims storage
+  # with zero risk to anything the hub or an agent might still be using. All
+  # rules are in-place updates (lifecycle_rule is a normal, non-ForceNew field
+  # on google_storage_bucket) — no bucket replace. Rendered from
   # local.artifacts_lifecycle_rules above so the resource config and the
   # bucket_lifecycle_rules output (outputs.tf) can never drift apart.
   dynamic "lifecycle_rule" {
     for_each = local.artifacts_lifecycle_rules
     content {
       condition {
-        with_state = lifecycle_rule.value.condition.with_state
-        age        = lifecycle_rule.value.condition.age
+        with_state     = lifecycle_rule.value.condition.with_state
+        age            = lifecycle_rule.value.condition.age
+        matches_prefix = try(lifecycle_rule.value.condition.matches_prefix, null)
       }
       action {
         type = lifecycle_rule.value.action.type

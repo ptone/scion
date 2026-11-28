@@ -133,9 +133,27 @@ run "fresh_h2_plans_clean" {
   assert {
     condition = anytrue([
       for r in output.bucket_lifecycle_rules :
-      r.condition.with_state == "ARCHIVED" && r.action.type == "Delete"
+      r.condition.with_state == "ARCHIVED" && r.condition.age == 30 && r.action.type == "Delete"
     ])
-    error_message = "expected a Delete lifecycle rule on the artifacts bucket scoped to with_state = ARCHIVED (noncurrent versions only) — a rule without that scope could delete live/CURRENT data."
+    error_message = "expected a Delete lifecycle rule on the artifacts bucket scoped to with_state = ARCHIVED (age 30, noncurrent versions only) — a rule without that scope could delete live/CURRENT data."
+  }
+
+  assert {
+    condition = anytrue([
+      for r in output.bucket_lifecycle_rules :
+      r.condition.with_state == "ANY" && r.condition.age == 7 && r.action.type == "AbortIncompleteMultipartUpload"
+    ])
+    error_message = "expected the AbortIncompleteMultipartUpload (age 7) lifecycle rule on the artifacts bucket to remain intact."
+  }
+
+  assert {
+    condition = anytrue([
+      for r in output.bucket_lifecycle_rules :
+      r.action.type == "Delete" &&
+      r.condition.age == 2 &&
+      try(r.condition.matches_prefix, null) == ["uploads-staging/"]
+    ])
+    error_message = "expected a Delete lifecycle rule on the artifacts bucket with age = 2 and matches_prefix = [\"uploads-staging/\"] (ptone/scion#8654 §3.13)."
   }
 }
 

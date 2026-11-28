@@ -51,10 +51,12 @@ locals {
   conduit_peer_secret_name = "${var.hub_name}-conduit-peer"
   conduit_peer_secret_key  = "SCION_SERVER_HUB_CONDUIT_PEERSECRET"
 
-  # Same rules as hub-cloudrun's artifacts bucket: only ARCHIVED versions
-  # expire, and stalled multipart uploads are aborted. See that module for
-  # why no rule touches CURRENT objects and why with_state = "ANY" is
-  # spelled out.
+  # Same rules as hub-cloudrun's artifacts bucket: noncurrent ARCHIVED
+  # versions expire after 30 days, stalled multipart uploads are aborted
+  # after 7 days, and abandoned large-upload staging objects under
+  # uploads-staging/ expire after 2 days (ptone/scion#8654 §3.13). See that
+  # module for why no blanket rule touches CURRENT objects and why
+  # with_state = "ANY" is spelled out.
   artifacts_lifecycle_rules = [
     {
       condition = { with_state = "ARCHIVED", age = 30 }
@@ -63,6 +65,10 @@ locals {
     {
       condition = { with_state = "ANY", age = 7 }
       action    = { type = "AbortIncompleteMultipartUpload" }
+    },
+    {
+      condition = { with_state = "ANY", age = 2, matches_prefix = ["uploads-staging/"] }
+      action    = { type = "Delete" }
     },
   ]
 
@@ -466,8 +472,9 @@ resource "google_storage_bucket" "artifacts" {
     for_each = local.artifacts_lifecycle_rules
     content {
       condition {
-        with_state = lifecycle_rule.value.condition.with_state
-        age        = lifecycle_rule.value.condition.age
+        with_state     = lifecycle_rule.value.condition.with_state
+        age            = lifecycle_rule.value.condition.age
+        matches_prefix = try(lifecycle_rule.value.condition.matches_prefix, null)
       }
       action {
         type = lifecycle_rule.value.action.type
