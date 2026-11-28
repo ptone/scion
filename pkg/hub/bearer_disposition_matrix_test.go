@@ -71,6 +71,14 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the route answers 404 while the hub.github_triggers experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET and PUT with project- and hub-boundary tokens carrying and lacking project:read and github_trigger:configure",
 		Pin:    "TestProjectGitHubTriggerSettings_ScopedTokens",
 	},
+	{OperationID: "project.github.write", Method: "PUT", Pattern: "/api/v1/projects/{id}/github-extra-repos"}: {
+		Reason: "the route answers 404 while the hub.github_extra_repos experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives PUT across project_admin, hub_admin, and off policies",
+		Pin:    "TestGitHubExtraRepos_AuthzMatrixAndExperimentGate",
+	},
+	{OperationID: "project.github.write", Method: "DELETE", Pattern: "/api/v1/projects/{id}/github-extra-repos"}: {
+		Reason: "the route answers 404 while the hub.github_extra_repos experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives DELETE",
+		Pin:    "TestGitHubExtraRepos_ReadModelStatusesWebhookHookAuditAndAdminReport",
+	},
 	{OperationID: "role.binding.effectivepermissions", Method: "GET", Pattern: "/api/v1/admin/effective-permissions"}: {
 		Reason: "the route answers 404 while the hub.effective_permissions experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET and HEAD with hub- and project-boundary tokens carrying and lacking role_binding:read",
 		Pin:    "TestAdminEffectivePermissions_ScopedTokens",
