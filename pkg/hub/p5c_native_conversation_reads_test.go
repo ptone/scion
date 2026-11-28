@@ -207,17 +207,19 @@ func TestP5c_WriteGapAndRecentMessages(t *testing.T) {
 		messageLog: slog.Default(),
 	}
 
-	// Non-broadcast with undetermined principal kind and no thread/conversation
-	// must be refused (returns false, no silent NULL conversation_id).
+	// Native web non-broadcast with undetermined principal kind and no
+	// thread/conversation must be refused (returns false, no silent NULL
+	// conversation_id).
 	storeMsg := &store.Message{ID: uuid.NewString()}
 	ok := proxy.resolveUserMessageConversation(ctx, uuid.NewString(), storeMsg, &messages.StructuredMessage{
+		Channel:     "web",
 		Sender:      "unknown-sender",
 		SenderID:    uuid.NewString(),
 		Recipient:   "unknown-recipient",
 		RecipientID: uuid.NewString(),
 		Msg:         "hello",
 	})
-	assert.False(t, ok, "unresolvable non-broadcast message must be refused")
+	assert.False(t, ok, "unresolvable native web non-broadcast message must be refused")
 	assert.Empty(t, storeMsg.ConversationID)
 
 	// Native web message with empty sender/recipient IDs and no thread/conversation
