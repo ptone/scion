@@ -236,7 +236,7 @@ func (s *Server) secretCredentialScope(token string) string {
 	if keys.configured() {
 		if k, _, err := keys.issue(); err == nil {
 			mat = k.Bytes()
-		} else if s.resourceLog != nil {
+		} else if s.resourceLog != nil && s.githubScopeKeyWarned.CompareAndSwap(false, true) {
 			s.resourceLog.Warn("github scope HMAC key issuance unavailable; using ephemeral per-process key", "error", err)
 		}
 	}

@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
 	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -507,21 +508,31 @@ func TestSkillsResolve_P4_RevocationStaleAndETag304(t *testing.T) {
 }
 
 // TestSkillsResolve_P4_HostedRefusesDenylistedAddress verifies that hosted Hub
-// skill resolution (s.workstation == false, production remotefetch Doer) refuses
-// loopback/denylisted addresses rather than talking to them via a bare http.Client.
+// skill resolution (s.workstation == false, production remotefetch Doer) reaches
+// the IP denylist and refuses loopback addresses (ReasonDeniedAddress) rather
+// than failing earlier on scheme/port checks or talking to loopback via a bare
+// http.Client.
 func TestSkillsResolve_P4_HostedRefusesDenylistedAddress(t *testing.T) {
-	var hits atomic.Int64
-	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(gh.Close)
-
 	srv, _, alice, _, project := setupSkillAuthzTest(t)
 	srv.workstation = false
 	srv.skillGitHubDoer = nil // production remotefetch.NetworkVetted path
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	// Use https://127.0.0.1 (default port 443) so the request passes both the
+	// HTTPS scheme check and the port-443 check and is refused specifically by
+	// NetworkVetted's IP denylist (ReasonDeniedAddress).
+	srv.config.GitHubAppConfig.APIBaseURL = "https://127.0.0.1"
+	srv.config.GitHubAppConfig.RawBaseURL = "https://127.0.0.1"
+
+	// Verify the production Doer rejects https://127.0.0.1 specifically at the
+	// IP denylist (ReasonDeniedAddress), not earlier on scheme or port checks.
+	ep := srv.skillGitHubEndpoint()
+	_, err := srv.skillGitHubDoerForEndpoint(ep).Open(context.Background(), githubfetch.Request{
+		URL: ep.APIBase + "/repos/acme/repo/commits/main",
+	})
+	require.Error(t, err)
+	var fe *remotefetch.Error
+	require.ErrorAs(t, err, &fe, "hosted NetworkVetted must return a remotefetch.Error")
+	assert.Equal(t, remotefetch.ReasonDeniedAddress, fe.Reason,
+		"hosted NetworkVetted must refuse https://127.0.0.1 at the IP denylist (not scheme/port)")
 
 	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
 		ResolveSkillsRequest{
@@ -534,7 +545,6 @@ func TestSkillsResolve_P4_HostedRefusesDenylistedAddress(t *testing.T) {
 	require.Empty(t, resp.Resolved)
 	require.Len(t, resp.Errors, 1)
 	assert.Equal(t, agent.SkillErrCodeResolveFailed, resp.Errors[0].Code)
-	assert.Zero(t, hits.Load(), "hosted NetworkVetted must refuse loopback/http address without contacting it")
 }
 
 // TestSkillsResolve_P4_SharedCooldownWithReimport verifies that a rate limit
@@ -823,4 +833,257 @@ func TestSkillsResolve_P4_SHAPinnedTTLBoundsRevocationForNonAnon(t *testing.T) {
 	require.True(t, hit)
 	assert.WithinDuration(t, fixedNow.Add(agent.DefaultResolutionCacheTTL), credEntry.ExpiresAt, time.Second,
 		"non-anon SHA-pinned tree row must use 30m fresh TTL to bound revocation exposure")
+}
+
+// TestSkillsResolve_P4_BranchWrittenTreeExpiresForSHAPinned verifies R1 (fix round 2):
+//   - Branch resolves write non-anon tree rows with DefaultResolutionCacheTTL (30m),
+//     not the 24h SHA TTL, so a later SHA-pinned resolve reusing that TreeCacheKey
+//     cannot serve stale metadata past 30m after credential revocation.
+//   - A warm branch 304 Not Modified extends both the ref row and the tree row
+//     without re-listing the tree (0 extra tree calls on 304 and on the follow-up).
+//   - Once >30m has elapsed after the branch resolve (simulated via advancing the
+//     branch-written row's age past its 30m expiry), a SHA-pinned resolve while
+//     upstream returns 404 or 401 calls upstream, is not served, and deletes rows.
+func TestSkillsResolve_P4_BranchWrittenTreeExpiresForSHAPinned(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		denyStatus int
+		wantCode   string
+	}{
+		{name: "revoked_404", denyStatus: http.StatusNotFound, wantCode: agent.SkillErrCodeNotFound},
+		{name: "revoked_401", denyStatus: http.StatusUnauthorized, wantCode: agent.SkillErrCodeCredentialRejected},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const (
+				owner     = "acme"
+				repo      = "branch-sha-ttl-repo"
+				skillPath = "skills/s"
+				sha       = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+				branchURI = "gh://" + owner + "/" + repo + "/s@main"
+				shaURI    = "gh://" + owner + "/" + repo + "/s@" + sha
+				pat       = "ghp_branch_sha_ttl_pat"
+			)
+
+			var (
+				refMode     atomic.Int32 // 0=200, 1=304
+				treeDeny    atomic.Bool
+				commitCalls atomic.Int64
+				treeCalls   atomic.Int64
+			)
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+				commitCalls.Add(1)
+				if refMode.Load() == 1 {
+					w.Header().Set("ETag", `"etag-branch-1"`)
+					w.WriteHeader(http.StatusNotModified)
+					return
+				}
+				w.Header().Set("ETag", `"etag-branch-1"`)
+				_, _ = w.Write([]byte(sha))
+			})
+			mux.HandleFunc(ghTreeTestPath(owner, repo, sha, skillPath), func(w http.ResponseWriter, _ *http.Request) {
+				treeCalls.Add(1)
+				if treeDeny.Load() {
+					http.Error(w, `{"message":"denied"}`, tc.denyStatus)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(ghTreeTestSingleFile))
+			})
+			gh := httptest.NewServer(mux)
+			t.Cleanup(gh.Close)
+
+			srv, _, alice, _, project := setupSkillAuthzTest(t)
+			entClient := enttest.NewClient(t)
+			srv.ghResolutionStore = NewGitHubResolutionStore(entClient)
+			wireFakeSkillGitHub(srv, gh.URL)
+			useReimportCredBackend(srv, secret.ScopeProject, project.ID, map[string]string{
+				"GITHUB_TOKEN": pat,
+			})
+
+			now := time.Now().UTC().Truncate(time.Second)
+			srv.ghNow = func() time.Time { return now }
+			srv.ghRandFloat64 = func() float64 { return 0.5 } // exact nominal TTL
+
+			ctx := context.Background()
+			ep := srv.skillGitHubEndpoint()
+			cred := srv.githubCredential(ctx, ghCredRequest{
+				Scope: store.TemplateScopeProject, ScopeID: project.ID, Owner: owner, Repo: repo,
+			})
+			scope := cred.EffectiveScope()
+			refKey := githubfetch.RefCacheKey(ep.APIHost(), owner, repo, "main", scope)
+			treeKey := githubfetch.TreeCacheKey(ep.APIHost(), owner, repo, sha, skillPath, scope)
+
+			resolve := func(t *testing.T, u string) ResolveSkillsResponse {
+				t.Helper()
+				rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
+					ResolveSkillsRequest{Skills: []ResolveSkillRef{{URI: u}}, ProjectID: project.ID})
+				require.Equal(t, http.StatusOK, rec.Code)
+				var resp ResolveSkillsResponse
+				require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+				return resp
+			}
+
+			// 1. Branch resolve populates ref + tree; tree row MUST have 30m TTL (not 24h).
+			resp := resolve(t, branchURI)
+			require.Len(t, resp.Resolved, 1)
+			require.Equal(t, int64(1), commitCalls.Load())
+			require.Equal(t, int64(1), treeCalls.Load())
+
+			treeRow, err := srv.ghResolutionStore.load(ctx, treeKey)
+			require.NoError(t, err)
+			require.NotNil(t, treeRow)
+			assert.WithinDuration(t, now.Add(agent.DefaultResolutionCacheTTL), treeRow.ExpiresAt, time.Second,
+				"branch-written non-anon tree row must use 30m TTL, not 24h")
+
+			// 2. Warm branch 304: expire both ref and tree rows, return 304 on ref.
+			// Must make 0 extra tree calls AND extend tree row ExpiresAt so the
+			// subsequent branch resolve hits cache with 0 commit and 0 tree calls.
+			refRow, err := srv.ghResolutionStore.load(ctx, refKey)
+			require.NoError(t, err)
+			require.NotNil(t, refRow)
+			refRow.ExpiresAt = time.Now().Add(-time.Minute)
+			require.NoError(t, srv.ghResolutionStore.Put(ctx, refKey, *refRow))
+			treeRow.ExpiresAt = time.Now().Add(-time.Minute)
+			require.NoError(t, srv.ghResolutionStore.Put(ctx, treeKey, *treeRow))
+
+			refMode.Store(1)
+			resp = resolve(t, branchURI)
+			require.Len(t, resp.Resolved, 1)
+			assert.Equal(t, int64(2), commitCalls.Load())
+			assert.Equal(t, int64(1), treeCalls.Load(), "304 must NOT re-list tree")
+
+			// Follow-up branch resolve must hit fresh ref + refreshed tree with 0 API calls.
+			resp = resolve(t, branchURI)
+			require.Len(t, resp.Resolved, 1)
+			assert.Equal(t, int64(2), commitCalls.Load())
+			assert.Equal(t, int64(1), treeCalls.Load(), "warm branch resolve after 304 must make 0 tree calls")
+
+			// 3. Simulate >30m elapsing since the branch-written tree row was written/refreshed:
+			// backdate the row by 31m (beyond its 30m TTL, well under 24h) while upstream denies.
+			treeRow, err = srv.ghResolutionStore.load(ctx, treeKey)
+			require.NoError(t, err)
+			require.NotNil(t, treeRow)
+			treeRow.ExpiresAt = treeRow.ExpiresAt.Add(-31 * time.Minute)
+			require.NoError(t, srv.ghResolutionStore.Put(ctx, treeKey, *treeRow))
+
+			treeDeny.Store(true)
+			resp = resolve(t, shaURI)
+			require.Empty(t, resp.Resolved, "SHA-pinned resolve >30m after branch write must NOT serve stale tree row")
+			require.Len(t, resp.Errors, 1)
+			assert.Equal(t, tc.wantCode, resp.Errors[0].Code)
+			assert.Equal(t, int64(2), treeCalls.Load(), "SHA-pinned resolve must call upstream after 30m expiry")
+
+			count, err := entClient.GitHubResolutionCache.Query().
+				Where(githubresolutioncache.TokenScopeEQ(scope)).
+				Count(ctx)
+			require.NoError(t, err)
+			assert.Zero(t, count, "revocation denial on SHA-pinned resolve must delete cached rows for scope")
+		})
+	}
+}
+
+// TestSkillsResolve_P4_ListTreeNotFoundDeletesOnlyPath verifies O1 (fix round 2):
+//   - A 404 from ListTree after a successful ResolveRef (missing skill path / typo)
+//     deletes only that path's tree row and records the negative memo without
+//     wiping other cached ref/tree rows for the same {host, owner, repo, scope}.
+//   - A 403 (forbidden) from ListTree or a 404 from ResolveRef still purges all
+//     cached rows for {host, owner, repo, scope}.
+func TestSkillsResolve_P4_ListTreeNotFoundDeletesOnlyPath(t *testing.T) {
+	const (
+		owner      = "acme"
+		repo       = "path-404-repo"
+		sha        = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		goodURI    = "gh://" + owner + "/" + repo + "/good@main"
+		missingURI = "gh://" + owner + "/" + repo + "/missing@main"
+		forbidURI  = "gh://" + owner + "/" + repo + "/forbid@main"
+		pat        = "ghp_path_404_pat"
+	)
+
+	var (
+		missingCalls atomic.Int64
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(sha))
+	})
+	mux.HandleFunc(ghTreeTestPath(owner, repo, sha, "skills/good"), func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(ghTreeTestSingleFile))
+	})
+	mux.HandleFunc(ghTreeTestPath(owner, repo, sha, "skills/missing"), func(w http.ResponseWriter, _ *http.Request) {
+		missingCalls.Add(1)
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+	})
+	mux.HandleFunc(ghTreeTestPath(owner, repo, sha, "skills/forbid"), func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"Forbidden"}`, http.StatusForbidden)
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+
+	srv, _, alice, _, project := setupSkillAuthzTest(t)
+	entClient := enttest.NewClient(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(entClient)
+	wireFakeSkillGitHub(srv, gh.URL)
+	useReimportCredBackend(srv, secret.ScopeProject, project.ID, map[string]string{
+		"GITHUB_TOKEN": pat,
+	})
+
+	ctx := context.Background()
+	cred := srv.githubCredential(ctx, ghCredRequest{
+		Scope: store.TemplateScopeProject, ScopeID: project.ID, Owner: owner, Repo: repo,
+	})
+	scope := cred.EffectiveScope()
+
+	resolve := func(t *testing.T, u string) ResolveSkillsResponse {
+		t.Helper()
+		rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
+			ResolveSkillsRequest{Skills: []ResolveSkillRef{{URI: u}}, ProjectID: project.ID})
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp ResolveSkillsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		return resp
+	}
+
+	// 1. Populate valid skill "good" (ref row + tree row = 2 rows).
+	resp := resolve(t, goodURI)
+	require.Len(t, resp.Resolved, 1)
+	count, err := entClient.GitHubResolutionCache.Query().
+		Where(githubresolutioncache.TokenScopeEQ(scope)).
+		Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+
+	// 2. Resolving a missing path on the same branch returns not_found, writes
+	// the negative memo, and preserves the ref + "good" tree rows.
+	resp = resolve(t, missingURI)
+	require.Empty(t, resp.Resolved)
+	require.Len(t, resp.Errors, 1)
+	assert.Equal(t, agent.SkillErrCodeNotFound, resp.Errors[0].Code)
+	assert.Equal(t, int64(1), missingCalls.Load())
+
+	count, err = entClient.GitHubResolutionCache.Query().
+		Where(githubresolutioncache.TokenScopeEQ(scope)).
+		Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count, "ListTree 404 on a missing skill path must NOT wipe other cached rows for the repo/scope")
+
+	// Immediate retry of missing path is absorbed by the negative memo.
+	resp = resolve(t, missingURI)
+	require.Len(t, resp.Errors, 1)
+	assert.Equal(t, agent.SkillErrCodeNotFound, resp.Errors[0].Code)
+	assert.Equal(t, int64(1), missingCalls.Load(), "negative memo must absorb immediate retry of missing path")
+
+	// 3. A 403 (forbidden) from ListTree wipes ALL rows for {host, owner, repo, scope}.
+	resp = resolve(t, forbidURI)
+	require.Empty(t, resp.Resolved)
+	require.Len(t, resp.Errors, 1)
+	assert.Equal(t, agent.SkillErrCodeCredentialRejected, resp.Errors[0].Code)
+
+	count, err = entClient.GitHubResolutionCache.Query().
+		Where(githubresolutioncache.TokenScopeEQ(scope)).
+		Count(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, count, "ListTree 403 must wipe all cached rows for the repo/scope")
 }

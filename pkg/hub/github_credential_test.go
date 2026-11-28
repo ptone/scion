@@ -17,10 +17,13 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -182,5 +185,32 @@ func TestGitHubScopeKey_FailClosedNoUnkeyedSHA256(t *testing.T) {
 		}
 		err := s.initGitHubScopeKey(context.Background())
 		require.Error(t, err)
+	})
+
+	t.Run("keyring issue failure warns once", func(t *testing.T) {
+		var buf bytes.Buffer
+		past := time.Now().Add(-time.Hour)
+		future := time.Now().Add(time.Hour)
+		kr := capKeyring(t, "gen1", "legacy", []string{"gen1"}, krEntry{
+			id: "gen1", secret: "expired-gen1-secret-value-000001", signUntil: &past, verifyUntl: &future,
+		})
+		s := &Server{
+			githubScopeKeys: capabilityKeys{
+				ring:    kr.Signing(),
+				purpose: sharedSecretPurpose(SecretKeyGitHubScopeKey),
+			},
+			resourceLog: slog.New(slog.NewTextHandler(&buf, nil)),
+		}
+		require.True(t, s.githubScopeCapabilityKeys().configured())
+		_, _, err := s.githubScopeCapabilityKeys().issue()
+		require.Error(t, err)
+
+		scope1 := s.secretCredentialScope(tok)
+		scope2 := s.secretCredentialScope(tok)
+		scope3 := s.secretCredentialScope(tok)
+		assert.Equal(t, scope1, scope2)
+		assert.Equal(t, scope2, scope3)
+		assert.Equal(t, 1, strings.Count(buf.String(), "github scope HMAC key issuance unavailable"),
+			"repeated keys.issue() failures must warn only once")
 	})
 }

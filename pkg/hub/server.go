@@ -2340,6 +2340,8 @@ type Server struct {
 	// if githubScopeKeys is unconfigured or cannot issue (never falls back to
 	// unkeyed SHA-256). Guarded by mu.
 	githubScopeEphemeralKey []byte
+	// githubScopeKeyWarned ensures a failed githubScopeKeys.issue() warns once.
+	githubScopeKeyWarned atomic.Bool
 	// portViewClock replaces time.Now on the page view route (tests only).
 	portViewClock func() time.Time
 

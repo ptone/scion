@@ -2150,23 +2150,27 @@ func (s *Server) skillGitHubEndpoint() githubfetch.Endpoint {
 	return ep
 }
 
-// getSkillGitHubClient returns a githubfetch.Client for Hub skill resolution.
-// Hosted Hubs use remotefetch.NetworkVetted (SSRF-hardened, IP denylist);
-// workstation Hubs use remotefetch.NetworkSystem (loopback, honours user proxy).
-// Tests may inject s.skillGitHubDoer.
-func (s *Server) getSkillGitHubClient(ep githubfetch.Endpoint) *githubfetch.Client {
-	doer := s.skillGitHubDoer
-	if doer == nil {
-		lim := githubfetch.SkillLimits()
-		network := remotefetch.NetworkVetted
-		if s.workstation {
-			network = remotefetch.NetworkSystem
-		}
-		doer = githubfetch.NewDoer(ep, network, 16<<20, lim.RequestTimeout, s.resourceLog)
+// skillGitHubDoerForEndpoint returns the githubfetch.Doer used for Hub skill
+// resolution: tests may inject s.skillGitHubDoer; otherwise hosted Hubs use
+// remotefetch.NetworkVetted (SSRF-hardened, IP denylist) and workstation Hubs
+// use remotefetch.NetworkSystem (loopback, honours user proxy).
+func (s *Server) skillGitHubDoerForEndpoint(ep githubfetch.Endpoint) githubfetch.Doer {
+	if s.skillGitHubDoer != nil {
+		return s.skillGitHubDoer
 	}
+	lim := githubfetch.SkillLimits()
+	network := remotefetch.NetworkVetted
+	if s.workstation {
+		network = remotefetch.NetworkSystem
+	}
+	return githubfetch.NewDoer(ep, network, 16<<20, lim.RequestTimeout, s.resourceLog)
+}
+
+// getSkillGitHubClient returns a githubfetch.Client for Hub skill resolution.
+func (s *Server) getSkillGitHubClient(ep githubfetch.Endpoint) *githubfetch.Client {
 	return githubfetch.New(githubfetch.Options{
 		Endpoint:   ep,
-		Doer:       doer,
+		Doer:       s.skillGitHubDoerForEndpoint(ep),
 		Cooldown:   s.githubCooldown(),
 		Clock:      s.ghClockNow,
 		MaxRetries: 1,
@@ -2587,6 +2591,7 @@ func (s *Server) resolveGitHubSkillWithCredMemo(ctx context.Context, rawURI, pro
 		defer cancel()
 
 		// Re-check fresh cache in case a concurrent flight just landed.
+		flightFreshRef := freshRef
 		if s.ghResolutionStore != nil {
 			if !isBranchRef {
 				if entry, hit, gerr := s.ghResolutionStore.Get(flightCtx, flightKey); gerr == nil && hit {
@@ -2597,7 +2602,7 @@ func (s *Server) resolveGitHubSkillWithCredMemo(ctx context.Context, rawURI, pro
 				if tEntry, tHit, terr := s.ghResolutionStore.Get(flightCtx, tKey); terr == nil && tHit {
 					return tEntry, nil
 				}
-				freshRef = rEntry
+				flightFreshRef = rEntry
 			}
 		}
 		if ferr := s.ghFailures.Recent(flightKey); ferr != nil {
@@ -2605,7 +2610,7 @@ func (s *Server) resolveGitHubSkillWithCredMemo(ctx context.Context, rawURI, pro
 			return nil, ferr
 		}
 
-		return s.fetchAndCacheGitHubSkill(flightCtx, ep, flightKey, refKey, rawURI, ghRef, cred, isBranchRef, freshRef, staleRef, staleTree, refSHAMemo)
+		return s.fetchAndCacheGitHubSkill(flightCtx, ep, flightKey, refKey, rawURI, ghRef, cred, isBranchRef, flightFreshRef, staleRef, staleTree, refSHAMemo)
 	})
 
 	select {
@@ -2737,7 +2742,22 @@ func (s *Server) fetchAndCacheGitHubSkill(
 	}
 	client := s.getSkillGitHubClient(ep)
 
+	refreshTreeExpiry := func(tKey string, entry *GitHubCacheEntry) *GitHubCacheEntry {
+		if scope == githubfetch.AnonScope || s.ghResolutionStore == nil {
+			return entry
+		}
+		updated := *entry
+		updated.ExpiresAt = s.ghClockNow().Add(agent.JitteredTTL(agent.DefaultResolutionCacheTTL, s.ghRand()))
+		if err := s.ghResolutionStore.Put(ctx, tKey, updated); err != nil {
+			slog.WarnContext(ctx, "github_resolution_cache: failed to extend tree entry",
+				"uri", rawURI, "error", err)
+			return entry
+		}
+		return &updated
+	}
+
 	var commitSHA string
+	refProven := false
 	if !isBranchRef {
 		commitSHA = ghRef.Ref
 	} else if freshRef != nil {
@@ -2757,6 +2777,7 @@ func (s *Server) fetchAndCacheGitHubSkill(
 			}
 			return nil, err
 		}
+		refProven = true
 		if notMod && staleRef != nil {
 			commitSHA = staleRef.CommitSHA
 			refEntry := GitHubCacheEntry{
@@ -2775,6 +2796,8 @@ func (s *Server) fetchAndCacheGitHubSkill(
 				}
 			}
 			if staleTree != nil {
+				tKey := githubfetch.TreeCacheKey(apiHost, ghRef.Owner, ghRef.Repo, commitSHA, ghRef.SkillPath, scope)
+				staleTree = refreshTreeExpiry(tKey, staleTree)
 				slog.InfoContext(ctx, "github_resolution_cache: ref 304 not modified, extended TTL without re-listing",
 					"uri", rawURI, "commit_sha", safeShortSHA(commitSHA))
 				return staleTree, nil
@@ -2802,11 +2825,17 @@ func (s *Server) fetchAndCacheGitHubSkill(
 	treeKey := githubfetch.TreeCacheKey(apiHost, ghRef.Owner, ghRef.Repo, commitSHA, ghRef.SkillPath, scope)
 	if staleTree != nil && staleTree.CommitSHA == commitSHA {
 		s.ghFailures.Clear(flightKey)
+		if refProven {
+			staleTree = refreshTreeExpiry(treeKey, staleTree)
+		}
 		return staleTree, nil
 	}
 	if s.ghResolutionStore != nil {
 		if existing, hit, gerr := s.ghResolutionStore.Get(ctx, treeKey); gerr == nil && hit {
 			s.ghFailures.Clear(flightKey)
+			if refProven {
+				existing = refreshTreeExpiry(treeKey, existing)
+			}
 			return existing, nil
 		}
 	}
@@ -2814,7 +2843,21 @@ func (s *Server) fetchAndCacheGitHubSkill(
 	tree, err := client.ListTree(ctx, src, commitSHA, cred, githubfetch.SkillLimits())
 	if err != nil {
 		if isGHAuthoritativeDenial(err) {
-			s.deleteGHRepoScopeCache(ctx, ep, ghRef.Owner, ghRef.Repo, scope)
+			var ghe *githubfetch.Error
+			if isBranchRef && errors.As(err, &ghe) && ghe.Kind == githubfetch.KindNotFound {
+				// Ref resolution already succeeded for this repo and scope; a
+				// 404 from ListTree means this skill path does not exist at
+				// commitSHA. Delete only this path's tree row so a missing path
+				// does not evict other skills/refs in the shared repo scope.
+				if s.ghResolutionStore != nil {
+					if derr := s.ghResolutionStore.Delete(ctx, treeKey); derr != nil {
+						slog.WarnContext(ctx, "github_resolution_cache: failed to delete tree entry on path not_found",
+							"uri", rawURI, "error", derr)
+					}
+				}
+			} else {
+				s.deleteGHRepoScopeCache(ctx, ep, ghRef.Owner, ghRef.Repo, scope)
+			}
 			s.rememberGHDenial(flightKey, err)
 		}
 		return nil, err
@@ -2837,11 +2880,12 @@ func (s *Server) fetchAndCacheGitHubSkill(
 
 	bundleHash := computeBundleHash(fileEntries)
 
-	// SHA-pinned refs (!isBranchRef) have no ref row in front of the tree row.
-	// For non-anon scopes, cap the tree row to the 30m fresh TTL so revocation
-	// exposure never exceeds one fresh TTL; anon keeps the 24h SHA TTL.
+	// For non-anon scopes, cap every tree row (whether written by a branch
+	// resolve or a SHA-pinned resolve) to DefaultResolutionCacheTTL (30m) so a
+	// later SHA-pinned resolve reusing that TreeCacheKey can never serve stale
+	// metadata past one fresh TTL after credential revocation. Anon keeps 24h.
 	treeTTL := agent.DefaultSHAResolutionCacheTTL
-	if !isBranchRef && scope != githubfetch.AnonScope {
+	if scope != githubfetch.AnonScope {
 		treeTTL = agent.DefaultResolutionCacheTTL
 	}
 

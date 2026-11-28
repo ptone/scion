@@ -145,6 +145,15 @@ func (s *GitHubResolutionStore) Put(ctx context.Context, cacheKey string, entry 
 		Exec(ctx)
 }
 
+// Delete removes a single cache entry by its exact cache_key.
+func (s *GitHubResolutionStore) Delete(ctx context.Context, cacheKey string) error {
+	_, err := s.client.GitHubResolutionCache.
+		Delete().
+		Where(githubresolutioncache.CacheKeyEQ(cacheKey)).
+		Exec(ctx)
+	return err
+}
+
 // DeleteByRepoAndScope deletes every cached ref and tree row for the given
 // repository key prefixes (see githubfetch.RepoCacheKeyPrefixes) belonging to
 // tokenScope. Called on authoritative denial (not_found, auth_rejected,
