@@ -6476,6 +6476,8 @@
 | http_route | POST | `/api/v1/projects/{id}/github-status` |
 | http_route | PUT | `/api/v1/projects/{id}/github-permissions` |
 | http_route | DELETE | `/api/v1/projects/{id}/github-permissions` |
+| http_route | PUT | `/api/v1/projects/{id}/github-extra-repos` |
+| http_route | DELETE | `/api/v1/projects/{id}/github-extra-repos` |
 | http_route | PUT | `/api/v1/projects/{id}/git-identity` |
 | http_route | DELETE | `/api/v1/projects/{id}/git-identity` |
 

@@ -48,6 +48,8 @@ const (
 	FieldGithubPermissions = "github_permissions"
 	// FieldGithubAppStatus holds the string denoting the github_app_status field in the database.
 	FieldGithubAppStatus = "github_app_status"
+	// FieldGithubExtraRepos holds the string denoting the github_extra_repos field in the database.
+	FieldGithubExtraRepos = "github_extra_repos"
 	// FieldGitIdentity holds the string denoting the git_identity field in the database.
 	FieldGitIdentity = "git_identity"
 	// FieldCrossProjectInbound holds the string denoting the cross_project_inbound field in the database.
@@ -88,6 +90,7 @@ var Columns = []string{
 	FieldGithubInstallationID,
 	FieldGithubPermissions,
 	FieldGithubAppStatus,
+	FieldGithubExtraRepos,
 	FieldGitIdentity,
 	FieldCrossProjectInbound,
 	FieldCrossProjectInboundRevision,
@@ -224,6 +227,11 @@ func ByGithubPermissions(opts ...sql.OrderTermOption) OrderOption {
 // ByGithubAppStatus orders the results by the github_app_status field.
 func ByGithubAppStatus(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldGithubAppStatus, opts...).ToFunc()
+}
+
+// ByGithubExtraRepos orders the results by the github_extra_repos field.
+func ByGithubExtraRepos(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldGithubExtraRepos, opts...).ToFunc()
 }
 
 // ByGitIdentity orders the results by the git_identity field.

@@ -192,6 +192,7 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.github_app.private_key_path":        "private_key_path",
 		"server.github_app.app_slug":                "app_slug",
 		"server.github_app.command_mention_aliases": "command_mention_aliases",
+		"server.github_app.extra_repos_policy":      "extra_repos_policy",
 	},
 	"auto_expose_ports": {
 		"auto_expose_ports.enabled": "enabled",
@@ -275,6 +276,7 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"private_key_path":        "server.github_app.private_key_path",
 		"app_slug":                "server.github_app.app_slug",
 		"command_mention_aliases": "server.github_app.command_mention_aliases",
+		"extra_repos_policy":      "server.github_app.extra_repos_policy",
 	},
 	"auto_expose_ports": {
 		"enabled": "auto_expose_ports.enabled",

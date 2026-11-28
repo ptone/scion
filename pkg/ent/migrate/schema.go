@@ -3181,6 +3181,7 @@ var (
 		{Name: "github_installation_id", Type: field.TypeInt64, Nullable: true},
 		{Name: "github_permissions", Type: field.TypeString, Nullable: true},
 		{Name: "github_app_status", Type: field.TypeString, Nullable: true},
+		{Name: "github_extra_repos", Type: field.TypeString, Nullable: true},
 		{Name: "git_identity", Type: field.TypeString, Nullable: true},
 		{Name: "cross_project_inbound", Type: field.TypeEnum, Enums: []string{"none", "members", "any"}, Default: "none"},
 		{Name: "cross_project_inbound_revision", Type: field.TypeInt64, Default: 1},

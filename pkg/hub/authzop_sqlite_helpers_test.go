@@ -1344,6 +1344,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/github-installation":               {"id": f.project},
 		"/api/v1/projects/{id}/github-status":                     {"id": f.project},
 		"/api/v1/projects/{id}/github-permissions":                {"id": f.project},
+		"/api/v1/projects/{id}/github-extra-repos":                {"id": f.project},
 		"/api/v1/projects/{id}/git-identity":                      {"id": f.project},
 		"/api/v1/projects/{id}/trigger-sources/github":            {"id": f.project},
 		"/api/v1/projects/{id}/members/assignable-roles":          {"id": f.project},

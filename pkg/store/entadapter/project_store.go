@@ -143,6 +143,11 @@ func entProjectToStore(p *ent.Project) *store.Project {
 		sp.GitHubAppStatus = &store.GitHubAppProjectStatus{}
 		unmarshalRawJSON(p.GithubAppStatus, sp.GitHubAppStatus)
 	}
+	if p.GithubExtraRepos != "" {
+		var extraRepos []store.GitHubExtraRepo
+		unmarshalRawJSON(p.GithubExtraRepos, &extraRepos)
+		sp.GitHubExtraRepos = extraRepos
+	}
 	if p.GitIdentity != "" {
 		sp.GitIdentity = &store.GitIdentityConfig{}
 		unmarshalRawJSON(p.GitIdentity, sp.GitIdentity)
@@ -197,6 +202,9 @@ func (s *ProjectStore) CreateProject(ctx context.Context, p *store.Project) erro
 	}
 	if p.GitHubAppStatus != nil {
 		create.SetGithubAppStatus(marshalRawJSON(p.GitHubAppStatus))
+	}
+	if len(p.GitHubExtraRepos) > 0 {
+		create.SetGithubExtraRepos(marshalRawJSON(p.GitHubExtraRepos))
 	}
 	if p.GitIdentity != nil {
 		create.SetGitIdentity(marshalRawJSON(p.GitIdentity))
@@ -431,9 +439,15 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 		return mapError(err)
 	}
 	p.Updated = updated.Updated
-	// owner_id is not written here, so report the stored value rather than
-	// leaving the caller holding a possibly stale owner.
+	// owner_id and github_extra_repos are not written here, so report the
+	// stored values rather than leaving the caller holding stale snapshots.
 	p.OwnerID = updated.OwnerID
+	p.GitHubExtraRepos = nil
+	if updated.GithubExtraRepos != "" {
+		var extraRepos []store.GitHubExtraRepo
+		unmarshalRawJSON(updated.GithubExtraRepos, &extraRepos)
+		p.GitHubExtraRepos = extraRepos
+	}
 	return nil
 }
 
@@ -467,6 +481,185 @@ func (s *ProjectStore) UpdateProjectGitHubAppStatus(ctx context.Context, project
 		return mapError(err)
 	}
 	return nil
+}
+
+// UpdateProjectGitHubExtraRepos is the sole full-list writer for
+// github_extra_repos, using a compare-and-set on the SHA-256 hash of the
+// previously stored list.
+func (s *ProjectStore) UpdateProjectGitHubExtraRepos(ctx context.Context, projectID string, expectedVersion string, repos []store.GitHubExtraRepo) (string, error) {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return "", err
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return "", mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Project.Query().Where(project.IDEQ(uid))
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+	row, err := q.Only(ctx)
+	if err != nil {
+		return "", mapError(err)
+	}
+
+	var current []store.GitHubExtraRepo
+	if row.GithubExtraRepos != "" {
+		unmarshalRawJSON(row.GithubExtraRepos, &current)
+	}
+	if store.HashGitHubExtraRepos(current) != expectedVersion {
+		return "", store.ErrVersionConflict
+	}
+
+	update := tx.Project.UpdateOneID(uid)
+	if len(repos) > 0 {
+		update.SetGithubExtraRepos(marshalRawJSON(repos))
+	} else {
+		update.ClearGithubExtraRepos()
+	}
+	if err := update.Exec(ctx); err != nil {
+		return "", mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", mapError(err)
+	}
+	return store.HashGitHubExtraRepos(repos), nil
+}
+
+// MarkProjectGitHubExtraReposRemoved sets RemovedFromInstallationAt on any
+// stored extra-repo entry matching repos (case-insensitive) that is not
+// already flagged, in a single-column read-modify-write transaction.
+func (s *ProjectStore) MarkProjectGitHubExtraReposRemoved(ctx context.Context, projectID string, repos []string, removedAt time.Time) (int, error) {
+	if len(repos) == 0 {
+		return 0, nil
+	}
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return 0, err
+	}
+
+	removedSet := make(map[string]bool, len(repos))
+	for _, r := range repos {
+		if trimmed := strings.TrimSpace(r); trimmed != "" {
+			removedSet[strings.ToLower(trimmed)] = true
+		}
+	}
+	if len(removedSet) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Project.Query().Where(project.IDEQ(uid))
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+	row, err := q.Only(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+
+	var current []store.GitHubExtraRepo
+	if row.GithubExtraRepos != "" {
+		unmarshalRawJSON(row.GithubExtraRepos, &current)
+	}
+	if len(current) == 0 {
+		return 0, nil
+	}
+
+	ts := removedAt.UTC().Truncate(time.Microsecond)
+	flagged := 0
+	for i := range current {
+		if removedSet[strings.ToLower(current[i].Repo)] && current[i].RemovedFromInstallationAt == nil {
+			t := ts
+			current[i].RemovedFromInstallationAt = &t
+			flagged++
+		}
+	}
+	if flagged == 0 {
+		return 0, nil
+	}
+
+	if err := tx.Project.UpdateOneID(uid).SetGithubExtraRepos(marshalRawJSON(current)).Exec(ctx); err != nil {
+		return 0, mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, mapError(err)
+	}
+	return flagged, nil
+}
+
+// ClearProjectGitHubExtraReposRemoved clears RemovedFromInstallationAt on any
+// stored extra-repo entry matching repos (case-insensitive) that is currently
+// flagged, in a single-column read-modify-write transaction.
+func (s *ProjectStore) ClearProjectGitHubExtraReposRemoved(ctx context.Context, projectID string, repos []string) (int, error) {
+	if len(repos) == 0 {
+		return 0, nil
+	}
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return 0, err
+	}
+
+	addedSet := make(map[string]bool, len(repos))
+	for _, r := range repos {
+		if trimmed := strings.TrimSpace(r); trimmed != "" {
+			addedSet[strings.ToLower(trimmed)] = true
+		}
+	}
+	if len(addedSet) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Project.Query().Where(project.IDEQ(uid))
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+	row, err := q.Only(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+
+	var current []store.GitHubExtraRepo
+	if row.GithubExtraRepos != "" {
+		unmarshalRawJSON(row.GithubExtraRepos, &current)
+	}
+	if len(current) == 0 {
+		return 0, nil
+	}
+
+	cleared := 0
+	for i := range current {
+		if addedSet[strings.ToLower(current[i].Repo)] && current[i].RemovedFromInstallationAt != nil {
+			current[i].RemovedFromInstallationAt = nil
+			cleared++
+		}
+	}
+	if cleared == 0 {
+		return 0, nil
+	}
+
+	if err := tx.Project.UpdateOneID(uid).SetGithubExtraRepos(marshalRawJSON(current)).Exec(ctx); err != nil {
+		return 0, mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, mapError(err)
+	}
+	return cleared, nil
 }
 
 // UpdateProjectMessagingPolicy atomically updates the cross-project inbound

@@ -292,6 +292,18 @@ export interface ProjectGitHubInfo {
     capped: string[];
     cap_reasons: Record<string, string>;
   };
+  extra_repos?: {
+    policy: 'project_admin' | 'hub_admin' | 'off';
+    max: number;
+    version: string;
+    repos: Array<{
+      repo: string;
+      status: 'ok' | 'not_in_installation' | 'owner_mismatch' | 'removed_from_installation';
+      added_by?: string;
+      added_at: string;
+      removed_from_installation_at?: string;
+    }>;
+  };
   can: {
     bind: boolean;
     unbind: boolean;

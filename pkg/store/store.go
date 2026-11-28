@@ -1975,6 +1975,26 @@ type ProjectStore interface {
 	// Returns ErrNotFound if the project doesn't exist.
 	UpdateProjectGitHubAppStatus(ctx context.Context, projectID string, status *GitHubAppProjectStatus) error
 
+	// UpdateProjectGitHubExtraRepos is the sole full-list writer for the
+	// project's github_extra_repos column (UpdateProject never writes it).
+	// It performs a compare-and-set on expectedVersion (the SHA-256 hash of
+	// the previously stored value from HashGitHubExtraRepos), returning the
+	// new version hash on success, ErrVersionConflict on mismatch, or
+	// ErrNotFound if the project does not exist.
+	UpdateProjectGitHubExtraRepos(ctx context.Context, projectID string, expectedVersion string, repos []GitHubExtraRepo) (string, error)
+
+	// MarkProjectGitHubExtraReposRemoved sets RemovedFromInstallationAt on any
+	// stored extra-repo entry matching repos (case-insensitive) that is not
+	// already flagged, in a single-column read-modify-write transaction. It
+	// never deletes entries. Returns the count of newly flagged entries.
+	MarkProjectGitHubExtraReposRemoved(ctx context.Context, projectID string, repos []string, removedAt time.Time) (int, error)
+
+	// ClearProjectGitHubExtraReposRemoved clears RemovedFromInstallationAt on
+	// any stored extra-repo entry matching repos (case-insensitive) that is
+	// currently flagged, in a single-column read-modify-write transaction.
+	// Returns the count of cleared entries.
+	ClearProjectGitHubExtraReposRemoved(ctx context.Context, projectID string, repos []string) (int, error)
+
 	// DeleteProject removes a project by ID.
 	// It does not deactivate the delegation edges or service-account
 	// assignments of the project's agents, which have no foreign key to the

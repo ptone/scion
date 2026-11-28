@@ -51,6 +51,8 @@ type Project struct {
 	GithubPermissions string `json:"github_permissions,omitempty"`
 	// GithubAppStatus holds the value of the "github_app_status" field.
 	GithubAppStatus string `json:"github_app_status,omitempty"`
+	// GithubExtraRepos holds the value of the "github_extra_repos" field.
+	GithubExtraRepos string `json:"github_extra_repos,omitempty"`
 	// GitIdentity holds the value of the "git_identity" field.
 	GitIdentity string `json:"git_identity,omitempty"`
 	// CrossProjectInbound holds the value of the "cross_project_inbound" field.
@@ -94,7 +96,7 @@ func (*Project) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case project.FieldGithubInstallationID, project.FieldCrossProjectInboundRevision:
 			values[i] = new(sql.NullInt64)
-		case project.FieldName, project.FieldSlug, project.FieldGitRemote, project.FieldDefaultRuntimeBrokerID, project.FieldSharedDirs, project.FieldCreatedBy, project.FieldOwnerID, project.FieldGithubPermissions, project.FieldGithubAppStatus, project.FieldGitIdentity, project.FieldCrossProjectInbound:
+		case project.FieldName, project.FieldSlug, project.FieldGitRemote, project.FieldDefaultRuntimeBrokerID, project.FieldSharedDirs, project.FieldCreatedBy, project.FieldOwnerID, project.FieldGithubPermissions, project.FieldGithubAppStatus, project.FieldGithubExtraRepos, project.FieldGitIdentity, project.FieldCrossProjectInbound:
 			values[i] = new(sql.NullString)
 		case project.FieldCreated, project.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -226,6 +228,12 @@ func (_m *Project) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.GithubAppStatus = value.String
 			}
+		case project.FieldGithubExtraRepos:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field github_extra_repos", values[i])
+			} else if value.Valid {
+				_m.GithubExtraRepos = value.String
+			}
 		case project.FieldGitIdentity:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field git_identity", values[i])
@@ -350,6 +358,9 @@ func (_m *Project) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("github_app_status=")
 	builder.WriteString(_m.GithubAppStatus)
+	builder.WriteString(", ")
+	builder.WriteString("github_extra_repos=")
+	builder.WriteString(_m.GithubExtraRepos)
 	builder.WriteString(", ")
 	builder.WriteString("git_identity=")
 	builder.WriteString(_m.GitIdentity)

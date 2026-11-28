@@ -154,7 +154,7 @@ func (s *Server) GitHubSourceIdentityMinter() source.IdentityMinter {
 			if err != nil {
 				return source.Credential{}, err
 			}
-			token, expStr, granted, err := s.mintGitHubAppTokenInternal(ctx, project, &perms, true)
+			token, expStr, granted, err := s.mintGitHubAppTokenInternal(ctx, project, &perms, true, nil, false)
 			if err != nil {
 				return source.Credential{}, err
 			}

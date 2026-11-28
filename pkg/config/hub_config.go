@@ -1710,6 +1710,37 @@ func (c MoveBundleConfig) ImportLimits() api.MoveBundleLimits {
 	return c.toAPILimits(timeout)
 }
 
+// Allowed values for GitHubAppConfig.ExtraReposPolicy.
+const (
+	GitHubExtraReposPolicyProjectAdmin = "project_admin"
+	GitHubExtraReposPolicyHubAdmin     = "hub_admin"
+	GitHubExtraReposPolicyOff          = "off"
+)
+
+// NormalizeGitHubExtraReposPolicy returns the effective extra-repos policy,
+// defaulting to project_admin when empty.
+func NormalizeGitHubExtraReposPolicy(v string) string {
+	switch v {
+	case GitHubExtraReposPolicyProjectAdmin, GitHubExtraReposPolicyHubAdmin, GitHubExtraReposPolicyOff:
+		return v
+	case "":
+		return GitHubExtraReposPolicyProjectAdmin
+	default:
+		return v
+	}
+}
+
+// ValidGitHubExtraReposPolicy reports whether v is a valid extra-repos policy
+// value (empty is valid and defaults to project_admin).
+func ValidGitHubExtraReposPolicy(v string) bool {
+	switch v {
+	case "", GitHubExtraReposPolicyProjectAdmin, GitHubExtraReposPolicyHubAdmin, GitHubExtraReposPolicyOff:
+		return true
+	default:
+		return false
+	}
+}
+
 // GitHubAppConfig holds configuration for the Hub's GitHub App integration.
 type GitHubAppConfig struct {
 	AppID                 int64    `json:"appId" yaml:"appId" koanf:"appId"`
@@ -1721,6 +1752,7 @@ type GitHubAppConfig struct {
 	InstallationURL       string   `json:"installationUrl,omitempty" yaml:"installationUrl,omitempty" koanf:"installationUrl"`
 	AppSlug               string   `json:"appSlug,omitempty" yaml:"appSlug,omitempty" koanf:"appSlug"`
 	CommandMentionAliases []string `json:"commandMentionAliases,omitempty" yaml:"commandMentionAliases,omitempty" koanf:"commandMentionAliases"`
+	ExtraReposPolicy      string   `json:"extraReposPolicy,omitempty" yaml:"extraReposPolicy,omitempty" koanf:"extraReposPolicy"`
 }
 
 // SecretsConfig holds configuration for the secrets backend.

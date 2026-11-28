@@ -15,10 +15,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -2107,6 +2109,105 @@ func (s *Server) handleAgentGitHubTokenRefresh(w http.ResponseWriter, r *http.Re
 	// resolved project's installation association, so a refresh can never
 	// reach an installation a create would not.
 	mintProject := resolveGitHubMintProject(ctx, s.store, s, s.projectsLogger(), agent, project)
+	// Optional provider-neutral scope body (e.g. {"scope": {"purpose": "extra_read", "repo": "owner/name"}}).
+	// No body / no scope preserves primary-token refresh behaviour byte-identically.
+	var refreshReq struct {
+		Scope *struct {
+			Purpose string `json:"purpose"`
+			Repo    string `json:"repo"`
+		} `json:"scope,omitempty"`
+	}
+	if r.Body != nil {
+		bodyBytes, readErr := io.ReadAll(io.LimitReader(r.Body, 16*1024))
+		if readErr != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "failed to read request body", nil)
+			return
+		}
+		if len(bytes.TrimSpace(bodyBytes)) > 0 {
+			if err := json.Unmarshal(bodyBytes, &refreshReq); err != nil {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
+				return
+			}
+		}
+	}
+
+	if refreshReq.Scope != nil {
+		if refreshReq.Scope.Purpose != "extra_read" {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				fmt.Sprintf("unsupported refresh-token scope purpose %q", refreshReq.Scope.Purpose), nil)
+			return
+		}
+		if mintProject == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": ErrCodeNotExtraRepo})
+			return
+		}
+		reqRepo := strings.TrimSpace(refreshReq.Scope.Repo)
+		if reqRepo == "" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": ErrCodeNotExtraRepo})
+			return
+		}
+		// Check whether the requested repo is configured on mintProject before
+		// minting so an unknown repo never triggers an unnecessary mint call.
+		configured := false
+		for _, entry := range mintProject.GitHubExtraRepos {
+			if strings.EqualFold(entry.Repo, reqRepo) && entry.RemovedFromInstallationAt == nil {
+				configured = true
+				break
+			}
+		}
+		if !configured {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": ErrCodeNotExtraRepo})
+			return
+		}
+
+		token, expiry, repos, err := s.MintGitHubAppExtraReadToken(ctx, mintProject)
+		if err != nil {
+			if errors.Is(err, ErrExtraReposDisabled) || errors.Is(err, ErrNoExtraRepos) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": ErrCodeNotExtraRepo})
+				return
+			}
+			statusCode := http.StatusBadGateway
+			errCode := ErrCodeRuntimeError
+			message := "failed to mint GitHub extra-read token"
+			if mintErr, ok := err.(*githubapp.TokenMintError); ok {
+				message = "failed to mint GitHub extra-read token: " + mintErr.Message
+				switch mintErr.ErrorCode {
+				case githubapp.ErrCodePrivateKeyInvalid, githubapp.ErrCodeAppNotFound:
+					statusCode = http.StatusBadGateway
+					errCode = ErrCodeRuntimeError
+				case githubapp.ErrCodeInstallationRevoked, githubapp.ErrCodeInstallationSuspended:
+					statusCode = http.StatusUnprocessableEntity
+					errCode = ErrCodeUnprocessable
+				case githubapp.ErrCodePermissionDenied, githubapp.ErrCodeRepoNotAccessible:
+					statusCode = http.StatusForbidden
+					errCode = ErrCodeForbidden
+				}
+			}
+			writeError(w, statusCode, errCode, message, nil)
+			return
+		}
+		// Confirm the requested repo survived installation/owner filtering.
+		matched := false
+		for _, r := range repos {
+			if strings.EqualFold(r, reqRepo) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": ErrCodeNotExtraRepo})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"token":      token,
+			"expires_at": expiry,
+			"purpose":    "extra_read",
+			"repos":      repos,
+		})
+		return
+	}
+
 	if mintProject == nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"project has no GitHub App installation", nil)

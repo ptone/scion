@@ -200,6 +200,7 @@ export function buildFixture() {
           'hub.exec_containers': false,
           'hub.exec_schedules': false,
           'hub.flat_runtime_brokers': true,
+          'hub.github_extra_repos': false,
           'hub.github_triggers': false,
           'hub.k8s_workload_identity_setup': false,
           'hub.large_uploads': false,

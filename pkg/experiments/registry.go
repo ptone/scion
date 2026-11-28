@@ -640,6 +640,13 @@ const SystemOne = "hub.system_one"
 // routes answer 404, and the web section is hidden.
 const GitHubTriggers = "hub.github_triggers"
 
+// GitHubExtraRepos gates project-configured extra read-only repositories for
+// GitHub App tokens (ptone/scion#9334): PUT/DELETE
+// /api/v1/projects/{id}/github-extra-repos (404 while off), extra_read token
+// minting and refresh-token extra_read scope, the read-model extra_repos block,
+// and the web UI surfaces.
+const GitHubExtraRepos = "hub.github_extra_repos"
+
 // Triggers gates Stage 1 event triggers and webhook endpoints
 // (ptone/scion#7961): Server layer returns 404 on /api/v1/hooks/{id} and all
 // /webhook-endpoints, /triggers and /trigger-events project routes and omits
@@ -754,6 +761,17 @@ const MCPServer = "hub.mcp_server"
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        GitHubExtraRepos,
+		Title:       "GitHub extra read-only repositories",
+		Description: "Allows projects associated with a GitHub App installation to list sibling repositories in the same installation for read-only token minting. While off, the extra-repos routes answer 404, extra_read minting is refused, and the UI surfaces are hidden.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9334",
+		Owner:       "github-app",
+		ReviewBy:    "2027-06-01",
+	},
 	{
 		Name:        MCPServer,
 		Title:       "MCP server",

@@ -92,6 +92,7 @@ var projectSubRouteTable = map[string]projectSubRouteKind{
 	"github-installation":      projectSubRouteGitHub,
 	"github-status":            projectSubRouteGitHub,
 	"github-permissions":       projectSubRouteGitHub,
+	"github-extra-repos":       projectSubRouteGitHub,
 	"git-identity":             projectSubRouteGitHub,
 	"visitors":                 projectSubRouteVisitors,
 	"leave":                    projectSubRouteLeave,

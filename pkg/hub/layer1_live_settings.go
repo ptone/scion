@@ -65,6 +65,7 @@ type githubAppPublicConfig struct {
 	PrivateKeyPath        string
 	AppSlug               string
 	CommandMentionAliases []string
+	ExtraReposPolicy      string
 }
 
 func (a githubAppPublicConfig) equal(b githubAppPublicConfig) bool {
@@ -74,7 +75,8 @@ func (a githubAppPublicConfig) equal(b githubAppPublicConfig) bool {
 		a.InstallationURL == b.InstallationURL &&
 		a.PrivateKeyPath == b.PrivateKeyPath &&
 		a.AppSlug == b.AppSlug &&
-		slices.Equal(a.CommandMentionAliases, b.CommandMentionAliases)
+		slices.Equal(a.CommandMentionAliases, b.CommandMentionAliases) &&
+		a.ExtraReposPolicy == b.ExtraReposPolicy
 }
 
 func githubAppPublicFrom(c GitHubAppServerConfig) githubAppPublicConfig {
@@ -86,6 +88,7 @@ func githubAppPublicFrom(c GitHubAppServerConfig) githubAppPublicConfig {
 		PrivateKeyPath:        c.PrivateKeyPath,
 		AppSlug:               c.AppSlug,
 		CommandMentionAliases: slices.Clone(c.CommandMentionAliases),
+		ExtraReposPolicy:      c.ExtraReposPolicy,
 	}
 }
 
@@ -103,6 +106,7 @@ func (s *Server) setGitHubAppPublicLocked(g githubAppPublicConfig) bool {
 	s.config.GitHubAppConfig.PrivateKeyPath = g.PrivateKeyPath
 	s.config.GitHubAppConfig.AppSlug = g.AppSlug
 	s.config.GitHubAppConfig.CommandMentionAliases = slices.Clone(g.CommandMentionAliases)
+	s.config.GitHubAppConfig.ExtraReposPolicy = g.ExtraReposPolicy
 	if prev.AppID != g.AppID || prev.APIBaseURL != g.APIBaseURL || prev.PrivateKeyPath != g.PrivateKeyPath {
 		s.githubAppIdentity.reset()
 	}

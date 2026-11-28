@@ -236,6 +236,26 @@ func (_u *ProjectUpdate) ClearGithubAppStatus() *ProjectUpdate {
 	return _u
 }
 
+// SetGithubExtraRepos sets the "github_extra_repos" field.
+func (_u *ProjectUpdate) SetGithubExtraRepos(v string) *ProjectUpdate {
+	_u.mutation.SetGithubExtraRepos(v)
+	return _u
+}
+
+// SetNillableGithubExtraRepos sets the "github_extra_repos" field if the given value is not nil.
+func (_u *ProjectUpdate) SetNillableGithubExtraRepos(v *string) *ProjectUpdate {
+	if v != nil {
+		_u.SetGithubExtraRepos(*v)
+	}
+	return _u
+}
+
+// ClearGithubExtraRepos clears the value of the "github_extra_repos" field.
+func (_u *ProjectUpdate) ClearGithubExtraRepos() *ProjectUpdate {
+	_u.mutation.ClearGithubExtraRepos()
+	return _u
+}
+
 // SetGitIdentity sets the "git_identity" field.
 func (_u *ProjectUpdate) SetGitIdentity(v string) *ProjectUpdate {
 	_u.mutation.SetGitIdentity(v)
@@ -492,6 +512,12 @@ func (_u *ProjectUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.GithubAppStatusCleared() {
 		_spec.ClearField(project.FieldGithubAppStatus, field.TypeString)
+	}
+	if value, ok := _u.mutation.GithubExtraRepos(); ok {
+		_spec.SetField(project.FieldGithubExtraRepos, field.TypeString, value)
+	}
+	if _u.mutation.GithubExtraReposCleared() {
+		_spec.ClearField(project.FieldGithubExtraRepos, field.TypeString)
 	}
 	if value, ok := _u.mutation.GitIdentity(); ok {
 		_spec.SetField(project.FieldGitIdentity, field.TypeString, value)
@@ -789,6 +815,26 @@ func (_u *ProjectUpdateOne) ClearGithubAppStatus() *ProjectUpdateOne {
 	return _u
 }
 
+// SetGithubExtraRepos sets the "github_extra_repos" field.
+func (_u *ProjectUpdateOne) SetGithubExtraRepos(v string) *ProjectUpdateOne {
+	_u.mutation.SetGithubExtraRepos(v)
+	return _u
+}
+
+// SetNillableGithubExtraRepos sets the "github_extra_repos" field if the given value is not nil.
+func (_u *ProjectUpdateOne) SetNillableGithubExtraRepos(v *string) *ProjectUpdateOne {
+	if v != nil {
+		_u.SetGithubExtraRepos(*v)
+	}
+	return _u
+}
+
+// ClearGithubExtraRepos clears the value of the "github_extra_repos" field.
+func (_u *ProjectUpdateOne) ClearGithubExtraRepos() *ProjectUpdateOne {
+	_u.mutation.ClearGithubExtraRepos()
+	return _u
+}
+
 // SetGitIdentity sets the "git_identity" field.
 func (_u *ProjectUpdateOne) SetGitIdentity(v string) *ProjectUpdateOne {
 	_u.mutation.SetGitIdentity(v)
@@ -1075,6 +1121,12 @@ func (_u *ProjectUpdateOne) sqlSave(ctx context.Context) (_node *Project, err er
 	}
 	if _u.mutation.GithubAppStatusCleared() {
 		_spec.ClearField(project.FieldGithubAppStatus, field.TypeString)
+	}
+	if value, ok := _u.mutation.GithubExtraRepos(); ok {
+		_spec.SetField(project.FieldGithubExtraRepos, field.TypeString, value)
+	}
+	if _u.mutation.GithubExtraReposCleared() {
+		_spec.ClearField(project.FieldGithubExtraRepos, field.TypeString)
 	}
 	if value, ok := _u.mutation.GitIdentity(); ok {
 		_spec.SetField(project.FieldGitIdentity, field.TypeString, value)

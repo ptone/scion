@@ -308,6 +308,7 @@ func init() {
 				"server.github_app.webhooks_enabled", "server.github_app.installation_url",
 				"server.github_app.private_key_path", "server.github_app.app_slug",
 				"server.github_app.command_mention_aliases",
+				"server.github_app.extra_repos_policy",
 			},
 			New: func() any { return &GitHubAppSettings{} },
 			// The agent dispatcher sets up its GitHub App token minter at

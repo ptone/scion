@@ -1256,6 +1256,7 @@ type Project struct {
 	GitHubInstallationID *int64                  `json:"githubInstallationId,omitempty"`
 	GitHubPermissions    *GitHubTokenPermissions `json:"githubPermissions,omitempty"`
 	GitHubAppStatus      *GitHubAppProjectStatus `json:"githubAppStatus,omitempty"`
+	GitHubExtraRepos     []GitHubExtraRepo       `json:"githubExtraRepos,omitempty"`
 
 	// Git commit attribution (used when GitHub App generates commits)
 	GitIdentity *GitIdentityConfig `json:"gitIdentity,omitempty"`

@@ -816,6 +816,7 @@ type GitHubAppServerConfig struct {
 	InstallationURL       string
 	AppSlug               string
 	CommandMentionAliases []string
+	ExtraReposPolicy      string
 }
 
 // DefaultServerConfig returns the default server configuration.
@@ -2931,6 +2932,9 @@ type Server struct {
 	// GCP token metrics tracker (nil = disabled)
 	gcpTokenMetrics GCPTokenMetricsRecorder
 
+	// GitHub App extra-read token mint metrics (always initialized by New).
+	githubExtraReadMetrics *GitHubExtraReadMetrics
+
 	// gs:// link fetch endpoint (/api/v1/gcs/object; no per-SA client cache —
 	// a fresh token and client are minted/built per request).
 	// gcsLinkBaseTransport is the one shared, credential-free base transport
@@ -3702,6 +3706,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	// Initialize GCP token metrics
 	srv.gcpTokenMetrics = NewGCPTokenMetrics()
+
+	// Initialize GitHub App extra-read mint metrics
+	srv.githubExtraReadMetrics = NewGitHubExtraReadMetrics()
 
 	// Initialize gs:// link fetch endpoint support (shared base transport,
 	// per-viewer rate limiter, global concurrency semaphore). The feature's
