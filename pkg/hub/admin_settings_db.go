@@ -399,6 +399,8 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	bIdle := snap.AutoSuspendIdle
 	resp.Server.Hub.AutoSuspendIdle = &bIdle
 	resp.Server.Hub.IdleSuspendAfter = snap.IdleSuspendAfter
+	resp.Server.Hub.BackgroundLivenessCapLocal = snap.BackgroundLivenessCapLocal
+	resp.Server.Hub.BackgroundLivenessCapReserved = snap.BackgroundLivenessCapReserved
 	resp.Server.Hub.SoftDeleteRetention = snap.SoftDeleteRetention
 	resp.Server.Hub.StartClaimLeaseTTL = snap.StartClaimLeaseTTL
 	resp.Server.Hub.StartMaxDuration = snap.StartMaxDuration
@@ -2839,6 +2841,12 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.IdleSuspendAfter != "" {
 				keys = append(keys, "server.hub.idle_suspend_after")
 			}
+			if hub.BackgroundLivenessCapLocal != "" {
+				keys = append(keys, "server.hub.background_liveness_cap_local")
+			}
+			if hub.BackgroundLivenessCapReserved != "" {
+				keys = append(keys, "server.hub.background_liveness_cap_reserved")
+			}
 			if hub.SoftDeleteRetention != "" {
 				keys = append(keys, "server.hub.soft_delete_retention")
 			}
@@ -3234,6 +3242,12 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			d.AutoSuspendIdle = req.Server.Hub.AutoSuspendIdle
 			if req.Server.Hub.IdleSuspendAfter != "" {
 				d.IdleSuspendAfter = req.Server.Hub.IdleSuspendAfter
+			}
+			if req.Server.Hub.BackgroundLivenessCapLocal != "" {
+				d.BackgroundLivenessCapLocal = req.Server.Hub.BackgroundLivenessCapLocal
+			}
+			if req.Server.Hub.BackgroundLivenessCapReserved != "" {
+				d.BackgroundLivenessCapReserved = req.Server.Hub.BackgroundLivenessCapReserved
 			}
 			if req.Server.Hub.SoftDeleteRetention != "" {
 				d.SoftDeleteRetention = req.Server.Hub.SoftDeleteRetention

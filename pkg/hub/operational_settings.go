@@ -106,11 +106,13 @@ type Layer1Snapshot struct {
 	AuthorizedDomains []string
 
 	// Lifecycle
-	AutoSuspendStalled  bool
-	StalledThreshold    string // DB-backed snapshots only (see type comment)
-	AutoSuspendIdle     bool
-	IdleSuspendAfter    string // DB-backed snapshots only (see type comment)
-	SoftDeleteRetention string // DB-backed snapshots only (see type comment); "" = startup value
+	AutoSuspendStalled            bool
+	StalledThreshold              string // DB-backed snapshots only (see type comment)
+	AutoSuspendIdle               bool
+	IdleSuspendAfter              string // DB-backed snapshots only (see type comment)
+	BackgroundLivenessCapLocal    string // DB-backed snapshots only (see type comment)
+	BackgroundLivenessCapReserved string // DB-backed snapshots only (see type comment)
+	SoftDeleteRetention           string // DB-backed snapshots only (see type comment); "" = startup value
 	// SoftDeleteRetainFiles is nil when unset; ApplySnapshot then uses the
 	// startup value. DB-backed snapshots only (see type comment).
 	SoftDeleteRetainFiles *bool
@@ -1377,6 +1379,8 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.StalledThreshold = k.String("server.hub.stalled_threshold")
 	snap.AutoSuspendIdle = k.Bool("server.hub.auto_suspend_idle")
 	snap.IdleSuspendAfter = k.String("server.hub.idle_suspend_after")
+	snap.BackgroundLivenessCapLocal = k.String("server.hub.background_liveness_cap_local")
+	snap.BackgroundLivenessCapReserved = k.String("server.hub.background_liveness_cap_reserved")
 	snap.SoftDeleteRetention = k.String("server.hub.soft_delete_retention")
 	if k.Exists("server.hub.soft_delete_retain_files") {
 		v := k.Bool("server.hub.soft_delete_retain_files")
@@ -2007,6 +2011,30 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 			s.config.IdleSuspendAfter = d
 		} else {
 			slog.Warn("invalid idle_suspend_after duration, keeping current value", "value", snap.IdleSuspendAfter, "error", err)
+		}
+	}
+
+	// Background liveness caps (local & reserved runtimes; "0s" disables)
+	if snap.BackgroundLivenessCapLocal != "" {
+		if d, err := time.ParseDuration(snap.BackgroundLivenessCapLocal); err == nil && d >= 0 {
+			if s.config.BackgroundLivenessCapLocal == nil || *s.config.BackgroundLivenessCapLocal != d {
+				applied = append(applied, "background_liveness_cap_local")
+			}
+			v := d
+			s.config.BackgroundLivenessCapLocal = &v
+		} else {
+			slog.Warn("invalid background_liveness_cap_local duration, keeping current value", "value", snap.BackgroundLivenessCapLocal, "error", err)
+		}
+	}
+	if snap.BackgroundLivenessCapReserved != "" {
+		if d, err := time.ParseDuration(snap.BackgroundLivenessCapReserved); err == nil && d >= 0 {
+			if s.config.BackgroundLivenessCapReserved == nil || *s.config.BackgroundLivenessCapReserved != d {
+				applied = append(applied, "background_liveness_cap_reserved")
+			}
+			v := d
+			s.config.BackgroundLivenessCapReserved = &v
+		} else {
+			slog.Warn("invalid background_liveness_cap_reserved duration, keeping current value", "value", snap.BackgroundLivenessCapReserved, "error", err)
 		}
 	}
 

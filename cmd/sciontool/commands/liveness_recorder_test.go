@@ -47,7 +47,13 @@ func TestLiveWorkRecorder(t *testing.T) {
 	// tool is still running: the turn is not over.
 	next = &liveness.LiveWork{Kind: liveness.KindToolCall}
 	sample()
-	assert.True(t, r.Live(), "any live work counts")
+	assert.True(t, r.Live(), "any turn live work counts")
+
+	// KindBackground (a low-CPU post-turn background job or server) guards Hub
+	// auto-suspend only; it must not suppress the API-error watchdog.
+	next = &liveness.LiveWork{Kind: liveness.KindBackground}
+	assert.Same(t, next, sample(), "the heartbeat still gets KindBackground")
+	assert.False(t, r.Live(), "KindBackground does not hold the API-error watchdog")
 
 	next = nil
 	assert.Nil(t, sample())

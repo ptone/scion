@@ -1999,6 +1999,10 @@ type V1ServerHubConfig struct {
 	AutoSuspendIdle *bool `json:"auto_suspend_idle,omitempty" yaml:"auto_suspend_idle,omitempty" koanf:"auto_suspend_idle"`
 	// IdleSuspendAfter is how long an agent must hold a suspend-eligible activity before idle auto-suspend applies (default "15m", minimum "5m").
 	IdleSuspendAfter string `json:"idle_suspend_after,omitempty" yaml:"idle_suspend_after,omitempty" koanf:"idle_suspend_after"`
+	// BackgroundLivenessCapLocal caps how long a low-CPU background process keeps a local-runtime agent from auto-suspending (default "2h", "0s" disables).
+	BackgroundLivenessCapLocal string `json:"background_liveness_cap_local,omitempty" yaml:"background_liveness_cap_local,omitempty" koanf:"background_liveness_cap_local"`
+	// BackgroundLivenessCapReserved caps how long a low-CPU background process keeps a reserving-runtime agent (kubernetes, cloudrun, substrate) from auto-suspending (default "30m", "0s" disables).
+	BackgroundLivenessCapReserved string `json:"background_liveness_cap_reserved,omitempty" yaml:"background_liveness_cap_reserved,omitempty" koanf:"background_liveness_cap_reserved"`
 	// MissingAgentGrace is how long a running agent must be absent from its
 	// runtime broker's complete heartbeat inventory before the Hub marks it
 	// as having no container (e.g., "3m"; minimum "1m").
@@ -4999,6 +5003,16 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				gc.Hub.IdleSuspendAfter = d
 			}
 		}
+		if v1.Hub.BackgroundLivenessCapLocal != "" {
+			if d, err := time.ParseDuration(v1.Hub.BackgroundLivenessCapLocal); err == nil && d >= 0 {
+				gc.Hub.BackgroundLivenessCapLocal = &d
+			}
+		}
+		if v1.Hub.BackgroundLivenessCapReserved != "" {
+			if d, err := time.ParseDuration(v1.Hub.BackgroundLivenessCapReserved); err == nil && d >= 0 {
+				gc.Hub.BackgroundLivenessCapReserved = &d
+			}
+		}
 		if v1.Hub.PerfTrace != nil {
 			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
 		}
@@ -5595,6 +5609,12 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.IdleSuspendAfter > 0 {
 		v1Hub.IdleSuspendAfter = gc.Hub.IdleSuspendAfter.String()
+	}
+	if gc.Hub.BackgroundLivenessCapLocal != nil {
+		v1Hub.BackgroundLivenessCapLocal = gc.Hub.BackgroundLivenessCapLocal.String()
+	}
+	if gc.Hub.BackgroundLivenessCapReserved != nil {
+		v1Hub.BackgroundLivenessCapReserved = gc.Hub.BackgroundLivenessCapReserved.String()
 	}
 	if gc.Hub.MissingAgentGrace > 0 {
 		v1Hub.MissingAgentGrace = gc.Hub.MissingAgentGrace.String()

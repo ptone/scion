@@ -56,13 +56,13 @@ func (r *liveWorkRecorder) record(sample func() *liveness.LiveWork) func() *live
 }
 
 // Live reports whether the latest sample, taken within liveWorkFreshness,
-// found live work of any kind: a tool call (capped or not) or CPU work. A
-// running tool or background job means the agent's turn is not over, so
-// the API-error watchdog must not call it a harness error. With no sample
-// yet (no Hub heartbeat), it is false: the watchdog behaves as it did
-// before live-work detection.
+// found active turn live work (a tool call, CPU work, attached terminal, or
+// exec). KindBackground (a low-CPU post-turn background process such as an
+// exposed server or lock wait) is excluded so it guards Hub auto-suspend
+// without masking a harness API error. With no sample yet (no Hub heartbeat),
+// it is false: the watchdog behaves as it did before live-work detection.
 func (r *liveWorkRecorder) Live() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.work != nil && r.now().Sub(r.at) < liveWorkFreshness
+	return r.work != nil && r.work.Kind != liveness.KindBackground && r.now().Sub(r.at) < liveWorkFreshness
 }

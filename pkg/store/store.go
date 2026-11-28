@@ -1770,9 +1770,15 @@ type AgentStatusUpdate struct {
 	Heartbeat       bool              `json:"heartbeat,omitempty"`
 	Metadata        map[string]string `json:"metadata,omitempty"`
 	// LiveWork is the live work the container's heartbeat reports
-	// (ptone/scion#7855); nil when there is none. It sets
-	// last_live_process_at, and last_live_work_at when SuppressStall is set.
+	// (ptone/scion#7855, ptone/scion#9751); nil when there is none. It sets
+	// last_live_process_at (subject to BackgroundLivenessCaps for kind
+	// "background"), and last_live_work_at when SuppressStall is set.
 	LiveWork *LiveWork `json:"liveWork,omitempty"`
+	// BackgroundLivenessCaps supplies the Hub's effective runtime-tiered
+	// extension caps for LiveWork.Kind == LiveWorkKindBackground
+	// (ptone/scion#9751). Nil falls back to the compiled defaults. Internal
+	// to the hub — json:"-".
+	BackgroundLivenessCaps *BackgroundLivenessCaps `json:"-"`
 
 	// Limits tracking (reported by sciontool)
 	CurrentTurns      *int   `json:"currentTurns,omitempty"`
