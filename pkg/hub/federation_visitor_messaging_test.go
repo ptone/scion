@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -46,6 +47,8 @@ var expectedVisitorSubRoutes = []struct{ pattern, subPath, method string }{
 	{"/api/v1/chat/conversations/", "{dmKey}/messages", http.MethodGet},
 	{"/api/v1/chat/conversations/", "{dmKey}/read", http.MethodGet},
 	{"/api/v1/chat/conversations/", "{dmKey}/read", http.MethodPost},
+	{"/api/v1/conversations/", "{id}/messages", http.MethodGet},
+	{"/api/v1/conversations/", "{id}/watch", http.MethodGet},
 	{"/api/v1/projects/", "{projectId}/agents", http.MethodGet},
 	{"/api/v1/projects/", "{projectId}/agents/{agentId}", http.MethodGet},
 }
@@ -104,13 +107,21 @@ func TestVisitorSubRoutes_MatchExactShapes(t *testing.T) {
 		{"/api/v1/chat/conversations/", http.MethodGet, "/api/v1/chat/conversations/" + dm + "/messages", true},
 		{"/api/v1/chat/conversations/", http.MethodGet, "/api/v1/chat/conversations/" + dm + "/read", true},
 		{"/api/v1/chat/conversations/", http.MethodPost, "/api/v1/chat/conversations/" + dm + "/read", true},
+		{"/api/v1/conversations/", http.MethodGet, "/api/v1/conversations/" + tid("conv") + "/messages", true},
+		{"/api/v1/conversations/", http.MethodGet, "/api/v1/conversations/" + tid("conv") + "/watch", true},
 
 		// Wrong method on an admitted shape.
 		{"/api/v1/projects/", http.MethodGet, "/api/v1/projects/" + pid + "/agents/" + aid + "/message", false},
 		{"/api/v1/agents/", http.MethodPut, "/api/v1/agents/" + aid + "/message", false},
 		{"/api/v1/chat/conversations/", http.MethodPost, "/api/v1/chat/conversations/" + dm + "/messages", false},
 		{"/api/v1/chat/conversations/", http.MethodDelete, "/api/v1/chat/conversations/" + dm + "/read", false},
+		{"/api/v1/conversations/", http.MethodPost, "/api/v1/conversations/" + tid("conv") + "/messages", false},
+		{"/api/v1/conversations/", http.MethodPost, "/api/v1/conversations/" + tid("conv") + "/watch", false},
 		// Other sub-routes of the same patterns.
+		{"/api/v1/conversations/", http.MethodGet, "/api/v1/conversations/" + tid("conv"), false},
+		{"/api/v1/conversations/", http.MethodGet, "/api/v1/conversations/" + tid("conv") + "/messages/" + tid("msg"), false},
+		{"/api/v1/conversations/", http.MethodGet, "/api/v1/conversations/" + tid("conv") + "/watch/", false},
+		{"/api/v1/conversations/", http.MethodGet, "/api/v1/conversations//messages", false},
 		{"/api/v1/projects/", http.MethodPost, "/api/v1/projects/" + pid + "/agents", false},
 		{"/api/v1/projects/", http.MethodPost, "/api/v1/projects/" + pid + "/agents/" + aid + "/start", false},
 		{"/api/v1/projects/", http.MethodPost, "/api/v1/projects/" + pid + "/agents/" + aid + "/message/extra", false},
@@ -879,4 +890,236 @@ func TestVisitorMessaging_RuleVisitorRevokedStaysRefused(t *testing.T) {
 	assertVisitorRefusal(t, rec, "DM read after revocation")
 	assert.Empty(t, f.ruleBindings(t, f.projectID, rule.ID), "the rule does not bind the revoked visitor again")
 	assert.Len(t, f.dispatcher.getCalls(), 1, "no refused request is dispatched")
+}
+
+// visitorSetExperiments sets federation.project_visitors and hub.mcp_server on srv.
+func visitorSetExperiments(t *testing.T, srv *Server, projectVisitors, mcpServer bool) {
+	t.Helper()
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		switch e.Name {
+		case experiments.FederationProjectVisitors:
+			e.Default = projectVisitors
+		case experiments.MCPServer:
+			e.Default = mcpServer
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	srv.setExperimentRegistry(reg)
+}
+
+// TestVisitorOwnDMConversation_Matrix covers design §4.3.2 & §10 AC6:
+// GET /api/v1/conversations/{id}/messages and /watch admit a visitor ONLY for
+// its own direct conversation with an agent in a project it holds a grant on,
+// while both federation.project_visitors and hub.mcp_server are enabled.
+// Another user's DM, a group conversation, a foreign-project DM, the list
+// endpoint, the conversation metadata endpoint, and either experiment off are
+// all refused with the uniform visitor refusal.
+func TestVisitorOwnDMConversation_Matrix(t *testing.T) {
+	f := newVisitorMessagingFixture(t)
+	ctx := context.Background()
+	visitorSetExperiments(t, f.srv, true, true)
+
+	aliceID, aliceToken := f.visitor(t, "sub-alice", "alice@corp.example")
+	bobID, _ := f.visitor(t, "sub-bob", "bob@corp.example")
+
+	// Alice sends a message to f.agent to create her canonical DM conversation.
+	sendRec := f.do(t, aliceToken, http.MethodPost, f.projectMessagePath(f.agent.Slug), visitorTextBody("hello from alice"))
+	require.Equal(t, http.StatusOK, sendRec.Code, sendRec.Body.String())
+	var sendResp MessageDeliveryResponse
+	require.NoError(t, json.Unmarshal(sendRec.Body.Bytes(), &sendResp))
+	require.NotEmpty(t, sendResp.ConversationID)
+
+	ownDM, err := f.st.GetConversation(ctx, sendResp.ConversationID)
+	require.NoError(t, err)
+	expectedDMKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", aliceID)
+	require.NoError(t, err)
+	assert.Equal(t, "direct", ownDM.Kind)
+	assert.Equal(t, expectedDMKey, ownDM.ExternalRef)
+
+	// Create Bob's DM with f.agent (another user's DM).
+	bobDMKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", bobID)
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	bobDM := &store.Conversation{
+		ID: tid("bob-dm"), Kind: "direct", Surface: "native",
+		ExternalRef: bobDMKey, DriftState: "active", LastActivityAt: now, CreatedAt: now,
+	}
+	require.NoError(t, f.st.CreateConversation(ctx, bobDM))
+
+	// Create a group conversation in f.projectID.
+	projID := f.projectID
+	groupConv := &store.Conversation{
+		ID: tid("group-conv"), Kind: "group", Surface: "native",
+		ProjectID: &projID, DisplayName: "team-chat", DriftState: "active", LastActivityAt: now, CreatedAt: now,
+	}
+	require.NoError(t, f.st.CreateConversation(ctx, groupConv))
+
+	// Create a DM between Alice and f.foreign (agent in another project with no grant).
+	foreignDMKey, err := messages.DMConversationKey("agent", f.foreign.ID, "user", aliceID)
+	require.NoError(t, err)
+	foreignDM := &store.Conversation{
+		ID: tid("foreign-dm"), Kind: "direct", Surface: "native",
+		ExternalRef: foreignDMKey, DriftState: "active", LastActivityAt: now, CreatedAt: now,
+	}
+	require.NoError(t, f.st.CreateConversation(ctx, foreignDM))
+
+	// Direct matcher unit assertions.
+	aliceIdent := NewVisitorIdentity(aliceID, grantTestIssuer, "sub-alice", "alice@corp.example", "Alice")
+	gotConv, gotAgent, err := f.srv.matchVisitorOwnDMConversation(ctx, aliceIdent, ownDM.ID)
+	require.NoError(t, err)
+	assert.Equal(t, ownDM.ID, gotConv.ID)
+	assert.Equal(t, f.agent.ID, gotAgent.ID)
+
+	_, _, err = f.srv.matchVisitorOwnDMConversation(ctx, aliceIdent, bobDM.ID)
+	assert.ErrorIs(t, err, errVisitorTargetRefused, "other user's DM must be refused by matcher")
+
+	_, _, err = f.srv.matchVisitorOwnDMConversation(ctx, aliceIdent, groupConv.ID)
+	assert.ErrorIs(t, err, errVisitorTargetRefused, "group conversation must be refused by matcher")
+
+	_, _, err = f.srv.matchVisitorOwnDMConversation(ctx, aliceIdent, tid("missing-conv"))
+	assert.ErrorIs(t, err, errVisitorTargetRefused, "missing conversation must be refused by matcher")
+
+	// HTTP matrix across both /messages and /watch.
+	for _, tc := range []struct {
+		name            string
+		projectVisitors bool
+		mcpServer       bool
+		path            string
+		wantOK          bool
+	}{
+		{"own DM messages", true, true, "/api/v1/conversations/" + ownDM.ID + "/messages", true},
+		{"own DM watch", true, true, "/api/v1/conversations/" + ownDM.ID + "/watch?wait=0&start=beginning", true},
+		{"other user DM messages", true, true, "/api/v1/conversations/" + bobDM.ID + "/messages", false},
+		{"other user DM watch", true, true, "/api/v1/conversations/" + bobDM.ID + "/watch?wait=0", false},
+		{"group messages", true, true, "/api/v1/conversations/" + groupConv.ID + "/messages", false},
+		{"group watch", true, true, "/api/v1/conversations/" + groupConv.ID + "/watch?wait=0", false},
+		{"foreign project DM messages", true, true, "/api/v1/conversations/" + foreignDM.ID + "/messages", false},
+		{"foreign project DM watch", true, true, "/api/v1/conversations/" + foreignDM.ID + "/watch?wait=0", false},
+		{"conversations list", true, true, "/api/v1/conversations", false},
+		{"conversation metadata get", true, true, "/api/v1/conversations/" + ownDM.ID, false},
+		{"mcp_server experiment off messages", true, false, "/api/v1/conversations/" + ownDM.ID + "/messages", false},
+		{"mcp_server experiment off watch", true, false, "/api/v1/conversations/" + ownDM.ID + "/watch?wait=0", false},
+		{"project_visitors experiment off messages", false, true, "/api/v1/conversations/" + ownDM.ID + "/messages", false},
+		{"project_visitors experiment off watch", false, true, "/api/v1/conversations/" + ownDM.ID + "/watch?wait=0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			visitorSetExperiments(t, f.srv, tc.projectVisitors, tc.mcpServer)
+			rec := f.do(t, aliceToken, http.MethodGet, tc.path, nil)
+			if tc.wantOK {
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			} else if tc.projectVisitors {
+				assertVisitorRefusal(t, rec, tc.name)
+			} else {
+				// With federation.project_visitors off, the auth middleware constructs
+				// a FederatedUserIdentity (not VisitorIdentity), which is refused 403.
+				assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestAuthorizeConversationReadByID_VisitorDefenseInDepth tests the handler-layer
+// visitor checks in authorizeConversationReadByID directly, bypassing routeGuard.
+// It ensures that even without routeGuard, own DM is admitted only while both
+// experiments are on and the caller holds a valid federation credential, and that
+// another user's DM, a group, a foreign-project DM, either experiment off, and
+// non-visitor federated identities are all denied with 403.
+func TestAuthorizeConversationReadByID_VisitorDefenseInDepth(t *testing.T) {
+	f := newVisitorMessagingFixture(t)
+	ctx := context.Background()
+	visitorSetExperiments(t, f.srv, true, true)
+
+	aliceID, aliceToken := f.visitor(t, "sub-alice-did", "alice-did@corp.example")
+	bobID, _ := f.visitor(t, "sub-bob-did", "bob-did@corp.example")
+
+	// Create Alice's own DM via send.
+	sendRec := f.do(t, aliceToken, http.MethodPost, f.projectMessagePath(f.agent.Slug), visitorTextBody("hello"))
+	require.Equal(t, http.StatusOK, sendRec.Code, sendRec.Body.String())
+	var sendResp MessageDeliveryResponse
+	require.NoError(t, json.Unmarshal(sendRec.Body.Bytes(), &sendResp))
+	ownDMID := sendResp.ConversationID
+	require.NotEmpty(t, ownDMID)
+
+	now := time.Now().UTC()
+
+	// Another user's DM with f.agent.
+	bobDMKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", bobID)
+	require.NoError(t, err)
+	bobDM := &store.Conversation{
+		ID: tid("did-bob-dm"), Kind: "direct", Surface: "native",
+		ExternalRef: bobDMKey, DriftState: "active", LastActivityAt: now, CreatedAt: now,
+	}
+	require.NoError(t, f.st.CreateConversation(ctx, bobDM))
+
+	// A group conversation in f.projectID.
+	projID := f.projectID
+	groupConv := &store.Conversation{
+		ID: tid("did-group"), Kind: "group", Surface: "native",
+		ProjectID: &projID, DisplayName: "did-group", DriftState: "active", LastActivityAt: now, CreatedAt: now,
+	}
+	require.NoError(t, f.st.CreateConversation(ctx, groupConv))
+
+	// A DM between Alice and f.foreign (agent in a project with no visitor grant).
+	foreignDMKey, err := messages.DMConversationKey("agent", f.foreign.ID, "user", aliceID)
+	require.NoError(t, err)
+	foreignDM := &store.Conversation{
+		ID: tid("did-foreign-dm"), Kind: "direct", Surface: "native",
+		ExternalRef: foreignDMKey, DriftState: "active", LastActivityAt: now, CreatedAt: now,
+	}
+	require.NoError(t, f.st.CreateConversation(ctx, foreignDM))
+
+	aliceVisitor := NewVisitorIdentity(aliceID, grantTestIssuer, "sub-alice-did", "alice-did@corp.example", "Alice")
+	fedUser := NewFederatedUserIdentity(grantTestIssuer, "sub-alice-did", "alice-did@corp.example", "Alice", "viewer", nil)
+	fedAgent := NewFederatedAgentIdentity(grantTestIssuer, f.agent.ID, "proj", "helper", "", nil, nil)
+
+	fedCred := CredentialContext{Kind: CredentialKindFederation}
+	callDirect := func(ident Identity, cred CredentialContext, convID string) (*store.Conversation, error) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+convID+"/messages", nil)
+		reqCtx := contextWithIdentity(ctx, ident)
+		reqCtx = contextWithCredentialContext(reqCtx, cred)
+		return f.srv.authorizeConversationReadByID(reqCtx, req.WithContext(reqCtx), convID)
+	}
+
+	assertDenied403 := func(t *testing.T, conv *store.Conversation, err error) {
+		t.Helper()
+		assert.Nil(t, conv)
+		require.Error(t, err)
+		var denial *convReadDenial
+		require.ErrorAs(t, err, &denial)
+		assert.Equal(t, http.StatusForbidden, denial.status)
+	}
+
+	for _, tc := range []struct {
+		name            string
+		ident           Identity
+		cred            CredentialContext
+		convID          string
+		projectVisitors bool
+		mcpServer       bool
+		wantAllow       bool
+	}{
+		{"own DM allowed", aliceVisitor, fedCred, ownDMID, true, true, true},
+		{"other user DM refused", aliceVisitor, fedCred, bobDM.ID, true, true, false},
+		{"group refused", aliceVisitor, fedCred, groupConv.ID, true, true, false},
+		{"foreign project DM refused", aliceVisitor, fedCred, foreignDM.ID, true, true, false},
+		{"mcp_server off refused", aliceVisitor, fedCred, ownDMID, true, false, false},
+		{"project_visitors off refused", aliceVisitor, fedCred, ownDMID, false, true, false},
+		{"FederatedUserIdentity refused", fedUser, fedCred, ownDMID, true, true, false},
+		{"FederatedAgentIdentity refused", fedAgent, fedCred, ownDMID, true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			visitorSetExperiments(t, f.srv, tc.projectVisitors, tc.mcpServer)
+			conv, err := callDirect(tc.ident, tc.cred, tc.convID)
+			if tc.wantAllow {
+				require.NoError(t, err)
+				require.NotNil(t, conv)
+				assert.Equal(t, ownDMID, conv.ID)
+			} else {
+				assertDenied403(t, conv, err)
+			}
+		})
+	}
 }

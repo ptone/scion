@@ -19,17 +19,22 @@ package mcpserver_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
@@ -38,7 +43,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
+	"github.com/knadh/koanf/v2"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -750,5 +758,456 @@ func TestIntegration_SendMessageCursorDoesNotSkipConcurrentReply(t *testing.T) {
 	}
 	if len(readOut.Messages) != 1 || readOut.Messages[0].Text != "CONCURRENT-REPLY" {
 		t.Fatalf("expected CONCURRENT-REPLY after send cursor, got: %+v", readOut.Messages)
+	}
+}
+
+// TestIntegration_VisitorSendAndWatchOwnDM covers design §9 B11 & §10 AC6:
+// a local mock OIDC issuer issues a JWT presented in X-Scion-Federation-Token;
+// a linked project visitor sends a message to an agent via MCP send_message,
+// reads the agent's reply via MCP read_messages (backed by /conversations/{id}/watch),
+// logs principal_kind="visitor" in the MCP audit log, and is refused on another
+// user's DM, a group conversation, the conversation list, and when hub.mcp_server
+// is turned off.
+func TestIntegration_VisitorSendAndWatchOwnDM(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// 1. Local mock OIDC issuer (RSA key + JWKS endpoint).
+	const (
+		issuerURL = "https://idp-mcp-visitor.example.com"
+		audience  = "https://hub-mcp-visitor.example.com"
+		kid       = "mcp-visitor-key-1"
+	)
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
+	jwksData, err := json.Marshal(jose.JSONWebKeySet{
+		Keys: []jose.JSONWebKey{{
+			Key:       &privKey.PublicKey,
+			KeyID:     kid,
+			Algorithm: string(jose.RS256),
+			Use:       "sig",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal JWKS: %v", err)
+	}
+	jwksSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(jwksData)
+	}))
+	t.Cleanup(jwksSrv.Close)
+
+	signVisitorJWT := func(sub, email, name string) string {
+		t.Helper()
+		signer, err := jose.NewSigner(
+			jose.SigningKey{Algorithm: jose.RS256, Key: privKey},
+			(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
+		)
+		if err != nil {
+			t.Fatalf("NewSigner: %v", err)
+		}
+		now := time.Now()
+		claims := map[string]any{
+			"iss":            issuerURL,
+			"sub":            sub,
+			"aud":            audience,
+			"iat":            jwt.NewNumericDate(now.Add(-time.Minute)),
+			"nbf":            jwt.NewNumericDate(now.Add(-time.Minute)),
+			"exp":            jwt.NewNumericDate(now.Add(5 * time.Minute)),
+			"email":          email,
+			"email_verified": true,
+			"name":           name,
+		}
+		raw, err := jwt.Signed(signer).Claims(claims).Serialize()
+		if err != nil {
+			t.Fatalf("Sign JWT: %v", err)
+		}
+		return raw
+	}
+
+	// 2. Real in-process Hub with Federation enabled and both experiments on.
+	dbPath := filepath.Join(t.TempDir(), "hub-visitor.db")
+	entClient, err := entc.OpenSQLite(dbPath, entc.PoolConfig{MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("entc.OpenSQLite: %v", err)
+	}
+	if err := entc.AutoMigrate(ctx, entClient); err != nil {
+		t.Fatalf("entc.AutoMigrate: %v", err)
+	}
+	st := entadapter.NewCompositeStore(entClient)
+	t.Cleanup(func() { _ = st.Close() })
+
+	hubSrv, err := hub.New(hub.ServerConfig{
+		Host:        "127.0.0.1",
+		Port:        0,
+		HubEndpoint: audience,
+		Mode:        "dev",
+		Federation: config.FederationConfig{
+			Enabled: true,
+			TrustedIssuers: []config.TrustedIssuerConfig{{
+				IssuerURL:          issuerURL,
+				IssuerType:         "user",
+				JWKSURL:            jwksSrv.URL,
+				ExpectedAudience:   audience,
+				AllowVisitorGrants: true,
+				AllowedEmails:      []string{"*@corp.example"},
+			}},
+		},
+	}, st)
+	if err != nil {
+		t.Fatalf("hub.New: %v", err)
+	}
+	hubSrv.SetDispatcher(&noopMessageDispatcher{})
+	ops := hub.NewOperationalSettings(st, koanf.New("."), koanf.New("."))
+	hubSrv.SetOperationalSettings(ops)
+
+	// Enable both federation.project_visitors and hub.mcp_server via operational settings.
+	var expRev int64
+	setExperiments := func(projectVisitors, mcpEnabled bool) {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{
+			"overrides": map[string]bool{
+				experiments.FederationProjectVisitors: projectVisitors,
+				experiments.MCPServer:                 mcpEnabled,
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal experiments: %v", err)
+		}
+		expRev, err = ops.Update(ctx, "experiments", raw, "test", expRev, "managed")
+		if err != nil {
+			t.Fatalf("ops.Update(experiments): %v", err)
+		}
+	}
+	setExperiments(true, true)
+
+	// 3. Seed project owner, project, agent, another user's DM, and a group conversation.
+	owner := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "owner@example.com",
+		DisplayName: "Owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	if err := st.CreateUser(ctx, owner); err != nil {
+		t.Fatalf("CreateUser(owner): %v", err)
+	}
+	hubMemberRole, err := st.GetRoleDefinitionByName(ctx, "hub-member", store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("GetRoleDefinitionByName(hub-member): %v", err)
+	}
+	if _, err := st.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               uuid.NewString(),
+		PrincipalType:    "user",
+		PrincipalID:      owner.ID,
+		RoleDefinitionID: hubMemberRole.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        owner.ID,
+	}); err != nil {
+		t.Fatalf("CreateRoleBinding(hub-member): %v", err)
+	}
+
+	inProcClient := func(opt hubclient.Option) hubclient.Client {
+		hc := &http.Client{
+			Transport: &mcpserver.InProcessTransport{Handler: hubSrv.Handler()},
+		}
+		cl, err := hubclient.New("http://in-process",
+			hubclient.WithHTTPClient(hc),
+			opt,
+			hubclient.WithTransportAuth(nil, 0),
+		)
+		if err != nil {
+			t.Fatalf("hubclient.New: %v", err)
+		}
+		return cl
+	}
+
+	ownerJWT, _, err := hubSrv.GetUserTokenService().MintAccessToken(hub.UserTokenSubject{
+		UserID:      owner.ID,
+		Email:       owner.Email,
+		DisplayName: owner.DisplayName,
+		Role:        owner.Role,
+		ClientType:  hub.ClientTypeWeb,
+	})
+	if err != nil {
+		t.Fatalf("MintAccessToken: %v", err)
+	}
+	ownerHubClient := inProcClient(hubclient.WithBearerToken(ownerJWT))
+
+	proj, err := ownerHubClient.Projects().Create(ctx, &hubclient.CreateProjectRequest{
+		Name: "Visitor MCP Project",
+		Slug: "visitor-mcp",
+	})
+	if err != nil {
+		t.Fatalf("Projects.Create: %v", err)
+	}
+
+	agent := &store.Agent{
+		ID:              uuid.NewString(),
+		Slug:            "echo-v",
+		Name:            "echo-v",
+		ProjectID:       proj.ID,
+		OwnerID:         owner.ID,
+		CreatedBy:       owner.ID,
+		RuntimeBrokerID: uuid.NewString(),
+		Phase:           "running",
+		MessageMode:     "project",
+		RunID:           "run-v1",
+	}
+	if err := st.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("CreateAgent: %v", err)
+	}
+	agentToken, agentCred, err := hubSrv.SignAgentToken(hub.AgentTokenGrant{
+		AgentID:   agent.ID,
+		ProjectID: proj.ID,
+		Ancestry:  []string{owner.ID},
+		Scopes:    []hub.AgentTokenScope{hub.ScopeAgentStatusUpdate, hub.ScopeProjectRead},
+	}, "run-v1")
+	if err != nil {
+		t.Fatalf("SignAgentToken: %v", err)
+	}
+	if err := st.CreateAgentCredential(ctx, agentCred); err != nil {
+		t.Fatalf("CreateAgentCredential: %v", err)
+	}
+
+	// Grant visitor alice@corp.example on proj via the real REST endpoint.
+	grantBody, _ := json.Marshal(map[string]any{
+		"issuer": issuerURL,
+		"email":  "alice@corp.example",
+	})
+	grantReq := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+proj.ID+"/visitors", bytes.NewReader(grantBody))
+	grantReq.Header.Set("Content-Type", "application/json")
+	grantReq.Header.Set("Authorization", "Bearer "+ownerJWT)
+	grantRec := httptest.NewRecorder()
+	hubSrv.Handler().ServeHTTP(grantRec, grantReq)
+	if grantRec.Code != http.StatusCreated {
+		t.Fatalf("grant visitor: status=%d body=%s", grantRec.Code, grantRec.Body.String())
+	}
+	var grantResp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(grantRec.Body.Bytes(), &grantResp); err != nil {
+		t.Fatalf("unmarshal grant response: %v", err)
+	}
+	visitorID := grantResp.ID
+	if visitorID == "" {
+		t.Fatal("grant response missing visitor ID")
+	}
+
+	// Seed another user's DM with agent and a group conversation in proj.
+	now := time.Now().UTC()
+	ownerDMKey, err := messages.DMConversationKey("agent", agent.ID, "user", owner.ID)
+	if err != nil {
+		t.Fatalf("DMConversationKey: %v", err)
+	}
+	otherDM := &store.Conversation{
+		ID:             uuid.NewString(),
+		Kind:           "direct",
+		Surface:        "native",
+		ExternalRef:    ownerDMKey,
+		DriftState:     "active",
+		LastActivityAt: now,
+		CreatedAt:      now,
+	}
+	if err := st.CreateConversation(ctx, otherDM); err != nil {
+		t.Fatalf("CreateConversation(otherDM): %v", err)
+	}
+	projIDCopy := proj.ID
+	groupConv := &store.Conversation{
+		ID:             uuid.NewString(),
+		Kind:           "group",
+		Surface:        "native",
+		ProjectID:      &projIDCopy,
+		DisplayName:    "visitor-forbidden-group",
+		DriftState:     "active",
+		LastActivityAt: now,
+		CreatedAt:      now,
+	}
+	if err := st.CreateConversation(ctx, groupConv); err != nil {
+		t.Fatalf("CreateConversation(groupConv): %v", err)
+	}
+
+	// 4. Start embedded MCP server wired to hubSrv.ExperimentEnabled directly.
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	backend := mcpserver.NewBackend(mcpserver.BackendOptions{
+		HubBaseURL: "http://in-process",
+		Transport:  &mcpserver.InProcessTransport{Handler: hubSrv.Handler()},
+		Version:    "visitor-integration-test",
+		ExperimentChecker: func(_ context.Context, _ mcpserver.Credential, name string) (bool, error) {
+			return hubSrv.ExperimentEnabled(name), nil
+		},
+		DisableTransportAuth: true,
+	})
+	mcpSrv, err := mcpserver.New(mcpserver.Options{
+		Version: "visitor-integration-test",
+		Backend: backend,
+		Logger:  logger,
+	})
+	if err != nil {
+		t.Fatalf("mcpserver.New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	srvCtx, srvCancel := context.WithCancel(ctx)
+	srvDone := make(chan error, 1)
+	go func() { srvDone <- mcpSrv.Serve(srvCtx, ln) }()
+	defer func() {
+		srvCancel()
+		if err := <-srvDone; err != nil {
+			t.Errorf("Serve shutdown error: %v", err)
+		}
+	}()
+
+	visitorToken := signVisitorJWT("sub-alice", "alice@corp.example", "Alice Visitor")
+
+	// 5. Connect MCP client using ONLY X-Scion-Federation-Token (no Authorization).
+	mcpClient := mcp.NewClient(&mcp.Implementation{Name: "visitor-client", Version: "1.0"}, nil)
+	hc := &http.Client{
+		Transport: &headerRoundTripper{
+			base:    &http.Transport{DisableKeepAlives: true},
+			headers: map[string]string{mcpserver.HeaderFederationToken: visitorToken},
+		},
+	}
+	sess, err := mcpClient.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:   "http://" + ln.Addr().String() + "/mcp",
+		HTTPClient: hc,
+	}, nil)
+	if err != nil {
+		t.Fatalf("visitor MCP Connect failed: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	// 6. Visitor sends message to echo-v.
+	sendRes, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name: "send_message",
+		Arguments: map[string]any{
+			"project": proj.ID,
+			"agent":   agent.Slug,
+			"text":    "ping from visitor",
+		},
+	})
+	if err != nil || sendRes.IsError {
+		t.Fatalf("visitor send_message failed: err=%v res=%+v", err, sendRes)
+	}
+	var sendOut mcpserver.SendResult
+	if err := json.Unmarshal([]byte(sendRes.Content[0].(*mcp.TextContent).Text), &sendOut); err != nil {
+		t.Fatalf("unmarshal sendOut: %v", err)
+	}
+	if sendOut.ConversationID == "" || sendOut.Cursor == "" {
+		t.Fatalf("expected non-empty conversation_id and cursor, got: %+v", sendOut)
+	}
+
+	// Verify Open Question 6: DM conversation has Kind=direct and canonical ExternalRef.
+	visitorDMKey, err := messages.DMConversationKey("agent", agent.ID, "user", visitorID)
+	if err != nil {
+		t.Fatalf("DMConversationKey: %v", err)
+	}
+	storedConv, err := st.GetConversation(ctx, sendOut.ConversationID)
+	if err != nil {
+		t.Fatalf("GetConversation: %v", err)
+	}
+	if storedConv.Kind != "direct" || storedConv.ExternalRef != visitorDMKey {
+		t.Fatalf("stored DM = {Kind:%q ExternalRef:%q}, want {Kind:\"direct\" ExternalRef:%q}",
+			storedConv.Kind, storedConv.ExternalRef, visitorDMKey)
+	}
+
+	// 7. Agent replies into the visitor's DM using its agent JWT.
+	agentHubClient := inProcClient(hubclient.WithAgentToken(agentToken))
+	if _, err := agentHubClient.Agents().SendOutboundMessage(ctx, agent.ID, &hubclient.OutboundMessageRequest{
+		Recipient:      "user:" + visitorID,
+		Msg:            "PONG to visitor",
+		Type:           messages.TypeReply,
+		ConversationID: sendOut.ConversationID,
+	}); err != nil {
+		t.Fatalf("agent reply failed: %v", err)
+	}
+
+	// 8. Visitor reads/watches its own DM from send_message's cursor and gets the reply.
+	readRes, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name: "read_messages",
+		Arguments: map[string]any{
+			"conversation_id": sendOut.ConversationID,
+			"cursor":          sendOut.Cursor,
+		},
+	})
+	if err != nil || readRes.IsError {
+		t.Fatalf("visitor read_messages failed: err=%v res=%+v", err, readRes)
+	}
+	var readOut mcpserver.ReadMessagesOutput
+	if err := json.Unmarshal([]byte(readRes.Content[0].(*mcp.TextContent).Text), &readOut); err != nil {
+		t.Fatalf("unmarshal readOut: %v", err)
+	}
+	if len(readOut.Messages) != 1 || readOut.Messages[0].Text != "PONG to visitor" {
+		t.Fatalf("expected agent reply 'PONG to visitor', got: %+v", readOut.Messages)
+	}
+
+	// Verify audit log records principal_kind="visitor" and credential_class="federation".
+	logText := logBuf.String()
+	for _, want := range []string{
+		`"principal_kind":"visitor"`,
+		`"principal_id":"` + visitorID + `"`,
+		`"credential_class":"federation"`,
+	} {
+		if !strings.Contains(logText, want) {
+			t.Errorf("audit log missing %s; got:\n%s", want, logText)
+		}
+	}
+
+	// 9. Refusals: another user's DM and a group conversation are refused via MCP.
+	for _, tc := range []struct {
+		name   string
+		convID string
+	}{
+		{"other user DM", otherDM.ID},
+		{"group conversation", groupConv.ID},
+	} {
+		res, err := sess.CallTool(ctx, &mcp.CallToolParams{
+			Name: "read_messages",
+			Arguments: map[string]any{
+				"conversation_id": tc.convID,
+			},
+		})
+		if err != nil {
+			t.Fatalf("%s: unexpected transport error: %v", tc.name, err)
+		}
+		if !res.IsError {
+			t.Fatalf("%s: expected tool error (403 refusal), got success: %+v", tc.name, res)
+		}
+	}
+
+	// 10. Refusal: GET /api/v1/conversations (list) is refused for visitors.
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
+	listReq.Header.Set(mcpserver.HeaderFederationToken, visitorToken)
+	listRec := httptest.NewRecorder()
+	hubSrv.Handler().ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusForbidden {
+		t.Fatalf("GET /api/v1/conversations for visitor: status=%d, want 403 (%s)", listRec.Code, listRec.Body.String())
+	}
+
+	// 11. Refusal: with hub.mcp_server turned off, Hub refuses /watch (403) and MCP returns 404.
+	setExperiments(true, false)
+	watchReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+sendOut.ConversationID+"/watch?wait=0", nil)
+	watchReq.Header.Set(mcpserver.HeaderFederationToken, visitorToken)
+	watchRec := httptest.NewRecorder()
+	hubSrv.Handler().ServeHTTP(watchRec, watchReq)
+	if watchRec.Code != http.StatusForbidden {
+		t.Fatalf("GET /conversations/{id}/watch with hub.mcp_server off: status=%d, want 403 (%s)", watchRec.Code, watchRec.Body.String())
+	}
+
+	mcpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+ln.Addr().String()+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	mcpReq.Header.Set("Content-Type", "application/json")
+	mcpReq.Header.Set(mcpserver.HeaderFederationToken, visitorToken)
+	mcpResp, err := http.DefaultClient.Do(mcpReq)
+	if err != nil {
+		t.Fatalf("POST /mcp with experiment off: %v", err)
+	}
+	_ = mcpResp.Body.Close()
+	if mcpResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("POST /mcp with hub.mcp_server off: status=%d, want 404", mcpResp.StatusCode)
 	}
 }

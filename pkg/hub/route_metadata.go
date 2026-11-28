@@ -381,6 +381,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/conversations/": {
 		Pattern: "/api/v1/conversations/", RouteID: "conversations.byId",
 		Classification: RouteAuthenticated,
+		VisitorMethods: []string{http.MethodGet},
 	},
 	"/api/v1/conversations/resolve": {
 		Pattern: "/api/v1/conversations/resolve", RouteID: "conversations.resolve",

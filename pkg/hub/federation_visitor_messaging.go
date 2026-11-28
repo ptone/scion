@@ -64,8 +64,15 @@ type visitorAgentRef struct {
 	AgentID string
 	// DMKey is the conversation key of a DM route, "" on the other forms.
 	DMKey string
+	// ConversationID is the conversation UUID on /api/v1/conversations/{id}/...
+	// sub-routes, "" on the other forms.
+	ConversationID string
 	// Access is the check of the matched sub-route (visitorSubRoute.Access).
 	Access visitorAccess
+	// Experiment, if non-empty, is an additional experiment that must be
+	// enabled (alongside federation.project_visitors) for the matched
+	// sub-route to admit a visitor.
+	Experiment string
 }
 
 // visitorSubRoute is one sub-path, under a subtree route pattern (a
@@ -81,6 +88,10 @@ type visitorSubRoute struct {
 	SubPath string
 	// Access is the per-request check a visitor must pass on the sub-path.
 	Access visitorAccess
+	// Experiment, if non-empty, is an additional server experiment that must
+	// be enabled (alongside federation.project_visitors) for this sub-route
+	// to admit a visitor.
+	Experiment string
 	// match reports whether a request has this shape and returns the agent
 	// reference it names.
 	match func(r *http.Request) (visitorAgentRef, bool)
@@ -89,11 +100,12 @@ type visitorSubRoute struct {
 // visitorAdmittedSubRoutes is the complete, deny-by-default list of the
 // sub-routes of subtree patterns that admit a visitor: sending a message
 // to an agent (project and by-ID forms), the visitor's own DM history and
-// read marker with an agent, and listing and reading the agents of a
-// project the visitor holds a grant on (project form only, answered with
-// the visitor view, visitorAgentView). On a subtree route a visitor
-// request that matches no entry for the route's pattern and the request's
-// method is refused (admitVisitorSubRoute).
+// read marker with an agent, the visitor's own DM conversation messages and
+// watch feed (while hub.mcp_server is also enabled), and listing and reading
+// the agents of a project the visitor holds a grant on (project form only,
+// answered with the visitor view, visitorAgentView). On a subtree route a
+// visitor request that matches no entry for the route's pattern and the
+// request's method is refused (admitVisitorSubRoute).
 var visitorAdmittedSubRoutes = []visitorSubRoute{
 	{Pattern: "/api/v1/projects/", Method: http.MethodPost, SubPath: "{projectId}/agents/{agentId}/message",
 		Access: visitorAccessMessage, match: matchVisitorAgentSubRoute(ProjectAgentRouteActionMessage)},
@@ -105,6 +117,10 @@ var visitorAdmittedSubRoutes = []visitorSubRoute{
 		Access: visitorAccessMessage, match: matchVisitorDMSubRoute("read")},
 	{Pattern: "/api/v1/chat/conversations/", Method: http.MethodPost, SubPath: "{dmKey}/read",
 		Access: visitorAccessMessage, match: matchVisitorDMSubRoute("read")},
+	{Pattern: "/api/v1/conversations/", Method: http.MethodGet, SubPath: "{id}/messages",
+		Access: visitorAccessMessage, Experiment: experiments.MCPServer, match: matchVisitorConversationSubRoute("messages")},
+	{Pattern: "/api/v1/conversations/", Method: http.MethodGet, SubPath: "{id}/watch",
+		Access: visitorAccessMessage, Experiment: experiments.MCPServer, match: matchVisitorConversationSubRoute("watch")},
 	{Pattern: "/api/v1/projects/", Method: http.MethodGet, SubPath: "{projectId}/agents",
 		Access: visitorAccessAgentList, match: matchVisitorProjectAgentsSubRoute(ProjectAgentRouteCollection)},
 	{Pattern: "/api/v1/projects/", Method: http.MethodGet, SubPath: "{projectId}/agents/{agentId}",
@@ -143,6 +159,10 @@ func matchVisitorProjectAgentsSubRoute(id AgentSubRouteID) func(r *http.Request)
 // routes (handleChatConversationRoutes).
 const chatConversationsPrefix = "/api/v1/chat/conversations/"
 
+// conversationsPrefix is the path prefix of the conversation routes
+// (handleConversationRoutes).
+const conversationsPrefix = "/api/v1/conversations/"
+
 // matchVisitorDMSubRoute matches {dmKey}/{action} under the chat
 // conversation routes, with the path split exactly as
 // handleChatConversationRoutes splits it. The key must be a DM key.
@@ -160,6 +180,22 @@ func matchVisitorDMSubRoute(action string) func(r *http.Request) (visitorAgentRe
 	}
 }
 
+// matchVisitorConversationSubRoute matches {id}/{action} under
+// /api/v1/conversations/, with the path split identically to
+// handleConversationRoutes (extractAction).
+func matchVisitorConversationSubRoute(action string) func(r *http.Request) (visitorAgentRef, bool) {
+	return func(r *http.Request) (visitorAgentRef, bool) {
+		if !strings.HasPrefix(r.URL.Path, conversationsPrefix) {
+			return visitorAgentRef{}, false
+		}
+		id, act := extractAction(r, "/api/v1/conversations")
+		if id == "" || act != action {
+			return visitorAgentRef{}, false
+		}
+		return visitorAgentRef{ConversationID: id}, true
+	}
+}
+
 // routePatternIsSubtree reports whether a route table pattern (optionally
 // method-qualified) matches a subtree of paths: it ends in "/" or in a
 // "{name...}" wildcard.
@@ -172,7 +208,7 @@ func routePatternIsSubtree(pattern string) bool {
 
 // matchVisitorSubRoute returns the agent reference of the first entry of
 // visitorAdmittedSubRoutes for pattern and r's method that r matches, with
-// the entry's Access.
+// the entry's Access and Experiment.
 func matchVisitorSubRoute(pattern string, r *http.Request) (visitorAgentRef, bool) {
 	for _, sub := range visitorAdmittedSubRoutes {
 		if sub.Pattern != pattern || sub.Method != r.Method {
@@ -180,6 +216,7 @@ func matchVisitorSubRoute(pattern string, r *http.Request) (visitorAgentRef, boo
 		}
 		if ref, ok := sub.match(r); ok {
 			ref.Access = sub.Access
+			ref.Experiment = sub.Experiment
 			return ref, true
 		}
 	}
@@ -248,6 +285,9 @@ func (s *Server) admitVisitorSubRoute(w http.ResponseWriter, r *http.Request, me
 	if !ok {
 		return refuse("sub-route is not open to visitors")
 	}
+	if ref.Experiment != "" && !s.experimentEnabled(ref.Experiment) {
+		return refuse("sub-route experiment is off")
+	}
 	switch ref.Access {
 	case visitorAccessAgentList:
 		allowed, err := s.visitorMayListProjectAgents(r.Context(), visitor, ref.ProjectID)
@@ -302,6 +342,9 @@ func (s *Server) visitorTargetAgent(ctx context.Context, visitor *VisitorIdentit
 		err   error
 	)
 	switch {
+	case ref.ConversationID != "":
+		_, agent, err = s.matchVisitorOwnDMConversation(ctx, visitor, ref.ConversationID)
+		return agent, err
 	case ref.DMKey != "":
 		agentID, ok := visitorDMAgentID(ref.DMKey, visitor.ID())
 		if !ok {
@@ -329,6 +372,46 @@ func (s *Server) visitorTargetAgent(ctx context.Context, visitor *VisitorIdentit
 		return nil, errVisitorTargetRefused
 	}
 	return agent, nil
+}
+
+// matchVisitorOwnDMConversation loads conversation convID and verifies that:
+//   - it exists and has Kind == "direct";
+//   - visitor is a canonical participant of its ExternalRef (dm:agent:<id>:user:<visitorID>);
+//   - the peer agent exists and is not deleted.
+//
+// Callers additionally check that the visitor holds a current grant on the peer
+// agent's project (via authorizeAgentMessage). Non-matching, missing, group, or
+// deleted-agent conversations return errVisitorTargetRefused; any other store
+// error is returned as is.
+func (s *Server) matchVisitorOwnDMConversation(ctx context.Context, visitor *VisitorIdentity, convID string) (*store.Conversation, *store.Agent, error) {
+	if s.store == nil || visitor == nil || convID == "" {
+		return nil, nil, errVisitorTargetRefused
+	}
+	conv, err := s.store.GetConversation(ctx, convID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil, errVisitorTargetRefused
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if conv == nil || conv.Kind != "direct" {
+		return nil, nil, errVisitorTargetRefused
+	}
+	agentID, ok := visitorDMAgentID(conv.ExternalRef, visitor.ID())
+	if !ok {
+		return nil, nil, errVisitorTargetRefused
+	}
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil, errVisitorTargetRefused
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if agent == nil || !agent.DeletedAt.IsZero() {
+		return nil, nil, errVisitorTargetRefused
+	}
+	return conv, agent, nil
 }
 
 // visitorDMAgentID returns the agent ID of key when key is the canonical

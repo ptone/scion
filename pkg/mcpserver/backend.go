@@ -110,9 +110,8 @@ func (b *hubBackend) Me(ctx context.Context, c Credential) (Principal, error) {
 	if err != nil {
 		return Principal{}, err
 	}
-	// /api/v1/auth/me does not expose an identity kind field, so leave Kind
-	// empty rather than hard-coding "user" (which would mislabel visitors).
 	return Principal{
+		Kind:    u.PrincipalKind,
 		ID:      u.ID,
 		Email:   u.Email,
 		Display: u.DisplayName,

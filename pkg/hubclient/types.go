@@ -656,15 +656,16 @@ type TemplateFile struct {
 
 // User represents a user from the Hub API.
 type User struct {
-	ID          string           `json:"id"`
-	Email       string           `json:"email"`
-	DisplayName string           `json:"displayName"`
-	AvatarURL   string           `json:"avatarUrl,omitempty"`
-	Role        string           `json:"role"`
-	Status      string           `json:"status"`
-	Preferences *UserPreferences `json:"preferences,omitempty"`
-	Created     time.Time        `json:"created"`
-	LastLogin   time.Time        `json:"lastLogin,omitzero"`
+	ID            string           `json:"id"`
+	Email         string           `json:"email"`
+	DisplayName   string           `json:"displayName"`
+	AvatarURL     string           `json:"avatarUrl,omitempty"`
+	Role          string           `json:"role"`
+	Status        string           `json:"status"`
+	PrincipalKind string           `json:"principalKind,omitempty"`
+	Preferences   *UserPreferences `json:"preferences,omitempty"`
+	Created       time.Time        `json:"created"`
+	LastLogin     time.Time        `json:"lastLogin,omitzero"`
 }
 
 // UserPreferences holds user preferences.

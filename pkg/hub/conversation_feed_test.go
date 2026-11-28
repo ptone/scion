@@ -558,12 +558,30 @@ func TestConversationWatch_WithTxCreateMessageWakesPoll(t *testing.T) {
 	}
 }
 
-// Regression test (O2): dev and federated_user identities normalize to "user".
+// Table test covering every Identity.Type() value in the Hub (design §4.3.1,
+// §10 AC6): user-like identities (user, dev, federated_user, visitor) normalize
+// to "user"; federated_agent and federated_service are intentionally NOT mapped.
 func TestNormalizeFeedPrincipalKind(t *testing.T) {
-	assert.Equal(t, "user", normalizeFeedPrincipalKind("user"))
-	assert.Equal(t, "user", normalizeFeedPrincipalKind("dev"))
-	assert.Equal(t, "user", normalizeFeedPrincipalKind("federated_user"))
-	assert.Equal(t, "agent", normalizeFeedPrincipalKind("agent"))
+	cases := []struct {
+		identityType string
+		want         string
+	}{
+		{identityType: "user", want: "user"},
+		{identityType: "dev", want: "user"},
+		{identityType: "federated_user", want: "user"},
+		{identityType: "visitor", want: "user"},
+		{identityType: "agent", want: "agent"},
+		{identityType: "agent_delegated", want: "agent_delegated"},
+		{identityType: "broker", want: "broker"},
+		{identityType: "federated_agent", want: "federated_agent"},
+		{identityType: "federated_service", want: "federated_service"},
+		{identityType: "", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run("type="+tc.identityType, func(t *testing.T) {
+			assert.Equal(t, tc.want, normalizeFeedPrincipalKind(tc.identityType))
+		})
+	}
 }
 
 // Phase 3 item 2: start=beginning replays retained history from seq 1, respects

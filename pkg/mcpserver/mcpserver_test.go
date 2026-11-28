@@ -867,3 +867,129 @@ func TestInProcessTransport_StreamingAndCancellation(t *testing.T) {
 		}
 	})
 }
+
+func TestServer_AuditPrincipalKindAndFederationForwarding(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		seenAuthz []string
+		seenFed   []string
+		logBuf    bytes.Buffer
+	)
+
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenAuthz = append(seenAuthz, r.Header.Get("Authorization"))
+		seenFed = append(seenFed, r.Header.Get(HeaderFederationToken))
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
+			if r.Header.Get(HeaderFederationToken) != "" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id":            "visitor-42",
+					"email":         "vis@corp.example",
+					"displayName":   "Vis",
+					"principalKind": "visitor",
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":            "user-99",
+				"email":         "user@example.com",
+				"displayName":   "User",
+				"principalKind": "user",
+			})
+		case "/api/v1/conversations/conv-1/watch":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"events":     []any{},
+				"nextCursor": "v1.conv-1.1",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+	backend := NewBackend(BackendOptions{
+		HubBaseURL: "http://in-process",
+		Transport:  &InProcessTransport{Handler: fakeHub},
+		Version:    "test-1.0",
+		ExperimentChecker: func(_ context.Context, _ Credential, _ string) (bool, error) {
+			return true, nil
+		},
+		DisableTransportAuth: true,
+	})
+	srv, err := New(Options{
+		Version: "test-1.0",
+		Backend: backend,
+		Logger:  logger,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	callRead := func(headers map[string]string) {
+		t.Helper()
+		body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_messages","arguments":{"conversation_id":"conv-1"}}}`
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			t.Fatalf("status = %d (%s), want 200", resp.StatusCode, string(b))
+		}
+	}
+
+	// 1. Visitor via X-Scion-Federation-Token: forwarded verbatim, never moved to Authorization.
+	callRead(map[string]string{HeaderFederationToken: "oidc-visitor-jwt"})
+
+	mu.Lock()
+	if len(seenFed) < 2 {
+		mu.Unlock()
+		t.Fatalf("expected at least 2 hub calls (/auth/me and /watch), got %d", len(seenFed))
+	}
+	for i := range seenFed {
+		if seenFed[i] != "oidc-visitor-jwt" {
+			mu.Unlock()
+			t.Fatalf("call %d: X-Scion-Federation-Token = %q, want %q", i, seenFed[i], "oidc-visitor-jwt")
+		}
+		if seenAuthz[i] != "" {
+			mu.Unlock()
+			t.Fatalf("call %d: federation token must never be moved to Authorization, got %q", i, seenAuthz[i])
+		}
+	}
+	seenAuthz = nil
+	seenFed = nil
+	mu.Unlock()
+
+	// 2. Regular user via Authorization: Bearer.
+	callRead(map[string]string{"Authorization": "Bearer scion_pat_user99"})
+
+	logText := logBuf.String()
+	for _, want := range []string{
+		`"principal_id":"visitor-42"`,
+		`"principal_kind":"visitor"`,
+		`"credential_class":"federation"`,
+		`"principal_id":"user-99"`,
+		`"principal_kind":"user"`,
+		`"credential_class":"bearer"`,
+	} {
+		if !strings.Contains(logText, want) {
+			t.Errorf("audit log missing %s; got:\n%s", want, logText)
+		}
+	}
+}
