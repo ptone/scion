@@ -360,7 +360,7 @@ func TestChatSearchStoreTimeoutStopsStatement_Postgres(t *testing.T) {
 	for _, stmt := range []string{
 		`ALTER TABLE messages RENAME TO messages_base`,
 		`CREATE FUNCTION slow_text(t text) RETURNS text LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM pg_sleep(0.01); RETURN t; END $$`,
-		`CREATE VIEW messages AS SELECT id, project_id, created, channel, thread_id, slow_text(msg) AS msg, sender, sender_id, recipient, recipient_id FROM messages_base`,
+		`CREATE VIEW messages AS SELECT id, project_id, created, channel, thread_id, conversation_id, slow_text(msg) AS msg, sender, sender_id, recipient, recipient_id FROM messages_base`,
 	} {
 		_, err := db.ExecContext(ctx, stmt)
 		require.NoError(t, err, stmt)
