@@ -254,11 +254,6 @@ type WebChatStore interface {
 	// SetMessageReplyTo records that messageID is a reply to replyToID.
 	SetMessageReplyTo(ctx context.Context, messageID, replyToID string) error
 
-	// SetMessageChatV2Origin records that messageID was created by the chat-v2
-	// send path (sendAgentRouted), so held-message re-drive can distinguish
-	// chat-v2 rows from POST /agents/{id}/message rows without reading thread_id.
-	SetMessageChatV2Origin(ctx context.Context, messageID string) error
-
 	// GetMessageExt returns the extension row for a single message.
 	// Returns nil if no row exists.
 	GetMessageExt(ctx context.Context, messageID string) (*WebChatMessageExt, error)
@@ -351,11 +346,10 @@ type WebChatThread struct {
 // WebChatMessageExt holds per-message extension data stored outside the Ent
 // messages table. Used for reply-to, edit, soft-delete, and chat-v2 origin metadata.
 type WebChatMessageExt struct {
-	MessageID    string     `json:"messageId"`
-	ReplyToID    string     `json:"replyToId,omitempty"`
-	EditedAt     *time.Time `json:"editedAt,omitempty"`
-	DeletedAt    *time.Time `json:"deletedAt,omitempty"`
-	ChatV2Origin bool       `json:"-"`
+	MessageID string     `json:"messageId"`
+	ReplyToID string     `json:"replyToId,omitempty"`
+	EditedAt  *time.Time `json:"editedAt,omitempty"`
+	DeletedAt *time.Time `json:"deletedAt,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -678,8 +672,7 @@ CREATE TABLE IF NOT EXISTS webchat_message_ext (
     message_id TEXT PRIMARY KEY,
     reply_to_id TEXT,
     edited_at TEXT,
-    deleted_at TEXT,
-    chat_v2_origin INTEGER NOT NULL DEFAULT 0
+    deleted_at TEXT
 );
 
 -- Per-recipient mention records: one row per (message, mentioned user).
@@ -2082,9 +2075,6 @@ func (s *sqliteWebChatStore) runMigrations() error {
 	if err := s.addUserPrefsThreadGroupsMigratedAt(); err != nil {
 		return fmt.Errorf("user prefs thread_groups_migrated_at column: %w", err)
 	}
-	if err := s.addMessageExtChatV2Origin(); err != nil {
-		return fmt.Errorf("message ext chat_v2_origin column: %w", err)
-	}
 	return nil
 }
 
@@ -2928,47 +2918,12 @@ DO UPDATE SET reply_to_id = excluded.reply_to_id
 	return nil
 }
 
-// addMessageExtChatV2Origin adds the chat_v2_origin column to
-// webchat_message_ext for existing databases that lack it. Older binaries do
-// not select this column and ignore it safely.
-func (s *sqliteWebChatStore) addMessageExtChatV2Origin() error {
-	const migrationName = "add_message_ext_chat_v2_origin"
-	done, err := s.migrationCompleted(migrationName)
-	if err != nil {
-		return err
-	}
-	if done {
-		return nil
-	}
-	_, err = s.db.Exec("ALTER TABLE webchat_message_ext ADD COLUMN chat_v2_origin INTEGER NOT NULL DEFAULT 0")
-	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
-		return err
-	}
-	return s.markMigrationCompleted(migrationName)
-}
-
-// SetMessageChatV2Origin records that messageID originated from chat-v2.
-func (s *sqliteWebChatStore) SetMessageChatV2Origin(ctx context.Context, messageID string) error {
-	const query = `
-INSERT INTO webchat_message_ext (message_id, chat_v2_origin)
-VALUES (?, 1)
-ON CONFLICT (message_id)
-DO UPDATE SET chat_v2_origin = 1
-`
-	_, err := s.db.ExecContext(ctx, query, messageID)
-	if err != nil {
-		return fmt.Errorf("webchat store: set message chat_v2_origin: %w", err)
-	}
-	return nil
-}
-
 // GetMessageExt returns the extension row for a single message.
 func (s *sqliteWebChatStore) GetMessageExt(ctx context.Context, messageID string) (*WebChatMessageExt, error) {
-	const query = `SELECT message_id, reply_to_id, edited_at, deleted_at, COALESCE(chat_v2_origin, 0) FROM webchat_message_ext WHERE message_id = ?`
+	const query = `SELECT message_id, reply_to_id, edited_at, deleted_at FROM webchat_message_ext WHERE message_id = ?`
 	var ext WebChatMessageExt
 	var replyToID, editedAt, deletedAt sql.NullString
-	var chatV2Origin int
-	err := s.db.QueryRowContext(ctx, query, messageID).Scan(&ext.MessageID, &replyToID, &editedAt, &deletedAt, &chatV2Origin)
+	err := s.db.QueryRowContext(ctx, query, messageID).Scan(&ext.MessageID, &replyToID, &editedAt, &deletedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -2976,7 +2931,6 @@ func (s *sqliteWebChatStore) GetMessageExt(ctx context.Context, messageID string
 		return nil, fmt.Errorf("webchat store: get message ext: %w", err)
 	}
 	ext.ReplyToID = replyToID.String
-	ext.ChatV2Origin = chatV2Origin != 0
 	if editedAt.Valid {
 		t := parseSQLiteTime(editedAt.String)
 		ext.EditedAt = &t
@@ -2999,7 +2953,7 @@ func (s *sqliteWebChatStore) GetMessageExts(ctx context.Context, messageIDs []st
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	query := `SELECT message_id, reply_to_id, edited_at, deleted_at, COALESCE(chat_v2_origin, 0) FROM webchat_message_ext WHERE message_id IN (` + strings.Join(placeholders, ",") + `)`
+	query := `SELECT message_id, reply_to_id, edited_at, deleted_at FROM webchat_message_ext WHERE message_id IN (` + strings.Join(placeholders, ",") + `)`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: get message exts: %w", err)
@@ -3010,12 +2964,10 @@ func (s *sqliteWebChatStore) GetMessageExts(ctx context.Context, messageIDs []st
 	for rows.Next() {
 		var ext WebChatMessageExt
 		var replyToID, editedAt, deletedAt sql.NullString
-		var chatV2Origin int
-		if err := rows.Scan(&ext.MessageID, &replyToID, &editedAt, &deletedAt, &chatV2Origin); err != nil {
+		if err := rows.Scan(&ext.MessageID, &replyToID, &editedAt, &deletedAt); err != nil {
 			return nil, fmt.Errorf("webchat store: scan message ext: %w", err)
 		}
 		ext.ReplyToID = replyToID.String
-		ext.ChatV2Origin = chatV2Origin != 0
 		if editedAt.Valid {
 			t := parseSQLiteTime(editedAt.String)
 			ext.EditedAt = &t

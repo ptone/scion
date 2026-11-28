@@ -122,6 +122,11 @@ func (Message) Fields() []ent.Field {
 		field.Time("not_reached_at").
 			Optional().
 			Nillable(),
+		// chat_v2_origin marks rows created through the chat-v2 send path
+		// (sendAgentRouted) so held-message redrive can distinguish them from
+		// POST /agents/{id}/message rows without reading thread_id (ptone/scion#9633).
+		field.Bool("chat_v2_origin").
+			Default(false),
 		// channel identifies the integration that originated or targets
 		// this message (e.g. "web", "discord", "telegram").
 		field.String("channel").

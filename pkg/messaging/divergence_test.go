@@ -467,8 +467,8 @@ func TestCheckConversationConsistency_NoTotalCount(t *testing.T) {
 	if !CheckConversationConsistency(ctx, thread, "new-1", "conv-1", "t1", userID, agentID, logger) {
 		t.Fatal("thread lookup: expected consistent")
 	}
-	if thread.calls != 1 {
-		t.Fatalf("thread lookup: %d ListMessages calls, want 1", thread.calls)
+	if thread.calls != 0 {
+		t.Fatalf("thread lookup: %d ListMessages calls, want 0 (thread messages skip prior-message query)", thread.calls)
 	}
 	if thread.countedCalls != 0 {
 		t.Errorf("thread lookup: %d calls requested a total count, want 0", thread.countedCalls)

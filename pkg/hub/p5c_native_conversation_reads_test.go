@@ -18,7 +18,9 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
 	"testing"
 	"time"
 
@@ -290,9 +292,32 @@ func TestP5c_HeldWebMentionsOriginMarker(t *testing.T) {
 	topicConvID := topicConversationID(t, wcs, topicID)
 	require.NotEmpty(t, topicConvID)
 
+	// 0. Live chat-v2 send stamps chat_v2_origin atomically in CreateMessage.
+	bot := &store.Agent{
+		ID:        uuid.NewString(),
+		ProjectID: proj.ID,
+		Name:      "origin-bot",
+		Slug:      "origin-bot",
+		Phase:     "running",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	require.NoError(t, s.CreateAgent(ctx, bot))
+	require.NoError(t, wcs.UpdateTopic(ctx, topicID, TopicUpdate{DefaultAgent: &bot.Slug}))
+	srv.SetDispatcher(&brokerMockDispatcher{})
+	sendRec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+		map[string]string{"content": "hello @alice-smith"})
+	require.Equal(t, http.StatusCreated, sendRec.Code, sendRec.Body.String())
+	var sendResp struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(sendRec.Body.Bytes(), &sendResp))
+	persisted, err := s.GetMessage(ctx, sendResp.ID)
+	require.NoError(t, err)
+	assert.True(t, persisted.ChatV2Origin, "persisted chat-v2 message must carry chat_v2_origin=true in the messages row")
+
 	// 1. Chat-v2 row with thread_id empty and chat_v2_origin marker set -> translates.
 	chatV2ID := uuid.NewString()
-	require.NoError(t, wcs.SetMessageChatV2Origin(ctx, chatV2ID))
 	row1 := &store.Message{
 		ID:             chatV2ID,
 		ProjectID:      proj.ID,
@@ -302,6 +327,7 @@ func TestP5c_HeldWebMentionsOriginMarker(t *testing.T) {
 		Channel:        "web",
 		ThreadID:       "",
 		ConversationID: topicConvID,
+		ChatV2Origin:   true,
 		Msg:            "Ping @alice-smith please",
 		Type:           messages.TypeInstruction,
 	}
@@ -347,4 +373,120 @@ func TestP5c_HeldWebMentionsOriginMarker(t *testing.T) {
 	require.True(t, shouldTranslateHeldWebMentions(row3))
 	require.NoError(t, srv.enrichHeldWebMentions(ctx, row3, sm3, newHeldWebMentionCache()))
 	assert.Equal(t, "Ping @alice.smith@test.com please", sm3.Msg, "pre-upgrade unmarked row must translate via fallback")
+}
+
+// TestP5c_F1StoredReadersWithoutThreadID verifies F1: scheduled-send reply-to,
+// action-inbox recipient fallback, and decisions_agent prompt conversation
+// checks all work when messages.thread_id is empty/NULL.
+func TestP5c_F1StoredReadersWithoutThreadID(t *testing.T) {
+	t.Run("scheduled send reply-to uses conversation_id", func(t *testing.T) {
+		srv, s, wcs, proj, db := setupSendTest(t)
+		ctx := context.Background()
+
+		topicID := uuid.NewString()
+		require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+			ID: topicID, ProjectID: proj.ID, Name: "sched-f1", CreatedBy: DevUserID, CreatedAt: time.Now().UTC(),
+		}))
+		setTopicConversationID(t, db, s, topicID, proj.ID)
+		topicConvID := topicConversationID(t, wcs, topicID)
+
+		otherTopicID := uuid.NewString()
+		require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+			ID: otherTopicID, ProjectID: proj.ID, Name: "sched-f1-other", CreatedBy: DevUserID, CreatedAt: time.Now().UTC(),
+		}))
+		setTopicConversationID(t, db, s, otherTopicID, proj.ID)
+		otherConvID := topicConversationID(t, wcs, otherTopicID)
+
+		sameConvMsgID := uuid.NewString()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID: sameConvMsgID, ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+			Recipient: "thread:" + topicID, Msg: "in same conv", Type: messages.TypeChat,
+			Channel: "web", ThreadID: "", ConversationID: topicConvID, CreatedAt: time.Now().UTC(),
+		}))
+		otherConvMsgID := uuid.NewString()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID: otherConvMsgID, ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+			Recipient: "thread:" + otherTopicID, Msg: "in other conv", Type: messages.TypeChat,
+			Channel: "web", ThreadID: "", ConversationID: otherConvID, CreatedAt: time.Now().UTC(),
+		}))
+
+		check := srv.checkScheduledFire(ctx, &ScheduledChatMessage{
+			SenderUserID: DevUserID, ConversationKey: topicID, ReplyToID: sameConvMsgID, FireAt: time.Now().UTC(),
+		})
+		assert.Empty(t, check.reason)
+		assert.False(t, check.transient)
+		assert.Equal(t, sameConvMsgID, check.replyToID, "same-conversation reply target without thread_id must be preserved")
+
+		checkOther := srv.checkScheduledFire(ctx, &ScheduledChatMessage{
+			SenderUserID: DevUserID, ConversationKey: topicID, ReplyToID: otherConvMsgID, FireAt: time.Now().UTC(),
+		})
+		assert.Empty(t, checkOther.replyToID, "cross-conversation reply target must be cleared")
+	})
+
+	t.Run("action inbox isRecipient derives chatKey from conversation_id", func(t *testing.T) {
+		srv, s, _, proj, _ := setupSendTest(t)
+		ctx := context.Background()
+
+		peer := mustCreateActiveUser(t, s, "f1-inbox-peer")
+		outsider := mustCreateActiveUser(t, s, "f1-inbox-outsider")
+		dmKey, err := messages.DMConversationKey("user", DevUserID, "user", peer)
+		require.NoError(t, err)
+		dmConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+			Kind: "direct", Surface: "native", ExternalRef: dmKey, DriftState: "active",
+		})
+		require.NoError(t, err)
+
+		promptID := uuid.NewString()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID: promptID, ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+			Recipient: "user:peer", RecipientID: "", Msg: "decision prompt", Type: messages.TypeChat,
+			Channel: "web", ThreadID: "", ConversationID: dmConv.ID, CreatedAt: time.Now().UTC(),
+		}))
+
+		peerUser, err := s.GetUser(ctx, peer)
+		require.NoError(t, err)
+		outsiderUser, err := s.GetUser(ctx, outsider)
+		require.NoError(t, err)
+
+		peerIdent := NewAuthenticatedUser(peerUser.ID, peerUser.Email, peerUser.DisplayName, peerUser.Role, string(ClientTypeWeb))
+		outsiderIdent := NewAuthenticatedUser(outsiderUser.ID, outsiderUser.Email, outsiderUser.DisplayName, outsiderUser.Role, string(ClientTypeWeb))
+
+		peerScope, err := srv.newActionInboxScope(ctx, peerIdent)
+		require.NoError(t, err)
+		outsiderScope, err := srv.newActionInboxScope(ctx, outsiderIdent)
+		require.NoError(t, err)
+
+		assert.True(t, peerScope.isRecipient(ctx, "", promptID, false),
+			"DM participant must be recognized via conversation_id when thread_id is empty")
+		assert.False(t, outsiderScope.isRecipient(ctx, "", promptID, false),
+			"non-participant must be refused via conversation_id when thread_id is empty")
+	})
+
+	t.Run("chatKeyForConversationID resolves native topic and DM without thread_id", func(t *testing.T) {
+		srv, s, wcs, proj, db := setupSendTest(t)
+		ctx := context.Background()
+
+		topicID := uuid.NewString()
+		require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+			ID: topicID, ProjectID: proj.ID, Name: "f1-topic", CreatedBy: DevUserID, CreatedAt: time.Now().UTC(),
+		}))
+		setTopicConversationID(t, db, s, topicID, proj.ID)
+		topicConvID := topicConversationID(t, wcs, topicID)
+
+		gotTopic, err := srv.chatKeyForConversationID(ctx, topicConvID)
+		require.NoError(t, err)
+		assert.Equal(t, topicID, gotTopic)
+
+		peer := mustCreateActiveUser(t, s, "f1-key-peer")
+		dmKey, err := messages.DMConversationKey("user", DevUserID, "user", peer)
+		require.NoError(t, err)
+		dmConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+			Kind: "direct", Surface: "native", ExternalRef: dmKey, DriftState: "active",
+		})
+		require.NoError(t, err)
+
+		gotDM, err := srv.chatKeyForConversationID(ctx, dmConv.ID)
+		require.NoError(t, err)
+		assert.Equal(t, dmKey, gotDM)
+	})
 }

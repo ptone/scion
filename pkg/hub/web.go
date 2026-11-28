@@ -2921,6 +2921,10 @@ func (v *sseMessageViewer) visible(evt Event) bool {
 }
 
 func (v *sseMessageViewer) dmAllows(msg sseUserMessage) bool {
+	// TODO(P5e): remove once messages.thread_id is no longer dual-written.
+	if strings.HasPrefix(msg.ThreadID, "dm:") && !sseDMRuleAllows(msg, v.userID) {
+		return false
+	}
 	if msg.ConversationID == "" {
 		return sseDMRuleAllows(msg, v.userID)
 	}

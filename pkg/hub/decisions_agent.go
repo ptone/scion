@@ -601,11 +601,11 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	var commonThreadID string
+	var commonConvID string
 	var firstPrompt *store.Message
 	for _, d := range resolved {
 		prompt := promptsByID[d.MessageID]
-		if prompt == nil || prompt.ThreadID == "" {
+		if prompt == nil || prompt.ConversationID == "" {
 			writeError(w, http.StatusBadRequest, ErrCodeSourceWrongConversation,
 				fmt.Sprintf("%s: prompt message has no conversation", d.Key),
 				map[string]interface{}{"key": d.Key})
@@ -613,14 +613,14 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 		}
 		if firstPrompt == nil {
 			firstPrompt = prompt
-			commonThreadID = prompt.ThreadID
-		} else if prompt.ThreadID != commonThreadID {
+			commonConvID = prompt.ConversationID
+		} else if prompt.ConversationID != commonConvID {
 			writeError(w, http.StatusBadRequest, ErrCodeSourceWrongConversation,
 				fmt.Sprintf("%s: decisions span different conversations", d.Key),
 				map[string]interface{}{"key": d.Key})
 			return
 		}
-		if sourceMsg.ThreadID == "" || sourceMsg.ThreadID != prompt.ThreadID {
+		if !sameConversation(sourceMsg, commonConvID) {
 			writeError(w, http.StatusBadRequest, ErrCodeSourceWrongConversation,
 				fmt.Sprintf("%s: source message is not in the decision's conversation", d.Key),
 				map[string]interface{}{"key": d.Key})
@@ -632,6 +632,17 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 				map[string]interface{}{"key": d.Key})
 			return
 		}
+	}
+	commonChatKey, err := s.chatKeyForConversationID(ctx, commonConvID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if commonChatKey == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeSourceWrongConversation,
+			fmt.Sprintf("%s: prompt message has no conversation", resolved[0].Key),
+			map[string]interface{}{"key": resolved[0].Key})
+		return
 	}
 
 	if !strings.HasPrefix(sourceMsg.Sender, "user:") || sourceMsg.SenderID == "" || strings.HasPrefix(sourceMsg.Sender, "agent:") {
@@ -650,18 +661,18 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 		}
 	}
 
-	// Step 4: source author permission — authorizeChatSend(author, threadKey)
+	// Step 4: source author permission — authorizeChatSend(author, chatKey)
 	// and, for a user-addressed DM row, author == addressed user.
 	authorIdent, ok := s.loadSourceAuthorIdentity(w, ctx, sourceMsg.SenderID)
 	if !ok {
 		return
 	}
-	if strings.HasPrefix(commonThreadID, "dm:") && !isDMParticipant(commonThreadID, authorIdent.ID()) {
+	if strings.HasPrefix(commonChatKey, "dm:") && !isDMParticipant(commonChatKey, authorIdent.ID()) {
 		writeError(w, http.StatusForbidden, ErrCodeSourceAuthorNotAllowed,
 			"source message author is not the addressed user of this decision", nil)
 		return
 	}
-	if _, serr := s.authorizeChatSend(ctx, authorIdent, commonThreadID); serr != nil {
+	if _, serr := s.authorizeChatSend(ctx, authorIdent, commonChatKey); serr != nil {
 		if serr.Status >= 500 {
 			serr.write(w)
 			return
@@ -701,7 +712,7 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 		Type:           messages.TypeDecisionResponse,
 		AgentID:        agentID,
 		Channel:        "web",
-		ThreadID:       commonThreadID,
+		ThreadID:       commonChatKey,
 		ConversationID: convID,
 		DispatchState:  store.MessageDispatchDispatched,
 		CreatedAt:      time.Now().UTC(),

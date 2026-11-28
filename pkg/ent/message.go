@@ -62,6 +62,8 @@ type Message struct {
 	NotReached *string `json:"not_reached,omitempty"`
 	// NotReachedAt holds the value of the "not_reached_at" field.
 	NotReachedAt *time.Time `json:"not_reached_at,omitempty"`
+	// ChatV2Origin holds the value of the "chat_v2_origin" field.
+	ChatV2Origin bool `json:"chat_v2_origin,omitempty"`
 	// Channel holds the value of the "channel" field.
 	Channel string `json:"channel,omitempty"`
 	// ThreadID holds the value of the "thread_id" field.
@@ -92,7 +94,7 @@ func (*Message) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case message.FieldConversationID, message.FieldSenderProjectID, message.FieldRecipientProjectID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case message.FieldUrgent, message.FieldBroadcasted, message.FieldRead:
+		case message.FieldUrgent, message.FieldBroadcasted, message.FieldRead, message.FieldChatV2Origin:
 			values[i] = new(sql.NullBool)
 		case message.FieldConversationSeq:
 			values[i] = new(sql.NullInt64)
@@ -263,6 +265,12 @@ func (_m *Message) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.NotReachedAt = new(time.Time)
 				*_m.NotReachedAt = value.Time
+			}
+		case message.FieldChatV2Origin:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field chat_v2_origin", values[i])
+			} else if value.Valid {
+				_m.ChatV2Origin = value.Bool
 			}
 		case message.FieldChannel:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -450,6 +458,9 @@ func (_m *Message) String() string {
 		builder.WriteString("not_reached_at=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("chat_v2_origin=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ChatV2Origin))
 	builder.WriteString(", ")
 	builder.WriteString("channel=")
 	builder.WriteString(_m.Channel)

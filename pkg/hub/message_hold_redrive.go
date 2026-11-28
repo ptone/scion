@@ -1102,20 +1102,7 @@ func (s *Server) enrichHeldWebMentions(
 	sm *messages.StructuredMessage,
 	cache *heldWebMentionCache,
 ) error {
-	s.mu.RLock()
-	wcs := s.webChatStore
-	s.mu.RUnlock()
-
-	var markedChatV2 bool
-	if wcs != nil {
-		ext, err := wcs.GetMessageExt(ctx, row.ID)
-		if err != nil {
-			return fmt.Errorf("held mention origin lookup: %w", err)
-		}
-		markedChatV2 = ext != nil && ext.ChatV2Origin
-	}
-
-	if markedChatV2 {
+	if row.ChatV2Origin {
 		if row.ConversationID == "" {
 			return nil
 		}

@@ -126,6 +126,7 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		NotReached:            derefString(e.NotReached),
 		NotReachedAt:          timePtrUTC(e.NotReachedAt),
 		ScheduledEventID:      derefString(e.ScheduledEventID),
+		ChatV2Origin:          e.ChatV2Origin,
 	}
 }
 
@@ -230,7 +231,8 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 			SetBroadcasted(msg.Broadcasted).
 			SetRead(msg.Read).
 			SetAgentID(msg.AgentID).
-			SetGroupID(msg.GroupID)
+			SetGroupID(msg.GroupID).
+			SetChatV2Origin(msg.ChatV2Origin)
 
 		if msg.Channel != "" {
 			create.SetChannel(msg.Channel)

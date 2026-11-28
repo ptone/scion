@@ -1100,7 +1100,7 @@ func TestDecisionSetAnswer_InterpretedOther_ConfirmOverrideAndAgentLine(t *testi
 	require.Len(t, promptRes.Decisions, 2)
 	r0, r1 := promptRes.Decisions[0].RowID, promptRes.Decisions[1].RowID
 
-	reply := f.storeUserReply(t, f.bob, f.topicID, "", "slack", "europe-west4, after 6 PM")
+	reply := f.storeUserReply(t, f.bob, f.topicID, promptMsg.ConversationID, "slack", "europe-west4, after 6 PM")
 	recRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
 		SourceMessageID: reply.ID,
 		Answers: []InterpretedAnswerInput{
@@ -1141,7 +1141,7 @@ func TestDecisionSetAnswer_InterpretedOther_ConfirmOverrideAndAgentLine(t *testi
 		{"id":"reg-conf2","question":"Region?","choices":["us-central1"],"allow_other":{"label":"Another region"}},
 		{"id":"win-conf2","question":"Window?","choices":["now"],"allow_other":true}
 	]`, false)
-	reply2 := f.storeUserReply(t, f.bob, f.topicID, "", "slack", "same answers")
+	reply2 := f.storeUserReply(t, f.bob, f.topicID, promptMsg2.ConversationID, "slack", "same answers")
 	recRR2 := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
 		SourceMessageID: reply2.ID,
 		Answers: []InterpretedAnswerInput{

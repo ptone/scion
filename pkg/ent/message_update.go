@@ -415,6 +415,20 @@ func (_u *MessageUpdate) ClearNotReachedAt() *MessageUpdate {
 	return _u
 }
 
+// SetChatV2Origin sets the "chat_v2_origin" field.
+func (_u *MessageUpdate) SetChatV2Origin(v bool) *MessageUpdate {
+	_u.mutation.SetChatV2Origin(v)
+	return _u
+}
+
+// SetNillableChatV2Origin sets the "chat_v2_origin" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableChatV2Origin(v *bool) *MessageUpdate {
+	if v != nil {
+		_u.SetChatV2Origin(*v)
+	}
+	return _u
+}
+
 // SetChannel sets the "channel" field.
 func (_u *MessageUpdate) SetChannel(v string) *MessageUpdate {
 	_u.mutation.SetChannel(v)
@@ -695,6 +709,9 @@ func (_u *MessageUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.NotReachedAtCleared() {
 		_spec.ClearField(message.FieldNotReachedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.ChatV2Origin(); ok {
+		_spec.SetField(message.FieldChatV2Origin, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Channel(); ok {
 		_spec.SetField(message.FieldChannel, field.TypeString, value)
@@ -1144,6 +1161,20 @@ func (_u *MessageUpdateOne) ClearNotReachedAt() *MessageUpdateOne {
 	return _u
 }
 
+// SetChatV2Origin sets the "chat_v2_origin" field.
+func (_u *MessageUpdateOne) SetChatV2Origin(v bool) *MessageUpdateOne {
+	_u.mutation.SetChatV2Origin(v)
+	return _u
+}
+
+// SetNillableChatV2Origin sets the "chat_v2_origin" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableChatV2Origin(v *bool) *MessageUpdateOne {
+	if v != nil {
+		_u.SetChatV2Origin(*v)
+	}
+	return _u
+}
+
 // SetChannel sets the "channel" field.
 func (_u *MessageUpdateOne) SetChannel(v string) *MessageUpdateOne {
 	_u.mutation.SetChannel(v)
@@ -1454,6 +1485,9 @@ func (_u *MessageUpdateOne) sqlSave(ctx context.Context) (_node *Message, err er
 	}
 	if _u.mutation.NotReachedAtCleared() {
 		_spec.ClearField(message.FieldNotReachedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.ChatV2Origin(); ok {
+		_spec.SetField(message.FieldChatV2Origin, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Channel(); ok {
 		_spec.SetField(message.FieldChannel, field.TypeString, value)

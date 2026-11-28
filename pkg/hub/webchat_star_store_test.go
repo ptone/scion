@@ -85,6 +85,8 @@ type starStoreEnv struct {
 	setTopicConversation func(t *testing.T, topicID, conversationID string)
 	// deleteConversation soft-deletes a conversation row.
 	deleteConversation func(t *testing.T, id string)
+	// nullThreadID sets messages.thread_id = NULL for the given message id.
+	nullThreadID func(t *testing.T, id string)
 }
 
 func convSel(key, convID string) StarSelector {
@@ -388,6 +390,10 @@ func TestMessageStarStore_SQLite(t *testing.T) {
 		deleteConversation: func(t *testing.T, id string) {
 			require.NoError(t, s.DeleteConversation(context.Background(), id))
 		},
+		nullThreadID: func(t *testing.T, id string) {
+			_, err := db.Exec(`UPDATE messages SET thread_id = NULL WHERE id = ?`, id)
+			require.NoError(t, err)
+		},
 	}
 	require.NotNil(t, env.stars)
 	testMessageStarStoreContract(t, env)
@@ -533,6 +539,10 @@ VALUES ($1, 'direct', 'native', $2, 'active', NOW(), NOW())`, id, ref)
 		},
 		deleteConversation: func(t *testing.T, id string) {
 			_, err := db.Exec(`UPDATE conversations SET deleted_at = NOW() WHERE id = $1`, id)
+			require.NoError(t, err)
+		},
+		nullThreadID: func(t *testing.T, id string) {
+			_, err := db.Exec(`UPDATE messages SET thread_id = NULL WHERE id = $1`, id)
 			require.NoError(t, err)
 		},
 	}

@@ -3937,6 +3937,10 @@ type Message struct {
 	NotReached       string     `json:"-"`
 	NotReachedAt     *time.Time `json:"-"`
 	ScheduledEventID string     `json:"-"`
+	// ChatV2Origin records that the row was created by the chat-v2 send path
+	// (sendAgentRouted) so held-message redrive can translate @mentions without
+	// consulting ThreadID (ptone/scion#9633). Internal store field only.
+	ChatV2Origin bool `json:"-"`
 
 	// ConversationSeq is the commit-ordered per-conversation sequence number
 	// allocated in CreateMessage (ptone/scion#8136). Internal store field only;

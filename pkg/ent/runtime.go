@@ -2605,20 +2605,24 @@ func init() {
 	messageDescNotReached := messageFields[21].Descriptor()
 	// message.NotReachedValidator is a validator for the "not_reached" field. It is called by the builders before save.
 	message.NotReachedValidator = messageDescNotReached.Validators[0].(func(string) error)
+	// messageDescChatV2Origin is the schema descriptor for chat_v2_origin field.
+	messageDescChatV2Origin := messageFields[23].Descriptor()
+	// message.DefaultChatV2Origin holds the default value on creation for the chat_v2_origin field.
+	message.DefaultChatV2Origin = messageDescChatV2Origin.Default.(bool)
 	// messageDescChannel is the schema descriptor for channel field.
-	messageDescChannel := messageFields[23].Descriptor()
+	messageDescChannel := messageFields[24].Descriptor()
 	// message.ChannelValidator is a validator for the "channel" field. It is called by the builders before save.
 	message.ChannelValidator = messageDescChannel.Validators[0].(func(string) error)
 	// messageDescThreadID is the schema descriptor for thread_id field.
-	messageDescThreadID := messageFields[24].Descriptor()
+	messageDescThreadID := messageFields[25].Descriptor()
 	// message.ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
 	message.ThreadIDValidator = messageDescThreadID.Validators[0].(func(string) error)
 	// messageDescScheduledEventID is the schema descriptor for scheduled_event_id field.
-	messageDescScheduledEventID := messageFields[31].Descriptor()
+	messageDescScheduledEventID := messageFields[32].Descriptor()
 	// message.ScheduledEventIDValidator is a validator for the "scheduled_event_id" field. It is called by the builders before save.
 	message.ScheduledEventIDValidator = messageDescScheduledEventID.Validators[0].(func(string) error)
 	// messageDescCreated is the schema descriptor for created field.
-	messageDescCreated := messageFields[32].Descriptor()
+	messageDescCreated := messageFields[33].Descriptor()
 	// message.DefaultCreated holds the default value on creation for the created field.
 	message.DefaultCreated = messageDescCreated.Default.(func() time.Time)
 	// messageDescID is the schema descriptor for id field.

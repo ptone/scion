@@ -1120,7 +1120,14 @@ func (s *Server) checkScheduledFire(ctx context.Context, m *ScheduledChatMessage
 		if err != nil {
 			return scheduledFireCheck{transient: true}
 		}
-		if ref := refs[replyToID]; ref == nil || ref.ThreadID != m.ConversationKey {
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		convID, err := s.conversationIDForKey(ctx, wcs, m.ConversationKey)
+		if err != nil {
+			return scheduledFireCheck{transient: true}
+		}
+		if ref := refs[replyToID]; ref == nil || !sameConversation(ref, convID) {
 			replyToID = ""
 		}
 	}

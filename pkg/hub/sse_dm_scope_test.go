@@ -301,3 +301,24 @@ func TestPublishUserMessage_DMSubjectsScoped(t *testing.T) {
 		})
 	}
 }
+
+// TestSSEViewer_DMThreadIDWithGroupConversationDenied checks O1: while
+// thread_id is dual-written, a UserMessageEvent with a dm: threadId naming
+// user A and a group conversationId must NOT be delivered to attach-holder B.
+func TestSSEViewer_DMThreadIDWithGroupConversationDenied(t *testing.T) {
+	const userA, userB, agentID, groupConvID = "user-a", "user-b", "agent-1", "conv-group-1"
+	viewerB := &sseMessageViewer{
+		userID: userB,
+		decideDM: func(convID string) (bool, bool) {
+			// Group conversation allows non-participants through the conversation check.
+			return convID == groupConvID, true
+		},
+		decideAttach: func(aid string) (bool, bool) {
+			// User B holds attach on the agent.
+			return aid == agentID, true
+		},
+	}
+	payload := `{"id":"m1","agentId":"` + agentID + `","threadId":"dm:agent:` + agentID + `:user:` + userA + `","conversationId":"` + groupConvID + `","senderId":"` + agentID + `","recipientId":"` + userA + `"}`
+	evt := Event{Subject: "agent." + agentID + ".message", Data: []byte(payload)}
+	assert.False(t, viewerB.visible(evt), "dm: threadId naming user A must block delivery to attach-holder B even with a group conversationId")
+}

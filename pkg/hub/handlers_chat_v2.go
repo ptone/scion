@@ -2120,17 +2120,10 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		storeMsg.CreatedAt = now
 		msg.Timestamp = now.UTC().Format(time.RFC3339)
 	}
+	storeMsg.ChatV2Origin = true
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)
 		return nil, prePersistErr(newChatSendError(http.StatusInternalServerError, "INTERNAL", "failed to persist message", nil))
-	}
-	s.mu.RLock()
-	originWcs := s.webChatStore
-	s.mu.RUnlock()
-	if originWcs != nil {
-		if err := originWcs.SetMessageChatV2Origin(ctx, storeMsg.ID); err != nil {
-			s.messageLog.Error("Failed to mark chat_v2_origin on message", "messageId", storeMsg.ID, "error", err)
-		}
 	}
 	if opts.OnPersisted != nil {
 		opts.OnPersisted(storeMsg.ID)
@@ -2570,15 +2563,11 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				mentionMsg.AttachmentDeliveries = deliveries
 			}
 			mentionPersisted := true
+			mentionStoreMsg.ChatV2Origin = true
 			if err := s.store.CreateMessage(ctx, mentionStoreMsg); err != nil {
 				s.messageLog.Error("Failed to persist mention message", "slug", mentionAgent.Slug, "error", err)
 				mentionPersisted = false
 			} else {
-				if affinityWcs != nil {
-					if err := affinityWcs.SetMessageChatV2Origin(ctx, mentionStoreMsg.ID); err != nil {
-						s.messageLog.Error("Failed to mark chat_v2_origin on mention message", "messageId", mentionStoreMsg.ID, "error", err)
-					}
-				}
 				if affinityWcs != nil && user.ID() != "" && mentionAgent.ProjectID != "" && mentionAgent.ID != "" {
 					if err := affinityWcs.RecordChannel(ctx, user.ID(), mentionAgent.ProjectID, mentionAgent.ID, "web", now); err != nil {
 						s.messageLog.Error("Failed to record web channel affinity for mentioned agent",

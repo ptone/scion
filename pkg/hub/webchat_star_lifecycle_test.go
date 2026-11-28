@@ -343,6 +343,53 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 		assert.Equal(t, StarCleanupPosition{}, res.Next, "fewer rows than the limit: the scan wrapped")
 	})
 
+	t.Run("upkeep repairs, purges, and lists with messages.thread_id nulled", func(t *testing.T) {
+		u := uuid.NewString()
+		env.addUser(t, u)
+		liveTopic, deletedTopic := uuid.NewString(), uuid.NewString()
+		liveConv, deletedConv := uuid.NewString(), uuid.NewString()
+		env.addTopic(t, liveTopic)
+		env.addTopic(t, deletedTopic)
+		env.setTopicConversation(t, liveTopic, liveConv)
+		env.setTopicConversation(t, deletedTopic, deletedConv)
+
+		mLive, mDeleted := uuid.NewString(), uuid.NewString()
+		env.addMsg(t, mLive, "web", liveTopic, liveConv, base)
+		env.addMsg(t, mDeleted, "web", deletedTopic, deletedConv, base)
+		// Explicitly NULL messages.thread_id in SQL in both SQLite and Postgres.
+		env.nullThreadID(t, mLive)
+		env.nullThreadID(t, mDeleted)
+		env.deleteTopic(t, deletedTopic)
+
+		at := time.Now().UTC().Add(-time.Minute).Truncate(starTimePrecision)
+		// Stale conversation_key and empty project_id on live star -> repaired via conversation_id.
+		env.insertStar(t, u, mLive, "dm:agent:"+uuid.NewString()+":user:"+u, "", at)
+		// Star on deleted topic -> purged via conversation_id.
+		env.insertStar(t, u, mDeleted, deletedTopic, env.projectID, at)
+
+		res, err := st.PurgeMessageStarCandidates(ctx, StarCleanupPosition{}, 10000)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, res.Repaired, int64(1), "live star must be repaired with thread_id=NULL")
+		assert.GreaterOrEqual(t, res.Purged, int64(1), "deleted-topic star must be purged with thread_id=NULL")
+
+		repaired := get(u, mLive)
+		require.NotNil(t, repaired)
+		assert.Equal(t, liveTopic, repaired.ConversationKey)
+		assert.Equal(t, env.projectID, repaired.ProjectID)
+		assert.Nil(t, get(u, mDeleted))
+
+		refs, err := st.ListStarredMessageIDs(ctx, u, []string{mLive, mDeleted})
+		require.NoError(t, err)
+		require.Len(t, refs, 1)
+		assert.Equal(t, mLive, refs[0].MessageID)
+		assert.Equal(t, liveConv, refs[0].ConversationID)
+
+		page, err := st.ListMessageStarCandidates(ctx, StarFilter{UserID: u, Selector: convSel(liveTopic, liveConv), Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, page.Items, 1)
+		assert.Equal(t, mLive, page.Items[0].MessageID)
+	})
+
 	t.Run("reconciliation sweeps until nothing is left, between another replica's batches", func(t *testing.T) {
 		owner := uuid.NewString()
 		env.addUser(t, owner)

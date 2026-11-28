@@ -158,6 +158,36 @@ func (s *Server) messageInChatConversation(ctx context.Context, wcs WebChatStore
 	return sameConversation(msg, convID), nil
 }
 
+// chatKeyForConversationID derives the native chat conversation key (dm:...
+// for direct conversations, topic ID for native project topic groups) from a
+// stored conversation ID. Returns ("", nil) when the conversation is missing,
+// non-native, or has no native chat key.
+func (s *Server) chatKeyForConversationID(ctx context.Context, convID string) (string, error) {
+	if convID == "" || s.store == nil {
+		return "", nil
+	}
+	conv, err := s.store.GetConversation(ctx, convID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	if conv == nil || (conv.Surface != "" && conv.Surface != "native") {
+		return "", nil
+	}
+	if conv.Kind == "direct" {
+		if strings.HasPrefix(conv.ExternalRef, "dm:") {
+			return conv.ExternalRef, nil
+		}
+		return "", nil
+	}
+	if _, topicID, err := messaging.ParseThreadConversationExternalRef(conv.ExternalRef); err == nil && topicID != "" {
+		return topicID, nil
+	}
+	return "", nil
+}
+
 // attachmentLinkScanLimit bounds how many linked messages the download check
 // looks at for a file uploaded in a direct message.
 const attachmentLinkScanLimit = 20

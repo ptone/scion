@@ -58,6 +58,8 @@ const (
 	FieldNotReached = "not_reached"
 	// FieldNotReachedAt holds the string denoting the not_reached_at field in the database.
 	FieldNotReachedAt = "not_reached_at"
+	// FieldChatV2Origin holds the string denoting the chat_v2_origin field in the database.
+	FieldChatV2Origin = "chat_v2_origin"
 	// FieldChannel holds the string denoting the channel field in the database.
 	FieldChannel = "channel"
 	// FieldThreadID holds the string denoting the thread_id field in the database.
@@ -107,6 +109,7 @@ var Columns = []string{
 	FieldHoldLaunchID,
 	FieldNotReached,
 	FieldNotReachedAt,
+	FieldChatV2Origin,
 	FieldChannel,
 	FieldThreadID,
 	FieldConversationID,
@@ -152,6 +155,8 @@ var (
 	HoldLaunchIDValidator func(string) error
 	// NotReachedValidator is a validator for the "not_reached" field. It is called by the builders before save.
 	NotReachedValidator func(string) error
+	// DefaultChatV2Origin holds the default value on creation for the "chat_v2_origin" field.
+	DefaultChatV2Origin bool
 	// ChannelValidator is a validator for the "channel" field. It is called by the builders before save.
 	ChannelValidator func(string) error
 	// ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
@@ -280,6 +285,11 @@ func ByNotReached(opts ...sql.OrderTermOption) OrderOption {
 // ByNotReachedAt orders the results by the not_reached_at field.
 func ByNotReachedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldNotReachedAt, opts...).ToFunc()
+}
+
+// ByChatV2Origin orders the results by the chat_v2_origin field.
+func ByChatV2Origin(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldChatV2Origin, opts...).ToFunc()
 }
 
 // ByChannel orders the results by the channel field.
