@@ -380,11 +380,15 @@ func TestNoRecipient_MemberLookupErrorKeepsDispatched(t *testing.T) {
 // fields, as a quote-reply target.
 func seedRefMessage(t *testing.T, s store.Store, projectID, threadID, sender, senderID string) string {
 	t.Helper()
+	var convID string
+	if conv, err := s.GetConversationByExternalRef(t.Context(), "native", "thread:"+projectID+":"+threadID); err == nil && conv != nil {
+		convID = conv.ID
+	}
 	id := api.NewUUID()
 	if err := s.CreateMessage(t.Context(), &store.Message{
 		ID: id, ProjectID: projectID, Sender: sender, SenderID: senderID,
 		Recipient: "thread:" + threadID, Msg: "quoted", Type: "chat",
-		ThreadID: threadID, CreatedAt: time.Now().UTC(),
+		ThreadID: threadID, ConversationID: convID, CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seedRefMessage: %v", err)
 	}

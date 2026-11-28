@@ -366,8 +366,16 @@ func (sc *actionInboxScope) isRecipient(ctx context.Context, chatKey, messageID 
 	var promptMsg *store.Message
 	if chatKey == "" {
 		promptMsg = sc.getPromptMessage(ctx, messageID)
-		if promptMsg != nil && promptMsg.ThreadID != "" {
-			chatKey = promptMsg.ThreadID
+		if promptMsg != nil && promptMsg.ConversationID != "" {
+			derived, err := sc.srv.chatKeyForConversationID(ctx, promptMsg.ConversationID)
+			if err != nil {
+				// Fail closed on lookup error and do not memoise the transient
+				// failure, rather than falling through to the no-key branch.
+				return false
+			}
+			if derived != "" {
+				chatKey = derived
+			}
 		}
 	}
 	allowed := sc.srv.isMessageActionRecipient(ctx, sc.user, chatKey, promptMsg, answering)

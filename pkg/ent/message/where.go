@@ -165,6 +165,11 @@ func NotReachedAt(v time.Time) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldNotReachedAt, v))
 }
 
+// ChatV2Origin applies equality check predicate on the "chat_v2_origin" field. It's identical to ChatV2OriginEQ.
+func ChatV2Origin(v bool) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldChatV2Origin, v))
+}
+
 // Channel applies equality check predicate on the "channel" field. It's identical to ChannelEQ.
 func Channel(v string) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldChannel, v))
@@ -1483,6 +1488,16 @@ func NotReachedAtIsNil() predicate.Message {
 // NotReachedAtNotNil applies the NotNil predicate on the "not_reached_at" field.
 func NotReachedAtNotNil() predicate.Message {
 	return predicate.Message(sql.FieldNotNull(FieldNotReachedAt))
+}
+
+// ChatV2OriginEQ applies the EQ predicate on the "chat_v2_origin" field.
+func ChatV2OriginEQ(v bool) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldChatV2Origin, v))
+}
+
+// ChatV2OriginNEQ applies the NEQ predicate on the "chat_v2_origin" field.
+func ChatV2OriginNEQ(v bool) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldChatV2Origin, v))
 }
 
 // ChannelEQ applies the EQ predicate on the "channel" field.

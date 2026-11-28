@@ -83,9 +83,16 @@ func appendUnmentionedNote(content, mention, poster string) (string, bool) {
 // recent message not from the sender was posted by an agent. Mention
 // fan-out copies are ignored.
 func (s *Server) recentThreadPosters(ctx context.Context, key, senderUserID string) (agentSlug string, humans []string, agentLast bool, err error) {
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	convID, err := s.conversationIDForKey(ctx, wcs, key)
+	if err != nil || convID == "" {
+		return "", nil, false, err
+	}
 	res, err := s.store.ListMessages(ctx, store.MessageFilter{
-		ThreadID:    key,
-		ExcludeType: messages.TypeMention,
+		ConversationID: convID,
+		ExcludeType:    messages.TypeMention,
 	}, store.ListOptions{Limit: unmentionedNoteScanLimit, SkipTotalCount: true})
 	if err != nil {
 		return "", nil, false, err

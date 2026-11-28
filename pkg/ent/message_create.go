@@ -300,6 +300,20 @@ func (_c *MessageCreate) SetNillableNotReachedAt(v *time.Time) *MessageCreate {
 	return _c
 }
 
+// SetChatV2Origin sets the "chat_v2_origin" field.
+func (_c *MessageCreate) SetChatV2Origin(v bool) *MessageCreate {
+	_c.mutation.SetChatV2Origin(v)
+	return _c
+}
+
+// SetNillableChatV2Origin sets the "chat_v2_origin" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableChatV2Origin(v *bool) *MessageCreate {
+	if v != nil {
+		_c.SetChatV2Origin(*v)
+	}
+	return _c
+}
+
 // SetChannel sets the "channel" field.
 func (_c *MessageCreate) SetChannel(v string) *MessageCreate {
 	_c.mutation.SetChannel(v)
@@ -509,6 +523,10 @@ func (_c *MessageCreate) defaults() {
 		v := message.DefaultDispatchState
 		_c.mutation.SetDispatchState(v)
 	}
+	if _, ok := _c.mutation.ChatV2Origin(); !ok {
+		v := message.DefaultChatV2Origin
+		_c.mutation.SetChatV2Origin(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := message.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -577,6 +595,9 @@ func (_c *MessageCreate) check() error {
 		if err := message.NotReachedValidator(v); err != nil {
 			return &ValidationError{Name: "not_reached", err: fmt.Errorf(`ent: validator failed for field "Message.not_reached": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.ChatV2Origin(); !ok {
+		return &ValidationError{Name: "chat_v2_origin", err: errors.New(`ent: missing required field "Message.chat_v2_origin"`)}
 	}
 	if v, ok := _c.mutation.Channel(); ok {
 		if err := message.ChannelValidator(v); err != nil {
@@ -719,6 +740,10 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.NotReachedAt(); ok {
 		_spec.SetField(message.FieldNotReachedAt, field.TypeTime, value)
 		_node.NotReachedAt = &value
+	}
+	if value, ok := _c.mutation.ChatV2Origin(); ok {
+		_spec.SetField(message.FieldChatV2Origin, field.TypeBool, value)
+		_node.ChatV2Origin = value
 	}
 	if value, ok := _c.mutation.Channel(); ok {
 		_spec.SetField(message.FieldChannel, field.TypeString, value)
@@ -1151,6 +1176,18 @@ func (u *MessageUpsert) UpdateNotReachedAt() *MessageUpsert {
 // ClearNotReachedAt clears the value of the "not_reached_at" field.
 func (u *MessageUpsert) ClearNotReachedAt() *MessageUpsert {
 	u.SetNull(message.FieldNotReachedAt)
+	return u
+}
+
+// SetChatV2Origin sets the "chat_v2_origin" field.
+func (u *MessageUpsert) SetChatV2Origin(v bool) *MessageUpsert {
+	u.Set(message.FieldChatV2Origin, v)
+	return u
+}
+
+// UpdateChatV2Origin sets the "chat_v2_origin" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateChatV2Origin() *MessageUpsert {
+	u.SetExcluded(message.FieldChatV2Origin)
 	return u
 }
 
@@ -1694,6 +1731,20 @@ func (u *MessageUpsertOne) UpdateNotReachedAt() *MessageUpsertOne {
 func (u *MessageUpsertOne) ClearNotReachedAt() *MessageUpsertOne {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearNotReachedAt()
+	})
+}
+
+// SetChatV2Origin sets the "chat_v2_origin" field.
+func (u *MessageUpsertOne) SetChatV2Origin(v bool) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetChatV2Origin(v)
+	})
+}
+
+// UpdateChatV2Origin sets the "chat_v2_origin" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateChatV2Origin() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateChatV2Origin()
 	})
 }
 
@@ -2417,6 +2468,20 @@ func (u *MessageUpsertBulk) UpdateNotReachedAt() *MessageUpsertBulk {
 func (u *MessageUpsertBulk) ClearNotReachedAt() *MessageUpsertBulk {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearNotReachedAt()
+	})
+}
+
+// SetChatV2Origin sets the "chat_v2_origin" field.
+func (u *MessageUpsertBulk) SetChatV2Origin(v bool) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetChatV2Origin(v)
+	})
+}
+
+// UpdateChatV2Origin sets the "chat_v2_origin" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateChatV2Origin() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateChatV2Origin()
 	})
 }
 

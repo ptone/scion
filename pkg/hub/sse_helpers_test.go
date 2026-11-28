@@ -35,9 +35,28 @@ import (
 
 type sseAgentStore struct {
 	*mockAuthzStore
-	agents    map[string]*store.Agent
-	lookupErr error
-	authzErr  error
+	agents        map[string]*store.Agent
+	conversations map[string]*store.Conversation
+	participants  map[string][]store.ConversationParticipant
+	lookupErr     error
+	authzErr      error
+}
+
+func (s *sseAgentStore) GetConversation(_ context.Context, id string) (*store.Conversation, error) {
+	if s.conversations == nil {
+		return nil, store.ErrNotFound
+	}
+	if c, ok := s.conversations[id]; ok {
+		return c, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (s *sseAgentStore) ListParticipants(_ context.Context, conversationID string) ([]store.ConversationParticipant, error) {
+	if s.participants == nil {
+		return nil, nil
+	}
+	return s.participants[conversationID], nil
 }
 
 // sseStatusWriter is an httptest.ResponseRecorder that reports, once, when

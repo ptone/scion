@@ -2149,18 +2149,27 @@ func noRecipientSetupProject(t *testing.T) (*Server, store.Store, string, *store
 // so a later reply can reference it via reply_to_id. Returns the message ID.
 func seedAgentMessage(t *testing.T, s store.Store, proj *store.Project, topicID string, agent *store.Agent, content string) string {
 	t.Helper()
+	var convID string
+	extRef := fmt.Sprintf("thread:%s:%s", proj.ID, topicID)
+	if strings.HasPrefix(topicID, "dm:") {
+		extRef = topicID
+	}
+	if conv, err := s.GetConversationByExternalRef(t.Context(), "native", extRef); err == nil && conv != nil {
+		convID = conv.ID
+	}
 	id := api.NewUUID()
 	if err := s.CreateMessage(t.Context(), &store.Message{
-		ID:        id,
-		ProjectID: proj.ID,
-		Sender:    "agent:" + agent.Slug,
-		SenderID:  agent.ID,
-		Recipient: "thread:" + topicID,
-		Msg:       content,
-		Type:      "chat",
-		AgentID:   agent.ID,
-		ThreadID:  topicID,
-		CreatedAt: time.Now().UTC(),
+		ID:             id,
+		ProjectID:      proj.ID,
+		Sender:         "agent:" + agent.Slug,
+		SenderID:       agent.ID,
+		Recipient:      "thread:" + topicID,
+		Msg:            content,
+		Type:           "chat",
+		AgentID:        agent.ID,
+		ThreadID:       topicID,
+		ConversationID: convID,
+		CreatedAt:      time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seedAgentMessage: %v", err)
 	}
@@ -2171,17 +2180,26 @@ func seedAgentMessage(t *testing.T, s store.Store, proj *store.Project, topicID 
 // topicID, for the "reply to a human message" case.
 func seedHumanMessage(t *testing.T, s store.Store, proj *store.Project, topicID, senderID, content string) string {
 	t.Helper()
+	var convID string
+	extRef := fmt.Sprintf("thread:%s:%s", proj.ID, topicID)
+	if strings.HasPrefix(topicID, "dm:") {
+		extRef = topicID
+	}
+	if conv, err := s.GetConversationByExternalRef(t.Context(), "native", extRef); err == nil && conv != nil {
+		convID = conv.ID
+	}
 	id := api.NewUUID()
 	if err := s.CreateMessage(t.Context(), &store.Message{
-		ID:        id,
-		ProjectID: proj.ID,
-		Sender:    "user:" + senderID,
-		SenderID:  senderID,
-		Recipient: "thread:" + topicID,
-		Msg:       content,
-		Type:      "chat",
-		ThreadID:  topicID,
-		CreatedAt: time.Now().UTC(),
+		ID:             id,
+		ProjectID:      proj.ID,
+		Sender:         "user:" + senderID,
+		SenderID:       senderID,
+		Recipient:      "thread:" + topicID,
+		Msg:            content,
+		Type:           "chat",
+		ThreadID:       topicID,
+		ConversationID: convID,
+		CreatedAt:      time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("seedHumanMessage: %v", err)
 	}
@@ -2336,6 +2354,27 @@ func newTestWebChatStoreWithMessages(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
 	db := openTestMemorySQLite(t, "sqlite")
 
+	// Create the Ent conversations table so SearchChatMessages can join it.
+	if _, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    kind TEXT NOT NULL DEFAULT 'group',
+    surface TEXT NOT NULL DEFAULT 'native',
+    external_ref TEXT NOT NULL DEFAULT '',
+    parent_ref TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    default_agent_id TEXT,
+    drift_state TEXT NOT NULL DEFAULT 'active',
+    last_activity_at DATETIME,
+    last_message_seq INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME,
+    deleted_at DATETIME
+);
+`); err != nil {
+		t.Fatalf("create conversations table: %v", err)
+	}
+
 	store := NewWebChatStore(db, "sqlite")
 	if err := store.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -2355,6 +2394,7 @@ CREATE TABLE IF NOT EXISTS messages (
     type TEXT NOT NULL DEFAULT 'instruction',
     channel TEXT,
     thread_id TEXT,
+    conversation_id TEXT,
     created DATETIME NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages (created);
@@ -2366,11 +2406,46 @@ CREATE INDEX IF NOT EXISTS idx_messages_created ON messages (created);
 	return store, db
 }
 
+// seedSearchConversation ensures a conversation (and webchat_topic for non-DM
+// keys) exists for threadID and returns its deterministic conversation UUID.
+func seedSearchConversation(t *testing.T, db *sql.DB, projectID, threadID string) string {
+	t.Helper()
+	if threadID == "" {
+		return ""
+	}
+	convID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("search-test:"+threadID)).String()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if strings.HasPrefix(threadID, "dm:") {
+		_, err := db.Exec(`INSERT INTO conversations (id, project_id, kind, surface, external_ref, created_at)
+			VALUES (?, ?, 'direct', 'native', ?, ?) ON CONFLICT (id) DO NOTHING`,
+			convID, projectID, threadID, now)
+		if err != nil {
+			t.Fatalf("seed search dm conversation: %v", err)
+		}
+		return convID
+	}
+	extRef := "thread:" + projectID + ":" + threadID
+	_, err := db.Exec(`INSERT INTO conversations (id, project_id, kind, surface, external_ref, created_at)
+		VALUES (?, ?, 'group', 'native', ?, ?) ON CONFLICT (id) DO NOTHING`,
+		convID, projectID, extRef, now)
+	if err != nil {
+		t.Fatalf("seed search group conversation: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO webchat_topic (id, project_id, name, created_by, created_at, conversation_id)
+		VALUES (?, ?, ?, 'test', ?, ?) ON CONFLICT (id) DO UPDATE SET conversation_id = COALESCE(webchat_topic.conversation_id, excluded.conversation_id)`,
+		threadID, projectID, "topic-"+threadID, now, convID)
+	if err != nil {
+		t.Fatalf("seed search topic: %v", err)
+	}
+	return convID
+}
+
 // insertTestMessage is a helper to insert a message row for search testing.
 func insertTestMessage(t *testing.T, db *sql.DB, id, projectID, threadID, sender, msg string, created time.Time) {
 	t.Helper()
-	const query = `INSERT INTO messages (id, project_id, thread_id, sender, msg, channel, created) VALUES (?, ?, ?, ?, ?, 'web', ?)`
-	_, err := db.Exec(query, id, projectID, threadID, sender, msg, created.UTC())
+	convID := seedSearchConversation(t, db, projectID, threadID)
+	const query = `INSERT INTO messages (id, project_id, thread_id, conversation_id, sender, msg, channel, created) VALUES (?, ?, ?, ?, ?, ?, 'web', ?)`
+	_, err := db.Exec(query, id, projectID, threadID, nullableString(convID), sender, msg, created.UTC())
 	if err != nil {
 		t.Fatalf("insert test message: %v", err)
 	}

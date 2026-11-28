@@ -21,6 +21,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -448,15 +449,31 @@ func TestChatSearchDMAuthz(t *testing.T) {
 
 	// A user-to-user DM row carrying a project ID, and an ordinary project
 	// thread message, inserted directly with the columns search reads.
-	insert := func(id, thread, msg string) {
+	insert := func(id, thread, convID, msg string) {
 		_, err := db.ExecContext(ctx,
-			`INSERT INTO messages (id, project_id, thread_id, sender, recipient, msg, type, channel, created) VALUES (?, ?, ?, 'x', 'y', ?, 'instruction', 'web', ?)`,
-			id, proj.ID, thread, msg, time.Now().UTC().Format(time.RFC3339Nano))
+			`INSERT INTO messages (id, project_id, thread_id, conversation_id, sender, recipient, msg, type, channel, created) VALUES (?, ?, ?, ?, 'x', 'y', ?, 'instruction', 'web', ?)`,
+			id, proj.ID, thread, convID, msg, time.Now().UTC().Format(time.RFC3339Nano))
 		require.NoError(t, err)
 	}
 	userDM := "dm:user:" + DevUserID + ":user:" + tid("search-erin")
-	insert(tid("search-msg-udm"), userDM, "PRIVATEPHRASE user dm body")
-	insert(tid("search-msg-topic"), "topic-"+proj.ID, "PRIVATEPHRASE public thread body")
+	userDMConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: userDM,
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+	topicID := "topic-" + proj.ID
+	topicConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "group",
+		Surface:     "native",
+		ProjectID:   &proj.ID,
+		ExternalRef: fmt.Sprintf("thread:%s:%s", proj.ID, topicID),
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+	insert(tid("search-msg-udm"), userDM, userDMConv.ID, "PRIVATEPHRASE user dm body")
+	insert(tid("search-msg-topic"), topicID, topicConv.ID, "PRIVATEPHRASE public thread body")
 
 	search := func(user *store.User, extra string) string {
 		t.Helper()

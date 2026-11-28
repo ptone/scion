@@ -64,7 +64,6 @@ func TestCheckConversationConsistency_StalledLookupFailsOpenAtDeadline(t *testin
 	for _, tc := range []struct {
 		name, thread, sender, recipient string
 	}{
-		{name: "thread", thread: "t1"},
 		{name: "pair", sender: "user-1", recipient: "agent-1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -119,18 +118,18 @@ func TestConsistencyRunner_GoDoesNotWaitForTheCheck(t *testing.T) {
 	swapDivergenceMetrics(t)
 	r := NewConsistencyRunner(2, time.Minute)
 	st := &heldQueryStore{
-		entered: make(chan struct{}, 1),
+		entered: make(chan struct{}, 2),
 		release: make(chan struct{}),
-		// A prior message in another conversation: only the released lookup
+		// A prior DM message in another conversation: only the released lookup
 		// can produce the mismatch verdict.
-		items: []store.Message{{ID: "prior", ThreadID: "t1", ConversationID: "conv-other"}},
+		items: []store.Message{{ID: "prior", SenderID: "user-1", RecipientID: "agent-1", ConversationID: "conv-other"}},
 	}
 	finished := make(chan bool, 1)
 	var deadline time.Time
 	var hasDeadline bool
 
 	scheduled := r.Go(ConsistencyInput{
-		Store: st, Log: quietLogger(), MessageID: "m1", ConversationID: "conv-1", ThreadID: "t1",
+		Store: st, Log: quietLogger(), MessageID: "m1", ConversationID: "conv-1", SenderID: "user-1", RecipientID: "agent-1",
 	}, func(ctx context.Context, in ConsistencyInput) {
 		deadline, hasDeadline = ctx.Deadline()
 		finished <- CheckConversationConsistency(ctx, in.Store, in.MessageID, in.ConversationID, in.ThreadID, in.SenderID, in.RecipientID, in.Log)

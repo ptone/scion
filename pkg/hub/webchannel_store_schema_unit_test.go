@@ -162,8 +162,9 @@ func TestPgWebChatStore_TableExistsError_Surfaces(t *testing.T) {
 	})
 
 	for name, run := range map[string]func(*pgWebChatStore) error{
-		"migrateThreadIDs": func(s *pgWebChatStore) error { return s.migrateThreadIDs(DefaultMigrationBatchSize) },
-		"addThreadIDIndex": func(s *pgWebChatStore) error { return s.addThreadIDIndex() },
+		"migrateThreadIDs":                   func(s *pgWebChatStore) error { return s.migrateThreadIDs(DefaultMigrationBatchSize) },
+		"addThreadIDIndex":                   func(s *pgWebChatStore) error { return s.addThreadIDIndex() },
+		"backfillNativeMessageConversations": func(s *pgWebChatStore) error { return s.backfillNativeMessageConversations() },
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, p := newStore(t)
@@ -180,8 +181,9 @@ func TestPgWebChatStore_TableExistsError_Surfaces(t *testing.T) {
 // runs them once the Ent migration has created the table.
 func TestPgWebChatStore_ThreadMigrations_MessagesAbsent_NotRecorded(t *testing.T) {
 	for name, run := range map[string]func(*pgWebChatStore) error{
-		"migrateThreadIDs": func(s *pgWebChatStore) error { return s.migrateThreadIDs(DefaultMigrationBatchSize) },
-		"addThreadIDIndex": func(s *pgWebChatStore) error { return s.addThreadIDIndex() },
+		"migrateThreadIDs":                   func(s *pgWebChatStore) error { return s.migrateThreadIDs(DefaultMigrationBatchSize) },
+		"addThreadIDIndex":                   func(s *pgWebChatStore) error { return s.addThreadIDIndex() },
+		"backfillNativeMessageConversations": func(s *pgWebChatStore) error { return s.backfillNativeMessageConversations() },
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := &scriptedPG{currentSchema: scriptedSchema("hub"), exists: false}

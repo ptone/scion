@@ -75,15 +75,14 @@ func (a *pgArgs) add(v any) string {
 }
 
 // pgStarSelectorSQL returns the predicate (on messages m) for sel.
+// An empty ConversationID matches nothing.
 func pgStarSelectorSQL(a *pgArgs, sel StarSelector) string {
-	ch := a.add(sel.Channel)
-	cond := "(" + ch + "::text = '' OR m.channel = " + ch + "::text)"
-	if sel.ConversationID != "" {
-		cond += " AND m.conversation_id = " + a.add(strings.ToLower(sel.ConversationID)) + "::uuid"
-	} else {
-		cond += " AND m.thread_id = " + a.add(sel.ThreadID) + "::text"
+	if sel.ConversationID == "" {
+		return "FALSE"
 	}
-	return cond
+	ch := a.add(sel.Channel)
+	return "(" + ch + "::text = '' OR m.channel = " + ch + "::text)" +
+		" AND m.conversation_id = " + a.add(strings.ToLower(sel.ConversationID)) + "::uuid"
 }
 
 // pgStarTargetGuard is the add check of sqliteStarTargetGuard.
@@ -97,7 +96,7 @@ func pgStarTargetGuard(a *pgArgs, target StarTarget) string {
 }
 
 func (s *pgWebChatStore) AddMessageStar(ctx context.Context, userID string, target StarTarget) (StarRecord, bool, error) {
-	if userID == "" || target.MessageID == "" || target.Selector.ConversationKey == "" {
+	if userID == "" || target.MessageID == "" || target.Selector.ConversationKey == "" || target.Selector.ConversationID == "" {
 		return StarRecord{}, false, fmt.Errorf("webchat store: add message star: %w", store.ErrInvalidInput)
 	}
 	messagesTable, err := s.table(ctx, "messages")
@@ -202,7 +201,7 @@ SELECT user_id, message_id, conversation_key, COALESCE(project_id, ''), starred_
 }
 
 func (s *pgWebChatStore) ListMessageStarCandidates(ctx context.Context, f StarFilter) (StarCandidatePage, error) {
-	if f.UserID == "" || f.Selector.ConversationKey == "" || f.Limit < 1 {
+	if f.UserID == "" || f.Selector.ConversationKey == "" || f.Selector.ConversationID == "" || f.Limit < 1 {
 		return StarCandidatePage{}, fmt.Errorf("webchat store: list message stars: %w", store.ErrInvalidInput)
 	}
 	messagesTable, err := s.table(ctx, "messages")
@@ -269,7 +268,7 @@ func (s *pgWebChatStore) ListStarredMessageIDs(ctx context.Context, userID strin
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT st.message_id, st.conversation_key, COALESCE(st.project_id, ''),
-       COALESCE(m.channel, ''), COALESCE(m.thread_id, ''), COALESCE(m.conversation_id::text, '')
+       COALESCE(m.channel, ''), COALESCE(m.conversation_id::text, '')
   FROM webchat_message_star st
   JOIN `+messagesTable+` m ON m.id = st.message_id::uuid
  WHERE st.user_id = `+user+` AND st.message_id IN (`+strings.Join(placeholders, ",")+`)
@@ -282,7 +281,7 @@ SELECT st.message_id, st.conversation_key, COALESCE(st.project_id, ''),
 	for rows.Next() {
 		var ref StarredMessageRef
 		if err := rows.Scan(&ref.MessageID, &ref.ConversationKey, &ref.ProjectID,
-			&ref.Channel, &ref.ThreadID, &ref.ConversationID); err != nil {
+			&ref.Channel, &ref.ConversationID); err != nil {
 			return nil, fmt.Errorf("webchat store: list starred message ids: %w", err)
 		}
 		out = append(out, ref)
@@ -498,7 +497,7 @@ SELECT user_id, message_id FROM webchat_message_star
 UPDATE webchat_message_star st
    SET conversation_key = t.id, project_id = t.project_id
   FROM `+messagesTable+` m
-  JOIN webchat_topic t ON t.id = m.thread_id AND t.deleted_at IS NULL
+  JOIN webchat_topic t ON `+pgUUIDText("lower(t.conversation_id)")+` = m.conversation_id AND t.deleted_at IS NULL
  WHERE m.id = `+pgUUIDText("st.message_id")+`
    AND `+rng+`
    AND (st.conversation_key <> t.id OR st.project_id IS DISTINCT FROM t.project_id)
@@ -524,7 +523,7 @@ DELETE FROM webchat_message_star st
      OR (left(st.conversation_key, 3) <> 'dm:'
          AND NOT EXISTS (SELECT 1 FROM webchat_topic t
                           WHERE t.id = st.conversation_key AND t.deleted_at IS NULL))
-     OR EXISTS (SELECT 1 FROM `+messagesTable+` m JOIN webchat_topic t ON t.id = m.thread_id
+     OR EXISTS (SELECT 1 FROM `+messagesTable+` m JOIN webchat_topic t ON `+pgUUIDText("lower(t.conversation_id)")+` = m.conversation_id
                  WHERE m.id = `+pgUUIDText("st.message_id")+` AND t.deleted_at IS NOT NULL))`, rngArgs...)
 	if err != nil {
 		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)

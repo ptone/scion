@@ -227,9 +227,17 @@ func newReaderBackedSearchStore(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Cleanup(func() { _ = reader.Close() })
 	wcs := NewWebChatStore(main, "sqlite", WithSearchDB(reader))
 	require.NoError(t, wcs.Init())
+	_, err = main.Exec(`CREATE TABLE IF NOT EXISTS conversations (
+    id TEXT PRIMARY KEY, project_id TEXT, kind TEXT NOT NULL DEFAULT 'group',
+    surface TEXT NOT NULL DEFAULT 'native', external_ref TEXT NOT NULL DEFAULT '',
+    parent_ref TEXT NOT NULL DEFAULT '', display_name TEXT NOT NULL DEFAULT '',
+    default_agent_id TEXT, drift_state TEXT NOT NULL DEFAULT 'active',
+    last_activity_at DATETIME, last_message_seq INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME, deleted_at DATETIME)`)
+	require.NoError(t, err)
 	_, err = main.Exec(`CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, sender TEXT NOT NULL DEFAULT '',
-    msg TEXT NOT NULL DEFAULT '', channel TEXT, thread_id TEXT, created DATETIME NOT NULL)`)
+    msg TEXT NOT NULL DEFAULT '', channel TEXT, thread_id TEXT, conversation_id TEXT, created DATETIME NOT NULL)`)
 	require.NoError(t, err)
 	return wcs, main
 }

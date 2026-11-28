@@ -445,8 +445,8 @@ func TestProjectDecisions_SearchDeadlineWithNonContextErrorIsTimeout(t *testing.
 func TestProjectDecisions_SearchOtherTextWaitingAndMade(t *testing.T) {
 	f := newDecisionsSearchFixture(t)
 
-	_, p := f.topicPrompt(t, `[{"id":"reg-search","question":"Which region?","choices":["us-central1"],"allow_other":{"label":"Another region"}}]`, false)
-	reply := f.storeUserReply(t, f.bob, f.topicID, "", "slack", "use europe-north2")
+	promptMsg, p := f.topicPrompt(t, `[{"id":"reg-search","question":"Which region?","choices":["us-central1"],"allow_other":{"label":"Another region"}}]`, false)
+	reply := f.storeUserReply(t, f.bob, f.topicID, promptMsg.ConversationID, "slack", "use europe-north2")
 	recRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
 		SourceMessageID: reply.ID,
 		Answers:         []InterpretedAnswerInput{{Key: "reg-search", ChoiceID: messages.ChoiceIDOther, OtherText: "europe-north2 canary"}},

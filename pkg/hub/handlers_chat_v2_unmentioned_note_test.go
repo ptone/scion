@@ -34,11 +34,15 @@ import (
 // seedThreadMsgAt persists a thread message from sender at the given time.
 func seedThreadMsgAt(t *testing.T, s store.Store, projectID, topicID, sender, senderID string, at time.Time) string {
 	t.Helper()
+	var convID string
+	if conv, err := s.GetConversationByExternalRef(t.Context(), "native", "thread:"+projectID+":"+topicID); err == nil && conv != nil {
+		convID = conv.ID
+	}
 	id := api.NewUUID()
 	if err := s.CreateMessage(t.Context(), &store.Message{
 		ID: id, ProjectID: projectID, Sender: sender, SenderID: senderID,
 		Recipient: "thread:" + topicID, Msg: "earlier", Type: "chat",
-		ThreadID: topicID, CreatedAt: at,
+		ThreadID: topicID, ConversationID: convID, CreatedAt: at,
 	}); err != nil {
 		t.Fatalf("seedThreadMsgAt: %v", err)
 	}

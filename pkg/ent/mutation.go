@@ -76285,6 +76285,7 @@ type MessageMutation struct {
 	hold_launch_id          *string
 	not_reached             *string
 	not_reached_at          *time.Time
+	chat_v2_origin          *bool
 	channel                 *string
 	thread_id               *string
 	conversation_id         *uuid.UUID
@@ -77367,6 +77368,42 @@ func (m *MessageMutation) ResetNotReachedAt() {
 	delete(m.clearedFields, message.FieldNotReachedAt)
 }
 
+// SetChatV2Origin sets the "chat_v2_origin" field.
+func (m *MessageMutation) SetChatV2Origin(b bool) {
+	m.chat_v2_origin = &b
+}
+
+// ChatV2Origin returns the value of the "chat_v2_origin" field in the mutation.
+func (m *MessageMutation) ChatV2Origin() (r bool, exists bool) {
+	v := m.chat_v2_origin
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChatV2Origin returns the old "chat_v2_origin" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldChatV2Origin(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChatV2Origin is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChatV2Origin requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChatV2Origin: %w", err)
+	}
+	return oldValue.ChatV2Origin, nil
+}
+
+// ResetChatV2Origin resets all changes to the "chat_v2_origin" field.
+func (m *MessageMutation) ResetChatV2Origin() {
+	m.chat_v2_origin = nil
+}
+
 // SetChannel sets the "channel" field.
 func (m *MessageMutation) SetChannel(s string) {
 	m.channel = &s
@@ -77899,7 +77936,7 @@ func (m *MessageMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessageMutation) Fields() []string {
-	fields := make([]string, 0, 32)
+	fields := make([]string, 0, 33)
 	if m.project_id != nil {
 		fields = append(fields, message.FieldProjectID)
 	}
@@ -77965,6 +78002,9 @@ func (m *MessageMutation) Fields() []string {
 	}
 	if m.not_reached_at != nil {
 		fields = append(fields, message.FieldNotReachedAt)
+	}
+	if m.chat_v2_origin != nil {
+		fields = append(fields, message.FieldChatV2Origin)
 	}
 	if m.channel != nil {
 		fields = append(fields, message.FieldChannel)
@@ -78048,6 +78088,8 @@ func (m *MessageMutation) Field(name string) (ent.Value, bool) {
 		return m.NotReached()
 	case message.FieldNotReachedAt:
 		return m.NotReachedAt()
+	case message.FieldChatV2Origin:
+		return m.ChatV2Origin()
 	case message.FieldChannel:
 		return m.Channel()
 	case message.FieldThreadID:
@@ -78121,6 +78163,8 @@ func (m *MessageMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldNotReached(ctx)
 	case message.FieldNotReachedAt:
 		return m.OldNotReachedAt(ctx)
+	case message.FieldChatV2Origin:
+		return m.OldChatV2Origin(ctx)
 	case message.FieldChannel:
 		return m.OldChannel(ctx)
 	case message.FieldThreadID:
@@ -78303,6 +78347,13 @@ func (m *MessageMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetNotReachedAt(v)
+		return nil
+	case message.FieldChatV2Origin:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChatV2Origin(v)
 		return nil
 	case message.FieldChannel:
 		v, ok := value.(string)
@@ -78638,6 +78689,9 @@ func (m *MessageMutation) ResetField(name string) error {
 		return nil
 	case message.FieldNotReachedAt:
 		m.ResetNotReachedAt()
+		return nil
+	case message.FieldChatV2Origin:
+		m.ResetChatV2Origin()
 		return nil
 	case message.FieldChannel:
 		m.ResetChannel()

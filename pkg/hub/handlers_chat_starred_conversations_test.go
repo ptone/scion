@@ -117,7 +117,7 @@ func newStarredRailFixture(t *testing.T, readSwitch bool) *starredRailFixture {
 	// directly: the API would refuse it).
 	f.hiddenB = f.threadMsg(t, f.topicB, f.projB, "b1", now.Add(-time.Hour))
 	_, _, err := f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: f.hiddenB, ProjectID: f.projB,
-		Selector: StarSelector{ConversationKey: f.topicB, Channel: "web", ThreadID: f.topicB}})
+		Selector: StarSelector{ConversationKey: f.topicB, Channel: "web", ConversationID: topicConversationID(t, f.wcs, f.topicB)}})
 	require.NoError(t, err)
 	return f
 }
@@ -346,7 +346,7 @@ func TestChatStarredConversations_MatchesStarScope(t *testing.T) {
 			}
 			m := f.threadMsg(t, topic, projectID, "m", time.Now().Add(-time.Minute))
 			_, _, err := f.stars.AddMessageStar(ctx, u, StarTarget{MessageID: m, ProjectID: projectID,
-				Selector: StarSelector{ConversationKey: topic, Channel: "web", ThreadID: topic}})
+				Selector: StarSelector{ConversationKey: topic, Channel: "web", ConversationID: topicConversationID(t, f.wcs, topic)}})
 			require.NoError(t, err)
 		}
 	}
@@ -358,9 +358,17 @@ func TestChatStarredConversations_MatchesStarScope(t *testing.T) {
 	require.NotEqual(t, f.dms.humanKey, swapped)
 	legacy := f.dmMsg(t, swapped, f.dms.humanConv, uuid.Nil.String(), "user:"+f.member, f.member, "legacy", "web", time.Now().Add(-time.Minute))
 	_, _, err := f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: legacy,
-		Selector: StarSelector{ConversationKey: swapped, Channel: "web", ThreadID: swapped}})
+		Selector: StarSelector{ConversationKey: swapped, Channel: "web", ConversationID: f.dms.humanConv}})
 	require.NoError(t, err)
 
+	convForKey := map[string]string{
+		f.topicA:       topicConversationID(t, f.wcs, f.topicA),
+		f.topicA2:      topicConversationID(t, f.wcs, f.topicA2),
+		f.topicB:       topicConversationID(t, f.wcs, f.topicB),
+		f.dms.agentKey: f.dms.agentConv,
+		f.dms.humanKey: f.dms.humanConv,
+		swapped:        f.dms.humanConv,
+	}
 	keys := []string{f.topicA, f.topicA2, f.topicB, f.dms.agentKey, f.dms.humanKey, swapped}
 	for _, u := range []string{f.member, f.owner, f.admin, plain} {
 		rows := map[string]bool{}
@@ -370,7 +378,7 @@ func TestChatStarredConversations_MatchesStarScope(t *testing.T) {
 		user, err := f.s.GetUser(ctx, u)
 		require.NoError(t, err)
 		for _, key := range keys {
-			page, err := f.stars.ListMessageStarCandidates(ctx, StarFilter{UserID: u, Selector: StarSelector{ConversationKey: key, Channel: "web", ThreadID: key}, Limit: 1})
+			page, err := f.stars.ListMessageStarCandidates(ctx, StarFilter{UserID: u, Selector: StarSelector{ConversationKey: key, Channel: "web", ConversationID: convForKey[key]}, Limit: 1})
 			require.NoError(t, err)
 			starred := len(page.Items) > 0
 			identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeWeb))
@@ -396,6 +404,13 @@ func TestChatStarredConversations_MatchesStarScopeForTokens(t *testing.T) {
 	ctx := context.Background()
 	// The owner, a participant of the member's human DM, stars in both A
 	// threads, project B's thread and that DM, then loses project A.
+	convForKey := map[string]string{
+		f.topicA:       topicConversationID(t, f.wcs, f.topicA),
+		f.topicA2:      topicConversationID(t, f.wcs, f.topicA2),
+		f.topicB:       topicConversationID(t, f.wcs, f.topicB),
+		f.dms.agentKey: f.dms.agentConv,
+		f.dms.humanKey: f.dms.humanConv,
+	}
 	for _, c := range []struct{ key, projectID string }{
 		{f.topicA, f.projA}, {f.topicA2, f.projA}, {f.topicB, f.projB}, {f.dms.humanKey, ""},
 	} {
@@ -406,7 +421,7 @@ func TestChatStarredConversations_MatchesStarScopeForTokens(t *testing.T) {
 			m = f.threadMsg(t, c.key, c.projectID, "o", time.Now().Add(-time.Minute))
 		}
 		_, _, err := f.stars.AddMessageStar(ctx, f.owner, StarTarget{MessageID: m, ProjectID: c.projectID,
-			Selector: StarSelector{ConversationKey: c.key, Channel: "web", ThreadID: c.key}})
+			Selector: StarSelector{ConversationKey: c.key, Channel: "web", ConversationID: convForKey[c.key]}})
 		require.NoError(t, err)
 	}
 	// A member of both projects, starring in a project A thread and project
@@ -420,7 +435,7 @@ func TestChatStarredConversations_MatchesStarScopeForTokens(t *testing.T) {
 	for _, c := range []struct{ key, projectID string }{{f.topicA, f.projA}, {f.topicB, f.projB}} {
 		m := f.threadMsg(t, c.key, c.projectID, "both", time.Now().Add(-time.Minute))
 		_, _, err := f.stars.AddMessageStar(ctx, both, StarTarget{MessageID: m, ProjectID: c.projectID,
-			Selector: StarSelector{ConversationKey: c.key, Channel: "web", ThreadID: c.key}})
+			Selector: StarSelector{ConversationKey: c.key, Channel: "web", ConversationID: convForKey[c.key]}})
 		require.NoError(t, err)
 	}
 	type caller struct {
@@ -471,7 +486,7 @@ func TestChatStarredConversations_MatchesStarScopeForTokens(t *testing.T) {
 		}
 		for _, key := range keys {
 			page, err := f.stars.ListMessageStarCandidates(ctx, StarFilter{UserID: c.user,
-				Selector: StarSelector{ConversationKey: key, Channel: "web", ThreadID: key}, Limit: 1})
+				Selector: StarSelector{ConversationKey: key, Channel: "web", ConversationID: convForKey[key]}, Limit: 1})
 			require.NoError(t, err)
 			starred := len(page.Items) > 0
 			list := f.call(t, c.token, http.MethodGet, starListPath(key), nil)
@@ -528,7 +543,7 @@ func TestChatStarredConversations_ScanBudget(t *testing.T) {
 		require.NoError(t, err)
 		m := f.threadMsg(t, key, projectID, "m", at)
 		_, _, err = f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: m, ProjectID: projectID,
-			Selector: StarSelector{ConversationKey: key, Channel: "web", ThreadID: key}})
+			Selector: StarSelector{ConversationKey: key, Channel: "web", ConversationID: topicConversationID(t, f.wcs, key)}})
 		require.NoError(t, err)
 		if i < 5 {
 			hidden = append(hidden, key)

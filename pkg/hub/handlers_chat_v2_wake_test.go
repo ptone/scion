@@ -631,7 +631,8 @@ func TestChatV2Wake_PanicAfterPersist_KeepsGateState(t *testing.T) {
 			require.NoError(t, f.s.CreateMessage(t.Context(), &store.Message{
 				ID: replyTarget, ProjectID: f.proj.ID, Sender: "user:dev", SenderID: DevUserID, Recipient: "thread:" + f.topic,
 				Msg: "earlier", Type: "instruction", Channel: "web", ThreadID: f.topic,
-				CreatedAt: time.Now().Add(-time.Minute).UTC(),
+				ConversationID: topicConversationID(t, wcs, f.topic),
+				CreatedAt:      time.Now().Add(-time.Minute).UTC(),
 			}))
 
 			func() {

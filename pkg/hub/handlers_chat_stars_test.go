@@ -428,7 +428,7 @@ func TestChatStars_StateFiltersByAccess(t *testing.T) {
 	// A retained association in a thread the member cannot read (stored
 	// directly: the API would refuse it) is hidden from every read.
 	_, _, err := f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: b1, ProjectID: f.projB,
-		Selector: StarSelector{ConversationKey: f.topicB, Channel: "web", ThreadID: f.topicB}})
+		Selector: StarSelector{ConversationKey: f.topicB, Channel: "web", ConversationID: topicConversationID(t, f.wcs, f.topicB)}})
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{a1}, decodeStarState(t, f.session(t, f.member, http.MethodGet, starStatePath(a2, b1, a1), nil)))

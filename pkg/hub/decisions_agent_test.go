@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1458,7 +1459,7 @@ func TestAgentDecisions_WithdrawMultiKeyWholeSetRefusalsAndListWithdrawn(t *test
 	f := newDecisionsFixture(t)
 
 	// 1. Multi-key all-or-nothing (D8) and mixed idempotency.
-	_, p1 := f.topicPrompt(t, `[
+	p1Msg, p1 := f.topicPrompt(t, `[
 		{"id":"MK-A","question":"First pending?","choices":["yes","no"]},
 		{"id":"MK-INT","question":"Interpreted awaiting confirm?","choices":["yes","no"]}
 	]`, false)
@@ -1471,7 +1472,7 @@ func TestAgentDecisions_WithdrawMultiKeyWholeSetRefusalsAndListWithdrawn(t *test
 	pDirect := f.sendPromptToBob(t, `[{"id":"MK-DIR","question":"Direct?","choices":["yes","no"]}]`, false)
 	require.Equal(t, http.StatusOK, f.answer(t, f.bob, pDirect.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
 
-	topicReply := f.storeUserReply(t, f.alice, f.topicID, "", "web", "MK-INT: no")
+	topicReply := f.storeUserReply(t, f.alice, f.topicID, p1Msg.ConversationID, "web", "MK-INT: no")
 	recIntRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
 		SourceMessageID: topicReply.ID,
 		Answers:         []InterpretedAnswerInput{{Key: "MK-INT", ChoiceID: "2"}},
@@ -1571,9 +1572,9 @@ func TestAgentDecisions_WithdrawMultiKeyWholeSetRefusalsAndListWithdrawn(t *test
 	require.Equal(t, http.StatusOK, okSetRR.Code, okSetRR.Body.String())
 
 	// 3. POST /api/v1/agent/decisions/interpreted on a withdrawn key (single and mixed batch) -> 409 withdrawn.
-	_, pOpenForInterp := f.topicPrompt(t, `[{"id":"INT-STILL-OPEN","question":"Open?","choices":["yes","no"]}]`, false)
+	pOpenMsg, pOpenForInterp := f.topicPrompt(t, `[{"id":"INT-STILL-OPEN","question":"Open?","choices":["yes","no"]}]`, false)
 	_ = pOpenForInterp
-	lateReply := f.storeUserReply(t, f.alice, f.topicID, "", "web", "MK-A: yes, INT-STILL-OPEN: yes")
+	lateReply := f.storeUserReply(t, f.alice, f.topicID, pOpenMsg.ConversationID, "web", "MK-A: yes, INT-STILL-OPEN: yes")
 
 	interpSingleRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
 		SourceMessageID: lateReply.ID,
@@ -1623,12 +1624,12 @@ func TestAgentDecisions_InterpretedOther_ConfirmOverrideKeyStateShowAndList(t *t
 	f := newDecisionsFixture(t)
 
 	// Create 3 decisions with Other on + 1 without Other.
-	_, pConfirm := f.topicPrompt(t, `[{"id":"reg-conf","question":"Confirm region?","choices":["us-central1"],"allow_other":{"label":"Another region","placeholder":"e.g. europe-west4"}}]`, false)
+	pConfirmMsg, pConfirm := f.topicPrompt(t, `[{"id":"reg-conf","question":"Confirm region?","choices":["us-central1"],"allow_other":{"label":"Another region","placeholder":"e.g. europe-west4"}}]`, false)
 	_, pOverride := f.topicPrompt(t, `[{"id":"reg-over","question":"Override region?","choices":["us-central1"],"allow_other":{"label":"Another region"}}]`, false)
 	_, pFixedToOther := f.topicPrompt(t, `[{"id":"reg-f2o","question":"Fixed to other?","choices":["us-central1"],"allow_other":"Something else"}]`, false)
 	_, _ = f.topicPrompt(t, `[{"id":"no-other","question":"No other?","choices":["yes","no"]}]`, false)
 
-	reply := f.storeUserReply(t, f.alice, f.topicID, "", "slack", "use europe-west4 for both, us-central1 for f2o")
+	reply := f.storeUserReply(t, f.alice, f.topicID, pConfirmMsg.ConversationID, "slack", "use europe-west4 for both, us-central1 for f2o")
 
 	// 1. Validation rejections on POST /api/v1/agent/decisions/interpreted.
 	for name, ans := range map[string]InterpretedAnswerInput{
@@ -1870,4 +1871,27 @@ func TestFormatInterpretedOther_Golden(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// TestAgentDecisions_InterpretedWorksWithoutThreadID verifies F1: recording an
+// interpreted decision answer succeeds when both the prompt message and the
+// user's source reply have messages.thread_id nulled (conversation_id only).
+func TestAgentDecisions_InterpretedWorksWithoutThreadID(t *testing.T) {
+	f := newDecisionsFixture(t)
+	ctx := context.Background()
+
+	dmPrompt := f.sendPromptToBob(t, `[{"id":"NT1","question":"Proceed?","choices":["yes","no"]}]`, false)
+	bobReply := f.bobDMReply(t, dmPrompt.MessageID, "NT1: yes")
+
+	dbp, ok := f.store.(interface{ DB() *sql.DB })
+	require.True(t, ok, "test store must expose DB()")
+	_, err := dbp.DB().ExecContext(ctx, `UPDATE messages SET thread_id = NULL WHERE id IN (?, ?)`,
+		dmPrompt.MessageID, bobReply.ID)
+	require.NoError(t, err)
+
+	rr := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: bobReply.ID,
+		Answers:         []InterpretedAnswerInput{{Key: "NT1", ChoiceID: "1"}},
+	})
+	require.Equal(t, http.StatusOK, rr.Code, "interpreted answer must succeed with thread_id nulled: %s", rr.Body.String())
 }

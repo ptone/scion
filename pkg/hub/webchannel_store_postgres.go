@@ -210,7 +210,7 @@ CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_message
 CREATE INDEX IF NOT EXISTS idx_webchat_message_attachment_attachment
     ON webchat_message_attachment (attachment_id);
 
--- Phase-3: message extension data (reply-to, edit, delete)
+-- Phase-3: message extension data (reply-to, edit, delete, chat-v2 origin)
 CREATE TABLE IF NOT EXISTS webchat_message_ext (
     message_id TEXT PRIMARY KEY,
     reply_to_id TEXT,
@@ -1376,13 +1376,19 @@ func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSear
 	conditions = append(conditions, "x.deleted_at IS NULL")
 
 	if filter.ConversationKey != "" {
-		conditions = append(conditions, fmt.Sprintf("thread_id = $%d", argIdx))
-		args = append(args, filter.ConversationKey)
-		argIdx++
+		if strings.HasPrefix(filter.ConversationKey, "dm:") {
+			conditions = append(conditions, fmt.Sprintf("c.surface = 'native' AND c.external_ref = $%d AND c.deleted_at IS NULL", argIdx))
+			args = append(args, filter.ConversationKey)
+			argIdx++
+		} else {
+			conditions = append(conditions, fmt.Sprintf("t.id = $%d", argIdx))
+			args = append(args, filter.ConversationKey)
+			argIdx++
+		}
 	}
 
 	if filter.ProjectID != "" {
-		conditions = append(conditions, fmt.Sprintf("project_id = $%d", argIdx))
+		conditions = append(conditions, fmt.Sprintf("m.project_id = $%d", argIdx))
 		args = append(args, filter.ProjectID)
 		argIdx++
 	} else if len(filter.ProjectIDs) > 0 {
@@ -1392,20 +1398,21 @@ func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSear
 			args = append(args, pid)
 			argIdx++
 		}
-		conditions = append(conditions, fmt.Sprintf("project_id IN (%s)", strings.Join(placeholders, ",")))
+		conditions = append(conditions, fmt.Sprintf("m.project_id IN (%s)", strings.Join(placeholders, ",")))
 	}
 
-	// DM threads are private to their participants. Unless the search is
+	// DM conversations are private to their participants. Unless the search is
 	// scoped to one (already authorized) conversation, include a DM only when
-	// the caller occupies one of its user slots. Exact prefix/suffix
-	// comparison, not LIKE, so IDs are never treated as patterns.
+	// the caller occupies one of its user slots on conversations.external_ref.
+	// Exact prefix/suffix comparison, not LIKE, so IDs are never treated as
+	// patterns.
 	if filter.ConversationKey == "" {
 		if filter.DMParticipantUserID == "" {
-			conditions = append(conditions, "(thread_id IS NULL OR left(thread_id, 3) <> 'dm:')")
+			conditions = append(conditions, "(c.id IS NOT NULL AND c.kind <> 'direct' AND left(COALESCE(c.external_ref, ''), 3) <> 'dm:')")
 		} else {
 			prefix, suffix := dmParticipantBounds(filter.DMParticipantUserID)
 			conditions = append(conditions, fmt.Sprintf(
-				"(thread_id IS NULL OR left(thread_id, 3) <> 'dm:' OR left(thread_id, length($%d::text)) = $%d::text OR right(thread_id, length($%d::text)) = $%d::text)",
+				"(c.id IS NOT NULL AND ((c.kind <> 'direct' AND left(COALESCE(c.external_ref, ''), 3) <> 'dm:') OR left(COALESCE(c.external_ref, ''), length($%d::text)) = $%d::text OR right(COALESCE(c.external_ref, ''), length($%d::text)) = $%d::text))",
 				argIdx, argIdx, argIdx+1, argIdx+1))
 			args = append(args, prefix, suffix)
 			argIdx += 2
@@ -1416,7 +1423,7 @@ func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSear
 	if filter.Cursor != "" {
 		cursorParts := strings.SplitN(filter.Cursor, "|", 2)
 		if len(cursorParts) == 2 {
-			conditions = append(conditions, fmt.Sprintf("(created < $%d OR (created = $%d AND id < $%d))", argIdx, argIdx+1, argIdx+2))
+			conditions = append(conditions, fmt.Sprintf("(m.created < $%d OR (m.created = $%d AND m.id < $%d))", argIdx, argIdx+1, argIdx+2))
 			args = append(args, cursorParts[0], cursorParts[0], cursorParts[1])
 			argIdx += 3
 		}
@@ -1426,14 +1433,24 @@ func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSear
 	if err != nil {
 		return nil, "", err
 	}
+	conversationsTable, err := s.table(ctx, "conversations")
+	if err != nil {
+		return nil, "", err
+	}
+	topicTable, err := s.table(ctx, "webchat_topic")
+	if err != nil {
+		return nil, "", err
+	}
 	query := fmt.Sprintf(`
-SELECT m.id, m.project_id, COALESCE(m.thread_id, ''), m.sender, m.msg, m.created
+SELECT m.id, m.project_id, COALESCE(t.id, CASE WHEN c.kind = 'direct' THEN c.external_ref ELSE '' END, ''), m.sender, m.msg, m.created
   FROM %s m
   LEFT JOIN %s x ON x.message_id = m.id::text
+  LEFT JOIN %s c ON c.id = m.conversation_id
+  LEFT JOIN %s t ON %s = m.conversation_id
  WHERE %s
  ORDER BY m.created DESC, m.id DESC
  LIMIT $%d
-`, messagesTable, extTable, strings.Join(conditions, " AND "), argIdx)
+`, messagesTable, extTable, conversationsTable, topicTable, pgUUIDText("lower(t.conversation_id)"), strings.Join(conditions, " AND "), argIdx)
 	args = append(args, filter.Limit+1)
 
 	// A READ ONLY transaction with SET LOCAL statement_timeout: the server
@@ -1618,6 +1635,9 @@ func (s *pgWebChatStore) runMigrations() error {
 	if err := s.backfillTopicConversations(); err != nil {
 		return fmt.Errorf("topic conversation backfill: %w", err)
 	}
+	if err := s.backfillNativeMessageConversations(); err != nil {
+		return fmt.Errorf("native message conversation backfill: %w", err)
+	}
 	if err := s.reconcileTopicConversations(); err != nil {
 		return fmt.Errorf("topic conversation reconcile: %w", err)
 	}
@@ -1770,6 +1790,58 @@ func (s *pgWebChatStore) backfillTopicConversations() error {
 	}
 
 	return s.markMigrationCompleted("topic_conversation_backfill")
+}
+
+// backfillNativeMessageConversations fills messages.conversation_id from
+// webchat_topic.conversation_id for native topic rows whose conversation_id is
+// still NULL. It only fills in missing values, so it is non-destructive and
+// idempotent. DM rows are already covered by messaging/backfill.go.
+func (s *pgWebChatStore) backfillNativeMessageConversations() error {
+	const migrationName = "messages_native_conversation_backfill"
+	done, err := s.migrationCompleted(migrationName)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	// messages is Ent-managed and may not exist yet. Leave the migration
+	// unrecorded when absent so the next Init runs it once messages exists.
+	tableExists, err := s.tableExists(context.Background(), "messages")
+	if err != nil {
+		return err
+	}
+	if !tableExists {
+		slog.Debug("Webchat native message conversation backfill deferred: messages table does not exist yet")
+		return nil
+	}
+	hasConvCol, err := s.columnExists(context.Background(), "messages", "conversation_id")
+	if err != nil {
+		return fmt.Errorf("check messages.conversation_id column: %w", err)
+	}
+	if !hasConvCol {
+		slog.Debug("Webchat native message conversation backfill deferred: messages.conversation_id column does not exist yet")
+		return nil
+	}
+	messagesTable, err := s.table(context.Background(), "messages")
+	if err != nil {
+		return err
+	}
+
+	convUUID := pgUUIDText("lower(t.conversation_id)")
+	_, err = s.db.Exec(`
+UPDATE ` + messagesTable + ` m
+   SET conversation_id = ` + convUUID + `
+  FROM webchat_topic t
+ WHERE m.thread_id = t.id
+   AND ` + convUUID + ` IS NOT NULL
+   AND m.conversation_id IS NULL`)
+	if err != nil {
+		return fmt.Errorf("backfill native message conversation_id: %w", err)
+	}
+
+	return s.markMigrationCompleted(migrationName)
 }
 
 // reconcileTopicConversations is a one-time idempotent startup migration that
@@ -2556,32 +2628,38 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 }
 
 // CountPendingMessages returns the number of messages with dispatch_state='pending'
-// for the given thread_id.
-func (s *pgWebChatStore) CountPendingMessages(ctx context.Context, threadID string) (int, error) {
+// for the given conversation_id.
+func (s *pgWebChatStore) CountPendingMessages(ctx context.Context, conversationID string) (int, error) {
+	if conversationID == "" {
+		return 0, nil
+	}
 	messagesTable, err := s.table(ctx, "messages")
 	if err != nil {
 		return 0, err
 	}
 	var count int
 	err = s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM `+messagesTable+` WHERE thread_id = $1 AND dispatch_state = 'pending'`,
-		threadID).Scan(&count)
+		`SELECT COUNT(*) FROM `+messagesTable+` WHERE conversation_id = `+pgUUIDText("$1::text")+` AND dispatch_state = 'pending'`,
+		strings.ToLower(conversationID)).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("webchat store: count pending messages: %w", err)
 	}
 	return count, nil
 }
 
-// CountMessages returns the number of messages for the given thread_id.
-func (s *pgWebChatStore) CountMessages(ctx context.Context, threadID string) (int, error) {
+// CountMessages returns the number of messages for the given conversation_id.
+func (s *pgWebChatStore) CountMessages(ctx context.Context, conversationID string) (int, error) {
+	if conversationID == "" {
+		return 0, nil
+	}
 	messagesTable, err := s.table(ctx, "messages")
 	if err != nil {
 		return 0, err
 	}
 	var count int
 	err = s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM `+messagesTable+` WHERE thread_id = $1`,
-		threadID).Scan(&count)
+		`SELECT COUNT(*) FROM `+messagesTable+` WHERE conversation_id = `+pgUUIDText("$1::text"),
+		strings.ToLower(conversationID)).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("webchat store: count messages: %w", err)
 	}
@@ -2619,6 +2697,31 @@ func (s *pgWebChatStore) tableExists(ctx context.Context, table string) (bool, e
 		return false, err
 	}
 	return pgTableExists(ctx, s.db, schema, table)
+}
+
+// pgColumnExistsQuery reports whether a column exists on a table in the given
+// schema, using the same single-schema rule as pgTableExistsQuery.
+const pgColumnExistsQuery = `SELECT EXISTS (
+	SELECT 1 FROM information_schema.columns
+	WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
+)`
+
+// pgTableColumnExists reports whether column exists on table in schema.
+func pgTableColumnExists(ctx context.Context, db *sql.DB, schema, table, column string) (bool, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx, pgColumnExistsQuery, schema, table, column).Scan(&exists); err != nil {
+		return false, fmt.Errorf("webchat store: check column %s.%s exists: %w", table, column, err)
+	}
+	return exists, nil
+}
+
+// columnExists reports whether column exists on table in the store's current schema.
+func (s *pgWebChatStore) columnExists(ctx context.Context, table, column string) (bool, error) {
+	schema, err := s.currentSchema(ctx)
+	if err != nil {
+		return false, err
+	}
+	return pgTableColumnExists(ctx, s.db, schema, table, column)
 }
 
 // addThreadIDIndex creates an index on messages.thread_id for query performance.

@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -68,17 +69,34 @@ func newPGSearchStore(t *testing.T) (WebChatStore, *sql.DB) {
 	_, err = db.ExecContext(ctx, "CREATE SCHEMA "+schema)
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = db.Exec("DROP SCHEMA " + schema + " CASCADE") })
+	_, err = db.ExecContext(ctx, `CREATE TABLE conversations (
+    id               uuid PRIMARY KEY,
+    project_id       uuid,
+    kind             text NOT NULL DEFAULT 'group',
+    surface          text NOT NULL DEFAULT 'native',
+    external_ref     text NOT NULL DEFAULT '',
+    parent_ref       text NOT NULL DEFAULT '',
+    display_name     text NOT NULL DEFAULT '',
+    default_agent_id uuid,
+    drift_state      text NOT NULL DEFAULT 'active',
+    last_activity_at timestamptz,
+    last_message_seq bigint NOT NULL DEFAULT 0,
+    created_at       timestamptz,
+    deleted_at       timestamptz
+)`)
+	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `CREATE TABLE messages (
-    id           uuid PRIMARY KEY,
-    project_id   uuid NOT NULL,
-    created      timestamptz NOT NULL,
-    channel      text,
-    thread_id    text,
-    msg          text NOT NULL DEFAULT '',
-    sender       text,
-    sender_id    text,
-    recipient    text,
-    recipient_id text
+    id              uuid PRIMARY KEY,
+    project_id      uuid NOT NULL,
+    created         timestamptz NOT NULL,
+    channel         text,
+    thread_id       text,
+    conversation_id uuid,
+    msg             text NOT NULL DEFAULT '',
+    sender          text,
+    sender_id       text,
+    recipient       text,
+    recipient_id    text
 )`)
 	require.NoError(t, err)
 	wcs := NewWebChatStore(db, "postgres")
@@ -86,10 +104,36 @@ func newPGSearchStore(t *testing.T) (WebChatStore, *sql.DB) {
 	return wcs, db
 }
 
+func pgSeedSearchConversation(t *testing.T, db *sql.DB, projectID, threadID string) any {
+	t.Helper()
+	if threadID == "" {
+		return nil
+	}
+	convID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("search-test:"+threadID)).String()
+	if strings.HasPrefix(threadID, "dm:") {
+		_, err := db.Exec(`INSERT INTO conversations (id, project_id, kind, surface, external_ref, created_at)
+			VALUES ($1, $2, 'direct', 'native', $3, NOW()) ON CONFLICT (id) DO NOTHING`,
+			convID, projectID, threadID)
+		require.NoError(t, err)
+		return convID
+	}
+	extRef := "thread:" + projectID + ":" + threadID
+	_, err := db.Exec(`INSERT INTO conversations (id, project_id, kind, surface, external_ref, created_at)
+		VALUES ($1, $2, 'group', 'native', $3, NOW()) ON CONFLICT (id) DO NOTHING`,
+		convID, projectID, extRef)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO webchat_topic (id, project_id, name, created_by, created_at, conversation_id)
+		VALUES ($1, $2, $3, 'test', NOW(), $4) ON CONFLICT (id) DO UPDATE SET conversation_id = COALESCE(webchat_topic.conversation_id, EXCLUDED.conversation_id)`,
+		threadID, projectID, "topic-"+threadID, convID)
+	require.NoError(t, err)
+	return convID
+}
+
 func pgInsertMessage(t *testing.T, db *sql.DB, id, projectID, threadID, msg string, at time.Time) {
 	t.Helper()
-	_, err := db.Exec(`INSERT INTO messages (id, project_id, created, channel, thread_id, msg, sender)
-		VALUES ($1, $2, $3, 'web', $4, $5, 'user:a')`, id, projectID, at, threadID, msg)
+	convID := pgSeedSearchConversation(t, db, projectID, threadID)
+	_, err := db.Exec(`INSERT INTO messages (id, project_id, created, channel, thread_id, conversation_id, msg, sender)
+		VALUES ($1, $2, $3, 'web', $4, $5, $6, 'user:a')`, id, projectID, at, threadID, convID, msg)
 	require.NoError(t, err)
 }
 
@@ -316,7 +360,7 @@ func TestChatSearchStoreTimeoutStopsStatement_Postgres(t *testing.T) {
 	for _, stmt := range []string{
 		`ALTER TABLE messages RENAME TO messages_base`,
 		`CREATE FUNCTION slow_text(t text) RETURNS text LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM pg_sleep(0.01); RETURN t; END $$`,
-		`CREATE VIEW messages AS SELECT id, project_id, created, channel, thread_id, slow_text(msg) AS msg, sender, sender_id, recipient, recipient_id FROM messages_base`,
+		`CREATE VIEW messages AS SELECT id, project_id, created, channel, thread_id, conversation_id, slow_text(msg) AS msg, sender, sender_id, recipient, recipient_id FROM messages_base`,
 	} {
 		_, err := db.ExecContext(ctx, stmt)
 		require.NoError(t, err, stmt)

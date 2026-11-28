@@ -45,19 +45,24 @@ func TestPgTableExistsQuery_FiltersCurrentSchema(t *testing.T) {
 	assert.Contains(t, q, "FROM information_schema.tables")
 	assert.Contains(t, q, "table_schema = $1")
 	assert.Contains(t, q, "table_name = $2")
+	cq := strings.Join(strings.Fields(pgColumnExistsQuery), " ")
+	assert.Contains(t, cq, "FROM information_schema.columns")
+	assert.Contains(t, cq, "table_schema = $1")
+	assert.Contains(t, cq, "table_name = $2")
+	assert.Contains(t, cq, "column_name = $3")
 	assert.Equal(t, "SELECT current_schema()", pgCurrentSchemaQuery)
 }
 
 // TestPgWebChatStore_TableExistenceChecksUseHelper pins, without a database,
-// that pgTableExistsQuery is the only information_schema lookup in the
-// Postgres web chat store, so no call site can reintroduce an unfiltered
-// check.
+// that pgTableExistsQuery and pgColumnExistsQuery are the only
+// information_schema lookups in the Postgres web chat store, so no call site
+// can reintroduce an unfiltered check.
 func TestPgWebChatStore_TableExistenceChecksUseHelper(t *testing.T) {
 	src, err := os.ReadFile("webchannel_store_postgres.go")
 	require.NoError(t, err)
 	re := regexp.MustCompile(`(?i)information_schema|pg_catalog|pg_tables|pg_indexes|pg_class|pg_namespace|to_regclass`)
-	assert.Len(t, re.FindAllString(string(src), -1), 1,
-		"catalog lookups in webchannel_store_postgres.go must go through pgTableExists")
+	assert.Len(t, re.FindAllString(string(src), -1), 2,
+		"catalog lookups in webchannel_store_postgres.go must go through pgTableExists or pgTableColumnExists")
 }
 
 // TestPgWebChatStore_ExternalTablesQualified pins, without a database, that
@@ -168,13 +173,20 @@ func TestWebChatStore_Postgres_MessagesInOtherSchema(t *testing.T) {
 		assert.Zero(t, indexCount(t, other), "thread_id index must not be created in another schema")
 		assert.Empty(t, search(t, db), "search must not read another schema's messages")
 
-		// Once the current schema has its own messages table, the store uses it.
-		_, err := admin.ExecContext(ctx, fmt.Sprintf(messagesDDL, own))
+		// Once the current schema has its own messages and conversations tables, the store uses them.
+		const ownConvID = "00000000-0000-4000-8000-000000000003"
+		_, err := admin.ExecContext(ctx, fmt.Sprintf(conversationsDDL, own))
+		require.NoError(t, err)
+		_, err = admin.ExecContext(ctx, `INSERT INTO `+own+`.conversations
+			(id, kind, surface, external_ref, drift_state, created_at)
+			VALUES ($1, 'group', 'native', 'thread:project-1:topic-1', 'active', now())`, ownConvID)
+		require.NoError(t, err)
+		_, err = admin.ExecContext(ctx, fmt.Sprintf(messagesDDL, own))
 		require.NoError(t, err)
 		_, err = admin.ExecContext(ctx, `INSERT INTO `+own+`.messages
-			(id, created, channel, thread_id, project_id, msg, sender, sender_id, recipient, recipient_id)
-			VALUES ($1, now(), 'web', 'topic:topic-1', 'project-1', 'schema-needle own', 'user:user-1', 'user-1', 'agent:agent-a', 'agent-a')`,
-			ownID)
+			(id, created, channel, thread_id, conversation_id, project_id, msg, sender, sender_id, recipient, recipient_id)
+			VALUES ($1, now(), 'web', 'topic:topic-1', $2, 'project-1', 'schema-needle own', 'user:user-1', 'user-1', 'agent:agent-a', 'agent-a')`,
+			ownID, ownConvID)
 		require.NoError(t, err)
 		res := search(t, db)
 		require.Len(t, res, 1)

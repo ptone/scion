@@ -240,11 +240,19 @@ func TestSearchChatMessages_PagesToExhaustionOnEntSchema(t *testing.T) {
 		{"m1", base.Add(2 * time.Minute)},
 		{"m0", base},
 	}
+	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "group",
+		Surface:     "native",
+		ProjectID:   &proj.ID,
+		ExternalRef: "thread:" + proj.ID + ":topic-1",
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
 	for _, m := range msgs {
 		require.NoError(t, s.CreateMessage(ctx, &store.Message{
 			ID: hubtestutil.TID("search-paging-" + m.name), ProjectID: proj.ID,
 			Sender: "user:alice", Recipient: "agent:bot", Msg: "needle " + m.name,
-			Channel: "web", ThreadID: "topic-1", CreatedAt: m.created,
+			Channel: "web", ThreadID: "topic-1", ConversationID: conv.ID, CreatedAt: m.created,
 		}))
 	}
 	// Expected order: created DESC, id DESC within a tie.

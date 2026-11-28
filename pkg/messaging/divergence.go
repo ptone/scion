@@ -408,9 +408,12 @@ type MessageQueryStore interface {
 // messages and compares their conversation_id — providing a truly independent
 // source of truth.
 //
-// It looks up prior messages by threadID (if non-empty) or by the
-// senderID+recipientID pair (for DMs), then checks whether any of those
-// messages have a conversation_id that differs from resolvedConvID.
+// For direct messages (empty threadID with both senderID and recipientID
+// present), it looks up up to 25 prior messages in each direction and checks
+// whether any have a conversation_id that differs from resolvedConvID.
+// For thread messages (non-empty threadID) or messages lacking a DM principal
+// pair, conversation_id is authoritative and no prior-message query is issued;
+// the check returns true immediately.
 //
 // Returns true if all prior messages agree (or no prior messages exist),
 // false if a mismatch is detected. It fails open (returns true) when a lookup
@@ -448,20 +451,7 @@ func CheckConversationConsistency(
 
 	// Every lookup below reads only Items, so each one passes SkipTotalCount:
 	// otherwise the store runs a COUNT of the matching messages per call.
-	if threadID != "" {
-		// Look up prior messages with the same ThreadID.
-		result, err := msgStore.ListMessages(ctx, store.MessageFilter{
-			ThreadID: threadID,
-		}, store.ListOptions{Limit: 50, SkipTotalCount: true})
-		if err != nil {
-			log.Warn("conversation consistency check: failed to query by thread_id",
-				"thread_id", threadID, "error", err)
-			return failOpen() // fail open on query errors
-		}
-		if result != nil {
-			messages = result.Items
-		}
-	} else if senderID != "" && recipientID != "" {
+	if senderID != "" && recipientID != "" && threadID == "" {
 		// Look up prior DM messages between the same two principals.
 		// Query both directions: sender→recipient and recipient→sender.
 		dmOpts := store.ListOptions{Limit: 25, SkipTotalCount: true}
@@ -490,7 +480,10 @@ func CheckConversationConsistency(
 			messages = append(messages, result2.Items...)
 		}
 	} else {
-		// Not enough info to look up prior messages.
+		// Thread messages key directly on conversation_id (and messages missing
+		// a sender/recipient pair have no DM lookup key); querying by
+		// resolvedConvID cannot detect a mismatch against resolvedConvID, so
+		// skip the query.
 		return true
 	}
 

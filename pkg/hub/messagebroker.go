@@ -1265,12 +1265,19 @@ func (p *MessageBrokerProxy) resolveUserMessageConversation(ctx context.Context,
 				return false
 			}
 		} else {
-			p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
+			p.log.Warn("cannot resolve DM conversation: principal kind undetermined",
 				"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
 		}
 	}
 	if convResult != nil && storeMsg.ConversationID == "" {
 		storeMsg.ConversationID = convResult.ConversationID
+	}
+	if msg.Channel == "web" && storeMsg.ConversationID == "" {
+		messaging.WriteDenialMetrics.Inc("mb.user.unresolved")
+		p.log.Error("native web message conversation could not be resolved, message not persisted",
+			"sender", msg.Sender, "sender_id", msg.SenderID,
+			"recipient", msg.Recipient, "recipient_id", msg.RecipientID)
+		return false
 	}
 	// DEF-141: Classification is a three-way decision on provenance,
 	// separated from the honouring block above. Honouring is gated on
@@ -1519,7 +1526,10 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	// rendering can read it after persistence.
 	var convResult *messaging.ConversationResult
 	if !msg.Broadcasted {
-		if msg.ThreadID != "" {
+		if msg.ConversationID != "" {
+			storeMsg.ConversationID = msg.ConversationID
+			convResult = &messaging.ConversationResult{ConversationID: msg.ConversationID}
+		} else if msg.ThreadID != "" {
 			var threadOpts []messaging.ThreadConversationOption
 			if p.webChatStore != nil {
 				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
@@ -1547,13 +1557,21 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
 					return
 				}
-			} else {
-				p.log.Warn("skipping DM conversation resolution: sender kind undetermined",
+			} else if msg.Type != messages.TypeSystem {
+				messaging.WriteDenialMetrics.Inc("mb.agent.dm")
+				p.log.Error("cannot resolve DM conversation: sender kind undetermined, message not persisted",
 					"sender", msg.Sender, "sender_id", msg.SenderID)
+				return
 			}
 		}
-		if convResult != nil {
+		if convResult != nil && storeMsg.ConversationID == "" {
 			storeMsg.ConversationID = convResult.ConversationID
+		}
+		if msg.Channel == "web" && storeMsg.ConversationID == "" {
+			messaging.WriteDenialMetrics.Inc("mb.agent.unresolved")
+			p.log.Error("native web message conversation could not be resolved, message not persisted",
+				"sender", msg.Sender, "sender_id", msg.SenderID, "agent_id", agent.ID)
+			return
 		}
 		// Always log divergence — even when convResult is nil, that is a divergence signal.
 		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, agent.ID, msg.ThreadID)

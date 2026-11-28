@@ -99,8 +99,10 @@ func TestMessageProjectForBind_DMAgentGone(t *testing.T) {
 
 func TestMessageProjectForBind_ThreadKeys(t *testing.T) {
 	f := newRefFixture(t)
-	require.Equal(t, f.projB.ID, projectForBind(t, f, "", f.topicB, f.ub.ID), "topic key")
-	require.Equal(t, "", projectForBind(t, f, "", dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID), f.ua.ID), "DM key")
+	topicBConv := topicConversationID(t, f.wcs, f.topicB)
+	require.Equal(t, f.projB.ID, projectForBind(t, f, topicBConv, f.topicB, f.ub.ID), "topic conversation")
+	require.Equal(t, "", projectForBind(t, f, "", f.topicB, f.ub.ID), "topic key without conversation_id does not fall back to thread_id")
+	require.Equal(t, "", projectForBind(t, f, "", dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID), f.ua.ID), "DM key without conversation_id")
 }
 
 // TestMessageProjectForBind_IgnoresRequestProject (K8): the upload names

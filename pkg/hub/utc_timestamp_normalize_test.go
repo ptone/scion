@@ -256,13 +256,14 @@ func TestUTCTimestampNormalize_OrderingOverMigratedAndNewRows(t *testing.T) {
 		id string
 		at time.Time
 	}
+	convLegacyWeb, convLegacyJST := tid("norm-conv-lweb"), tid("norm-conv-ljst")
 	var all []row
 	addMsg := func(name string, at time.Time, legacy string) {
 		t.Helper()
 		id := tid("norm-order-" + name)
 		require.NoError(t, s.CreateMessage(ctx, &store.Message{
 			ID: id, ProjectID: proj.ID, Sender: "user:alice", Recipient: "agent:bot",
-			Msg: "needle " + name, Channel: "web", ThreadID: "topic-1", CreatedAt: at,
+			Msg: "needle " + name, Channel: "web", ThreadID: "topic-1", ConversationID: convLegacyWeb, CreatedAt: at,
 		}))
 		if legacy != "" {
 			execOne(t, db, "UPDATE messages SET created = ? WHERE id = ?", legacy, id)
@@ -278,7 +279,6 @@ func TestUTCTimestampNormalize_OrderingOverMigratedAndNewRows(t *testing.T) {
 	// Legacy conversations: a pre-fix webchat insert (RFC 3339 text) and a
 	// Tokyo-stamped ent row.
 	pid := proj.ID
-	convLegacyWeb, convLegacyJST := tid("norm-conv-lweb"), tid("norm-conv-ljst")
 	for _, c := range []struct {
 		id, text string
 	}{
@@ -740,7 +740,8 @@ func TestUTCTimestampNormalize_LeavesStarTimesFixedWidth(t *testing.T) {
 	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
 		ID: topicID, ProjectID: proj.ID, Name: "stars", CreatedBy: "u1", CreatedAt: normBase,
 	}))
-	sel := StarSelector{ConversationKey: topicID, Channel: "web", ThreadID: topicID}
+	topicConvID := topicConversationID(t, wcs, topicID)
+	sel := StarSelector{ConversationKey: topicID, Channel: "web", ConversationID: topicConvID}
 
 	// One whole-second and one fractional save time: both are stored with
 	// nine fraction digits, so neither is in the trimmed canonical form.
@@ -750,7 +751,7 @@ func TestUTCTimestampNormalize_LeavesStarTimesFixedWidth(t *testing.T) {
 	for i, at := range []time.Time{whole, frac} {
 		require.NoError(t, s.CreateMessage(ctx, &store.Message{
 			ID: ids[i], ProjectID: proj.ID, Sender: "user:alice", Recipient: "chat",
-			Msg: fmt.Sprintf("star %d", i), Type: "chat", Channel: "web", ThreadID: topicID, CreatedAt: normBase,
+			Msg: fmt.Sprintf("star %d", i), Type: "chat", Channel: "web", ThreadID: topicID, ConversationID: topicConvID, CreatedAt: normBase,
 		}))
 		_, changed, err := stars.AddMessageStar(ctx, "u1", StarTarget{MessageID: ids[i], ProjectID: proj.ID, Selector: sel})
 		require.NoError(t, err)

@@ -86,6 +86,7 @@ func setupPromoteBusyFixture(t *testing.T) (*Server, store.Store, WebChatStore, 
 	enableWriteDenySwitch(t, srv)
 
 	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+	dmConvID := seedConversation(t, s, "native", dmKey, "direct")
 	if err := wcs.UpsertDM(ctx, WebChatDM{
 		ConversationKey: dmKey,
 		ParticipantID:   DevUserID,
@@ -99,17 +100,18 @@ func setupPromoteBusyFixture(t *testing.T) (*Server, store.Store, WebChatStore, 
 	// the chat v2 send handler (handlers_chat_v2.go), so it never trips the
 	// guard on its own.
 	userMsg := &store.Message{
-		ID:            tid("promote-busy-user-msg"),
-		ProjectID:     proj.ID,
-		Sender:        "user:dev@localhost",
-		SenderID:      DevUserID,
-		Recipient:     "agent:" + agentID,
-		Msg:           "hello agent",
-		Type:          "chat",
-		Channel:       "web",
-		ThreadID:      dmKey,
-		DispatchState: store.MessageDispatchDispatched,
-		CreatedAt:     time.Now().Add(-5 * time.Second),
+		ID:             tid("promote-busy-user-msg"),
+		ProjectID:      proj.ID,
+		Sender:         "user:dev@localhost",
+		SenderID:       DevUserID,
+		ConversationID: dmConvID,
+		Recipient:      "agent:" + agentID,
+		Msg:            "hello agent",
+		Type:           "chat",
+		Channel:        "web",
+		ThreadID:       dmKey,
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().Add(-5 * time.Second),
 	}
 	if err := s.CreateMessage(ctx, userMsg); err != nil {
 		t.Fatalf("CreateMessage (user): %v", err)
@@ -207,18 +209,23 @@ func TestPromoteDM_GenuinelyPendingMessage_StillBlocks(t *testing.T) {
 	// durable dispatch intent has been written, but the broker/runtime has
 	// not yet acknowledged it (same shape as agent_dm_operation.go's
 	// pre-dispatch "pending" write).
+	dmConv, err := s.GetConversationByExternalRef(ctx, "native", dmKey)
+	if err != nil || dmConv == nil {
+		t.Fatalf("GetConversationByExternalRef(%q): %v", dmKey, err)
+	}
 	pending := &store.Message{
-		ID:            tid("promote-busy-pending-msg"),
-		ProjectID:     agent.ProjectID,
-		Sender:        "user:dev@localhost",
-		SenderID:      DevUserID,
-		Recipient:     "agent:" + agent.ID,
-		Msg:           "are you still there?",
-		Type:          "chat",
-		Channel:       "web",
-		ThreadID:      dmKey,
-		DispatchState: store.MessageDispatchPending,
-		CreatedAt:     time.Now(),
+		ID:             tid("promote-busy-pending-msg"),
+		ProjectID:      agent.ProjectID,
+		Sender:         "user:dev@localhost",
+		SenderID:       DevUserID,
+		Recipient:      "agent:" + agent.ID,
+		Msg:            "are you still there?",
+		Type:           "chat",
+		Channel:        "web",
+		ThreadID:       dmKey,
+		ConversationID: dmConv.ID,
+		DispatchState:  store.MessageDispatchPending,
+		CreatedAt:      time.Now(),
 	}
 	if err := s.CreateMessage(ctx, pending); err != nil {
 		t.Fatalf("CreateMessage (pending): %v", err)

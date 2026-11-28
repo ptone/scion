@@ -1447,11 +1447,18 @@ func (s *Server) resolveReplyTarget(ctx context.Context, key, projectID, replyTo
 		return nil, nil, false
 	}
 	// Authorization: the replied-to message must belong to this same
-	// conversation thread. A mismatched thread means the reply-to reference
+	// conversation. A mismatched conversation means the reply-to reference
 	// doesn't apply here — ignore it rather than route based on a message
 	// from another conversation.
 	agentSlug, isAgentSender := strings.CutPrefix(refMsg.Sender, "agent:")
-	if refMsg.ThreadID != key || !isAgentSender {
+	if !isAgentSender || refMsg.ConversationID == "" {
+		return nil, nil, false
+	}
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	convID, convErr := s.conversationIDForKey(ctx, wcs, key)
+	if convErr != nil || convID == "" || refMsg.ConversationID != convID {
 		return nil, nil, false
 	}
 	if refMsg.SenderID == "" {
@@ -2006,12 +2013,16 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				return nil, prePersistErr(newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil))
 			}
 		}
-		if convResult != nil {
-			storeMsg.ConversationID = convResult.ConversationID
-			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-				messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.validate")
-				return nil, prePersistErr(newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil))
-			}
+		if convResult == nil || convResult.ConversationID == "" {
+			messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.unresolved")
+			s.messageLog.Error("conversation resolution returned empty result, refusing message persist",
+				"key", key, "project_id", projectID)
+			return nil, prePersistErr(newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil))
+		}
+		storeMsg.ConversationID = convResult.ConversationID
+		if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+			messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.validate")
+			return nil, prePersistErr(newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil))
 		}
 		chatV2ConvResult = convResult
 	}
@@ -2109,6 +2120,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		storeMsg.CreatedAt = now
 		msg.Timestamp = now.UTC().Format(time.RFC3339)
 	}
+	storeMsg.ChatV2Origin = true
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)
 		return nil, prePersistErr(newChatSendError(http.StatusInternalServerError, "INTERNAL", "failed to persist message", nil))
@@ -2531,9 +2543,12 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 						continue
 					}
 				}
-				if convResult != nil {
-					mentionStoreMsg.ConversationID = convResult.ConversationID
+				if convResult == nil || convResult.ConversationID == "" {
+					messaging.WriteDenialMetrics.Inc("chat_v2.mention.unresolved")
+					s.messageLog.Error("conversation resolution returned empty result for mention", "slug", mentionAgent.Slug)
+					continue
 				}
+				mentionStoreMsg.ConversationID = convResult.ConversationID
 				mentionConvResult = convResult
 			}
 			// The primary's attachments stored as artifacts go with this copy
@@ -2548,6 +2563,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				mentionMsg.AttachmentDeliveries = deliveries
 			}
 			mentionPersisted := true
+			mentionStoreMsg.ChatV2Origin = true
 			if err := s.store.CreateMessage(ctx, mentionStoreMsg); err != nil {
 				s.messageLog.Error("Failed to persist mention message", "slug", mentionAgent.Slug, "error", err)
 				mentionPersisted = false
@@ -2898,8 +2914,16 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 				return nil, newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 			}
 		}
-		if convResult != nil {
-			storeMsg.ConversationID = convResult.ConversationID
+		if convResult == nil || convResult.ConversationID == "" {
+			messaging.WriteDenialMetrics.Inc("chat_v2.human.unresolved")
+			s.messageLog.Error("conversation resolution returned empty result, refusing message persist",
+				"key", key, "project_id", msgProjectID)
+			return nil, newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+		}
+		storeMsg.ConversationID = convResult.ConversationID
+		if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
+			messaging.WriteDenialMetrics.Inc("chat_v2.human.validate")
+			return nil, newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
 		}
 	}
 
@@ -3047,12 +3071,6 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 		return
 	}
 
-	// Verify conversation key matches.
-	if msg.ThreadID != key {
-		BadRequest(w, "message does not belong to this conversation")
-		return
-	}
-
 	// A token is re-checked against the conversation the message is in.
 	if !s.authorizeChatTokenMessageTarget(w, r, token, wcs, key) {
 		return
@@ -3063,8 +3081,19 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 		return
 	}
 
+	// Verify message belongs to this conversation.
+	convID, err := s.conversationIDForKey(ctx, wcs, key)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to look up conversation", nil)
+		return
+	}
+	if !sameConversation(msg, convID) {
+		BadRequest(w, "message does not belong to this conversation")
+		return
+	}
+
 	// Check no agent has replied after this message.
-	if hasAgentReplyAfter(ctx, s.store, key, msg.CreatedAt) {
+	if hasAgentReplyAfter(ctx, s.store, convID, msg.CreatedAt) {
 		writeError(w, http.StatusConflict, "AGENT_REPLIED", "Cannot edit: an agent has replied after this message", nil)
 		return
 	}
@@ -3174,12 +3203,6 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 		return
 	}
 
-	// Verify conversation key matches.
-	if msg.ThreadID != key {
-		BadRequest(w, "message does not belong to this conversation")
-		return
-	}
-
 	// A token is re-checked against the conversation the message is in.
 	if !s.authorizeChatTokenMessageTarget(w, r, token, wcs, key) {
 		return
@@ -3190,8 +3213,19 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 		return
 	}
 
+	// Verify message belongs to this conversation.
+	convID, err := s.conversationIDForKey(ctx, wcs, key)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to look up conversation", nil)
+		return
+	}
+	if !sameConversation(msg, convID) {
+		BadRequest(w, "message does not belong to this conversation")
+		return
+	}
+
 	// Check no agent has replied after this message.
-	if hasAgentReplyAfter(ctx, s.store, key, msg.CreatedAt) {
+	if hasAgentReplyAfter(ctx, s.store, convID, msg.CreatedAt) {
 		writeError(w, http.StatusConflict, "AGENT_REPLIED", "Cannot delete: an agent has replied after this message", nil)
 		return
 	}
@@ -3241,11 +3275,14 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 // regardless of how many messages follow the target timestamp. Each page
 // loads at most pageSize messages; as soon as one agent-sent message is
 // found the function returns early.
-func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, after time.Time) bool {
+func hasAgentReplyAfter(ctx context.Context, s store.Store, conversationID string, after time.Time) bool {
+	if conversationID == "" {
+		return true // fail-closed: deny edit/delete without a resolved conversation
+	}
 	filter := store.MessageFilter{
-		Channel:  "web",
-		ThreadID: threadID,
-		After:    after,
+		Channel:        "web",
+		ConversationID: conversationID,
+		After:          after,
 	}
 	const pageSize = 50
 	cursor := ""
@@ -3432,8 +3469,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if (filter.Channel != "" && anchor.Channel != filter.Channel) ||
-			(filter.ConversationID != "" && anchor.ConversationID != filter.ConversationID) ||
-			(filter.ThreadID != "" && anchor.ThreadID != filter.ThreadID) {
+			filter.ConversationID == "" || anchor.ConversationID != filter.ConversationID {
 			writeAroundMessageUnavailable(w)
 			return
 		}
@@ -3602,7 +3638,7 @@ func (s *Server) chatHistoryPage(ctx context.Context, wcs WebChatStore, key, his
 						// A preview shows only a message of this
 						// conversation, also for reply rows stored
 						// before the send-time check existed.
-						if !sameConversation(refMsg, key, historyConvID) {
+						if !sameConversation(refMsg, historyConvID) {
 							continue
 						}
 						content := refMsg.Msg
@@ -4047,9 +4083,7 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 
 	// The watermark must be a persisted message of this conversation:
 	// clients must never set a client-local placeholder, and a message of
-	// another conversation gets the same answer as a missing one. History
-	// lists by ConversationID, and a visible row's ThreadID may differ
-	// from key, so a match on either counts (sameConversation).
+	// another conversation gets the same answer as a missing one.
 	const watermarkNotInConversation = "messageId does not refer to a message in this conversation"
 	targetMsg, err := s.store.GetMessage(ctx, body.MessageID)
 	if err != nil {
@@ -4064,20 +4098,18 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 		ValidationError(w, watermarkNotInConversation, nil)
 		return
 	}
-	if !sameConversation(targetMsg, key, "") {
-		convID := ""
-		if targetMsg.ConversationID != "" {
-			convID, err = s.conversationIDForKey(ctx, wcs, key)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to look up message", nil)
-				return
-			}
-		}
-		if !sameConversation(targetMsg, key, convID) {
-			logReferenceRefused(ctx, logging.RequestPath(r), "read marker is not a message of this conversation", user)
-			ValidationError(w, watermarkNotInConversation, nil)
+	convID := ""
+	if targetMsg.ConversationID != "" {
+		convID, err = s.conversationIDForKey(ctx, wcs, key)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to look up message", nil)
 			return
 		}
+	}
+	if !sameConversation(targetMsg, convID) {
+		logReferenceRefused(ctx, logging.RequestPath(r), "read marker is not a message of this conversation", user)
+		ValidationError(w, watermarkNotInConversation, nil)
+		return
 	}
 	// Monotonic: a stale advance must never roll the watermark backward;
 	// ties break by ID, matching ListMessages' (CreatedAt, ID) ordering.
@@ -4175,16 +4207,25 @@ func (s *Server) conversationRecentMessages(
 			ExcludeType:    nativeDMMessageScope.ExcludeType,
 		}
 	} else {
-		filter = store.MessageFilter{Channel: "web", ThreadID: key}
-		if wcs != nil {
-			if topic, err := wcs.GetTopic(ctx, key); err == nil && topic != nil {
-				if convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, key, topic.ProjectID,
-					messaging.WithReadTopicLookup(wcs)); convResult != nil {
-					filter.ThreadID = ""
-					filter.ConversationID = convResult.ConversationID
-				}
-			}
+		if wcs == nil {
+			return nil, nil
 		}
+		topic, err := wcs.GetTopic(ctx, key)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		if topic == nil {
+			return nil, nil
+		}
+		convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, key, topic.ProjectID,
+			messaging.WithReadTopicLookup(wcs))
+		if convResult == nil {
+			return nil, nil
+		}
+		filter = store.MessageFilter{Channel: "web", ConversationID: convResult.ConversationID}
 	}
 
 	result, err := s.store.ListMessages(ctx, filter, store.ListOptions{Limit: limit, SkipTotalCount: true})
@@ -4571,7 +4612,8 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 	}
 
 	// 9. Check for in-flight dispatches
-	pendingCount, err := wcs.CountPendingMessages(ctx, key)
+	dmConvID, _ := s.conversationIDForKey(ctx, wcs, key)
+	pendingCount, err := wcs.CountPendingMessages(ctx, dmConvID)
 	if err == nil && pendingCount > 0 {
 		writeError(w, http.StatusConflict, "IN_FLIGHT_MESSAGES",
 			"agent has pending replies — try again in a few seconds", nil)
@@ -4580,7 +4622,7 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 
 	// 10. Idempotency check: if DM has no messages left and a matching topic exists,
 	// the promotion already succeeded.
-	msgCount, _ := wcs.CountMessages(ctx, key)
+	msgCount, _ := wcs.CountMessages(ctx, dmConvID)
 	if msgCount == 0 {
 		// DM has no messages — check if promotion already happened
 		topics, listErr := wcs.ListTopics(ctx, projectID)
