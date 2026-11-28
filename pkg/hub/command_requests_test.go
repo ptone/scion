@@ -1891,7 +1891,16 @@ func TestCommandRequests_ConversationApproverAndPendingCap(t *testing.T) {
 	})
 	f.srv.SetMessageBrokerProxy(nil)
 	assert.Equal(t, http.StatusBadRequest, rrSpoofDMThread.Code, "dm: thread_id on group conversation must be refused at send: %s", rrSpoofDMThread.Body.String())
-	assert.Contains(t, rrSpoofDMThread.Body.String(), "dm:", "expected dm: thread_id refusal, got: %s", rrSpoofDMThread.Body.String())
+	assert.Contains(t, rrSpoofDMThread.Body.String(), "thread_id does not match the conversation", "expected group thread_id mismatch refusal, got: %s", rrSpoofDMThread.Body.String())
+	spoofReqs, spoofReqErr := f.store.ListAgentCommandRequests(ctx, &store.ListAgentCommandRequestsOptions{
+		AgentID: f.agent.ID,
+		Key:     "conv-dm-thread-spoof",
+	})
+	require.NoError(t, spoofReqErr)
+	assert.Empty(t, spoofReqs.Items, "refused send must not write a command_requests row")
+	spoofMsgs, spoofMsgErr := f.store.ListMessages(ctx, store.MessageFilter{ConversationID: conv.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, spoofMsgErr)
+	assert.Empty(t, spoofMsgs.Items, "refused send must not write a message row")
 
 	// 4. Conversation target with human participant Alice as --approver -> 200.
 	rrConvOK := f.doAgentJSON(t, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/outbound-message", OutboundMessageRequest{

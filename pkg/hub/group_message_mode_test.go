@@ -648,8 +648,9 @@ func TestGroupMessageMode_OutboundExternalThreadPost(t *testing.T) {
 			rr := postOutboundGroupWith(t, srv, a, user.Email, "", threadID, "slack", "external thread post from "+a.Slug)
 			_, lookupErr := s.GetConversationByExternalRef(ctx, "slack", extRef)
 			if groupModeIsProjectCell(mode) {
-				require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
-				assert.NoError(t, lookupErr)
+				require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "body: %s", rr.Body.String())
+				assert.True(t, errors.Is(lookupErr, store.ErrNotFound),
+					"unknown external thread creates no conversation (err=%v)", lookupErr)
 			} else {
 				requireGroupModeDenied(t, rr, "body: %s", rr.Body.String())
 				assert.True(t, errors.Is(lookupErr, store.ErrNotFound),
