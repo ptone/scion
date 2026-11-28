@@ -105,7 +105,7 @@ import {
 import { replaceSearch } from '../../client/navigation.js';
 import '../shared/filter-box/filter-box.js';
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
-import { formatFilterResultCount } from '../shared/filter-box/filter-count.js';
+import { formatAgentWindowFilterCount } from './agent-filter-count.js';
 import {
   buildAgentValueSuggestions,
   canLiveAddAgent,
@@ -708,6 +708,10 @@ export class ScionPageAgents extends LitElement {
    * possibly stale.
    */
   private boundOnAgentCreated = (): void => {
+    if (this.unfilteredTotal !== null && !this.agentsIsUnfiltered) {
+      this.unfilteredTotal += 1;
+      this.requestUpdate();
+    }
     if (hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)) {
       this.agentWindow.markMembershipChanged();
     }
@@ -1033,6 +1037,10 @@ export class ScionPageAgents extends LitElement {
     const detail = (e as CustomEvent<{ data: AgentsChangedDetail }>).detail.data;
     // Paged: the window applies the change to its page and member index.
     this.agentWindow.applyChanges(detail);
+    if (this.unfilteredTotal !== null && !this.agentsIsUnfiltered && detail.deleted.length > 0) {
+      this.unfilteredTotal = Math.max(0, this.unfilteredTotal - detail.deleted.length);
+      this.requestUpdate();
+    }
     if (this.agentWindow.state === 'paged') return;
     const merged = mergeChanged(this.agents, detail, {
       getAgent: (id) => stateManager.getAgent(id),
@@ -1050,6 +1058,15 @@ export class ScionPageAgents extends LitElement {
     });
     if (merged !== this.agents) {
       this.agents = merged;
+      if (this.agentsIsUnfiltered) {
+        if (this.agentWindow.incompleteReason === null) {
+          this.unfilteredTotal = merged.length;
+          this.unfilteredTotalApproximate = false;
+        } else if (this.agentWindow.incompleteReason === 'capped') {
+          this.unfilteredTotal = merged.length;
+          this.unfilteredTotalApproximate = true;
+        }
+      }
     } else if (this.hasGraphContextChange(detail)) {
       this.graphContextVersion++;
     }
@@ -1886,59 +1903,16 @@ export class ScionPageAgents extends LitElement {
     if (!this.hasCommittedFilter || this.loading || Boolean(this.error)) {
       return '';
     }
-    const win = this.agentWindow;
-    let matched: number;
-    let matchedApproximate: boolean;
-    let total: number | null = null;
-    let totalApproximate = false;
-
-    if (win.state === 'paged') {
-      matched = typeof win.total === 'number' ? win.total : 0;
-      matchedApproximate = win.totalApproximate;
-      if (
-        !hasNonPhaseServerPredicate(this.committedFilterQuery, AGENTS_FILTER_SCHEMA) &&
-        (win.memberIndex.countOnly || win.memberIndex.size > 0)
-      ) {
-        total = win.stats.total;
-        totalApproximate = win.memberIndex.approximate;
-      } else if (
-        stateManager.isAgentSetComplete('full') ||
-        stateManager.isAgentSetComplete('compact')
-      ) {
-        total = stateManager.getAgents().length;
-      } else if (this.unfilteredTotal !== null) {
-        total = this.unfilteredTotal;
-        totalApproximate = this.unfilteredTotalApproximate;
-      }
-    } else {
-      matched = win.display.length;
-      matchedApproximate = win.incompleteReason !== null;
-      if (this.agentsIsUnfiltered) {
-        if (win.incompleteReason === null) {
-          total = this.agents.length;
-        } else if (win.incompleteReason === 'capped') {
-          total = this.agents.length;
-          totalApproximate = true;
-        }
-      } else if (
-        stateManager.isAgentSetComplete('full') ||
-        stateManager.isAgentSetComplete('compact')
-      ) {
-        total = stateManager.getAgents().length;
-      } else if (this.unfilteredTotal !== null) {
-        total = this.unfilteredTotal;
-        totalApproximate = this.unfilteredTotalApproximate;
-      }
-    }
-
-    return formatFilterResultCount({
-      active: true,
-      matched,
-      matchedApproximate,
-      total,
-      totalApproximate,
-      singular: 'agent',
-      plural: 'agents',
+    return formatAgentWindowFilterCount({
+      window: this.agentWindow,
+      agentsLength: this.agents.length,
+      agentsIsUnfiltered: this.agentsIsUnfiltered,
+      phaseOnlyServerFilter: !hasNonPhaseServerPredicate(
+        this.committedFilterQuery,
+        AGENTS_FILTER_SCHEMA
+      ),
+      unfilteredTotal: this.unfilteredTotal,
+      unfilteredTotalApproximate: this.unfilteredTotalApproximate,
     });
   }
 

@@ -166,8 +166,6 @@ export class AgentGraphPage extends LitElement {
   private knownLarge = false;
   /** The capped unscoped drain, reused for "all projects" with no request. */
   private cappedAll: CappedSet | null = null;
-  private unfilteredTotal: number | null = null;
-  private unfilteredTotalApproximate = false;
   private drainRunner = new AgentDrainRunner();
   private probeController: AbortController | null = null;
   /** Bumped by every load and picker change; a load whose number is stale is discarded. */
@@ -314,8 +312,6 @@ export class AgentGraphPage extends LitElement {
     this.probed = false;
     this.knownLarge = false;
     this.cappedAll = null;
-    this.unfilteredTotal = null;
-    this.unfilteredTotalApproximate = false;
     this.pendingCreated.clear();
     this.firstConnected = false;
     this.firstConnectLate = false;
@@ -363,8 +359,6 @@ export class AgentGraphPage extends LitElement {
     this.memberScope = '';
     this.loadTarget = '';
     this.incomplete = null;
-    this.unfilteredTotal = this.agents.length;
-    this.unfilteredTotalApproximate = false;
     this.error = null;
     this.loading = false;
     this.pendingCreated.clear();
@@ -592,18 +586,6 @@ export class AgentGraphPage extends LitElement {
     this.agents = agents;
     this.memberScope = scope;
     this.incomplete = incomplete;
-    if (scope === '') {
-      if (!incomplete || incomplete.shownComplete) {
-        this.unfilteredTotal = agents.length;
-        this.unfilteredTotalApproximate = false;
-      } else if (incomplete.reason === 'capped') {
-        this.unfilteredTotal = agents.length;
-        this.unfilteredTotalApproximate = true;
-      } else {
-        this.unfilteredTotal = null;
-        this.unfilteredTotalApproximate = false;
-      }
-    }
     this.stale = stale;
     this.error = null;
     this.pendingCreated.clear();
@@ -854,7 +836,12 @@ export class AgentGraphPage extends LitElement {
   }
 
   private getFilterResultCount(filtered: GraphFilterResult): string {
-    if (!filtered.hasActiveFilter || this.loading || Boolean(this.error)) {
+    if (
+      !filtered.hasActiveFilter ||
+      this.loading ||
+      Boolean(this.error) ||
+      this.memberScope === null
+    ) {
       return '';
     }
     const incomplete = this.incomplete;
@@ -862,23 +849,11 @@ export class AgentGraphPage extends LitElement {
     let total: number | null = null;
     let totalApproximate = false;
 
-    if (this.memberScope === '') {
-      if (!isIncomplete) {
-        total = this.agents.length;
-      } else if (incomplete.reason === 'capped') {
-        total = this.agents.length;
-        totalApproximate = true;
-      }
-    } else if (this.initiallyProjectScoped) {
-      if (!isIncomplete) {
-        total = this.agents.length;
-      } else if (incomplete.reason === 'capped') {
-        total = this.agents.length;
-        totalApproximate = true;
-      }
-    } else if (this.unfilteredTotal !== null) {
-      total = this.unfilteredTotal;
-      totalApproximate = this.unfilteredTotalApproximate;
+    if (!isIncomplete) {
+      total = this.agents.length;
+    } else if (incomplete.reason === 'capped') {
+      total = this.agents.length;
+      totalApproximate = true;
     }
 
     return formatFilterResultCount({

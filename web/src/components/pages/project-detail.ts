@@ -126,7 +126,7 @@ import { formatNumber } from '../../utils/format-number.js';
 import { replaceSearch } from '../../client/navigation.js';
 import '../shared/filter-box/filter-box.js';
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
-import { formatFilterResultCount } from '../shared/filter-box/filter-count.js';
+import { formatAgentWindowFilterCount } from './agent-filter-count.js';
 import {
   buildAgentValueSuggestions,
   canLiveAddAgent,
@@ -219,6 +219,7 @@ interface SortedAgentsResponse {
   agents: Agent[];
   nextCursor?: string;
   totalCount: number;
+  totalCountApproximate?: boolean;
   complete?: boolean;
   sort?: string;
   dir?: string;
@@ -2326,7 +2327,7 @@ export class ScionPageProjectDetail extends LitElement {
       this.agentsIsUnfiltered = false;
       if (serverQ === '') {
         this.unfilteredTotal = data.totalCount;
-        this.unfilteredTotalApproximate = false;
+        this.unfilteredTotalApproximate = Boolean(data.totalCountApproximate);
       }
       this.agentWindow.setPaged(this.seedPage(epoch, data), ticket.key);
     }
@@ -2541,6 +2542,7 @@ export class ScionPageProjectDetail extends LitElement {
       agents: seeded.agents,
       nextCursor: data.nextCursor,
       totalCount: data.totalCount,
+      totalCountApproximate: data.totalCountApproximate,
       stats: this.freshStats(data.stats),
       liveChanged: epoch.changedIds,
       liveUnknown: epoch.unknownChanges,
@@ -2975,55 +2977,17 @@ export class ScionPageProjectDetail extends LitElement {
     ) {
       return '';
     }
-    const win = this.agentWindow;
-    let matched: number;
-    let matchedApproximate: boolean;
-    let total: number | null = null;
-    let totalApproximate = false;
-
-    if (win.state === 'paged') {
-      matched = typeof win.total === 'number' ? win.total : 0;
-      matchedApproximate = win.totalApproximate;
-      if (
-        !hasNonPhaseServerPredicate(this.committedFilterQuery, PROJECT_AGENTS_FILTER_SCHEMA) &&
-        (win.memberIndex.countOnly || win.memberIndex.size > 0)
-      ) {
-        total = win.stats.total;
-        totalApproximate = win.memberIndex.approximate;
-      } else if (this.unfilteredTotal !== null) {
-        total = this.unfilteredTotal;
-        totalApproximate = this.unfilteredTotalApproximate;
-      } else if (typeof this.project?.agentCount === 'number') {
-        total = this.project.agentCount;
-      }
-    } else {
-      matched = win.display.length;
-      matchedApproximate = win.incompleteReason !== null;
-      if (this.agentsIsUnfiltered) {
-        if (win.incompleteReason === null) {
-          total = this.agents.length;
-        } else if (win.incompleteReason === 'capped') {
-          total = this.agents.length;
-          totalApproximate = true;
-        } else if (typeof this.project?.agentCount === 'number') {
-          total = this.project.agentCount;
-        }
-      } else if (this.unfilteredTotal !== null) {
-        total = this.unfilteredTotal;
-        totalApproximate = this.unfilteredTotalApproximate;
-      } else if (typeof this.project?.agentCount === 'number') {
-        total = this.project.agentCount;
-      }
-    }
-
-    return formatFilterResultCount({
-      active: true,
-      matched,
-      matchedApproximate,
-      total,
-      totalApproximate,
-      singular: 'agent',
-      plural: 'agents',
+    return formatAgentWindowFilterCount({
+      window: this.agentWindow,
+      agentsLength: this.agents.length,
+      agentsIsUnfiltered: this.agentsIsUnfiltered,
+      phaseOnlyServerFilter: !hasNonPhaseServerPredicate(
+        this.committedFilterQuery,
+        PROJECT_AGENTS_FILTER_SCHEMA
+      ),
+      unfilteredTotal: this.unfilteredTotal,
+      unfilteredTotalApproximate: this.unfilteredTotalApproximate,
+      fallbackTotal: typeof this.project?.agentCount === 'number' ? this.project.agentCount : null,
     });
   }
 
