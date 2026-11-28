@@ -15,11 +15,13 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -62,7 +64,9 @@ func TestAuditM1_XForwardedForAllowlist(t *testing.T) {
 		},
 		DisableTransportAuth: true,
 	})
-	srv, err := New(Options{Backend: backend})
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	srv, err := New(Options{Backend: backend, Logger: logger})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -522,7 +526,9 @@ func TestSendMessage_TargetXORAndUnknownAgentCandidates(t *testing.T) {
 		},
 		DisableTransportAuth: true,
 	})
-	srv, err := New(Options{Backend: backend})
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	srv, err := New(Options{Backend: backend, Logger: logger})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -584,6 +590,10 @@ func TestSendMessage_TargetXORAndUnknownAgentCandidates(t *testing.T) {
 	if !strings.Contains(msg, "echo-t") || !strings.Contains(msg, "worker-2") {
 		t.Fatalf("expected candidate agents in error message, got: %q", msg)
 	}
+	// Audit log must preserve hub_status=404 even when wrapped with candidate hint.
+	if logText := logBuf.String(); !strings.Contains(logText, `"hub_status":404`) {
+		t.Fatalf("expected audit log to record hub_status:404 for unknown agent, got:\n%s", logText)
+	}
 }
 
 func TestServerOptions_DefaultsAndValidation(t *testing.T) {
@@ -605,6 +615,12 @@ func TestServerOptions_DefaultsAndValidation(t *testing.T) {
 	}
 	if _, err := New(Options{Backend: backend, StreamWait: -time.Second}); err == nil {
 		t.Fatal("expected error for negative StreamWait")
+	}
+	if _, err := New(Options{Backend: backend, StreamWait: MaxStreamWait + time.Second}); err == nil {
+		t.Fatal("expected error for StreamWait exceeding Hub 55s maximum")
+	}
+	if _, err := New(Options{Backend: backend, StreamWait: MaxStreamWait}); err != nil {
+		t.Fatalf("StreamWait at 55s maximum should be accepted, got: %v", err)
 	}
 
 	// Verify AcquireStream returns *jsonrpc.Error with CodeResourceExhausted (-32025).
@@ -787,7 +803,9 @@ func TestWaitForMessages_CursorExpiredAndInvalidCursor(t *testing.T) {
 		},
 		DisableTransportAuth: true,
 	})
-	srv, err := New(Options{Backend: backend})
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	srv, err := New(Options{Backend: backend, Logger: logger})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -879,7 +897,9 @@ func TestResources_ErrorCodeMapping(t *testing.T) {
 		},
 		DisableTransportAuth: true,
 	})
-	srv, err := New(Options{Backend: backend})
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	srv, err := New(Options{Backend: backend, Logger: logger})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -997,5 +1017,124 @@ func TestSendToConversation_UnsupportedExternalGroup(t *testing.T) {
 	_, err := backend.SendToConversation(context.Background(), Credential{Bearer: "scion_pat_ext"}, "conv-slack", "hello")
 	if err == nil || !strings.Contains(err.Error(), "not supported") {
 		t.Fatalf("err = %v, want clear 'not supported' error", err)
+	}
+}
+
+// TestSendToConversation_DMMismatchReturnsWarningNotError verifies that if the
+// Hub delivers (2xx) to a different conversation_id than requested on the DM
+// shortcut, SendToConversation returns success with a Warning ("do not resend")
+// instead of an error that would prompt duplicate retries.
+func TestSendToConversation_DMMismatchReturnsWarningNotError(t *testing.T) {
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/conversations/conv-requested":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":          "conv-requested",
+				"kind":        "direct",
+				"surface":     "native",
+				"externalRef": "dm:agent:22222222-2222-2222-2222-222222222222:user:11111111-1111-1111-1111-111111111111",
+			})
+		case strings.HasSuffix(r.URL.Path, "/agents/22222222-2222-2222-2222-222222222222/message"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"message_id":      "msg-delivered",
+				"conversation_id": "conv-actual",
+				"status":          "delivered",
+				"cursor":          "v1.conv-actual.1",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	backend := NewBackend(BackendOptions{
+		HubBaseURL:           "http://in-process",
+		Transport:            &InProcessTransport{Handler: fakeHub},
+		DisableTransportAuth: true,
+	})
+	ctx := withRequestAuth(context.Background(), requestAuth{
+		Credential: Credential{Bearer: "scion_pat_dm"},
+		Principal:  Principal{ID: "11111111-1111-1111-1111-111111111111"},
+	})
+	res, err := backend.SendToConversation(ctx, Credential{Bearer: "scion_pat_dm"}, "conv-requested", "hello")
+	if err != nil {
+		t.Fatalf("expected success with warning after 2xx delivery, got error: %v", err)
+	}
+	if res.MessageID != "msg-delivered" || res.ConversationID != "conv-actual" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if !strings.Contains(res.Warning, "conv-actual") || !strings.Contains(res.Warning, "do not resend") {
+		t.Fatalf("expected warning mentioning actual conversation and do not resend, got %q", res.Warning)
+	}
+}
+
+// TestSendToConversation_DMShortcutSkipsExtraMeCall verifies that DM sends
+// through the MCP front door reuse the already-resolved principal ID for
+// routing and do not issue a second /api/v1/auth/me call.
+func TestSendToConversation_DMShortcutSkipsExtraMeCall(t *testing.T) {
+	var meCalls atomic.Int32
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/auth/me":
+			meCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "11111111-1111-1111-1111-111111111111", "email": "u@example.com"})
+		case r.URL.Path == "/api/v1/conversations/conv-dm-1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":          "conv-dm-1",
+				"kind":        "direct",
+				"surface":     "native",
+				"externalRef": "dm:agent:22222222-2222-2222-2222-222222222222:user:11111111-1111-1111-1111-111111111111",
+			})
+		case strings.HasSuffix(r.URL.Path, "/agents/22222222-2222-2222-2222-222222222222/message"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"message_id":      "msg-1",
+				"conversation_id": "conv-dm-1",
+				"status":          "delivered",
+				"cursor":          "v1.conv-dm-1.1",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	backend := NewBackend(BackendOptions{
+		HubBaseURL: "http://in-process",
+		Transport:  &InProcessTransport{Handler: fakeHub},
+		ExperimentChecker: func(_ context.Context, _ Credential, _ string) (bool, error) {
+			return true, nil
+		},
+		DisableTransportAuth: true,
+	})
+	srv, err := New(Options{Backend: backend})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx := context.Background()
+	cl := mcp.NewClient(&mcp.Implementation{Name: "dm-me-test", Version: "1.0"}, nil)
+	sess, err := cl.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint: ts.URL + "/mcp",
+		HTTPClient: &http.Client{
+			Transport: &staticHeaderTransport{
+				base:    &http.Transport{DisableKeepAlives: true},
+				headers: map[string]string{"Authorization": "Bearer scion_pat_dm_me"},
+			},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	res, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "send_message",
+		Arguments: map[string]any{"conversation_id": "conv-dm-1", "text": "hello"},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("send_message failed: err=%v res=%+v", err, res)
+	}
+	if got := meCalls.Load(); got != 1 {
+		t.Fatalf("/api/v1/auth/me called %d times, want 1 (front door only)", got)
 	}
 }

@@ -114,6 +114,9 @@ func New(opts Options) (*Server, error) {
 	if opts.StreamWait < 0 {
 		return nil, fmt.Errorf("mcpserver: StreamWait must be non-negative, got %s", opts.StreamWait)
 	}
+	if opts.StreamWait > MaxStreamWait {
+		return nil, fmt.Errorf("mcpserver: StreamWait must not exceed %s (Hub maximum), got %s", MaxStreamWait, opts.StreamWait)
+	}
 	if opts.StreamWait == 0 {
 		opts.StreamWait = DefaultStreamWait
 	}

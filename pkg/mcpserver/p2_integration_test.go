@@ -173,13 +173,13 @@ func TestIntegration_P2_ToolsResourcesStreamCapAndAuthz(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create full UAT: %v", err)
 	}
-	noAgentReadUAT, err := aliceHub.Tokens().Create(ctx, &hubclient.CreateTokenRequest{
-		Name:      "p2-no-agent-read",
+	noAgentListUAT, err := aliceHub.Tokens().Create(ctx, &hubclient.CreateTokenRequest{
+		Name:      "p2-no-agent-list",
 		ProjectID: proj.ID,
-		Scopes:    []string{"project:read", "inbox:read"},
+		Scopes:    []string{"project:read", "agent:read", "inbox:read"},
 	})
 	if err != nil {
-		t.Fatalf("create no-agent-read UAT: %v", err)
+		t.Fatalf("create no-agent-list UAT: %v", err)
 	}
 	noInboxReadUAT, err := aliceHub.Tokens().Create(ctx, &hubclient.CreateTokenRequest{
 		Name:      "p2-no-inbox-read",
@@ -481,18 +481,21 @@ func TestIntegration_P2_ToolsResourcesStreamCapAndAuthz(t *testing.T) {
 	capWG.Wait()
 
 	// 8. §9 B10: Authz parity for new tools and resources.
-	noAgentSession := connectClient(noAgentReadUAT.Token)
-	deniedList, err := noAgentSession.CallTool(ctx, &mcp.CallToolParams{
+	// Token has project:read + agent:read + inbox:read, but lacks agent:list:
+	// Hub answers 404 not_found ("Project not found") to avoid an existence oracle.
+	noAgentListSession := connectClient(noAgentListUAT.Token)
+	deniedList, err := noAgentListSession.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "list_agents",
 		Arguments: map[string]any{"project": proj.ID},
 	})
 	if err != nil || !deniedList.IsError {
-		t.Fatalf("list_agents without agent:read: err=%v res=%+v, want tool error", err, deniedList)
+		t.Fatalf("list_agents without agent:list: err=%v res=%+v, want tool error", err, deniedList)
 	}
-	if txt := deniedList.Content[0].(*mcp.TextContent).Text; !strings.Contains(txt, "403") && !strings.Contains(txt, "404") {
-		t.Fatalf("expected Hub authz denial (403/404) for list_agents without agent:list, got: %q", txt)
+	if txt := deniedList.Content[0].(*mcp.TextContent).Text; txt != "hub error (404 not_found): Project not found" {
+		t.Fatalf("list_agents without agent:list error = %q, want %q", txt, "hub error (404 not_found): Project not found")
 	}
 
+	// Token lacks inbox:read: Hub answers 403 forbidden ("Insufficient permissions").
 	noInboxSession := connectClient(noInboxReadUAT.Token)
 	deniedConvs, err := noInboxSession.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "list_conversations",
@@ -501,8 +504,8 @@ func TestIntegration_P2_ToolsResourcesStreamCapAndAuthz(t *testing.T) {
 	if err != nil || !deniedConvs.IsError {
 		t.Fatalf("list_conversations without inbox:read: err=%v res=%+v, want tool error", err, deniedConvs)
 	}
-	if txt := deniedConvs.Content[0].(*mcp.TextContent).Text; !strings.Contains(txt, "403") {
-		t.Fatalf("expected Hub 403 reason for list_conversations without inbox:read, got: %q", txt)
+	if txt := deniedConvs.Content[0].(*mcp.TextContent).Text; txt != "hub error (403 forbidden): Insufficient permissions" {
+		t.Fatalf("list_conversations without inbox:read error = %q, want %q", txt, "hub error (403 forbidden): Insufficient permissions")
 	}
 
 	deniedWait, err := noInboxSession.CallTool(ctx, &mcp.CallToolParams{
@@ -1153,5 +1156,243 @@ func TestIntegration_P2_GroupConversationSendAndWait(t *testing.T) {
 		if c.Kind == "direct" {
 			t.Fatalf("O1 regression: agent<->agent DM send silently created/landed in alice's DM %q (%s)", c.ID, c.ExternalRef)
 		}
+	}
+}
+
+// groupRaceTransport intercepts a 201 response from POST
+// /api/v1/chat/conversations/{threadID}/messages and immediately commits a
+// concurrent message from another user before returning the response to
+// SendToConversation. On the old Watch(AfterMessage, Limit 1) implementation,
+// the returned cursor jumped past the injected message and wait_for_messages
+// silently skipped it (R1).
+type groupRaceTransport struct {
+	base    http.RoundTripper
+	onReply func() error
+	fired   bool
+	mu      sync.Mutex
+}
+
+func (r *groupRaceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := r.base.RoundTrip(req)
+	if err != nil || req.Method != http.MethodPost || !strings.Contains(req.URL.Path, "/api/v1/chat/conversations/") || !strings.HasSuffix(req.URL.Path, "/messages") {
+		return resp, err
+	}
+	if resp.StatusCode == http.StatusCreated {
+		r.mu.Lock()
+		already := r.fired
+		r.fired = true
+		r.mu.Unlock()
+		if !already {
+			if cbErr := r.onReply(); cbErr != nil {
+				_ = resp.Body.Close()
+				return nil, cbErr
+			}
+		}
+	}
+	return resp, nil
+}
+
+// TestIntegration_P2_GroupSendCursorDoesNotSkipConcurrentMessage is the R1
+// regression test: a message from another user committed immediately after the
+// group chat POST returns 201 must still be delivered by
+// wait_for_messages(send.Cursor, filter=others|all).
+func TestIntegration_P2_GroupSendCursorDoesNotSkipConcurrentMessage(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dbPath := filepath.Join(t.TempDir(), "hub-group-race.db")
+	entClient, err := entc.OpenSQLite(dbPath, entc.PoolConfig{MaxOpenConns: 1})
+	if err != nil {
+		t.Fatalf("entc.OpenSQLite: %v", err)
+	}
+	if err := entc.AutoMigrate(ctx, entClient); err != nil {
+		t.Fatalf("entc.AutoMigrate: %v", err)
+	}
+	st := entadapter.NewCompositeStore(entClient)
+	t.Cleanup(func() { _ = st.Close() })
+
+	hubSrv, err := hub.New(hub.ServerConfig{Host: "127.0.0.1", Port: 0}, st)
+	if err != nil {
+		t.Fatalf("hub.New: %v", err)
+	}
+	hubSrv.SetDispatcher(&noopMessageDispatcher{})
+
+	chatDB, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("sql.Open chatDB: %v", err)
+	}
+	chatDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = chatDB.Close() })
+	wcs := hub.NewWebChatStore(chatDB, "sqlite")
+	if err := wcs.Init(); err != nil {
+		t.Fatalf("wcs.Init: %v", err)
+	}
+	hubSrv.SetWebChatStore(wcs)
+
+	alice := &store.User{ID: uuid.NewString(), Email: "alice-gr@example.com", DisplayName: "Alice GR", Role: store.UserRoleMember, Status: "active"}
+	bob := &store.User{ID: uuid.NewString(), Email: "bob-gr@example.com", DisplayName: "Bob GR", Role: store.UserRoleMember, Status: "active"}
+	for _, u := range []*store.User{alice, bob} {
+		if err := st.CreateUser(ctx, u); err != nil {
+			t.Fatalf("CreateUser(%s): %v", u.Email, err)
+		}
+	}
+	hubMemberRole, err := st.GetRoleDefinitionByName(ctx, "hub-member", store.RoleScopeSystem)
+	if err != nil {
+		t.Fatalf("GetRoleDefinitionByName: %v", err)
+	}
+	if _, err := st.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID: uuid.NewString(), PrincipalType: "user", PrincipalID: alice.ID,
+		RoleDefinitionID: hubMemberRole.ID, ScopeType: store.RoleScopeSystem, CreatedBy: alice.ID,
+	}); err != nil {
+		t.Fatalf("CreateRoleBinding(alice): %v", err)
+	}
+
+	mint := func(u *store.User) string {
+		tok, _, err := hubSrv.GetUserTokenService().MintAccessToken(hub.UserTokenSubject{
+			UserID: u.ID, Email: u.Email, DisplayName: u.DisplayName, Role: u.Role, ClientType: hub.ClientTypeCLI,
+		})
+		if err != nil {
+			t.Fatalf("MintAccessToken: %v", err)
+		}
+		return tok
+	}
+	aliceJWT := mint(alice)
+	bobJWT := mint(bob)
+
+	hc := &http.Client{Transport: &mcpserver.InProcessTransport{Handler: hubSrv.Handler()}}
+	aliceHub, err := hubclient.New("http://in-process", hubclient.WithHTTPClient(hc), hubclient.WithBearerToken(aliceJWT), hubclient.WithTransportAuth(nil, 0))
+	if err != nil {
+		t.Fatalf("hubclient.New: %v", err)
+	}
+	proj, err := aliceHub.Projects().Create(ctx, &hubclient.CreateProjectRequest{Name: "Group Race", Slug: "grp-race"})
+	if err != nil {
+		t.Fatalf("Projects.Create: %v", err)
+	}
+	// Grant bob project-member so bob can post to the group thread.
+	projMemberRole, err := st.GetRoleDefinitionByName(ctx, "project-member", store.RoleScopeProject)
+	if err != nil {
+		t.Fatalf("GetRoleDefinitionByName(project-member): %v", err)
+	}
+	if _, err := st.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID: uuid.NewString(), PrincipalType: "user", PrincipalID: bob.ID,
+		RoleDefinitionID: projMemberRole.ID, ScopeType: store.RoleScopeProject, ScopeID: proj.ID, CreatedBy: alice.ID,
+	}); err != nil {
+		t.Fatalf("CreateRoleBinding(bob project-member): %v", err)
+	}
+
+	conv, err := aliceHub.Conversations().Create(ctx, &hubclient.CreateConversationRequest{
+		DisplayName: "race-group", ProjectID: proj.ID, Kind: "group",
+	})
+	if err != nil {
+		t.Fatalf("Conversations.Create: %v", err)
+	}
+	parts := strings.SplitN(conv.ExternalRef, ":", 3)
+	if len(parts) != 3 {
+		t.Fatalf("unexpected group ExternalRef %q", conv.ExternalRef)
+	}
+	threadID := parts[2]
+
+	raceRT := &groupRaceTransport{
+		base: &mcpserver.InProcessTransport{Handler: hubSrv.Handler()},
+		onReply: func() error {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+				"http://in-process/api/v1/chat/conversations/"+threadID+"/messages",
+				strings.NewReader(`{"content":"injected-race-from-bob"}`))
+			if err != nil {
+				return err
+			}
+			req.Header.Set("Authorization", "Bearer "+bobJWT)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := hc.Do(req)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusCreated {
+				return fmt.Errorf("bob inject status = %d, want 201", resp.StatusCode)
+			}
+			return nil
+		},
+	}
+
+	backend := mcpserver.NewBackend(mcpserver.BackendOptions{
+		HubBaseURL: "http://in-process",
+		Transport:  raceRT,
+		Version:    "grp-race-test",
+		ExperimentChecker: func(_ context.Context, _ mcpserver.Credential, _ string) (bool, error) {
+			return true, nil
+		},
+		DisableTransportAuth: true,
+	})
+	mcpSrv, err := mcpserver.New(mcpserver.Options{Version: "grp-race-test", Backend: backend})
+	if err != nil {
+		t.Fatalf("mcpserver.New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	srvCtx, srvCancel := context.WithCancel(ctx)
+	srvDone := make(chan error, 1)
+	go func() { srvDone <- mcpSrv.Serve(srvCtx, ln) }()
+	defer func() {
+		srvCancel()
+		if err := <-srvDone; err != nil {
+			t.Errorf("mcpSrv.Serve shutdown error: %v", err)
+		}
+	}()
+
+	cl := mcp.NewClient(&mcp.Implementation{Name: "grp-race-client", Version: "1.0"}, nil)
+	sess, err := cl.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint: "http://" + ln.Addr().String() + "/mcp",
+		HTTPClient: &http.Client{
+			Transport: &headerRoundTripper{
+				base:    &http.Transport{DisableKeepAlives: true},
+				headers: map[string]string{"Authorization": "Bearer " + aliceJWT},
+			},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	sendRes, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name: "send_message",
+		Arguments: map[string]any{
+			"conversation_id": conv.ID,
+			"text":            "alice-trigger",
+		},
+	})
+	if err != nil || sendRes.IsError {
+		t.Fatalf("send_message failed: err=%v res=%+v", err, sendRes)
+	}
+	var sendOut mcpserver.SendResult
+	if err := json.Unmarshal([]byte(sendRes.Content[0].(*mcp.TextContent).Text), &sendOut); err != nil {
+		t.Fatalf("unmarshal sendOut: %v", err)
+	}
+	if sendOut.Cursor == "" {
+		t.Fatalf("expected non-empty atomic cursor on group send, got %+v", sendOut)
+	}
+
+	// wait_for_messages(sendOut.Cursor, filter=others) MUST return bob's injected message.
+	waitRes, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name: "wait_for_messages",
+		Arguments: map[string]any{
+			"conversation_id": conv.ID,
+			"cursor":          sendOut.Cursor,
+			"timeout_seconds": 3,
+			"filter":          "others",
+		},
+	})
+	if err != nil || waitRes.IsError {
+		t.Fatalf("wait_for_messages failed: err=%v res=%+v", err, waitRes)
+	}
+	var waitOut mcpserver.WaitForMessagesOutput
+	if err := json.Unmarshal([]byte(waitRes.Content[0].(*mcp.TextContent).Text), &waitOut); err != nil {
+		t.Fatalf("unmarshal waitOut: %v", err)
+	}
+	if waitOut.TimedOut || len(waitOut.Messages) != 1 || waitOut.Messages[0].Text != "injected-race-from-bob" {
+		t.Fatalf("R1 regression: wait_for_messages missed concurrent group message: %+v", waitOut)
 	}
 }

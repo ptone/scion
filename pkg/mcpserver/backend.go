@@ -218,6 +218,8 @@ func (b *hubBackend) SendToAgent(ctx context.Context, c Credential, project, age
 	if err != nil {
 		// Design §4.4: if the agent name is unknown or ambiguous within the
 		// project, include candidate agents from list_agents when readable.
+		// Wrap with hubHintError so hubStatusCode retains the Hub HTTP status
+		// for audit logs while formatHubToolError surfaces the candidate hint.
 		var apiErr *apiclient.APIError
 		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusConflict) {
 			candidates, listErr := b.ListAgents(ctx, c, projectID)
@@ -226,10 +228,16 @@ func (b *hubBackend) SendToAgent(ctx context.Context, c Credential, project, age
 				for _, cand := range candidates {
 					names = append(names, fmt.Sprintf("%s (%s)", cand.Name, cand.ID))
 				}
-				return SendResult{}, fmt.Errorf("%s; available agents in project: %s", formatHubToolError(err), strings.Join(names, ", "))
+				return SendResult{}, &hubHintError{
+					cause: err,
+					msg:   fmt.Sprintf("%s; available agents in project: %s", formatHubToolError(err), strings.Join(names, ", ")),
+				}
 			}
 			if listErr != nil {
-				return SendResult{}, fmt.Errorf("%s (could not list candidate agents; listing agents requires the agent:list scope)", formatHubToolError(err))
+				return SendResult{}, &hubHintError{
+					cause: err,
+					msg:   fmt.Sprintf("%s (could not list candidate agents; listing agents requires the agent:list scope)", formatHubToolError(err)),
+				}
 			}
 		}
 		return SendResult{}, err
@@ -272,10 +280,17 @@ func (b *hubBackend) SendToConversation(ctx context.Context, c Credential, convI
 	// Only take this shortcut when the DM key is strictly user<->agent AND the
 	// user side matches the authenticated caller (O1): an agent<->agent DM or
 	// another user's DM must never silently land in the caller's own DM.
+	// Use the front door's already-resolved principal ID for routing only (never
+	// for authorization — the Hub still authorizes the outbound POST).
 	if conv.Kind == "direct" {
 		if userID, agentID, ok := parseUserAgentDM(conv.ExternalRef); ok {
-			caller, meErr := b.Me(ctx, c)
-			if meErr == nil && caller.ID != "" && caller.ID == userID {
+			var callerID string
+			if ra, hasAuth := requestAuthFromContext(ctx); hasAuth && ra.Principal.ID != "" {
+				callerID = ra.Principal.ID
+			} else if caller, meErr := b.Me(ctx, c); meErr == nil {
+				callerID = caller.ID
+			}
+			if callerID != "" && callerID == userID {
 				msg := &messages.StructuredMessage{
 					Version: messages.Version,
 					Msg:     text,
@@ -290,9 +305,6 @@ func (b *hubBackend) SendToConversation(ctx context.Context, c Credential, convI
 				if err != nil {
 					return SendResult{}, err
 				}
-				if resp.ConversationID != "" && resp.ConversationID != convID {
-					return SendResult{}, fmt.Errorf("refused conversation target mismatch: requested %q but Hub routed to %q", convID, resp.ConversationID)
-				}
 				res := SendResult{
 					MessageID:      resp.MessageID,
 					ConversationID: resp.ConversationID,
@@ -303,7 +315,12 @@ func (b *hubBackend) SendToConversation(ctx context.Context, c Credential, convI
 				if res.ConversationID == "" {
 					res.ConversationID = convID
 				}
-				if res.Cursor == "" {
+				if resp.ConversationID != "" && resp.ConversationID != convID {
+					// Hub already accepted/delivered the message (2xx); return
+					// success with a warning rather than an error so the caller
+					// does not resend and duplicate the side effect.
+					res.Warning = fmt.Sprintf("delivered to conversation %q instead of requested %q; do not resend", resp.ConversationID, convID)
+				} else if res.Cursor == "" {
 					res.Warning = "delivered but not recorded in conversation history; replies cannot be read via this conversation; do not resend"
 				}
 				return res, nil
@@ -320,7 +337,7 @@ func (b *hubBackend) SendToConversation(ctx context.Context, c Credential, convI
 	if err != nil {
 		return SendResult{}, err
 	}
-	msgID, status, err := b.postChatConversationMessage(ctx, c, chatKey, text)
+	msgID, status, cursor, err := b.postChatConversationMessage(ctx, c, chatKey, text)
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -329,19 +346,10 @@ func (b *hubBackend) SendToConversation(ctx context.Context, c Credential, convI
 		MessageID:      msgID,
 		ConversationID: convID,
 		Status:         status,
-	}
-	if msgID != "" {
-		if wRes, wErr := cl.Conversations().Watch(ctx, convID, hubclient.WatchOptions{
-			AfterMessage: msgID,
-			Immediate:    true,
-			Filter:       "all",
-			Limit:        1,
-		}); wErr == nil && wRes != nil && wRes.NextCursor != "" {
-			res.Cursor = wRes.NextCursor
-		}
+		Cursor:         cursor,
 	}
 	if res.Cursor == "" {
-		res.Warning = "delivered but cursor could not be obtained; do not resend"
+		res.Warning = "delivered but cursor was not returned by Hub; do not resend"
 	}
 	return res, nil
 }
@@ -395,39 +403,40 @@ func chatSendKeyForConversation(conv *hubclient.ConversationDetail) (string, err
 	}
 }
 
-func (b *hubBackend) postChatConversationMessage(ctx context.Context, c Credential, key, text string) (messageID, status string, err error) {
+func (b *hubBackend) postChatConversationMessage(ctx context.Context, c Credential, key, text string) (messageID, status, cursor string, err error) {
 	payload, err := json.Marshal(map[string]string{"content": text})
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	endpoint := strings.TrimRight(b.baseURL, "/") + "/api/v1/chat/conversations/" + url.PathEscape(key) + "/messages"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	if err := (&credentialAuthenticator{cred: c}).ApplyAuth(req); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
 	resp, err := b.newHTTPClient().Do(req)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	type chatSendResp struct {
 		ID            string `json:"id"`
 		DispatchState string `json:"dispatchState"`
+		Cursor        string `json:"cursor"`
 	}
 	decoded, err := apiclient.DecodeRequired[chatSendResp](resp)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	st := decoded.DispatchState
 	if st == "" {
 		st = "sent"
 	}
-	return decoded.ID, st, nil
+	return decoded.ID, st, decoded.Cursor, nil
 }
 
 func (b *hubBackend) ListConversations(ctx context.Context, c Credential, opts ListConvOpts) (ConvPage, error) {
@@ -663,10 +672,24 @@ func hubStatusCode(err error) int {
 	return 0
 }
 
+// hubHintError wraps a Hub error (preserving *apiclient.APIError via Unwrap
+// for hubStatusCode/audit logging) while carrying an enriched tool-error hint.
+type hubHintError struct {
+	cause error
+	msg   string
+}
+
+func (e *hubHintError) Error() string { return e.msg }
+func (e *hubHintError) Unwrap() error { return e.cause }
+
 // formatHubToolError formats a Hub error for an MCP tool error result,
 // preserving the Hub's error code and message verbatim (e.g. missing UAT
 // selector or 403 reason).
 func formatHubToolError(err error) string {
+	var hintErr *hubHintError
+	if errors.As(err, &hintErr) {
+		return hintErr.msg
+	}
 	var apiErr *apiclient.APIError
 	if errors.As(err, &apiErr) {
 		if apiErr.Code != "" {

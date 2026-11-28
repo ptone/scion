@@ -103,18 +103,39 @@ func TestLoadGlobalConfig_MCPStreamWaitValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects_non_positive_stream_wait_and_negative_max_streams", func(t *testing.T) {
+	t.Run("rejects_non_positive_above_55s_stream_wait_and_negative_max_streams", func(t *testing.T) {
 		if err := config.ValidateV1MCPConfig(&config.V1ServerMCPConfig{StreamWait: "0s"}); err == nil {
 			t.Fatal("expected error for stream_wait=0s")
 		}
 		if err := config.ValidateV1MCPConfig(&config.V1ServerMCPConfig{StreamWait: "-5s"}); err == nil {
 			t.Fatal("expected error for stream_wait=-5s")
 		}
+		if err := config.ValidateV1MCPConfig(&config.V1ServerMCPConfig{StreamWait: "56s"}); err == nil {
+			t.Fatal("expected error for stream_wait=56s (> 55s Hub maximum)")
+		}
 		if err := config.ValidateV1MCPConfig(&config.V1ServerMCPConfig{MaxStreamsPerPrincipal: -1}); err == nil {
 			t.Fatal("expected error for negative max_streams_per_principal")
 		}
-		if err := config.ValidateV1MCPConfig(&config.V1ServerMCPConfig{StreamWait: "30s", MaxStreamsPerPrincipal: 8}); err != nil {
-			t.Fatalf("valid MCP config rejected: %v", err)
+		if err := config.ValidateV1MCPConfig(&config.V1ServerMCPConfig{StreamWait: "55s", MaxStreamsPerPrincipal: 8}); err != nil {
+			t.Fatalf("valid MCP config (55s) rejected: %v", err)
+		}
+	})
+
+	t.Run("legacy_server_yaml_runs_mcp_validation", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("HOME", dir)
+		scionDir := filepath.Join(dir, ".scion")
+		if err := os.MkdirAll(scionDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		// Legacy server.yaml (no settings.yaml) with stream_wait > 55s.
+		legacyYAML := "mcp:\n  enabled: true\n  streamWait: 60s\n"
+		if err := os.WriteFile(filepath.Join(scionDir, "server.yaml"), []byte(legacyYAML), 0o600); err != nil {
+			t.Fatalf("write server.yaml: %v", err)
+		}
+		_, err := config.LoadGlobalConfig(scionDir)
+		if err == nil || !strings.Contains(err.Error(), "stream_wait") {
+			t.Fatalf("legacy server.yaml with streamWait=60s: err = %v, want stream_wait validation error", err)
 		}
 	})
 }

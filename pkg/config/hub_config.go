@@ -1770,9 +1770,14 @@ func (c MCPServerConfig) IsZero() bool {
 		c.StreamWait == 0
 }
 
+// MaxMCPStreamWait is the maximum allowed server.mcp.stream_wait duration,
+// matching the Hub's DefaultMaxWait of 55s (design §4.4).
+const MaxMCPStreamWait = 55 * time.Second
+
 // ValidateV1MCPConfig validates raw server.mcp settings from settings.yaml,
-// rejecting unparseable or non-positive stream_wait values and negative stream
-// caps at config load time rather than silently ignoring them.
+// rejecting unparseable, non-positive, or above-ceiling (>55s) stream_wait
+// values and negative stream caps at config load time rather than silently
+// ignoring them.
 func ValidateV1MCPConfig(m *V1ServerMCPConfig) error {
 	if m == nil {
 		return nil
@@ -1784,6 +1789,9 @@ func ValidateV1MCPConfig(m *V1ServerMCPConfig) error {
 		}
 		if d <= 0 {
 			return fmt.Errorf("server.mcp.stream_wait: must be positive, got %q", m.StreamWait)
+		}
+		if d > MaxMCPStreamWait {
+			return fmt.Errorf("server.mcp.stream_wait: must not exceed %s (Hub maximum), got %q", MaxMCPStreamWait, m.StreamWait)
 		}
 	}
 	if m.MaxStreamsPerPrincipal < 0 {
@@ -1801,6 +1809,9 @@ func validateMCPGlobalConfig(gc *GlobalConfig) error {
 	}
 	if gc.MCP.StreamWait < 0 {
 		return fmt.Errorf("server.mcp.stream_wait: must be non-negative, got %s", gc.MCP.StreamWait)
+	}
+	if gc.MCP.StreamWait > MaxMCPStreamWait {
+		return fmt.Errorf("server.mcp.stream_wait: must not exceed %s (Hub maximum), got %s", MaxMCPStreamWait, gc.MCP.StreamWait)
 	}
 	return nil
 }
@@ -1957,6 +1968,9 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 		return nil, err
 	}
 	if err := validateConduitDeliverRuntimesConfig(gc); err != nil {
+		return nil, err
+	}
+	if err := validateMCPGlobalConfig(gc); err != nil {
 		return nil, err
 	}
 	markTrustedProxiesSet(gc, nil)

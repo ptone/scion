@@ -35,6 +35,10 @@ const (
 	// DefaultStreamWait is the default Hub long-poll wait duration per
 	// events/stream iteration and wait_for_messages call (design §4.1, §4.4).
 	DefaultStreamWait = 30 * time.Second
+
+	// MaxStreamWait is the upper bound for stream_wait, matching the Hub's
+	// DefaultMaxWait of 55s (design §4.4).
+	MaxStreamWait = 55 * time.Second
 )
 
 // StreamLimiter bounds the number of concurrent long-lived streams
