@@ -90,8 +90,10 @@ import {
   FEATURE_FLAGS_CHANGED_EVENT,
   FLAT_BROKERS_FLAG,
   isFeatureEnabled,
+  tokenBudgetsEnabled,
   trajectoryCaptureEnabled,
 } from '../../utils/feature-flags.js';
+import type { UsageBudgetEntry, UsageBudgetsResponse } from '../../shared/usage-budgets.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
@@ -114,6 +116,7 @@ import '../shared/resource-list.js';
 import '../shared/resource-import.js';
 import '../shared/injected-skills-panel.js';
 import '../shared/pre-start-hook-list.js';
+import '../shared/token-budgets-panel.js';
 import { showToast } from '../../utils/toast.js';
 import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
@@ -148,6 +151,7 @@ interface ProjectSettings {
   telemetryEnabled?: boolean | null | undefined;
   trajectoryCapture?: string | undefined;
   trajectory_capture?: TrajectoryCapturePolicyStatus | undefined;
+  usageUnmeasuredPolicy?: string | undefined;
   autoExposePortsEnabled?: boolean | null | undefined;
   activeProfile?: string | undefined;
   /** null clears (inherit), 0 is Unlimited, n >= 1 a limit. */
@@ -375,6 +379,21 @@ export class ScionPageProjectSettings extends LitElement {
   private trajectoryCaptureStatus: TrajectoryCapturePolicyStatus | null = null;
 
   @state()
+  private configUsageUnmeasuredPolicy = '';
+
+  @state()
+  private tokenBudgetsFlagEnabled = tokenBudgetsEnabled();
+
+  @state()
+  private projectBudgets: UsageBudgetEntry[] = [];
+
+  @state()
+  private projectBudgetsLoading = false;
+
+  @state()
+  private projectBudgetsError: string | null = null;
+
+  @state()
   private configAutoExposePortsEnabled: boolean | null = null;
 
   @state()
@@ -475,6 +494,16 @@ export class ScionPageProjectSettings extends LitElement {
   private brokerDefaultWarnings: BrokerMessages = { byBroker: {}, general: [] };
 
   private readonly boundOnFeatureFlagsChanged = (): void => {
+    const nextBudgets = tokenBudgetsEnabled();
+    if (nextBudgets !== this.tokenBudgetsFlagEnabled) {
+      this.tokenBudgetsFlagEnabled = nextBudgets;
+      if (nextBudgets && this.projectId) {
+        void this.loadProjectBudgets();
+      } else if (!nextBudgets) {
+        this.projectBudgets = [];
+        this.projectBudgetsError = null;
+      }
+    }
     this.requestUpdate();
   };
 
@@ -1216,6 +1245,16 @@ export class ScionPageProjectSettings extends LitElement {
       if (tab) {
         this.activeResourcesTab = tab;
       }
+      const configTab = params.get('configTab');
+      if (
+        configTab === 'general' ||
+        configTab === 'auth-security' ||
+        configTab === 'limits' ||
+        configTab === 'resources' ||
+        configTab === 'brokers'
+      ) {
+        this.activeConfigTab = configTab;
+      }
       // The leave dialog's Transfer ownership link from the project page.
       // Only that param is removed from the URL once read, so a reload or
       // Back does not open the dialog again.
@@ -1225,6 +1264,7 @@ export class ScionPageProjectSettings extends LitElement {
         replaceSearch(params);
       }
     }
+    this.tokenBudgetsFlagEnabled = tokenBudgetsEnabled();
     void this.loadProject();
     void this.loadHubPreStartHook();
     void this.loadDropdownTemplates();
@@ -1233,6 +1273,9 @@ export class ScionPageProjectSettings extends LitElement {
     void this.loadBrokers();
     void this.loadGCPServiceAccounts();
     void this.loadMessagingPolicy();
+    if (this.tokenBudgetsFlagEnabled) {
+      void this.loadProjectBudgets();
+    }
   }
 
   override disconnectedCallback(): void {
@@ -1610,6 +1653,40 @@ export class ScionPageProjectSettings extends LitElement {
     }
   }
 
+  private async loadProjectBudgets(): Promise<void> {
+    if (!this.tokenBudgetsFlagEnabled || !this.projectId) return;
+    const projectId = this.projectId;
+    this.projectBudgetsLoading = true;
+    this.projectBudgetsError = null;
+    try {
+      const res = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/usage/budgets`,
+        {
+          suppressAccessDeniedToast: true,
+        }
+      );
+      if (!this.isConnected || this.projectId !== projectId || !this.tokenBudgetsFlagEnabled)
+        return;
+      if (res.status === 404) {
+        this.projectBudgets = [];
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+      const data = (await res.json()) as UsageBudgetsResponse;
+      this.projectBudgets = data.budgets ?? [];
+    } catch (err) {
+      if (!this.isConnected) return;
+      this.projectBudgetsError =
+        err instanceof Error ? err.message : 'Failed to load project token budgets';
+    } finally {
+      if (this.isConnected) {
+        this.projectBudgetsLoading = false;
+      }
+    }
+  }
+
   /**
    * Loads project settings via the resolved endpoint, which includes per-setting
    * hub default information. Falls back to the plain /settings endpoint if the
@@ -1678,6 +1755,7 @@ export class ScionPageProjectSettings extends LitElement {
       if (!this.trajectoryCaptureStatus && this.settings.trajectory_capture) {
         this.trajectoryCaptureStatus = this.settings.trajectory_capture;
       }
+      this.configUsageUnmeasuredPolicy = this.settings.usageUnmeasuredPolicy || '';
       this.configAutoExposePortsEnabled = this.settings.autoExposePortsEnabled ?? null;
       this.configDefaultMaxTurns = countLimitOrNull(this.settings.defaultMaxTurns);
       this.configDefaultMaxModelCalls = countLimitOrNull(this.settings.defaultMaxModelCalls);
@@ -2779,6 +2857,9 @@ export class ScionPageProjectSettings extends LitElement {
       }
       if (trajectoryCaptureEnabled() && !this.isTrajectoryCaptureLockedByHub()) {
         body.trajectoryCapture = this.configTrajectoryCapture || '';
+      }
+      if (tokenBudgetsEnabled()) {
+        body.usageUnmeasuredPolicy = this.configUsageUnmeasuredPolicy || '';
       }
       if (this.configDefaultMaxTurns !== this.loadedDefaultMaxTurns) {
         body.defaultMaxTurns = this.configDefaultMaxTurns;
@@ -4114,6 +4195,50 @@ export class ScionPageProjectSettings extends LitElement {
                     : ''}</span
                 >
               </div>
+
+              ${this.tokenBudgetsFlagEnabled
+                ? html`
+                    <div class="config-field" data-testid="project-unmeasured-policy-field">
+                      <label>Unmeasured Harness Policy</label>
+                      <sl-select
+                        data-testid="project-unmeasured-policy-select"
+                        value=${this.configUsageUnmeasuredPolicy || 'allow'}
+                        ?disabled=${!canEdit}
+                        @sl-change=${(e: Event) => {
+                          this.configUsageUnmeasuredPolicy = (e.target as HTMLSelectElement).value;
+                        }}
+                      >
+                        <sl-option value="allow">Allow (default)</sl-option>
+                        <sl-option value="deny">Deny</sl-option>
+                      </sl-select>
+                      <span class="field-help"
+                        >Controls whether agents using an unmeasured harness may launch when an
+                        active blocking token cap applies. <strong>Allow</strong> proceeds with a
+                        coverage warning; <strong>Deny</strong> refuses launches until measured
+                        (notify-only shadow caps and shell execution containers are
+                        unaffected).</span
+                      >
+                    </div>
+
+                    <div
+                      style="margin-top: 1.25rem;"
+                      data-testid="project-settings-token-budgets-section"
+                    >
+                      <scion-token-budgets-panel
+                        heading="Project Token Budgets"
+                        emptyMessage="No project token budgets configured."
+                        .budgets=${this.projectBudgets}
+                        ?loading=${this.projectBudgetsLoading}
+                        .error=${this.projectBudgetsError}
+                        ?canOverride=${canEdit}
+                        overrideEndpointBase="/api/v1/projects/${encodeURIComponent(
+                          this.projectId
+                        )}/usage/budgets"
+                        @budgets-refresh=${() => this.loadProjectBudgets()}
+                      ></scion-token-budgets-panel>
+                    </div>
+                  `
+                : nothing}
             </div>
           </sl-tab-panel>
 

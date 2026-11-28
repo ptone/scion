@@ -174,7 +174,15 @@ import {
   messagePoliciesEnabled,
   triggersEnabled,
   usageLedgerEnabled,
+  tokenBudgetsEnabled,
 } from '../../utils/feature-flags.js';
+import {
+  budgetStateDisplay,
+  formatTokenAmount,
+  isOverrideActive,
+  type UsageBudgetEntry,
+  type UsageBudgetsResponse,
+} from '../../shared/usage-budgets.js';
 import {
   PROJECT_AGENT_COLUMNS,
   defaultVisibleProjectAgentColumns,
@@ -610,6 +618,12 @@ export class ScionPageProjectDetail extends LitElement {
   private usageLedgerEnabled = false;
 
   @state()
+  private tokenBudgetsFlagEnabled = false;
+
+  @state()
+  private projectBudgets: UsageBudgetEntry[] = [];
+
+  @state()
   private waitingOnYouDecisionsCount = 0;
 
   private decisionsCountAbort: AbortController | null = null;
@@ -626,6 +640,15 @@ export class ScionPageProjectDetail extends LitElement {
         this.projectUsage = null;
       } else if (this.projectId) {
         void this.loadProjectUsage();
+      }
+    }
+    const nextBudgets = tokenBudgetsEnabled();
+    if (nextBudgets !== this.tokenBudgetsFlagEnabled) {
+      this.tokenBudgetsFlagEnabled = nextBudgets;
+      if (!nextBudgets) {
+        this.projectBudgets = [];
+      } else if (this.projectId) {
+        void this.loadProjectBudgets();
       }
     }
     const next = decisionsEnabled();
@@ -1541,6 +1564,7 @@ export class ScionPageProjectDetail extends LitElement {
     this.triggersEnabled = triggersEnabled();
     this.messagePoliciesEnabled = messagePoliciesEnabled();
     this.usageLedgerEnabled = usageLedgerEnabled();
+    this.tokenBudgetsFlagEnabled = tokenBudgetsEnabled();
 
     // Set SSE scope to this project (receives all agent events within
     // project) before the first load: a drain belongs to the scope
@@ -1945,6 +1969,9 @@ export class ScionPageProjectDetail extends LitElement {
     if (this.usageLedgerEnabled) {
       void this.loadProjectUsage();
     }
+    if (this.tokenBudgetsFlagEnabled) {
+      void this.loadProjectBudgets();
+    }
     if (this.decisionsEnabled) {
       void this.loadDecisionsCount();
     }
@@ -2053,6 +2080,31 @@ export class ScionPageProjectDetail extends LitElement {
     } catch {
       if (this.projectId === projectId) {
         this.projectUsage = null;
+      }
+    }
+  }
+
+  private async loadProjectBudgets(): Promise<void> {
+    if (!this.tokenBudgetsFlagEnabled || !this.projectId) return;
+    const projectId = this.projectId;
+    try {
+      const res = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(projectId)}/usage/budgets`,
+        {
+          suppressAccessDeniedToast: true,
+        }
+      );
+      if (!this.isConnected || this.projectId !== projectId || !this.tokenBudgetsFlagEnabled)
+        return;
+      if (res.ok) {
+        const data = (await res.json()) as UsageBudgetsResponse;
+        this.projectBudgets = data.budgets ?? [];
+      } else {
+        this.projectBudgets = [];
+      }
+    } catch {
+      if (this.projectId === projectId) {
+        this.projectBudgets = [];
       }
     }
   }
@@ -3600,6 +3652,60 @@ export class ScionPageProjectDetail extends LitElement {
               <div class="stat">
                 <span class="stat-label">Active Agents</span>
                 <span class="stat-value">${this.sessionMetricsSummary.activeAgents}</span>
+              </div>
+            </div>
+          `
+        : nothing}
+      ${this.tokenBudgetsFlagEnabled && this.projectBudgets.length > 0
+        ? html`
+            <div
+              class="stats-row"
+              style="margin-top: 0.5rem; align-items: center;"
+              data-testid="project-budgets-summary"
+            >
+              ${this.projectBudgets.map((b) => {
+                const info = budgetStateDisplay(b.state);
+                const windowLabel = b.limit_name.endsWith('_day')
+                  ? 'Daily Budget'
+                  : b.limit_name.endsWith('_month')
+                    ? 'Monthly Budget'
+                    : b.limit_name;
+                const capText =
+                  b.cap === null || b.cap <= 0 ? 'Unlimited' : formatTokenAmount(b.cap);
+                const overrideActive = isOverrideActive(b);
+                return html`
+                  <div class="stat" data-testid="project-budget-badge-item">
+                    <span class="stat-label">${windowLabel}</span>
+                    <span
+                      class="stat-value"
+                      style="display: inline-flex; align-items: center; gap: 0.375rem; font-size: 0.9375rem;"
+                    >
+                      <span>${formatTokenAmount(b.consumed)} / ${capText}</span>
+                      <sl-badge
+                        variant=${info.variant}
+                        data-testid="project-budget-state-badge"
+                        data-state=${b.state}
+                      >
+                        ${info.label}
+                      </sl-badge>
+                      ${overrideActive
+                        ? html`<sl-badge variant="primary">Override</sl-badge>`
+                        : nothing}
+                    </span>
+                  </div>
+                `;
+              })}
+              <div style="display: flex; align-items: center; margin-left: auto;">
+                <a
+                  href="/projects/${encodeURIComponent(this.projectId)}/settings?configTab=limits"
+                  data-testid="project-manage-budgets-link"
+                  style="text-decoration: none;"
+                >
+                  <sl-button size="small" variant="text">
+                    <sl-icon slot="prefix" name="speedometer2"></sl-icon>
+                    Manage Budgets
+                  </sl-button>
+                </a>
               </div>
             </div>
           `

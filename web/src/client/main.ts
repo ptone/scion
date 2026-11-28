@@ -725,6 +725,11 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/profile-settings.js'),
   },
   {
+    pattern: /^\/profile\/budgets$/,
+    tag: 'scion-page-profile-budgets',
+    load: () => import('../components/pages/profile-budgets.js'),
+  },
+  {
     pattern: /^\/profile\/tokens$/,
     tag: 'scion-page-profile-tokens',
     load: () => import('../components/pages/profile-tokens.js'),
@@ -930,6 +935,7 @@ const PROFILE_ROUTES = new Set([
   'scion-page-profile-env-vars',
   'scion-page-profile-secrets',
   'scion-page-profile-settings',
+  'scion-page-profile-budgets',
   'scion-page-profile-tokens',
   'scion-page-profile-telegram',
   'scion-page-profile-teams',

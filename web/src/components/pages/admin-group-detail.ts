@@ -40,17 +40,23 @@ import '../shared/group-member-editor.js';
 import '../shared/boundary-summary-notice.js';
 import '../shared/group-form-dialog.js';
 import '../shared/group-delete-dialog.js';
+import '../shared/token-budgets-panel.js';
 import type { ScionGroupFormDialog } from '../shared/group-form-dialog.js';
 import type { ScionGroupDeleteDialog } from '../shared/group-delete-dialog.js';
 import type { GroupUpdatedDetail } from '../shared/group-form-dialog.js';
 import type { GroupDeletedDetail } from '../shared/group-delete-dialog.js';
-import { apiFetch } from '../../client/api.js';
+import { apiFetch, extractApiError } from '../../client/api.js';
 import { current } from '../../client/crumbs.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { navigateTo } from '../../client/navigation.js';
 import { getGroup, listMembers, GroupsApiError } from '../../client/groups-api.js';
+import type { GroupBudgetItem, GroupUsageBudgetsResponse } from '../../shared/usage-budgets.js';
 import { formatRelativeTime } from '../../utils/time.js';
-import { accessConstraintsEnabled } from '../../utils/feature-flags.js';
+import {
+  accessConstraintsEnabled,
+  FEATURE_FLAGS_CHANGED_EVENT,
+  tokenBudgetsEnabled,
+} from '../../utils/feature-flags.js';
 
 @customElement('scion-page-admin-group-detail')
 export class ScionPageAdminGroupDetail extends LitElement {
@@ -83,6 +89,35 @@ export class ScionPageAdminGroupDetail extends LitElement {
   // Member count (for delete dialog impact copy)
   @state()
   private memberCount = 0;
+
+  // Pooled group token budgets state
+  @state()
+  private tokenBudgetsFlagEnabled = tokenBudgetsEnabled();
+
+  @state()
+  private groupBudgets: GroupBudgetItem[] = [];
+
+  @state()
+  private groupBudgetsLoading = false;
+
+  @state()
+  private groupBudgetsError: string | null = null;
+
+  @state()
+  private groupBudgetsForbidden = false;
+
+  private boundOnFeatureFlagsChanged = (): void => {
+    const next = tokenBudgetsEnabled();
+    if (next !== this.tokenBudgetsFlagEnabled) {
+      this.tokenBudgetsFlagEnabled = next;
+      if (next && this.group && this.group.groupType !== 'project_agents') {
+        void this.loadGroupBudgets();
+      } else if (!next) {
+        this.groupBudgets = [];
+        this.groupBudgetsError = null;
+      }
+    }
+  };
 
   // Dialog refs
   @query('scion-group-form-dialog')
@@ -260,6 +295,8 @@ export class ScionPageAdminGroupDetail extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    this.tokenBudgetsFlagEnabled = tokenBudgetsEnabled();
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
     if (typeof window !== 'undefined') {
       const match = window.location.pathname.match(/\/admin\/groups\/([^/]+)/);
       if (match) {
@@ -267,6 +304,11 @@ export class ScionPageAdminGroupDetail extends LitElement {
       }
     }
     void this.loadGroup();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
   }
 
   private async loadGroup(): Promise<void> {
@@ -279,6 +321,9 @@ export class ScionPageAdminGroupDetail extends LitElement {
       void this.loadBoundaries();
       void this.resolveOwnerName();
       void this.loadMemberCount();
+      if (this.tokenBudgetsFlagEnabled && this.group.groupType !== 'project_agents') {
+        void this.loadGroupBudgets();
+      }
     } catch (err) {
       console.error('Failed to load group:', err);
       if (err instanceof GroupsApiError) {
@@ -355,6 +400,45 @@ export class ScionPageAdminGroupDetail extends LitElement {
       this.boundaryError = err instanceof Error ? err.message : 'Failed to load access constraints';
     } finally {
       this.boundaryLoading = false;
+    }
+  }
+
+  private async loadGroupBudgets(): Promise<void> {
+    if (!this.tokenBudgetsFlagEnabled || !this.group || this.group.groupType === 'project_agents') {
+      return;
+    }
+    const groupId = this.group.id;
+    this.groupBudgetsLoading = true;
+    this.groupBudgetsError = null;
+    this.groupBudgetsForbidden = false;
+
+    try {
+      const res = await apiFetch(`/api/v1/groups/${encodeURIComponent(groupId)}/usage/budgets`, {
+        suppressAccessDeniedToast: true,
+      });
+      if (!this.isConnected || this.group?.id !== groupId || !this.tokenBudgetsFlagEnabled) return;
+      if (res.status === 403) {
+        this.groupBudgets = [];
+        this.groupBudgetsForbidden = true;
+        return;
+      }
+      if (res.status === 404) {
+        this.groupBudgets = [];
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+      const data = (await res.json()) as GroupUsageBudgetsResponse;
+      this.groupBudgets = data.budgets ?? [];
+    } catch (err) {
+      if (!this.isConnected) return;
+      this.groupBudgetsError =
+        err instanceof Error ? err.message : 'Failed to load pooled group token budgets';
+    } finally {
+      if (this.isConnected) {
+        this.groupBudgetsLoading = false;
+      }
     }
   }
 
@@ -501,6 +585,21 @@ export class ScionPageAdminGroupDetail extends LitElement {
                 this.groupId
               )}"
             ></scion-boundary-summary-notice>
+          `
+        : nothing}
+      ${this.tokenBudgetsFlagEnabled && !isProjectAgents && !this.groupBudgetsForbidden
+        ? html`
+            <div style="margin-bottom: 1.5rem;" data-testid="group-token-budgets-section">
+              <scion-token-budgets-panel
+                heading="Pooled Token Budgets"
+                emptyMessage="No pooled token budgets configured for this group."
+                .budgets=${this.groupBudgets}
+                ?loading=${this.groupBudgetsLoading}
+                .error=${this.groupBudgetsError}
+                nonAdditive
+                @budgets-refresh=${() => this.loadGroupBudgets()}
+              ></scion-token-budgets-panel>
+            </div>
           `
         : nothing}
 

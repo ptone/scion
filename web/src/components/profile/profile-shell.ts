@@ -51,6 +51,7 @@ const PROFILE_TITLES: Record<string, string> = {
   '/profile/env': 'Environment Variables',
   '/profile/secrets': 'Secrets',
   '/profile/settings': 'Settings',
+  '/profile/budgets': 'My Budgets',
   '/profile/tokens': 'Access Tokens',
   '/profile/skills': 'Skills',
   '/profile/templates': 'Templates',
