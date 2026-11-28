@@ -55,11 +55,20 @@ const (
 	// unbounded goroutines.
 	budgetBreachAsyncConcurrency = 32
 
-	// budgetBreachTaskTimeout bounds one async threshold-crossing handler.
-	budgetBreachTaskTimeout = 30 * time.Second
+	// budgetSweepEnqueueTimeout bounds the DB-only sweep enumeration and durable
+	// enqueue step (no broker I/O).
+	budgetSweepEnqueueTimeout = 15 * time.Second
+
+	// budgetNotifyTaskTimeout bounds the independent thresholds_notified CAS
+	// claim and user notification write step.
+	budgetNotifyTaskTimeout = 15 * time.Second
 
 	// budgetNoticeDispatchTimeout bounds one best-effort running-agent notice.
 	budgetNoticeDispatchTimeout = 5 * time.Second
+
+	// budgetNoticeConcurrency bounds concurrent best-effort running-agent
+	// notice dispatches after all durable enqueues have completed.
+	budgetNoticeConcurrency = 8
 
 	// budgetAnalyticsEmitTimeout bounds one best-effort usage.budget analytics
 	// sink emit.
@@ -97,24 +106,32 @@ type BudgetSuspendPayload struct {
 //     notice, ~30s grace period, and full pre-dispatch re-verification).
 //  3. usage.budget analytics event emission.
 type BudgetBreachHandler struct {
-	server       *Server
-	store        store.Store
-	quota        *QuotaService
-	pooledGroups *PooledGroupResolver
-	queue        durablequeue.Queue
-	logger       *slog.Logger
-	enabledFn    func() bool
-	nowFn        func() time.Time
+	server    *Server
+	store     store.Store
+	quota     *QuotaService
+	queue     durablequeue.Queue
+	logger    *slog.Logger
+	enabledFn func() bool
+	nowFn     func() time.Time
 
 	// gracePeriod is the delay between running-agent notice and suspend
 	// dispatch (defaults to 30s; configurable in tests).
 	gracePeriod time.Duration
 
-	// respectNeverSuspend implements provisional decision D10: when true,
-	// agents with an active never_suspend policy are skipped during
-	// suspend_and_pause sweeps, logged+counted, and listed as
-	// "not suspended (never_suspend)" in the exhausted notification.
-	// Kept as a single check so it can be flipped cleanly if D10 changes.
+	// noticeTimeout bounds each best-effort per-agent notice dispatch
+	// (defaults to budgetNoticeDispatchTimeout; configurable in tests).
+	noticeTimeout time.Duration
+
+	// drainerPollInterval overrides the usage.budget_suspend drainer poll
+	// interval when > 0 (defaults to 5s; configurable in tests).
+	drainerPollInterval time.Duration
+
+	// respectNeverSuspend implements decision D10: when true (and the
+	// never_suspend experiment is enabled), agents with suspend_policy=never
+	// are skipped during suspend_and_pause sweeps, logged+counted, and listed
+	// as "not suspended (never_suspend)" in the exhausted notification.
+	// Evaluated through a single helper (neverSuspendEnforced / shouldSkipNeverSuspend)
+	// so sweep discovery, dispatch re-check, and store intent guard always agree.
 	respectNeverSuspend bool
 
 	// maxGroupNotifyRecipients caps pooled-group 100% notification fan-out.
@@ -124,9 +141,10 @@ type BudgetBreachHandler struct {
 	// if configured.
 	analyticsSinkFn func() telemetryemit.Sink
 
-	neverSuspendSkipped atomic.Int64
-	analyticsErrors     atomic.Int64
-	notifyErrors        atomic.Int64
+	neverSuspendSkipped  atomic.Int64
+	cannotSuspendSkipped atomic.Int64
+	analyticsErrors      atomic.Int64
+	notifyErrors         atomic.Int64
 
 	sem chan struct{}
 	wg  sync.WaitGroup
@@ -139,20 +157,18 @@ func NewBudgetBreachHandler(srv *Server, q durablequeue.Queue, logger *slog.Logg
 	}
 	var st store.Store
 	var qs *QuotaService
-	var pg *PooledGroupResolver
 	if srv != nil {
 		st = srv.store
 		qs = srv.quotaService
-		pg = srv.pooledGroupResolver
 	}
 	return &BudgetBreachHandler{
 		server:                   srv,
 		store:                    st,
 		quota:                    qs,
-		pooledGroups:             pg,
 		queue:                    q,
 		logger:                   logger,
 		gracePeriod:              defaultBudgetSuspendGrace,
+		noticeTimeout:            budgetNoticeDispatchTimeout,
 		respectNeverSuspend:      true,
 		maxGroupNotifyRecipients: defaultMaxBudgetGroupNotifyRecipients,
 		enabledFn: func() bool {
@@ -191,8 +207,14 @@ func (h *BudgetBreachHandler) now() time.Time {
 	return time.Now().UTC()
 }
 
+// neverSuspendEnforced is the single predicate governing D10 across sweep
+// discovery, dispatch-time re-check, and the store intent guard.
+func (h *BudgetBreachHandler) neverSuspendEnforced() bool {
+	return h != nil && h.respectNeverSuspend && h.server != nil && h.server.experimentEnabled(experiments.NeverSuspend)
+}
+
 func (h *BudgetBreachHandler) shouldSkipNeverSuspend(agent *store.Agent) bool {
-	return h != nil && h.respectNeverSuspend && h.server != nil && h.server.neverSuspendActive(agent)
+	return h.neverSuspendEnforced() && agent != nil && agent.SuspendPolicy == store.SuspendPolicyNever
 }
 
 // NeverSuspendSkipped returns the cumulative count of running agents skipped
@@ -202,6 +224,16 @@ func (h *BudgetBreachHandler) NeverSuspendSkipped() int64 {
 		return 0
 	}
 	return h.neverSuspendSkipped.Load()
+}
+
+// CannotSuspendSkipped returns the cumulative count of running agents skipped
+// during suspend_and_pause sweeps because their runtime or harness does not
+// support suspend/resume.
+func (h *BudgetBreachHandler) CannotSuspendSkipped() int64 {
+	if h == nil {
+		return 0
+	}
+	return h.cannotSuspendSkipped.Load()
 }
 
 // Wait blocks until all in-flight asynchronous threshold-crossing tasks finish.
@@ -255,9 +287,7 @@ func (h *BudgetBreachHandler) OnThresholdCrossing(ctx context.Context, crossing 
 		case <-baseCtx.Done():
 			return
 		}
-		taskCtx, cancel := context.WithTimeout(baseCtx, budgetBreachTaskTimeout)
-		defer cancel()
-		h.handleCrossing(taskCtx, crossing)
+		h.handleCrossing(baseCtx, crossing)
 	}()
 }
 
@@ -294,7 +324,7 @@ func budgetNotificationStatusForPct(pct int) string {
 	}
 }
 
-func (h *BudgetBreachHandler) handleCrossing(ctx context.Context, crossing BudgetThresholdCrossing) {
+func (h *BudgetBreachHandler) handleCrossing(baseCtx context.Context, crossing BudgetThresholdCrossing) {
 	defer func() {
 		if r := recover(); r != nil {
 			h.logger.Error("token budget breach handler panicked; recovered",
@@ -312,9 +342,6 @@ func (h *BudgetBreachHandler) handleCrossing(ctx context.Context, crossing Budge
 
 	crossedBits := crossing.CrossedBits
 	if crossedBits == 0 {
-		crossedBits = budgetThresholdBitsForRatio(crossing.Consumed, crossing.Cap)
-	}
-	if crossedBits == 0 {
 		return
 	}
 	highestPct := highestThresholdPct(crossedBits)
@@ -322,23 +349,42 @@ func (h *BudgetBreachHandler) handleCrossing(ctx context.Context, crossing Budge
 		return
 	}
 
-	// 1. Emit usage.budget analytics event once per crossing.
-	h.emitUsageBudgetEvent(ctx, crossing, highestPct)
-
-	// 2. On exhaustion with suspend_and_pause, discover running agents in scope,
-	// send running-agent notices, and enqueue idempotent durablequeue suspend
-	// items (recording any never_suspend-skipped slugs so the exhausted
-	// notification can list them per provisional D10).
-	var skippedNeverSuspendSlugs []string
+	// 1. On exhaustion with suspend_and_pause, perform DB-only scope discovery
+	// and enqueue ALL durable usage.budget_suspend items BEFORE any broker I/O.
+	// Each step gets its own independent timeout derived from baseCtx so a slow
+	// or failing step can never consume the budget of the notification claim or
+	// durable enqueues (R1).
+	var (
+		toNotice                  []store.Agent
+		skippedNeverSuspendSlugs  []string
+		skippedCannotSuspendSlugs []string
+	)
 	if crossing.NewState == store.UsageBudgetStateExhausted &&
 		crossing.TokenAction == store.TokenActionSuspendAndPause {
-		skippedNeverSuspendSlugs = h.enqueueSuspendSweep(ctx, crossing)
+		sweepCtx, cancel := context.WithTimeout(baseCtx, budgetSweepEnqueueTimeout)
+		toNotice, skippedNeverSuspendSlugs, skippedCannotSuspendSlugs = h.enqueueSuspendSweep(sweepCtx, crossing)
+		cancel()
 	}
 
-	// 3. Deduplicated threshold notifications via CAS on thresholds_notified.
+	// 2. Deduplicated threshold notifications via CAS on thresholds_notified
+	// under their own independent timeout (never starved by broker notices).
 	// Bit claim happens in the same step immediately before sending; a process
 	// crash between CAS-claim and notification write is the only loss mode.
-	h.claimAndSendNotifications(ctx, crossing, crossedBits, skippedNeverSuspendSlugs)
+	notifyCtx, notifyCancel := context.WithTimeout(baseCtx, budgetNotifyTaskTimeout)
+	h.claimAndSendNotifications(notifyCtx, crossing, crossedBits, skippedNeverSuspendSlugs, skippedCannotSuspendSlugs)
+	notifyCancel()
+
+	// 3. Emit usage.budget analytics event once per crossing under its own timeout.
+	analyticsCtx, analyticsCancel := context.WithTimeout(baseCtx, budgetAnalyticsEmitTimeout)
+	h.emitUsageBudgetEvent(analyticsCtx, crossing, highestPct)
+	analyticsCancel()
+
+	// 4. Send best-effort running-agent notices AFTER all durable enqueues and
+	// user notifications have completed, with bounded concurrency and per-agent
+	// short timeouts so hanging brokers can never drop enqueues or notifications.
+	if len(toNotice) > 0 {
+		h.sendSuspendNotices(baseCtx, crossing, toNotice)
+	}
 }
 
 func (h *BudgetBreachHandler) emitUsageBudgetEvent(ctx context.Context, crossing BudgetThresholdCrossing, thresholdPct int) {
@@ -414,6 +460,7 @@ func (h *BudgetBreachHandler) claimAndSendNotifications(
 	crossing BudgetThresholdCrossing,
 	crossedBits int64,
 	skippedNeverSuspendSlugs []string,
+	skippedCannotSuspendSlugs []string,
 ) {
 	var (
 		claimedRow  *store.UsageBudgetState
@@ -494,7 +541,7 @@ func (h *BudgetBreachHandler) claimAndSendNotifications(
 		return
 	}
 
-	msg := formatBudgetThresholdNotificationMessage(crossing, pct, skippedNeverSuspendSlugs)
+	msg := formatBudgetThresholdNotificationMessage(crossing, pct, skippedNeverSuspendSlugs, skippedCannotSuspendSlugs)
 	status := budgetNotificationStatusForPct(pct)
 	projectID := ""
 	switch crossing.ScopeKind {
@@ -684,6 +731,7 @@ func formatBudgetThresholdNotificationMessage(
 	crossing BudgetThresholdCrossing,
 	thresholdPct int,
 	skippedNeverSuspendSlugs []string,
+	skippedCannotSuspendSlugs []string,
 ) string {
 	scopeLabel := fmt.Sprintf("%s %s", crossing.ScopeKind, crossing.ScopeID)
 	if crossing.ProjectScopeID != "" {
@@ -698,6 +746,9 @@ func formatBudgetThresholdNotificationMessage(
 		)
 		if len(skippedNeverSuspendSlugs) > 0 {
 			msg += fmt.Sprintf("; not suspended (never_suspend): %s", strings.Join(skippedNeverSuspendSlugs, ", "))
+		}
+		if len(skippedCannotSuspendSlugs) > 0 {
+			msg += fmt.Sprintf("; not suspended (cannot suspend): %s", strings.Join(skippedCannotSuspendSlugs, ", "))
 		}
 	} else {
 		msg = fmt.Sprintf(
@@ -715,26 +766,31 @@ type budgetSuspendCandidate struct {
 }
 
 // enqueueSuspendSweep enumerates running agents in scope of an exhausted
-// suspend_and_pause budget, sends a best-effort running-agent notice, and
-// enqueues an idempotent durablequeue item keyed by (crossing_id, run_id)
-// delayed by h.gracePeriod (~30s). Returns the sorted slugs of any running
-// agents skipped due to never_suspend (provisional D10).
-func (h *BudgetBreachHandler) enqueueSuspendSweep(ctx context.Context, crossing BudgetThresholdCrossing) []string {
+// suspend_and_pause budget and enqueues an idempotent durablequeue item keyed
+// by (crossing_id, run_id) delayed by h.gracePeriod (~30s). Performs zero
+// broker I/O so slow or unreachable brokers can never starve durable enqueues
+// or threshold notifications (R1). Returns the agents to receive best-effort
+// notices plus sorted slugs of running agents skipped due to never_suspend
+// (D10) or non-resumable runtime/harness (R2).
+func (h *BudgetBreachHandler) enqueueSuspendSweep(
+	ctx context.Context,
+	crossing BudgetThresholdCrossing,
+) (toNotice []store.Agent, skippedNeverSuspend []string, skippedCannotSuspend []string) {
 	now := h.now()
 	if !crossing.WindowEndUTC.After(now) {
-		return nil
+		return nil, nil, nil
 	}
 
 	// Verify the state row is still exhausted and not under an active override
-	// before sending notices or enqueuing suspends.
+	// before enqueuing suspends.
 	if crossing.StateID != "" {
 		row, err := h.store.GetUsageBudgetStateByID(ctx, crossing.StateID)
 		if err != nil {
-			return nil
+			return nil, nil, nil
 		}
 		if row.State != store.UsageBudgetStateExhausted ||
 			(row.OverrideUntil != nil && row.OverrideUntil.After(now)) {
-			return nil
+			return nil, nil, nil
 		}
 	}
 
@@ -742,46 +798,41 @@ func (h *BudgetBreachHandler) enqueueSuspendSweep(ctx context.Context, crossing 
 	if err != nil {
 		h.logger.Warn("token budget suspend sweep failed to enumerate agents in scope",
 			"limit", crossing.LimitName, "scope_kind", crossing.ScopeKind, "scope_id", crossing.ScopeID, "error", err)
-		return nil
+		return nil, nil, nil
 	}
 	if len(candidates) == 0 {
-		return nil
+		return nil, nil, nil
 	}
 
 	cid := crossingIDFor(crossing)
-	dispatcher := h.server.GetDispatcher()
 	notBefore := now.Add(h.gracePeriod)
-	noticeMsg := fmt.Sprintf(
-		"Token budget exhausted (%s: %d/%d tokens). This agent will be gracefully suspended in %s; please wrap up and save your work.",
-		crossing.LimitName, crossing.Consumed, crossing.Cap, h.gracePeriod.Truncate(time.Second),
-	)
 
-	var skippedNeverSuspend []string
 	enqueuedAny := false
 	for _, cand := range candidates {
 		a := cand.agent
+		label := a.Slug
+		if label == "" {
+			label = a.ID
+		}
 		if h.shouldSkipNeverSuspend(&a) {
 			h.neverSuspendSkipped.Add(1)
 			h.logger.Info("token budget suspend sweep: skipping agent with never_suspend policy",
 				"agent_id", a.ID, "agent_slug", a.Slug, "run_id", a.RunID,
 				"limit", crossing.LimitName, "crossing_id", cid)
-			label := a.Slug
-			if label == "" {
-				label = a.ID
-			}
 			skippedNeverSuspend = append(skippedNeverSuspend, label)
 			continue
 		}
-
-		// Best-effort running-agent notice before the grace period elapses.
-		if dispatcher != nil && a.RuntimeBrokerID != "" {
-			noticeCtx, cancel := context.WithTimeout(ctx, budgetNoticeDispatchTimeout)
-			if err := dispatcher.DispatchAgentMessage(noticeCtx, &a, noticeMsg, false, nil); err != nil {
-				h.logger.Warn("token budget suspend sweep: failed to send running-agent notice",
-					"agent_id", a.ID, "run_id", a.RunID, "error", err)
-			}
-			cancel()
+		if ok, harnessType, skipReason := h.server.harnessSupportsResume(ctx, &a); !ok {
+			h.cannotSuspendSkipped.Add(1)
+			h.logger.Info("token budget suspend sweep: skipping non-resumable agent",
+				"agent_id", a.ID, "agent_slug", a.Slug, "run_id", a.RunID,
+				"harness", harnessType, "reason", skipReason,
+				"limit", crossing.LimitName, "crossing_id", cid)
+			skippedCannotSuspend = append(skippedCannotSuspend, label)
+			continue
 		}
+
+		toNotice = append(toNotice, a)
 
 		if h.queue == nil {
 			continue
@@ -827,7 +878,57 @@ func (h *BudgetBreachHandler) enqueueSuspendSweep(ctx context.Context, crossing 
 		h.queue.Wake(usageBudgetSuspendQueueKind)
 	}
 	sort.Strings(skippedNeverSuspend)
-	return skippedNeverSuspend
+	sort.Strings(skippedCannotSuspend)
+	return toNotice, skippedNeverSuspend, skippedCannotSuspend
+}
+
+// sendSuspendNotices dispatches best-effort running-agent grace-period notices
+// concurrently with bounded parallelism and per-agent short timeouts AFTER all
+// durable suspend items and user notifications have already been written (R1).
+func (h *BudgetBreachHandler) sendSuspendNotices(
+	baseCtx context.Context,
+	crossing BudgetThresholdCrossing,
+	agents []store.Agent,
+) {
+	dispatcher := h.server.GetDispatcher()
+	if dispatcher == nil || len(agents) == 0 {
+		return
+	}
+	timeout := h.noticeTimeout
+	if timeout <= 0 {
+		timeout = budgetNoticeDispatchTimeout
+	}
+	noticeMsg := fmt.Sprintf(
+		"Token budget exhausted (%s: %d/%d tokens). This agent will be gracefully suspended in %s; please wrap up and save your work.",
+		crossing.LimitName, crossing.Consumed, crossing.Cap, h.gracePeriod.Truncate(time.Second),
+	)
+
+	sem := make(chan struct{}, budgetNoticeConcurrency)
+	var wg sync.WaitGroup
+	for i := range agents {
+		a := agents[i]
+		if a.RuntimeBrokerID == "" {
+			continue
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-baseCtx.Done():
+			wg.Wait()
+			return
+		}
+		wg.Add(1)
+		go func(agent store.Agent) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			noticeCtx, cancel := context.WithTimeout(baseCtx, timeout)
+			defer cancel()
+			if err := dispatcher.DispatchAgentMessage(noticeCtx, &agent, noticeMsg, false, nil); err != nil {
+				h.logger.Warn("token budget suspend sweep: failed to send running-agent notice",
+					"agent_id", agent.ID, "run_id", agent.RunID, "error", err)
+			}
+		}(a)
+	}
+	wg.Wait()
 }
 
 func (h *BudgetBreachHandler) findRunningAgentsInScope(
@@ -1063,6 +1164,13 @@ func (h *BudgetBreachHandler) HandleSuspendQueueItem(ctx context.Context, item d
 			"agent_id", agent.ID, "agent_slug", agent.Slug, "run_id", agent.RunID)
 		return nil
 	}
+	if ok, harnessType, skipReason := h.server.harnessSupportsResume(ctx, agent); !ok {
+		h.cannotSuspendSkipped.Add(1)
+		h.logger.Info("token budget suspend skipped at dispatch: agent runtime/harness does not support suspend",
+			"agent_id", agent.ID, "agent_slug", agent.Slug, "run_id", agent.RunID,
+			"harness", harnessType, "reason", skipReason)
+		return nil
+	}
 	if agent.RunID != payload.RunID {
 		h.logger.Info("token budget suspend skipped: agent run_id changed (replacement run preserved)",
 			"agent_id", agent.ID, "expected_run_id", payload.RunID, "current_run_id", agent.RunID)
@@ -1077,7 +1185,9 @@ func (h *BudgetBreachHandler) HandleSuspendQueueItem(ctx context.Context, item d
 	}
 
 	// 5. Dispatch graceful broker suspend via Hub's existing broker suspend lifecycle.
-	return h.server.budgetSuspendAgent(ctx, agent, h.respectNeverSuspend)
+	// Deliberately skips HasRecentLiveWork and idle/stalled activity checks because
+	// suspend_and_pause is hard quota enforcement (after the running-agent grace period).
+	return h.server.budgetSuspendAgent(ctx, agent, h.neverSuspendEnforced())
 }
 
 // budgetSuspendAgent performs a graceful broker suspend with
@@ -1228,6 +1338,10 @@ func (s *Server) NewBudgetSuspendDrainer() (*durablequeue.Drainer, error) {
 	if h == nil {
 		return nil, nil
 	}
+	pollInterval := 5 * time.Second
+	if h.drainerPollInterval > 0 {
+		pollInterval = h.drainerPollInterval
+	}
 	return durablequeue.NewDrainer(durablequeue.DrainerConfig{
 		Store: dqs,
 		Queue: s.durableQueue,
@@ -1240,7 +1354,8 @@ func (s *Server) NewBudgetSuspendDrainer() (*durablequeue.Drainer, error) {
 		},
 		Owner:          s.HubID(),
 		Enabled:        h.enabled,
-		PollInterval:   5 * time.Second,
+		Now:            h.now,
+		PollInterval:   pollInterval,
 		LeaseDuration:  60 * time.Second,
 		HandlerTimeout: 45 * time.Second,
 		BatchSize:      10,
@@ -1248,14 +1363,12 @@ func (s *Server) NewBudgetSuspendDrainer() (*durablequeue.Drainer, error) {
 }
 
 // startBudgetSuspendDrainer lazily constructs and starts the background
-// durablequeue.Drainer for usage.budget_suspend when both tokenomics
-// experiments are enabled.
+// durablequeue.Drainer for usage.budget_suspend unconditionally whenever a
+// durable queue is configured. DrainerConfig.Enabled (h.enabled) gates each
+// drain pass live so enabling tokenomics.token_budgets at runtime works
+// without restarting the Hub (R3).
 func (s *Server) startBudgetSuspendDrainer(ctx context.Context) {
 	if s == nil || s.durableQueue == nil {
-		return
-	}
-	if !s.experimentEnabled(experiments.TokenomicsUsageLedger) ||
-		!s.experimentEnabled(experiments.TokenomicsTokenBudgets) {
 		return
 	}
 	s.mu.Lock()

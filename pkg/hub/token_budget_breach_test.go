@@ -67,10 +67,12 @@ func (m *memoryAnalyticsSink) Events(t *testing.T) []telemetrycontract.UsageBudg
 
 type budgetTestDispatcher struct {
 	mockDispatcher
-	mu          sync.Mutex
-	stoppedIDs  []string
-	messagedIDs []string
-	messages    map[string][]string
+	mu              sync.Mutex
+	stoppedIDs      []string
+	messagedIDs     []string
+	messages        map[string][]string
+	hangMessages    bool
+	noticeAttempted sync.WaitGroup
 }
 
 func newBudgetTestDispatcher() *budgetTestDispatcher {
@@ -86,11 +88,16 @@ func (d *budgetTestDispatcher) DispatchAgentStop(_ context.Context, agent *store
 	return nil
 }
 
-func (d *budgetTestDispatcher) DispatchAgentMessage(_ context.Context, agent *store.Agent, msg string, _ bool, _ *messages.StructuredMessage) error {
+func (d *budgetTestDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, msg string, _ bool, _ *messages.StructuredMessage) error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	hang := d.hangMessages
 	d.messagedIDs = append(d.messagedIDs, agent.ID)
 	d.messages[agent.ID] = append(d.messages[agent.ID], msg)
+	d.mu.Unlock()
+	if hang {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return nil
 }
 
@@ -649,19 +656,44 @@ func TestBudgetBreach_SuspendReverifySkips(t *testing.T) {
 	dayStart, dayEnd := utcDayWindow(now)
 
 	cases := []struct {
-		name  string
-		setup func(t *testing.T, srv *Server, s store.Store, h *BudgetBreachHandler, binding *store.EntitlementBinding, stRow *store.UsageBudgetState, agent *store.Agent)
+		name           string
+		payloadGen     int
+		agentGen       int
+		setup          func(t *testing.T, srv *Server, s store.Store, h *BudgetBreachHandler, binding *store.EntitlementBinding, stRow *store.UsageBudgetState, agent *store.Agent)
+		wantSkippedCnt int64
 	}{
 		{
-			name: "override_added_during_grace",
+			// O2: real counter rows keep consumed=1200 >= cap=1000 after override,
+			// so this independently pins the OverrideUntil re-check.
+			name:       "override_added_during_grace",
+			payloadGen: 1,
+			agentGen:   1,
 			setup: func(t *testing.T, srv *Server, _ store.Store, _ *BudgetBreachHandler, _ *store.EntitlementBinding, stRow *store.UsageBudgetState, _ *store.Agent) {
 				until := now.Add(2 * time.Hour)
-				_, err := srv.TokenBudgetEvaluator().OverrideBudgetState(ctx, stRow, &until, stRow.StateVersion)
+				res, err := srv.TokenBudgetEvaluator().OverrideBudgetState(ctx, stRow, &until, stRow.StateVersion)
+				require.NoError(t, err)
+				require.GreaterOrEqual(t, res.After.ConsumedAtEval, int64(1000), "consumed must remain >= cap so override check is tested independently")
+			},
+		},
+		{
+			// O2: state lowered to ok with OverrideUntil=nil and consumed=1200 >= cap=1000,
+			// independently pinning the row.State != exhausted re-check.
+			name:       "state_lowered_without_override",
+			payloadGen: 1,
+			agentGen:   1,
+			setup: func(t *testing.T, _ *Server, s store.Store, _ *BudgetBreachHandler, _ *store.EntitlementBinding, stRow *store.UsageBudgetState, _ *store.Agent) {
+				cand := *stRow
+				cand.State = store.UsageBudgetStateOK
+				cand.OverrideUntil = nil
+				cand.ConsumedAtEval = 1200
+				_, err := s.CompareAndSwapUsageBudgetState(ctx, stRow.StateVersion, &cand)
 				require.NoError(t, err)
 			},
 		},
 		{
-			name: "cap_raised_during_grace",
+			name:       "cap_raised_during_grace",
+			payloadGen: 1,
+			agentGen:   1,
 			setup: func(t *testing.T, _ *Server, s store.Store, _ *BudgetBreachHandler, binding *store.EntitlementBinding, _ *store.UsageBudgetState, _ *store.Agent) {
 				binding.Value = 5000
 				_, err := s.UpdateEntitlementBinding(ctx, binding)
@@ -669,7 +701,21 @@ func TestBudgetBreach_SuspendReverifySkips(t *testing.T) {
 			},
 		},
 		{
-			name: "action_changed_to_pause_new",
+			// O2: cap changed from 1000 to 1100 while consumed=1200 still >= 1100,
+			// independently pinning the capNow != payload.Cap policy-revision check.
+			name:       "cap_changed_still_exceeded",
+			payloadGen: 1,
+			agentGen:   1,
+			setup: func(t *testing.T, _ *Server, s store.Store, _ *BudgetBreachHandler, binding *store.EntitlementBinding, _ *store.UsageBudgetState, _ *store.Agent) {
+				binding.Value = 1100
+				_, err := s.UpdateEntitlementBinding(ctx, binding)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name:       "action_changed_to_pause_new",
+			payloadGen: 1,
+			agentGen:   1,
 			setup: func(t *testing.T, _ *Server, s store.Store, _ *BudgetBreachHandler, binding *store.EntitlementBinding, _ *store.UsageBudgetState, _ *store.Agent) {
 				binding.TokenAction = tbStrPtr(store.TokenActionPauseNew)
 				_, err := s.UpdateEntitlementBinding(ctx, binding)
@@ -677,17 +723,41 @@ func TestBudgetBreach_SuspendReverifySkips(t *testing.T) {
 			},
 		},
 		{
-			name: "window_rolled_over",
+			name:       "window_rolled_over",
+			payloadGen: 1,
+			agentGen:   1,
 			setup: func(t *testing.T, _ *Server, _ store.Store, h *BudgetBreachHandler, _ *store.EntitlementBinding, _ *store.UsageBudgetState, _ *store.Agent) {
 				h.nowFn = func() time.Time { return dayEnd.Add(time.Minute) }
 			},
 		},
 		{
-			name: "agent_restarted_new_run_id",
+			name:       "agent_restarted_new_run_id",
+			payloadGen: 1,
+			agentGen:   1,
 			setup: func(t *testing.T, _ *Server, s store.Store, _ *BudgetBreachHandler, _ *store.EntitlementBinding, _ *store.UsageBudgetState, agent *store.Agent) {
 				_, err := s.SetAgentRunID(ctx, agent.ID, "run-replacement-2", nil)
 				require.NoError(t, err)
 			},
+		},
+		{
+			// O2/O4: same run_id but generation changed -> independently pins generation check.
+			name:       "generation_changed_same_run_id",
+			payloadGen: 1,
+			agentGen:   2,
+			setup: func(_ *testing.T, _ *Server, _ store.Store, _ *BudgetBreachHandler, _ *store.EntitlementBinding, _ *store.UsageBudgetState, _ *store.Agent) {
+			},
+		},
+		{
+			// O4: never_suspend set after enqueue -> dispatch-time skip.
+			name:       "never_suspend_set_after_enqueue",
+			payloadGen: 1,
+			agentGen:   1,
+			setup: func(t *testing.T, _ *Server, s store.Store, _ *BudgetBreachHandler, _ *store.EntitlementBinding, _ *store.UsageBudgetState, agent *store.Agent) {
+				changed, err := s.SetAgentSuspendPolicy(ctx, agent.ID, store.SuspendPolicyNever)
+				require.NoError(t, err)
+				require.True(t, changed)
+			},
+			wantSkippedCnt: 1,
 		},
 	}
 
@@ -696,7 +766,10 @@ func TestBudgetBreach_SuspendReverifySkips(t *testing.T) {
 			srv, s, h, disp, _ := setupBudgetBreachServer(t, now)
 			projID := uuid.NewString()
 			require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "p-" + tc.name, Slug: "p-" + tc.name}))
-			agent := createBudgetTestRunningAgent(t, s, projID, "worker-"+tc.name, nil, "run-orig-1", 1, false, false)
+			agent := createBudgetTestRunningAgent(t, s, projID, "worker-"+tc.name, nil, "run-orig-1", tc.agentGen, false, false)
+
+			// Seed real counter rows (1200 tokens) so consumed stays >= cap on re-evaluation/override.
+			_ = ingestTestTokens(t, s, projID, nil, now, 1200, false)
 
 			dayDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
 			require.NoError(t, err)
@@ -736,7 +809,7 @@ func TestBudgetBreach_SuspendReverifySkips(t *testing.T) {
 				TokenAction:    store.TokenActionSuspendAndPause,
 				AgentID:        agent.ID,
 				RunID:          "run-orig-1",
-				Generation:     1,
+				Generation:     tc.payloadGen,
 			}
 			raw, err := json.Marshal(payload)
 			require.NoError(t, err)
@@ -748,6 +821,9 @@ func TestBudgetBreach_SuspendReverifySkips(t *testing.T) {
 				Payload: raw,
 			}))
 			assert.Empty(t, disp.StoppedIDs(), "agent must not be suspended when %s", tc.name)
+			if tc.wantSkippedCnt > 0 {
+				assert.Equal(t, tc.wantSkippedCnt, h.NeverSuspendSkipped())
+			}
 			got, err := s.GetAgent(ctx, agent.ID)
 			require.NoError(t, err)
 			assert.Equal(t, string(state.PhaseRunning), got.Phase)
@@ -844,4 +920,449 @@ func TestBudgetBreach_ExperimentOffNoOp(t *testing.T) {
 	assert.Empty(t, sink.Events(t))
 	assert.Empty(t, disp.MessagedIDs())
 	assert.Empty(t, disp.StoppedIDs())
+}
+
+// TestBudgetBreach_HangingNoticesDoNotDropEnqueuesOrNotifications pins R1:
+// with N >= 7 running agents and a broker dispatcher that hangs on
+// DispatchAgentMessage, ALL durable suspend items are enqueued and the
+// exhausted notification is written. Also verifies that a cancelled caller
+// context passed to OnThresholdCrossing does not drop enqueues or notifications.
+func TestBudgetBreach_HangingNoticesDoNotDropEnqueuesOrNotifications(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	srv, s, h, disp, _ := setupBudgetBreachServer(t, now)
+	disp.hangMessages = true
+	h.noticeTimeout = 40 * time.Millisecond
+
+	adminUID := uuid.NewString()
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: adminUID, Email: "hang-admin@example.com", DisplayName: "Admin", Role: store.UserRoleMember, Status: store.UserStatusActive,
+	}))
+	projID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "p-hang", Slug: "p-hang"}))
+	adminRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               uuid.NewString(),
+		RoleDefinitionID: adminRole.ID,
+		PrincipalType:    store.PolicyPrincipalTypeUser,
+		PrincipalID:      adminUID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projID,
+	})
+	require.NoError(t, err)
+
+	const numAgents = 8
+	for i := 0; i < numAgents; i++ {
+		_ = createBudgetTestRunningAgent(t, s, projID, fmt.Sprintf("hang-worker-%d", i), tbStrPtr(adminUID), fmt.Sprintf("run-hang-%d", i), 1, false, false)
+	}
+
+	dayDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
+	require.NoError(t, err)
+	_, err = s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: dayDef.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           projID,
+		Value:             1000,
+		TokenAction:       tbStrPtr(store.TokenActionSuspendAndPause),
+	})
+	require.NoError(t, err)
+
+	// Pass an already-cancelled caller context to verify OnThresholdCrossing detaches cleanly.
+	ev := ingestTestTokens(t, s, projID, tbStrPtr(adminUID), now, 1500, false)
+	srv.TokenBudgetEvaluator().EvaluateIngestedEvents(ctx, []*store.UsageEvent{ev})
+	h.Wait()
+
+	// All 8 suspend items must be durably enqueued despite hanging DispatchAgentMessage.
+	dqs, ok := s.(store.DurableQueueStore)
+	require.True(t, ok)
+	afterGrace := now.Add(h.gracePeriod + time.Second)
+	items, err := dqs.ClaimDurableItems(ctx, usageBudgetSuspendQueueKind, "test-hub", afterGrace, afterGrace.Add(time.Minute), 20)
+	require.NoError(t, err)
+	assert.Len(t, items, numAgents, "all %d running agents must have durable suspend items even when notices hang", numAgents)
+
+	// Exhausted notification must be claimed and written to the admin.
+	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, adminUID, false)
+	require.NoError(t, err)
+	require.Len(t, notifs, 1, "exhausted notification must be written despite hanging notices")
+	assert.Equal(t, store.NotificationStatusBudgetExhausted, notifs[0].Status)
+
+	// Also verify direct OnThresholdCrossing with a cancelled caller ctx still succeeds on a second project.
+	proj2 := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: proj2, Name: "p-cancel", Slug: "p-cancel"}))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               uuid.NewString(),
+		RoleDefinitionID: adminRole.ID,
+		PrincipalType:    store.PolicyPrincipalTypeUser,
+		PrincipalID:      adminUID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          proj2,
+	})
+	require.NoError(t, err)
+	dayStart, dayEnd := utcDayWindow(now)
+	st2, err := s.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+		LimitDefinitionID: dayDef.ID,
+		ScopeKind:         store.UsageScopeKindProject,
+		ScopeID:           proj2,
+		WindowStartUTC:    dayStart,
+		WindowEndUTC:      dayEnd,
+		State:             store.UsageBudgetStateExhausted,
+		ConsumedAtEval:    1200,
+		CapAtEval:         1000,
+		StateVersion:      1,
+	})
+	require.NoError(t, err)
+	cancelledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	h.OnThresholdCrossing(cancelledCtx, BudgetThresholdCrossing{
+		StateID:        st2.ID,
+		LimitName:      store.LimitLLMTokensPerProjectDay,
+		LimitDefID:     dayDef.ID,
+		ScopeKind:      store.UsageScopeKindProject,
+		ScopeID:        proj2,
+		WindowStartUTC: dayStart,
+		WindowEndUTC:   dayEnd,
+		PrevState:      "",
+		NewState:       store.UsageBudgetStateExhausted,
+		CrossedBits:    store.UsageBudgetThresholdBit100,
+		Consumed:       1200,
+		Cap:            1000,
+		TokenAction:    store.TokenActionPauseNew,
+		StateVersion:   1,
+	})
+	h.Wait()
+	notifs2, err := s.GetNotifications(ctx, store.SubscriberTypeUser, adminUID, false)
+	require.NoError(t, err)
+	assert.Len(t, notifs2, 2, "cancelled caller ctx must not drop detached threshold notification")
+}
+
+// TestBudgetBreach_CannotSuspendAgentsSkippedAndListed pins R2:
+// managed-runtime agents and harnesses with Resume.Support == SupportNo are
+// skipped during suspend_and_pause sweeps, counted, listed as
+// "not suspended (cannot suspend)" in the exhausted notification, and refused
+// at dispatch time if enqueued.
+func TestBudgetBreach_CannotSuspendAgentsSkippedAndListed(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	srv, s, h, disp, _ := setupBudgetBreachServer(t, now)
+	eval := srv.TokenBudgetEvaluator()
+
+	adminUID := uuid.NewString()
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: adminUID, Email: "r2-admin@example.com", DisplayName: "Admin", Role: store.UserRoleMember, Status: store.UserStatusActive,
+	}))
+	projID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "p-r2", Slug: "p-r2"}))
+	adminRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               uuid.NewString(),
+		RoleDefinitionID: adminRole.ID,
+		PrincipalType:    store.PolicyPrincipalTypeUser,
+		PrincipalID:      adminUID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projID,
+	})
+	require.NoError(t, err)
+
+	// 1. Normal resumable agent (claude).
+	agentResumable := createBudgetTestRunningAgent(t, s, projID, "resumable-claude", tbStrPtr(adminUID), "run-res-1", 1, false, false)
+
+	// 2. Managed-runtime agent (cannot suspend).
+	agentManaged := createBudgetTestRunningAgent(t, s, projID, "managed-rt", tbStrPtr(adminUID), "run-mgr-1", 1, false, false)
+	agentManaged.Runtime = ManagedRuntimePrefix + "cloudrun"
+	require.NoError(t, s.UpdateAgent(ctx, agentManaged))
+
+	// 3. Generic harness agent (Resume.Support == api.SupportNo).
+	agentNoResume := createBudgetTestRunningAgent(t, s, projID, "generic-no-resume", tbStrPtr(adminUID), "run-gen-1", 1, false, false)
+	agentNoResume.HarnessConfig = "generic"
+	agentNoResume.AppliedConfig = &store.AgentAppliedConfig{
+		HarnessConfig: "generic",
+	}
+	require.NoError(t, s.UpdateAgent(ctx, agentNoResume))
+
+	dayDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
+	require.NoError(t, err)
+	_, err = s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: dayDef.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           projID,
+		Value:             1000,
+		TokenAction:       tbStrPtr(store.TokenActionSuspendAndPause),
+	})
+	require.NoError(t, err)
+
+	ev := ingestTestTokens(t, s, projID, tbStrPtr(adminUID), now, 1200, false)
+	eval.EvaluateIngestedEvents(ctx, []*store.UsageEvent{ev})
+	h.Wait()
+
+	// Only the resumable agent received a notice and durable suspend item.
+	assert.Equal(t, []string{agentResumable.ID}, disp.MessagedIDs())
+	assert.Equal(t, int64(2), h.CannotSuspendSkipped())
+
+	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, adminUID, false)
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+	assert.Contains(t, notifs[0].Message, "not suspended (cannot suspend): generic-no-resume, managed-rt")
+
+	// Also verify dispatch-time guard refuses managed-runtime agent if enqueued directly.
+	dayStart, dayEnd := utcDayWindow(now)
+	stRow, err := s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: dayDef.ID, ScopeKind: store.UsageScopeKindProject, ScopeID: projID, WindowStartUTC: dayStart,
+	})
+	require.NoError(t, err)
+	rawManaged, err := json.Marshal(BudgetSuspendPayload{
+		CrossingID:     fmt.Sprintf("%s:%d", stRow.ID, stRow.StateVersion),
+		StateID:        stRow.ID,
+		LimitName:      store.LimitLLMTokensPerProjectDay,
+		LimitDefID:     dayDef.ID,
+		ScopeKind:      store.UsageScopeKindProject,
+		ScopeID:        projID,
+		WindowStartUTC: dayStart,
+		WindowEndUTC:   dayEnd,
+		Cap:            1000,
+		TokenAction:    store.TokenActionSuspendAndPause,
+		AgentID:        agentManaged.ID,
+		RunID:          "run-mgr-1",
+		Generation:     1,
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.HandleSuspendQueueItem(ctx, durablequeue.Item{Kind: usageBudgetSuspendQueueKind, Payload: rawManaged}))
+	assert.Empty(t, disp.StoppedIDs())
+	gotManaged, err := s.GetAgent(ctx, agentManaged.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), gotManaged.Phase)
+}
+
+// TestBudgetBreach_LiveExperimentEnableDrainsSuspend pins R3:
+// starting the drainer while tokenomics.token_budgets is OFF, then enabling it
+// live without restarting the server, drains usage.budget_suspend and suspends
+// the running agent end-to-end.
+func TestBudgetBreach_LiveExperimentEnableDrainsSuspend(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	srv, s := testServer(t)
+	// Start with token_budgets OFF!
+	setBudgetBreachTestExperiments(t, srv, true, false, true)
+
+	disp := newBudgetTestDispatcher()
+	srv.SetDispatcher(disp)
+
+	h := srv.BudgetBreachHandler()
+	require.NotNil(t, h)
+	h.gracePeriod = 10 * time.Millisecond
+	h.drainerPollInterval = 20 * time.Millisecond
+
+	// Start drainer while experiment is OFF (R3: must start unconditionally).
+	srv.startBudgetSuspendDrainer(ctx)
+	t.Cleanup(func() { srv.stopBudgetSuspendDrainer(context.Background()) })
+
+	// Enable token_budgets LIVE (no restart).
+	setBudgetBreachTestExperiments(t, srv, true, true, true)
+	srv.reconcileTokenBudgets(ctx)
+
+	projID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "p-live", Slug: "p-live"}))
+	agent := createBudgetTestRunningAgent(t, s, projID, "live-worker", nil, "run-live-1", 1, false, false)
+
+	dayDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
+	require.NoError(t, err)
+	_, err = s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: dayDef.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           projID,
+		Value:             1000,
+		TokenAction:       tbStrPtr(store.TokenActionSuspendAndPause),
+	})
+	require.NoError(t, err)
+
+	ev := ingestTestTokens(t, s, projID, nil, now, 1200, false)
+	srv.TokenBudgetEvaluator().EvaluateIngestedEvents(ctx, []*store.UsageEvent{ev})
+	h.Wait()
+
+	require.Eventually(t, func() bool {
+		got, err := s.GetAgent(ctx, agent.ID)
+		return err == nil &&
+			got.Phase == string(state.PhaseSuspended) &&
+			got.SuspendReason == string(state.SuspendReasonBudgetExhausted)
+	}, 5*time.Second, 25*time.Millisecond, "drainer started with experiment OFF must drain after live enable")
+}
+
+// TestBudgetBreach_NeverSuspendExperimentOffSuspendsNormally pins O1:
+// when experiments.NeverSuspend is OFF, an agent with suspend_policy=never is
+// NOT skipped by sweep, dispatch re-check, or store intent guard.
+func TestBudgetBreach_NeverSuspendExperimentOffSuspendsNormally(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	srv, s, h, disp, _ := setupBudgetBreachServer(t, now)
+	// Disable NeverSuspend experiment!
+	setBudgetBreachTestExperiments(t, srv, true, true, false)
+
+	projID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "p-ns-off", Slug: "p-ns-off"}))
+	agent := createBudgetTestRunningAgent(t, s, projID, "ns-off-worker", nil, "run-nsoff-1", 1, false, true)
+
+	dayDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
+	require.NoError(t, err)
+	_, err = s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: dayDef.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           projID,
+		Value:             1000,
+		TokenAction:       tbStrPtr(store.TokenActionSuspendAndPause),
+	})
+	require.NoError(t, err)
+
+	ev := ingestTestTokens(t, s, projID, nil, now, 1200, false)
+	srv.TokenBudgetEvaluator().EvaluateIngestedEvents(ctx, []*store.UsageEvent{ev})
+	h.Wait()
+
+	assert.Equal(t, int64(0), h.NeverSuspendSkipped())
+	dqs, ok := s.(store.DurableQueueStore)
+	require.True(t, ok)
+	afterGrace := now.Add(h.gracePeriod + time.Second)
+	h.nowFn = func() time.Time { return afterGrace }
+	items, err := dqs.ClaimDurableItems(ctx, usageBudgetSuspendQueueKind, "test-hub", afterGrace, afterGrace.Add(time.Minute), 10)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+
+	require.NoError(t, h.HandleSuspendQueueItem(ctx, durablequeue.Item{
+		Seq: items[0].Seq, Kind: items[0].Kind, DedupKey: items[0].DedupKey, Payload: items[0].Payload, NotBefore: items[0].NotBefore,
+	}))
+	assert.Equal(t, []string{agent.ID}, disp.StoppedIDs())
+	got, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+	assert.Equal(t, string(state.SuspendReasonBudgetExhausted), got.SuspendReason)
+}
+
+// TestBudgetBreach_ScopeSweeps_UserUserProjectGroup pins O4:
+// user, user_project, and pooled group sweeps suspend only matching running
+// agents and exclude principal-less agents outside project scope.
+func TestBudgetBreach_ScopeSweeps_UserUserProjectGroup(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	srv, s, h, _, _ := setupBudgetBreachServer(t, now)
+	eval := srv.TokenBudgetEvaluator()
+
+	mkUser := func(email string) string {
+		u := &store.User{ID: uuid.NewString(), Email: email, DisplayName: email, Role: store.UserRoleMember, Status: store.UserStatusActive}
+		require.NoError(t, s.CreateUser(ctx, u))
+		return u.ID
+	}
+	userA := mkUser("sweep-a@example.com")
+	userB := mkUser("sweep-b@example.com")
+	userNested := mkUser("sweep-nested@example.com")
+
+	proj1 := uuid.NewString()
+	proj2 := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: proj1, Name: "p-sc1", Slug: "p-sc1"}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: proj2, Name: "p-sc2", Slug: "p-sc2"}))
+
+	// Running agents:
+	// - aP1: userA in proj1
+	// - aP2: userA in proj2
+	// - bP1: userB in proj1
+	// - anonP1: principal-less in proj1 (must NEVER be matched by user/user_project/group sweeps)
+	// - nestedP2: userNested in proj2
+	aP1 := createBudgetTestRunningAgent(t, s, proj1, "a-p1", tbStrPtr(userA), "run-ap1", 1, false, false)
+	aP2 := createBudgetTestRunningAgent(t, s, proj2, "a-p2", tbStrPtr(userA), "run-ap2", 1, false, false)
+	bP1 := createBudgetTestRunningAgent(t, s, proj1, "b-p1", tbStrPtr(userB), "run-bp1", 1, false, false)
+	anonP1 := createBudgetTestRunningAgent(t, s, proj1, "anon-p1", nil, "run-anonp1", 1, false, false)
+	nestedP2 := createBudgetTestRunningAgent(t, s, proj2, "nested-p2", tbStrPtr(userNested), "run-nestedp2", 1, false, false)
+	_ = bP1
+	_ = anonP1
+
+	// 1. user_project scope (userA, proj1): matches ONLY aP1.
+	upDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerUserProjectDay)
+	require.NoError(t, err)
+	dayStart, dayEnd := utcDayWindow(now)
+	candsUP, err := h.findRunningAgentsInScope(ctx, BudgetThresholdCrossing{
+		LimitName:      store.LimitLLMTokensPerUserProjectDay,
+		LimitDefID:     upDef.ID,
+		ScopeKind:      store.UsageScopeKindUserProject,
+		ScopeID:        userA,
+		ProjectScopeID: proj1,
+		WindowStartUTC: dayStart,
+		WindowEndUTC:   dayEnd,
+	})
+	require.NoError(t, err)
+	require.Len(t, candsUP, 1)
+	assert.Equal(t, aP1.ID, candsUP[0].agent.ID)
+
+	// 2. user scope (userA): matches aP1 and aP2 (excludes bP1, anonP1, nestedP2).
+	userDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerUserDay)
+	require.NoError(t, err)
+	candsUser, err := h.findRunningAgentsInScope(ctx, BudgetThresholdCrossing{
+		LimitName:      store.LimitLLMTokensPerUserDay,
+		LimitDefID:     userDef.ID,
+		ScopeKind:      store.UsageScopeKindUser,
+		ScopeID:        userA,
+		WindowStartUTC: dayStart,
+		WindowEndUTC:   dayEnd,
+	})
+	require.NoError(t, err)
+	var userIDs []string
+	for _, c := range candsUser {
+		userIDs = append(userIDs, c.agent.ID)
+	}
+	assert.ElementsMatch(t, []string{aP1.ID, aP2.ID}, userIDs)
+
+	// 3. group scope (parent group with userA direct + child group containing userNested):
+	//    matches aP1, aP2, nestedP2 (excludes bP1 and anonP1).
+	parentGrp := &store.Group{ID: uuid.NewString(), Name: "Sweep Parent", Slug: "sweep-parent", GroupType: store.GroupTypeExplicit}
+	childGrp := &store.Group{ID: uuid.NewString(), Name: "Sweep Child", Slug: "sweep-child", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, parentGrp))
+	require.NoError(t, s.CreateGroup(ctx, childGrp))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: parentGrp.ID, MemberType: store.GroupMemberTypeUser, MemberID: userA, Role: store.GroupMemberRoleMember}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: parentGrp.ID, MemberType: store.GroupMemberTypeGroup, MemberID: childGrp.ID, Role: store.GroupMemberRoleMember}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: childGrp.ID, MemberType: store.GroupMemberTypeUser, MemberID: userNested, Role: store.GroupMemberRoleMember}))
+
+	grpDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerGroupDay)
+	require.NoError(t, err)
+	candsGrp, err := h.findRunningAgentsInScope(ctx, BudgetThresholdCrossing{
+		LimitName:      store.LimitLLMTokensPerGroupDay,
+		LimitDefID:     grpDef.ID,
+		ScopeKind:      store.UsageScopeKindGroup,
+		ScopeID:        parentGrp.ID,
+		WindowStartUTC: dayStart,
+		WindowEndUTC:   dayEnd,
+	})
+	require.NoError(t, err)
+	var grpAgentIDs []string
+	for _, c := range candsGrp {
+		grpAgentIDs = append(grpAgentIDs, c.agent.ID)
+	}
+	assert.ElementsMatch(t, []string{aP1.ID, aP2.ID, nestedP2.ID}, grpAgentIDs)
+
+	// End-to-end user-scope binding exhaustion suspends aP1 and aP2 (not anonP1 or bP1).
+	_, err = s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: userDef.ID,
+		SubjectType:       store.EntitlementSubjectUser,
+		SubjectID:         userA,
+		ScopeType:         store.QuotaScopeSystem,
+		Value:             1000,
+		TokenAction:       tbStrPtr(store.TokenActionSuspendAndPause),
+	})
+	require.NoError(t, err)
+	ev := ingestTestTokens(t, s, proj1, tbStrPtr(userA), now, 1200, false)
+	eval.EvaluateIngestedEvents(ctx, []*store.UsageEvent{ev})
+	h.Wait()
+
+	dqs, ok := s.(store.DurableQueueStore)
+	require.True(t, ok)
+	afterGrace := now.Add(h.gracePeriod + time.Second)
+	items, err := dqs.ClaimDurableItems(ctx, usageBudgetSuspendQueueKind, "test-hub", afterGrace, afterGrace.Add(time.Minute), 10)
+	require.NoError(t, err)
+	var queuedAgents []string
+	for _, it := range items {
+		var p BudgetSuspendPayload
+		require.NoError(t, json.Unmarshal(it.Payload, &p))
+		queuedAgents = append(queuedAgents, p.AgentID)
+	}
+	assert.ElementsMatch(t, []string{aP1.ID, aP2.ID}, queuedAgents)
 }
