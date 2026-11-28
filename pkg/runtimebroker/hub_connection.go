@@ -770,6 +770,7 @@ func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brok
 	hb.profileSAMappings = s.heartbeatProfileSAMappings
 	hb.workloadIdentityTargets = s.heartbeatWorkloadIdentityTargets
 	hb.startsInFlight = s.startsInFlightSnapshot
+	hb.onAgentListing = s.observeHeartbeatAgentsForHarvest
 	hb.defaultProfile = s.defaultProfile
 	hb.flat = s.isFlat()
 	if !hb.flat {

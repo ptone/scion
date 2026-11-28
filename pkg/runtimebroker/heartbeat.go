@@ -88,6 +88,10 @@ type HeartbeatService struct {
 	// (Server.startsInFlightSnapshot). Optional: when nil, the heartbeat
 	// neither lists starts nor advertises the capability.
 	startsInFlight func() []launchKey
+	// onAgentListing, when set, is notified asynchronously after each
+	// heartbeat listing with the listed agents (used by post_exit harvest
+	// transition tracking). Must not block the heartbeat loop.
+	onAgentListing func(agents []api.AgentInfo)
 	log            *slog.Logger
 
 	// defaultRuntime is the broker's own default runtime instance, set once
@@ -861,6 +865,10 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context, startsBefore
 	}
 
 	agents = s.dropVanishedPodReportsForStarts(agents, startsBefore)
+
+	if s.onAgentListing != nil {
+		s.onAgentListing(agents)
+	}
 
 	// A project filter (multi-hub mode) drops projects whose ownership is
 	// inferred from local settings, so the reported list is not a reliable
