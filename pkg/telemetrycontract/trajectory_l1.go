@@ -21,18 +21,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"regexp"
 	"strings"
 	"time"
 )
 
-// Track 2 L1 normalization constants and limits (P7.1 contract §1–§5).
+// Track 2 L1 normalization constants and limits (P7 contract).
 const (
-	// NormalizerInterfaceVersion is the stdin/stdout protocol version for
-	// harness normalizer processes.
-	NormalizerInterfaceVersion = 1
-
 	// TrajectoryL1UsageSchemaVersion is the schema_version stamped onto
 	// enriched L1 usage_records rows.
 	TrajectoryL1UsageSchemaVersion = 1
@@ -48,20 +45,12 @@ const (
 	ATIFFileFormatJSON = "json"
 
 	// MaxNormalizerLineBytes caps the maximum byte length of a single JSONL
-	// output line emitted by a normalizer process (1 MiB).
+	// output line emitted by a converter process (1 MiB).
 	MaxNormalizerLineBytes = 1 << 20
 
-	// MaxNormalizerStateBytes caps the serialized byte size of the opaque
-	// normalizer state object (1 MiB).
-	MaxNormalizerStateBytes = 1 << 20
-
-	// MaxNormalizerStderrBytes caps stderr captured from a normalizer process
-	// for diagnostic logs (64 KiB).
-	MaxNormalizerStderrBytes = 64 << 10
-
-	// MaxATIFAccumulationBytes caps the per-session on-disk ATIF step
-	// accumulation file size (64 MiB).
-	MaxATIFAccumulationBytes = 64 << 20
+	// MaxSessionMetaStatsBytes caps the serialized byte size of the optional
+	// stats object on a session_meta line (64 KiB).
+	MaxSessionMetaStatsBytes = 64 << 10
 
 	// UsageRecordStatusOK and UsageRecordStatusError are the allowed status
 	// values on Track 2 L1 usage_records.
@@ -113,7 +102,8 @@ func NativeRequestIDHash(scope, event, id string) string {
 
 // NativeRequestIDHashForHarness computes the canonical "rid1:" hash for a
 // harness's raw native request ID using the harness trajectory registry's
-// scope and event inputs. Returns "" when rawID is empty.
+// declared Track 1 scope and event inputs. Returns "" when rawID is empty or
+// when the harness registry entry does not declare Track 1 scope/event inputs.
 func NativeRequestIDHashForHarness(harness, rawID string) string {
 	if rawID == "" {
 		return ""
@@ -121,7 +111,7 @@ func NativeRequestIDHashForHarness(harness, rawID string) string {
 	if spec, ok := HarnessTrajectorySpecFor(harness); ok && spec.RequestIDScope != "" && spec.RequestIDEvent != "" {
 		return NativeRequestIDHash(spec.RequestIDScope, spec.RequestIDEvent, rawID)
 	}
-	return NativeRequestIDHash(harness, "api_request", rawID)
+	return ""
 }
 
 // TrajectoryArtifactRule describes one allow-listed home-relative root, file
@@ -134,7 +124,7 @@ type TrajectoryArtifactRule struct {
 
 // HarnessTrajectorySpec is the single Go registry entry for a harness's
 // allow-listed trajectory roots, built-in converter parser version, and
-// request-ID hashing inputs (contract v1 D2, contract v2 §B).
+// Track 1 request-ID hashing inputs (contract v1 D2, contract v2 §B).
 type HarnessTrajectorySpec struct {
 	Harness string
 	Rules   []TrajectoryArtifactRule
@@ -175,8 +165,8 @@ func HarnessTrajectorySpecFor(harness string) (HarnessTrajectorySpec, bool) {
 	return spec, true
 }
 
-// UsageRecordInput is the validated input form of a normalizer "usage_record"
-// stdout line before sciontool enrichment (contract §3).
+// UsageRecordInput is the validated input form of a converter "usage_record"
+// stdout line before enrichment (contract §3).
 type UsageRecordInput struct {
 	SessionID            string `json:"session_id,omitempty"`
 	NativeRequestIDRaw   string `json:"native_request_id_raw,omitempty"`
@@ -202,9 +192,9 @@ type UsageRecordInput struct {
 	SubagentID           string `json:"subagent_id,omitempty"`
 }
 
-// UsageRecord is the sciontool-enriched L1 usage record written to
-// usage_records JSONL chunks before Hub attribution stamping (contract §3, §5).
-// It never carries NativeRequestIDRaw.
+// UsageRecord is the enriched L1 usage record written to usage_records JSONL
+// chunks before Hub attribution stamping (contract §3, §5). It never carries
+// NativeRequestIDRaw.
 type UsageRecord struct {
 	SchemaVersion        int    `json:"schema_version"`
 	Harness              string `json:"harness"`
@@ -233,6 +223,28 @@ type UsageRecord struct {
 	ReportedCostSource   string `json:"reported_cost_source,omitempty"`
 	IsSubagent           bool   `json:"is_subagent,omitempty"`
 	SubagentID           string `json:"subagent_id,omitempty"`
+}
+
+// checkedContextInputTotal computes input + cache_read + cache_write with
+// int64 overflow detection. Returns (0, false, nil) when all three are nil.
+func checkedContextInputTotal(input, cacheRead, cacheWrite *int64) (int64, bool, error) {
+	if input == nil && cacheRead == nil && cacheWrite == nil {
+		return 0, false, nil
+	}
+	var total int64
+	for _, p := range []*int64{input, cacheRead, cacheWrite} {
+		if p == nil {
+			continue
+		}
+		if *p < 0 {
+			return 0, false, errors.New("context_input_total component is negative")
+		}
+		if total > math.MaxInt64-*p {
+			return 0, false, errors.New("context_input_total overflows int64")
+		}
+		total += *p
+	}
+	return total, true, nil
 }
 
 // EnrichUsageRecord converts a validated UsageRecordInput into an enriched
@@ -267,17 +279,7 @@ func EnrichUsageRecord(in UsageRecordInput, harness, parserVersion string, captu
 		IsSubagent:           in.IsSubagent,
 		SubagentID:           in.SubagentID,
 	}
-	if in.Input != nil || in.CacheRead != nil || in.CacheWrite != nil {
-		var total int64
-		if in.Input != nil {
-			total += *in.Input
-		}
-		if in.CacheRead != nil {
-			total += *in.CacheRead
-		}
-		if in.CacheWrite != nil {
-			total += *in.CacheWrite
-		}
+	if total, ok, err := checkedContextInputTotal(in.Input, in.CacheRead, in.CacheWrite); err == nil && ok {
 		rec.ContextInputTotal = &total
 	}
 	return rec
@@ -305,8 +307,8 @@ type ATIFAgent struct {
 	Extra     map[string]any `json:"extra,omitempty"`
 }
 
-// SessionMeta describes per-session metadata emitted by the normalizer and
-// augmented by sciontool with parse error counts and status (contract §2–§4).
+// SessionMeta describes per-session metadata emitted by a converter and
+// augmented with parse error counts and status (contract §2–§4).
 type SessionMeta struct {
 	SessionID          string             `json:"session_id"`
 	NativeRelativePath string             `json:"native_relative_path"`
@@ -353,8 +355,8 @@ type ATIFFinalMetrics struct {
 	TotalSteps            int      `json:"total_steps,omitempty"`
 }
 
-// ATIFTrajectory is the Harbor ATIF-v1.8 Trajectory document assembled by
-// sciontool (contract §5).
+// ATIFTrajectory is the Harbor ATIF-v1.8 Trajectory document assembled from
+// validated steps (contract §5).
 type ATIFTrajectory struct {
 	SchemaVersion string            `json:"schema_version"`
 	SessionID     string            `json:"session_id"`
@@ -382,7 +384,7 @@ type RunInventory struct {
 }
 
 // usageRecordAllowedFields is the closed allowlist of input fields accepted on
-// a normalizer usage_record line (contract §3).
+// a converter usage_record line (contract §3).
 var usageRecordAllowedFields = map[string]struct{}{
 	"type":                   {},
 	"session_id":             {},
@@ -410,7 +412,7 @@ var usageRecordAllowedFields = map[string]struct{}{
 }
 
 // usageRecordDimensionFields are attribution dimension fields owned by the Hub
-// that are stripped and counted (not trusted) if emitted by a normalizer
+// that are stripped and counted (not trusted) if emitted by a converter
 // (contract §3, §6).
 var usageRecordDimensionFields = map[string]struct{}{
 	"hub_id":                {},
@@ -429,32 +431,64 @@ var usageRecordDimensionFields = map[string]struct{}{
 	"labels":                {},
 }
 
-// atifExtraScionAllowedKeys is the closed allowlist of keys under extra.scion
-// (contract §3, design §5.4).
-var atifExtraScionAllowedKeys = map[string]struct{}{
-	"input":             {},
-	"output":            {},
-	"cache_read":        {},
-	"cache_write":       {},
-	"cache_write_1h":    {},
-	"reasoning":         {},
-	"input_derivation":  {},
-	"token_status":      {},
+// sessionMetaAllowedFields is the closed allowlist of top-level fields on a
+// converter session_meta line.
+var sessionMetaAllowedFields = map[string]struct{}{
+	"type":                 {},
+	"session_id":           {},
+	"native_relative_path": {},
+	"agent":                {},
+	"is_subagent":          {},
+	"parent_session_id":    {},
+	"stats":                {},
+}
+
+// atifAgentAllowedFields is the closed allowlist of fields on ATIFAgent.
+var atifAgentAllowedFields = map[string]struct{}{
+	"name":       {},
+	"version":    {},
+	"model_name": {},
+	"extra":      {},
+}
+
+// atifStepEnvelopeAllowedFields is the closed allowlist of fields on an
+// atif_step stdout JSONL envelope line.
+var atifStepEnvelopeAllowedFields = map[string]struct{}{
+	"type":       {},
+	"session_id": {},
+	"step":       {},
+}
+
+// atifExtraScionTokenKeys are the non-negative int (or null) token fields
+// allowed inside extra.scion (contract §3, design §5.4).
+var atifExtraScionTokenKeys = map[string]struct{}{
+	"input":          {},
+	"output":         {},
+	"cache_read":     {},
+	"cache_write":    {},
+	"cache_write_1h": {},
+	"reasoning":      {},
+}
+
+// atifExtraScionStringKeys are the string (or null) metadata fields allowed
+// inside extra.scion (contract §3, design §5.4).
+var atifExtraScionStringKeys = map[string]struct{}{
 	"service_tier":      {},
 	"dedupe_key":        {},
 	"native_request_id": {},
 }
 
 // ValidateUsageRecordLine validates one JSONL usage_record line emitted by a
-// normalizer against contract §3:
+// converter against contract §3:
 //   - line length <= MaxNormalizerLineBytes (1 MiB)
-//   - dimension fields are stripped and counted (returned in strippedDims)
+//   - dimension fields are stripped and counted (returned in strippedDims; 0 on error)
 //   - any other unknown field (including prompt/tool payload fields) is an error
 //   - dedupe_key must start with "<harness>:"
 //   - event_ts must be valid RFC3339/RFC3339Nano
 //   - status must be "ok" or "error"
 //   - calls must be an integer >= 1
 //   - token fields and reported_cost_micros must be null or non-negative integers
+//   - context_input_total (input + cache_read + cache_write) must not overflow int64
 //   - input_derivation must be "", "reported", or "derived"
 //   - token_status must be a known TokenStatus* constant
 func ValidateUsageRecordLine(line []byte, harness string) (UsageRecordInput, int, error) {
@@ -478,12 +512,12 @@ func ValidateUsageRecordLine(line []byte, harness string) (UsageRecordInput, int
 			continue
 		}
 		if _, allowed := usageRecordAllowedFields[k]; !allowed {
-			return UsageRecordInput{}, strippedDims, fmt.Errorf("usage_record: disallowed field %q", k)
+			return UsageRecordInput{}, 0, fmt.Errorf("usage_record: disallowed field %q", k)
 		}
 		if k == "type" {
 			var typ string
 			if err := json.Unmarshal(v, &typ); err != nil || typ != "usage_record" {
-				return UsageRecordInput{}, strippedDims, fmt.Errorf("usage_record: invalid type field")
+				return UsageRecordInput{}, 0, errors.New("usage_record: invalid type field")
 			}
 			continue
 		}
@@ -494,57 +528,257 @@ func ValidateUsageRecordLine(line []byte, harness string) (UsageRecordInput, int
 	// negative values are rejected cleanly with exact field names.
 	callsVal, callsPresent, err := parseStrictInt64Field(cleaned, "calls")
 	if err != nil {
-		return UsageRecordInput{}, strippedDims, fmt.Errorf("usage_record: %w", err)
+		return UsageRecordInput{}, 0, fmt.Errorf("usage_record: %w", err)
 	}
 	if !callsPresent || callsVal == nil || *callsVal < 1 {
-		return UsageRecordInput{}, strippedDims, errors.New("usage_record: calls must be an integer >= 1")
+		return UsageRecordInput{}, 0, errors.New("usage_record: calls must be an integer >= 1")
 	}
 
 	for _, name := range []string{"input", "output", "cache_read", "cache_write", "cache_write_1h", "reasoning", "reported_cost_micros"} {
 		val, _, err := parseStrictInt64Field(cleaned, name)
 		if err != nil {
-			return UsageRecordInput{}, strippedDims, fmt.Errorf("usage_record: %w", err)
+			return UsageRecordInput{}, 0, fmt.Errorf("usage_record: %w", err)
 		}
 		if val != nil && *val < 0 {
-			return UsageRecordInput{}, strippedDims, fmt.Errorf("usage_record: %s must be non-negative (got %d)", name, *val)
+			return UsageRecordInput{}, 0, fmt.Errorf("usage_record: %s must be non-negative (got %d)", name, *val)
 		}
 	}
 
 	cleanedBytes, err := json.Marshal(cleaned)
 	if err != nil {
-		return UsageRecordInput{}, strippedDims, fmt.Errorf("usage_record: re-encode: %w", err)
+		return UsageRecordInput{}, 0, fmt.Errorf("usage_record: re-encode: %w", err)
 	}
 	var rec UsageRecordInput
 	dec := json.NewDecoder(bytes.NewReader(cleanedBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&rec); err != nil {
-		return UsageRecordInput{}, strippedDims, fmt.Errorf("usage_record: decode: %w", err)
+		return UsageRecordInput{}, 0, fmt.Errorf("usage_record: decode: %w", err)
+	}
+
+	if _, _, err := checkedContextInputTotal(rec.Input, rec.CacheRead, rec.CacheWrite); err != nil {
+		return UsageRecordInput{}, 0, fmt.Errorf("usage_record: %w", err)
 	}
 
 	prefix := harness + ":"
 	if !strings.HasPrefix(rec.DedupeKey, prefix) || len(rec.DedupeKey) == len(prefix) {
-		return UsageRecordInput{}, strippedDims, fmt.Errorf("usage_record: dedupe_key %q must start with %q", rec.DedupeKey, prefix)
+		return UsageRecordInput{}, 0, fmt.Errorf("usage_record: dedupe_key %q must start with %q", rec.DedupeKey, prefix)
 	}
 	if rec.EventTS == "" {
-		return UsageRecordInput{}, strippedDims, errors.New("usage_record: event_ts is required")
+		return UsageRecordInput{}, 0, errors.New("usage_record: event_ts is required")
 	}
 	if _, err := time.Parse(time.RFC3339Nano, rec.EventTS); err != nil {
-		return UsageRecordInput{}, strippedDims, fmt.Errorf("usage_record: invalid event_ts %q: %w", rec.EventTS, err)
+		return UsageRecordInput{}, 0, fmt.Errorf("usage_record: invalid event_ts %q: %w", rec.EventTS, err)
 	}
 	if rec.Status != UsageRecordStatusOK && rec.Status != UsageRecordStatusError {
-		return UsageRecordInput{}, strippedDims, fmt.Errorf("usage_record: status %q must be %q or %q", rec.Status, UsageRecordStatusOK, UsageRecordStatusError)
+		return UsageRecordInput{}, 0, fmt.Errorf("usage_record: status %q must be %q or %q", rec.Status, UsageRecordStatusOK, UsageRecordStatusError)
 	}
 	if rec.InputDerivation != "" && rec.InputDerivation != InputDerivationReported && rec.InputDerivation != InputDerivationDerived {
-		return UsageRecordInput{}, strippedDims, fmt.Errorf("usage_record: invalid input_derivation %q", rec.InputDerivation)
+		return UsageRecordInput{}, 0, fmt.Errorf("usage_record: invalid input_derivation %q", rec.InputDerivation)
 	}
 	if !ValidTokenStatus(rec.TokenStatus) {
-		return UsageRecordInput{}, strippedDims, fmt.Errorf("usage_record: invalid token_status %q", rec.TokenStatus)
+		return UsageRecordInput{}, 0, fmt.Errorf("usage_record: invalid token_status %q", rec.TokenStatus)
 	}
 	if rec.ModelSource != "" && rec.ModelSource != ModelSourceEvent && rec.ModelSource != ModelSourceConfigured && rec.ModelSource != ModelSourceUnknown {
-		return UsageRecordInput{}, strippedDims, fmt.Errorf("usage_record: invalid model_source %q", rec.ModelSource)
+		return UsageRecordInput{}, 0, fmt.Errorf("usage_record: invalid model_source %q", rec.ModelSource)
 	}
 
 	return rec, strippedDims, nil
+}
+
+// ValidateSessionMetaLine validates one JSONL session_meta line emitted by a
+// converter:
+//   - line length <= MaxNormalizerLineBytes (1 MiB)
+//   - closed top-level field allowlist (type, session_id, native_relative_path,
+//     agent, is_subagent, parent_session_id, stats)
+//   - closed agent field allowlist (name, version, model_name, extra)
+//   - strips and counts any keys under agent.extra.scion (Hub stamps attribution)
+//   - caps serialized stats object size at MaxSessionMetaStatsBytes (64 KiB)
+//   - validates native_relative_path against the harness registry
+//
+// Returns 0 for strippedScionKeys on any error.
+func ValidateSessionMetaLine(line []byte, harness string) (SessionMeta, int, error) {
+	if len(line) > MaxNormalizerLineBytes {
+		return SessionMeta{}, 0, fmt.Errorf("session_meta line exceeds maximum size of %d bytes", MaxNormalizerLineBytes)
+	}
+	if harness == "" {
+		return SessionMeta{}, 0, errors.New("harness is required")
+	}
+
+	rawObj, err := decodeJSONObjectStrict(line)
+	if err != nil {
+		return SessionMeta{}, 0, fmt.Errorf("session_meta: %w", err)
+	}
+
+	for k, v := range rawObj {
+		if _, allowed := sessionMetaAllowedFields[k]; !allowed {
+			return SessionMeta{}, 0, fmt.Errorf("session_meta: disallowed field %q", k)
+		}
+		if k == "type" {
+			var typ string
+			if err := json.Unmarshal(v, &typ); err != nil || typ != "session_meta" {
+				return SessionMeta{}, 0, errors.New("session_meta: invalid type field")
+			}
+		}
+	}
+
+	sessionID, err := parseRequiredString(rawObj, "session_id")
+	if err != nil {
+		return SessionMeta{}, 0, fmt.Errorf("session_meta: %w", err)
+	}
+	relPath, err := parseRequiredString(rawObj, "native_relative_path")
+	if err != nil {
+		return SessionMeta{}, 0, fmt.Errorf("session_meta: %w", err)
+	}
+	if err := ValidateTrajectoryRelativePath(harness, relPath); err != nil {
+		return SessionMeta{}, 0, fmt.Errorf("session_meta: %w", err)
+	}
+
+	agentRaw, ok := rawObj["agent"]
+	if !ok || isJSONNull(agentRaw) {
+		return SessionMeta{}, 0, errors.New("session_meta: agent is required")
+	}
+	agent, strippedScion, err := validateSessionMetaAgent(agentRaw)
+	if err != nil {
+		return SessionMeta{}, 0, fmt.Errorf("session_meta: %w", err)
+	}
+
+	var isSubagent bool
+	if subRaw, has := rawObj["is_subagent"]; has && !isJSONNull(subRaw) {
+		if err := json.Unmarshal(subRaw, &isSubagent); err != nil {
+			return SessionMeta{}, 0, fmt.Errorf("session_meta: is_subagent must be a boolean")
+		}
+	}
+
+	var parentSessionID *string
+	if pRaw, has := rawObj["parent_session_id"]; has && !isJSONNull(pRaw) {
+		var p string
+		if err := json.Unmarshal(pRaw, &p); err != nil {
+			return SessionMeta{}, 0, fmt.Errorf("session_meta: parent_session_id must be a string or null")
+		}
+		parentSessionID = &p
+	}
+
+	var stats map[string]any
+	if statsRaw, has := rawObj["stats"]; has && !isJSONNull(statsRaw) {
+		trimmed := bytes.TrimSpace(statsRaw)
+		if len(trimmed) > MaxSessionMetaStatsBytes {
+			return SessionMeta{}, 0, fmt.Errorf("session_meta: stats exceeds maximum size of %d bytes", MaxSessionMetaStatsBytes)
+		}
+		if _, err := decodeJSONObjectStrict(trimmed); err != nil {
+			return SessionMeta{}, 0, fmt.Errorf("session_meta: stats: %w", err)
+		}
+		if err := json.Unmarshal(trimmed, &stats); err != nil {
+			return SessionMeta{}, 0, fmt.Errorf("session_meta: stats decode: %w", err)
+		}
+	}
+
+	return SessionMeta{
+		SessionID:          sessionID,
+		NativeRelativePath: relPath,
+		Agent:              agent,
+		IsSubagent:         isSubagent,
+		ParentSessionID:    parentSessionID,
+		Stats:              stats,
+	}, strippedScion, nil
+}
+
+func validateSessionMetaAgent(agentRaw []byte) (ATIFAgent, int, error) {
+	obj, err := decodeJSONObjectStrict(agentRaw)
+	if err != nil {
+		return ATIFAgent{}, 0, fmt.Errorf("agent: %w", err)
+	}
+	for k := range obj {
+		if _, allowed := atifAgentAllowedFields[k]; !allowed {
+			return ATIFAgent{}, 0, fmt.Errorf("agent: disallowed field %q", k)
+		}
+	}
+
+	name, err := parseRequiredString(obj, "name")
+	if err != nil {
+		return ATIFAgent{}, 0, fmt.Errorf("agent: %w", err)
+	}
+	version, err := parseOptionalString(obj, "version")
+	if err != nil {
+		return ATIFAgent{}, 0, fmt.Errorf("agent: %w", err)
+	}
+	modelName, err := parseOptionalString(obj, "model_name")
+	if err != nil {
+		return ATIFAgent{}, 0, fmt.Errorf("agent: %w", err)
+	}
+
+	var (
+		extra         map[string]any
+		strippedScion int
+	)
+	if extraRaw, has := obj["extra"]; has && !isJSONNull(extraRaw) {
+		extraObj, err := decodeJSONObjectStrict(extraRaw)
+		if err != nil {
+			return ATIFAgent{}, 0, fmt.Errorf("agent.extra: %w", err)
+		}
+		if scionRaw, hasScion := extraObj["scion"]; hasScion {
+			if !isJSONNull(scionRaw) {
+				scionObj, err := decodeJSONObjectStrict(scionRaw)
+				if err != nil {
+					return ATIFAgent{}, 0, fmt.Errorf("agent.extra.scion: %w", err)
+				}
+				strippedScion = len(scionObj)
+			}
+			delete(extraObj, "scion")
+		}
+		if len(extraObj) > 0 {
+			extra = make(map[string]any, len(extraObj))
+			for k, v := range extraObj {
+				var decoded any
+				if err := json.Unmarshal(v, &decoded); err != nil {
+					return ATIFAgent{}, 0, fmt.Errorf("agent.extra.%s: %w", k, err)
+				}
+				extra[k] = decoded
+			}
+		}
+	}
+
+	return ATIFAgent{
+		Name:      name,
+		Version:   version,
+		ModelName: modelName,
+		Extra:     extra,
+	}, strippedScion, nil
+}
+
+// ValidateATIFStepLine validates one full JSONL atif_step envelope line
+// (`{"type":"atif_step","session_id":"...","step":{...}}`), enforcing the
+// 1 MiB line size cap on the whole line, strict envelope fields, and
+// ValidateATIFStep on the inner step object.
+func ValidateATIFStepLine(line []byte, prevStepID int) (string, ATIFStep, error) {
+	if len(line) > MaxNormalizerLineBytes {
+		return "", ATIFStep{}, fmt.Errorf("atif_step line exceeds maximum size of %d bytes", MaxNormalizerLineBytes)
+	}
+	obj, err := decodeJSONObjectStrict(line)
+	if err != nil {
+		return "", ATIFStep{}, fmt.Errorf("atif_step line: %w", err)
+	}
+	for k := range obj {
+		if _, allowed := atifStepEnvelopeAllowedFields[k]; !allowed {
+			return "", ATIFStep{}, fmt.Errorf("atif_step line: disallowed envelope field %q", k)
+		}
+	}
+	typ, err := parseRequiredString(obj, "type")
+	if err != nil || typ != "atif_step" {
+		return "", ATIFStep{}, errors.New("atif_step line: type must be \"atif_step\"")
+	}
+	sessionID, err := parseRequiredString(obj, "session_id")
+	if err != nil {
+		return "", ATIFStep{}, fmt.Errorf("atif_step line: %w", err)
+	}
+	stepRaw, ok := obj["step"]
+	if !ok || isJSONNull(stepRaw) {
+		return "", ATIFStep{}, errors.New("atif_step line: step is required")
+	}
+	step, err := ValidateATIFStep(stepRaw, prevStepID)
+	if err != nil {
+		return "", ATIFStep{}, err
+	}
+	return sessionID, step, nil
 }
 
 // ValidTokenStatus reports whether v is one of the canonical TokenStatus* values.
@@ -682,22 +916,88 @@ func validateATIFExtraScion(extraObj map[string]json.RawMessage, source string) 
 	if err != nil {
 		return fmt.Errorf("extra.scion: %w", err)
 	}
-	for k := range scionObj {
-		if k == "scion_input_channel" {
+	for k, v := range scionObj {
+		switch {
+		case k == "scion_input_channel":
 			if source != "user" {
 				return fmt.Errorf("extra.scion.%s is only allowed on user steps (source=%q)", k, source)
 			}
-			continue
-		}
-		if _, allowed := atifExtraScionAllowedKeys[k]; !allowed {
+			if !isJSONNull(v) {
+				var s string
+				if err := json.Unmarshal(v, &s); err != nil {
+					return fmt.Errorf("extra.scion.%s must be a string", k)
+				}
+			}
+		case isInSet(atifExtraScionTokenKeys, k):
+			val, _, err := parseStrictInt64Field(scionObj, k)
+			if err != nil {
+				return fmt.Errorf("extra.scion.%w", err)
+			}
+			if val != nil && *val < 0 {
+				return fmt.Errorf("extra.scion.%s must be non-negative (got %d)", k, *val)
+			}
+		case k == "token_status":
+			if !isJSONNull(v) {
+				var ts string
+				if err := json.Unmarshal(v, &ts); err != nil || !ValidTokenStatus(ts) {
+					return fmt.Errorf("extra.scion.token_status has invalid value %s", string(bytes.TrimSpace(v)))
+				}
+			}
+		case k == "input_derivation":
+			if !isJSONNull(v) {
+				var deriv string
+				if err := json.Unmarshal(v, &deriv); err != nil || (deriv != "" && deriv != InputDerivationReported && deriv != InputDerivationDerived) {
+					return fmt.Errorf("extra.scion.input_derivation has invalid value %s", string(bytes.TrimSpace(v)))
+				}
+			}
+		case isInSet(atifExtraScionStringKeys, k):
+			if !isJSONNull(v) {
+				var s string
+				if err := json.Unmarshal(v, &s); err != nil {
+					return fmt.Errorf("extra.scion.%s must be a string", k)
+				}
+			}
+		default:
 			return fmt.Errorf("extra.scion: disallowed key %q", k)
 		}
 	}
 	return nil
 }
 
-// decodeJSONObjectStrict decodes a JSON object without trailing tokens and
-// rejects duplicate keys.
+func isInSet(set map[string]struct{}, k string) bool {
+	_, ok := set[k]
+	return ok
+}
+
+func parseRequiredString(obj map[string]json.RawMessage, name string) (string, error) {
+	raw, ok := obj[name]
+	if !ok || isJSONNull(raw) {
+		return "", fmt.Errorf("%s is required", name)
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", fmt.Errorf("%s must be a string", name)
+	}
+	if s == "" {
+		return "", fmt.Errorf("%s is required", name)
+	}
+	return s, nil
+}
+
+func parseOptionalString(obj map[string]json.RawMessage, name string) (string, error) {
+	raw, ok := obj[name]
+	if !ok || isJSONNull(raw) {
+		return "", nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", fmt.Errorf("%s must be a string", name)
+	}
+	return s, nil
+}
+
+// decodeJSONObjectStrict decodes a JSON object without trailing tokens or
+// trailing garbage, and rejects duplicate keys. Trailing whitespace is allowed.
 func decodeJSONObjectStrict(data []byte) (map[string]json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
@@ -734,9 +1034,10 @@ func decodeJSONObjectStrict(data []byte) (map[string]json.RawMessage, error) {
 	if _, err := dec.Token(); err != nil {
 		return nil, fmt.Errorf("unterminated JSON object: %w", err)
 	}
-	// Reject trailing tokens.
-	if _, err := dec.Token(); err == nil {
-		return nil, errors.New("unexpected trailing JSON content")
+	// Require EOF after the closing '}' (allows trailing whitespace, rejects
+	// both valid trailing JSON tokens and trailing non-JSON garbage).
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("unexpected trailing content after JSON object")
 	}
 	return out, nil
 }

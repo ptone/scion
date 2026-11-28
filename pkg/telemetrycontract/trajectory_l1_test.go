@@ -15,8 +15,6 @@
 package telemetrycontract
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"go/parser"
@@ -29,15 +27,13 @@ import (
 )
 
 func TestNativeRequestIDHash_Golden(t *testing.T) {
-	// Golden value computed independently using the Track 1 length-prefixed
-	// SHA-256 formula: "rid1:" + sha256("31:com.anthropic.claude_code.events11:api_request24:req_011CP9XYZ0123456789a").
-	rawID := "req_011CP9XYZ0123456789a"
-	h := sha256.New()
-	for _, part := range []string{ClaudeRequestIDScope, ClaudeRequestIDEvent, rawID} {
-		_, _ = fmt.Fprintf(h, "%d:", len(part))
-		h.Write([]byte(part))
-	}
-	want := "rid1:" + hex.EncodeToString(h.Sum(nil))
+	// Hard-coded golden value computed independently from the Track 1
+	// length-prefixed SHA-256 formula:
+	// "rid1:" + sha256("32:com.anthropic.claude_code.events11:api_request24:req_011CP9XYZ0123456789a").
+	const (
+		rawID = "req_011CP9XYZ0123456789a"
+		want  = "rid1:e7621aaff5f6b34add9c00ffe30648a02fe67c2f53c1a02b1cffdc382526a22c"
+	)
 
 	if got := NativeRequestIDHash(ClaudeRequestIDScope, ClaudeRequestIDEvent, rawID); got != want {
 		t.Fatalf("NativeRequestIDHash = %q, want %q", got, want)
@@ -50,6 +46,10 @@ func TestNativeRequestIDHash_Golden(t *testing.T) {
 	}
 	if got := NativeRequestIDHashForHarness("claude", ""); got != "" {
 		t.Fatalf("NativeRequestIDHashForHarness empty = %q, want empty", got)
+	}
+	// Unregistered harness without declared Track 1 scope/event inputs must return "".
+	if got := NativeRequestIDHashForHarness("unregistered-harness", rawID); got != "" {
+		t.Fatalf("NativeRequestIDHashForHarness(unregistered) = %q, want empty", got)
 	}
 }
 
@@ -145,8 +145,8 @@ func TestValidateParserVersion(t *testing.T) {
 func TestValidateUsageRecordLine(t *testing.T) {
 	validBase := `{"type":"usage_record","session_id":"sess-1","native_request_id_raw":"req_011CP9XYZ0123456789a","dedupe_key":"claude:msg_1:req_011CP9XYZ0123456789a","event_ts":"2026-11-28T12:00:00Z","model":"claude-sonnet-4-6","model_source":"event","service_tier":"standard","status":"ok","calls":1,"input":100,"output":50,"cache_read":200,"cache_write":30,"cache_write_1h":10,"reasoning":null,"input_derivation":"reported","token_status":"reported","reported_cost_micros":1234,"reported_cost_currency":"USD","reported_cost_source":"harness","is_subagent":false,"subagent_id":""}`
 
-	t.Run("valid full record", func(t *testing.T) {
-		rec, stripped, err := ValidateUsageRecordLine([]byte(validBase), "claude")
+	t.Run("valid full record with trailing whitespace", func(t *testing.T) {
+		rec, stripped, err := ValidateUsageRecordLine([]byte(validBase+"   \t\r\n"), "claude")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -172,6 +172,17 @@ func TestValidateUsageRecordLine(t *testing.T) {
 		}
 	})
 
+	t.Run("returns zero strippedDims on error", func(t *testing.T) {
+		line := `{"type":"usage_record","hub_id":"evil-hub","project_id":"evil-proj","dedupe_key":"claude:msg_1:req_1","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"token_status":"not_reported","disallowed":"x"}`
+		_, stripped, err := ValidateUsageRecordLine([]byte(line), "claude")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if stripped != 0 {
+			t.Fatalf("stripped = %d on error, want 0", stripped)
+		}
+	})
+
 	t.Run("error cases", func(t *testing.T) {
 		cases := []struct {
 			name    string
@@ -181,7 +192,10 @@ func TestValidateUsageRecordLine(t *testing.T) {
 			{"oversized line", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"token_status":"reported","model":"` + strings.Repeat("a", MaxNormalizerLineBytes) + `"}`},
 			{"not json", "claude", `not-json`},
 			{"not object", "claude", `[1,2,3]`},
-			{"trailing json", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"token_status":"reported"} {}`},
+			{"trailing json object", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"token_status":"reported"} {}`},
+			{"trailing non-json garbage", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"token_status":"reported"} xyz`},
+			{"trailing extra brace", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"token_status":"reported"}}`},
+			{"trailing comma", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"token_status":"reported"},`},
 			{"duplicate key", "claude", `{"dedupe_key":"claude:x","dedupe_key":"claude:y","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"token_status":"reported"}`},
 			{"unknown field", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"token_status":"reported","foo":"bar"}`},
 			{"prompt payload field", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"token_status":"reported","prompt":"secret"}`},
@@ -198,6 +212,7 @@ func TestValidateUsageRecordLine(t *testing.T) {
 			{"negative input", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"input":-1,"token_status":"reported"}`},
 			{"float output", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"output":2.5,"token_status":"reported"}`},
 			{"negative cache_read", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"cache_read":-5,"token_status":"reported"}`},
+			{"context_input_total overflow", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"input":4611686018427387904,"cache_read":4611686018427387904,"cache_write":4611686018427387904,"token_status":"reported"}`},
 			{"negative cost", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"reported_cost_micros":-1,"token_status":"reported"}`},
 			{"bad input_derivation", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"input_derivation":"guessed","token_status":"reported"}`},
 			{"bad token_status", "claude", `{"dedupe_key":"claude:x","event_ts":"2026-11-28T12:00:00Z","status":"ok","calls":1,"token_status":"bogus"}`},
@@ -206,7 +221,104 @@ func TestValidateUsageRecordLine(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				if _, _, err := ValidateUsageRecordLine([]byte(tc.line), tc.harness); err == nil {
+				_, stripped, err := ValidateUsageRecordLine([]byte(tc.line), tc.harness)
+				if err == nil {
+					t.Errorf("expected error for %s, got nil", tc.name)
+				}
+				if stripped != 0 {
+					t.Errorf("%s: stripped = %d on error, want 0", tc.name, stripped)
+				}
+			})
+		}
+	})
+}
+
+func TestValidateSessionMetaLine(t *testing.T) {
+	t.Run("valid with agent.extra.scion stripped and counted", func(t *testing.T) {
+		line := `{"type":"session_meta","session_id":"sess-1","native_relative_path":".claude/projects/-workspace/sess-1.jsonl","agent":{"name":"claude-code","version":"2.1.296","model_name":"claude-sonnet-4-6","extra":{"vendor":"anthropic","scion":{"hub_id":"evil","project_id":"evil","billing_user_id":"evil"}}},"is_subagent":false,"parent_session_id":null,"stats":{"lines":42}}   `
+		meta, stripped, err := ValidateSessionMetaLine([]byte(line), "claude")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if stripped != 3 {
+			t.Fatalf("stripped = %d, want 3", stripped)
+		}
+		if meta.SessionID != "sess-1" || meta.Agent.Name != "claude-code" {
+			t.Fatalf("unexpected meta: %+v", meta)
+		}
+		if _, leaked := meta.Agent.Extra["scion"]; leaked {
+			t.Fatalf("agent.extra.scion was not stripped: %+v", meta.Agent.Extra)
+		}
+		if meta.Agent.Extra["vendor"] != "anthropic" {
+			t.Fatalf("non-scion agent.extra key lost: %+v", meta.Agent.Extra)
+		}
+	})
+
+	t.Run("error cases", func(t *testing.T) {
+		oversizedStats := `{"type":"session_meta","session_id":"s","native_relative_path":".claude/projects/-w/s.jsonl","agent":{"name":"claude"},"stats":{"pad":"` + strings.Repeat("a", MaxSessionMetaStatsBytes) + `"}}`
+		cases := []struct {
+			name    string
+			harness string
+			line    string
+		}{
+			{"empty harness", "", `{"type":"session_meta","session_id":"s","native_relative_path":".claude/projects/-w/s.jsonl","agent":{"name":"claude"}}`},
+			{"wrong type", "claude", `{"type":"usage_record","session_id":"s","native_relative_path":".claude/projects/-w/s.jsonl","agent":{"name":"claude"}}`},
+			{"disallowed top field", "claude", `{"type":"session_meta","session_id":"s","native_relative_path":".claude/projects/-w/s.jsonl","agent":{"name":"claude","extra":{"scion":{"hub_id":"evil"}}},"hub_id":"evil"}`},
+			{"missing session_id", "claude", `{"type":"session_meta","native_relative_path":".claude/projects/-w/s.jsonl","agent":{"name":"claude"}}`},
+			{"invalid relative path", "claude", `{"type":"session_meta","session_id":"s","native_relative_path":".codex/sessions/s.jsonl","agent":{"name":"claude"}}`},
+			{"missing agent", "claude", `{"type":"session_meta","session_id":"s","native_relative_path":".claude/projects/-w/s.jsonl"}`},
+			{"missing agent name", "claude", `{"type":"session_meta","session_id":"s","native_relative_path":".claude/projects/-w/s.jsonl","agent":{"version":"1"}}`},
+			{"disallowed agent field", "claude", `{"type":"session_meta","session_id":"s","native_relative_path":".claude/projects/-w/s.jsonl","agent":{"name":"claude","prompt":"leak"}}`},
+			{"oversized stats", "claude", oversizedStats},
+			{"stats not object", "claude", `{"type":"session_meta","session_id":"s","native_relative_path":".claude/projects/-w/s.jsonl","agent":{"name":"claude"},"stats":[1,2]}`},
+			{"trailing garbage", "claude", `{"type":"session_meta","session_id":"s","native_relative_path":".claude/projects/-w/s.jsonl","agent":{"name":"claude"}} xyz`},
+			{"oversized line", "claude", `{"type":"session_meta","session_id":"` + strings.Repeat("a", MaxNormalizerLineBytes) + `","native_relative_path":".claude/projects/-w/s.jsonl","agent":{"name":"claude"}}`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, stripped, err := ValidateSessionMetaLine([]byte(tc.line), tc.harness)
+				if err == nil {
+					t.Errorf("expected error for %s, got nil", tc.name)
+				}
+				if stripped != 0 {
+					t.Errorf("%s: stripped = %d on error, want 0", tc.name, stripped)
+				}
+			})
+		}
+	})
+}
+
+func TestValidateATIFStepLine(t *testing.T) {
+	t.Run("valid envelope", func(t *testing.T) {
+		line := `{"type":"atif_step","session_id":"sess-1","step":{"step_id":1,"source":"user","message":"hello"}}` + "\n"
+		sid, step, err := ValidateATIFStepLine([]byte(line), 0)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sid != "sess-1" || step.StepID != 1 {
+			t.Fatalf("got sid=%q step=%+v", sid, step)
+		}
+	})
+
+	t.Run("error cases", func(t *testing.T) {
+		// Whole line exceeds 1 MiB even though inner step is tiny (via long session_id).
+		oversizedEnvelope := `{"type":"atif_step","session_id":"` + strings.Repeat("s", MaxNormalizerLineBytes) + `","step":{"step_id":1,"source":"user","message":"hi"}}`
+		cases := []struct {
+			name string
+			line string
+		}{
+			{"oversized envelope", oversizedEnvelope},
+			{"missing type", `{"session_id":"s","step":{"step_id":1,"source":"user","message":"hi"}}`},
+			{"wrong type", `{"type":"usage_record","session_id":"s","step":{"step_id":1,"source":"user","message":"hi"}}`},
+			{"missing session_id", `{"type":"atif_step","step":{"step_id":1,"source":"user","message":"hi"}}`},
+			{"missing step", `{"type":"atif_step","session_id":"s"}`},
+			{"disallowed envelope field", `{"type":"atif_step","session_id":"s","step":{"step_id":1,"source":"user","message":"hi"},"extra":"nope"}`},
+			{"trailing garbage", `{"type":"atif_step","session_id":"s","step":{"step_id":1,"source":"user","message":"hi"}} xyz`},
+			{"invalid inner step", `{"type":"atif_step","session_id":"s","step":{"step_id":1,"source":"tool","message":"hi"}}`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				if _, _, err := ValidateATIFStepLine([]byte(tc.line), 0); err == nil {
 					t.Errorf("expected error for %s, got nil", tc.name)
 				}
 			})
@@ -274,7 +386,7 @@ func TestValidateATIFStep(t *testing.T) {
 	})
 
 	t.Run("valid agent step with metrics and extra.scion", func(t *testing.T) {
-		raw := `{"step_id":2,"source":"agent","message":"hi","tool_calls":[{"id":"t1"}],"metrics":{"prompt_tokens":350,"completion_tokens":40,"cached_tokens":200,"cost_usd":0.0012,"extra":{"scion":{"input":100,"output":40,"cache_read":200,"cache_write":50,"cache_write_1h":10,"reasoning":0,"input_derivation":"reported","token_status":"reported","service_tier":"standard","dedupe_key":"claude:m1:r1","native_request_id":"rid1:abc"}}}}`
+		raw := `{"step_id":2,"source":"agent","message":"hi","tool_calls":[{"id":"t1"}],"metrics":{"prompt_tokens":350,"completion_tokens":40,"cached_tokens":200,"cost_usd":0.0012,"extra":{"scion":{"input":100,"output":40,"cache_read":200,"cache_write":50,"cache_write_1h":10,"reasoning":null,"input_derivation":"reported","token_status":"reported","service_tier":"standard","dedupe_key":"claude:m1:r1","native_request_id":"rid1:abc"}}}}`
 		step, err := ValidateATIFStep([]byte(raw), 1)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -301,6 +413,7 @@ func TestValidateATIFStep(t *testing.T) {
 			{"invalid source", 0, `{"step_id":1,"source":"tool","message":"hi"}`},
 			{"missing message", 0, `{"step_id":1,"source":"user"}`},
 			{"null message", 0, `{"step_id":1,"source":"user","message":null}`},
+			{"trailing non-json", 0, `{"step_id":1,"source":"user","message":"hi"} xyz`},
 			{"negative prompt_tokens", 0, `{"step_id":1,"source":"agent","message":"hi","metrics":{"prompt_tokens":-1}}`},
 			{"float completion_tokens", 0, `{"step_id":1,"source":"agent","message":"hi","metrics":{"completion_tokens":1.2}}`},
 			{"negative cached_tokens", 0, `{"step_id":1,"source":"agent","message":"hi","metrics":{"cached_tokens":-3}}`},
@@ -309,6 +422,15 @@ func TestValidateATIFStep(t *testing.T) {
 			{"disallowed metrics.extra.scion key", 0, `{"step_id":1,"source":"agent","message":"hi","metrics":{"extra":{"scion":{"secret":"x"}}}}`},
 			{"scion_input_channel on agent step", 0, `{"step_id":1,"source":"agent","message":"hi","extra":{"scion":{"scion_input_channel":"direct_tty"}}}`},
 			{"scion_input_channel on system step", 0, `{"step_id":1,"source":"system","message":"hi","extra":{"scion":{"scion_input_channel":"direct_tty"}}}`},
+			{"scion_input_channel non-string", 0, `{"step_id":1,"source":"user","message":"hi","extra":{"scion":{"scion_input_channel":123}}}`},
+			{"extra.scion token string", 0, `{"step_id":1,"source":"agent","message":"hi","extra":{"scion":{"input":"free text"}}}`},
+			{"extra.scion token negative", 0, `{"step_id":1,"source":"agent","message":"hi","extra":{"scion":{"output":-5}}}`},
+			{"extra.scion token float", 0, `{"step_id":1,"source":"agent","message":"hi","extra":{"scion":{"cache_read":1.5}}}`},
+			{"extra.scion bad token_status", 0, `{"step_id":1,"source":"agent","message":"hi","extra":{"scion":{"token_status":"bogus"}}}`},
+			{"extra.scion bad input_derivation", 0, `{"step_id":1,"source":"agent","message":"hi","extra":{"scion":{"input_derivation":"guessed"}}}`},
+			{"extra.scion service_tier non-string", 0, `{"step_id":1,"source":"agent","message":"hi","extra":{"scion":{"service_tier":42}}}`},
+			{"extra.scion dedupe_key non-string", 0, `{"step_id":1,"source":"agent","message":"hi","extra":{"scion":{"dedupe_key":["a"]}}}`},
+			{"extra.scion native_request_id non-string", 0, `{"step_id":1,"source":"agent","message":"hi","extra":{"scion":{"native_request_id":{}}}}`},
 			{"oversized step", 0, `{"step_id":1,"source":"user","message":"` + strings.Repeat("a", MaxNormalizerLineBytes) + `"}`},
 		}
 		for _, tc := range cases {
