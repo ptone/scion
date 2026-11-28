@@ -45,14 +45,20 @@ const (
 
 // ConversationTargetSource reports where ResolveConversationTarget(msg).ExternalRef
 // originated: TargetSourceConversation when msg.Conversation supplies a non-native
-// ExternalRef, TargetSourceThreadID when falling back to msg.ThreadID, or "" when
-// neither supplies an explicit target.
+// ExternalRef, TargetSourceThreadID when msg.Conversation is nil and msg.ThreadID
+// is set, or "" when neither supplies an explicit target.
+//
+// Matches ResolveConversationTarget: when msg.Conversation is present, msg.ThreadID
+// is never read.
 func ConversationTargetSource(msg *messages.StructuredMessage) TargetSource {
 	if msg == nil {
 		return ""
 	}
-	if msg.Conversation != nil && msg.Conversation.Surface != "native" && msg.Conversation.ExternalRef != "" {
-		return TargetSourceConversation
+	if msg.Conversation != nil {
+		if msg.Conversation.Surface != "native" && msg.Conversation.ExternalRef != "" {
+			return TargetSourceConversation
+		}
+		return ""
 	}
 	if msg.ThreadID != "" {
 		return TargetSourceThreadID

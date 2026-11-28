@@ -81,8 +81,10 @@ func TestConversationTargetSource(t *testing.T) {
 		},
 	}))
 
-	// Native conversation falls back to ThreadID (or "" if empty).
-	assert.Equal(t, TargetSourceThreadID, ConversationTargetSource(&messages.StructuredMessage{
+	// When Conversation is present, ResolveConversationTarget never reads
+	// ThreadID: native conversations and non-native conversations with an empty
+	// ExternalRef yield no explicit target source.
+	assert.Equal(t, TargetSource(""), ConversationTargetSource(&messages.StructuredMessage{
 		ThreadID: "19:chan@thread.tacv2",
 		Conversation: &messages.Conversation{
 			Surface:     "native",
@@ -96,8 +98,8 @@ func TestConversationTargetSource(t *testing.T) {
 		},
 	}))
 
-	// Non-native conversation with empty ExternalRef falls back to ThreadID.
-	assert.Equal(t, TargetSourceThreadID, ConversationTargetSource(&messages.StructuredMessage{
+	// Non-native conversation with empty ExternalRef does not fall back to ThreadID.
+	assert.Equal(t, TargetSource(""), ConversationTargetSource(&messages.StructuredMessage{
 		ThreadID: "19:chan@thread.tacv2",
 		Conversation: &messages.Conversation{
 			Surface: "teams",

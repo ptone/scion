@@ -144,25 +144,6 @@ func TestTeamsBroker_TargetAuthz_CrossProjectDeniedAndFallsThrough(t *testing.T)
 				}
 			},
 		},
-		{
-			name:    "ThreadID ExternalRef with foreign Conversation.ParentRef logs conversation source",
-			wantSrc: string(plugin.TargetSourceConversation),
-			buildMsg: func() *messages.StructuredMessage {
-				return &messages.StructuredMessage{
-					Version:   messages.Version,
-					Sender:    "agent:coder",
-					Recipient: "user:alice@example.com",
-					Msg:       "mixed source parent ref attempt",
-					Type:      messages.TypeInstruction,
-					Channel:   "teams",
-					ThreadID:  "19:proj-a@thread.tacv2;messageid=unseen",
-					Conversation: &messages.Conversation{
-						Surface:   "teams",
-						ParentRef: "19:proj-b@thread.tacv2;messageid=99",
-					},
-				}
-			},
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -224,6 +205,75 @@ func TestTeamsBroker_TargetAuthz_CrossProjectDeniedAndFallsThrough(t *testing.T)
 			assert.Equal(t, string(plugin.DenyForeignProject), denied[0]["reason"])
 		})
 	}
+
+	// Under P5a (ResolveConversationTarget never reads ThreadID when Conversation
+	// is present), a Conversation with empty ExternalRef and a foreign ParentRef
+	// skips Priority 1 altogether and falls through to proj-a without touching
+	// proj-b.
+	t.Run("Conversation without ExternalRef ignores ThreadID and foreign ParentRef", func(t *testing.T) {
+		var mu sync.Mutex
+		var deliveredPaths []string
+		serviceURL, client := newTestBotConnectorServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			deliveredPaths = append(deliveredPaths, r.URL.Path)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ActivityResponse{ID: "resp-1"})
+		}))
+
+		logBuf := &lockedBuffer{}
+		log := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		broker := NewBroker(log)
+		configureBrokerWithBotClient(t, broker, client)
+
+		ctx := context.Background()
+		require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+			ConversationID: "19:proj-a@thread.tacv2",
+			ProjectID:      "proj-a",
+			Active:         true,
+		}))
+		require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+			ConversationID: "19:proj-b@thread.tacv2",
+			ProjectID:      "proj-b",
+			Active:         true,
+		}))
+		require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
+			ConversationID: "19:proj-a@thread.tacv2",
+			ServiceURL:     serviceURL,
+			UpdatedAt:      time.Now(),
+		}))
+		require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
+			ConversationID: "19:proj-b@thread.tacv2;messageid=99",
+			ServiceURL:     serviceURL,
+			UpdatedAt:      time.Now(),
+		}))
+
+		require.NoError(t, broker.Publish(ctx, "scion.project.proj-a.user.u1.messages", &messages.StructuredMessage{
+			Version:   messages.Version,
+			Sender:    "agent:coder",
+			Recipient: "user:alice@example.com",
+			Msg:       "empty external_ref with foreign parent_ref",
+			Type:      messages.TypeInstruction,
+			Channel:   "teams",
+			ThreadID:  "19:proj-a@thread.tacv2;messageid=unseen",
+			Conversation: &messages.Conversation{
+				Surface:   "teams",
+				ParentRef: "19:proj-b@thread.tacv2;messageid=99",
+			},
+		}))
+
+		broker.mu.Lock()
+		sq := broker.sendQueue
+		broker.mu.Unlock()
+		sq.Close()
+
+		mu.Lock()
+		require.Equal(t, []string{"/amer/v3/conversations/19:proj-a@thread.tacv2/activities"}, deliveredPaths)
+		mu.Unlock()
+
+		denied := findLogEvent(logBuf.Entries(t), "outbound_target_denied")
+		require.Empty(t, denied)
+	})
 }
 
 // A5: Unlinked, inactive link, lookup error, nil store, and missing project fail closed.

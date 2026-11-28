@@ -207,7 +207,7 @@ func TestOutbound_ExternalSurface_RawThreadID_InboundConversation_AcceptedAndFor
 			// Phase 11 inbound resolution path.
 			inboundConv, err := srv.resolveBrokerInboundConversation(
 				ctx, slog.Default(), project.ID, tc.channel, tc.threadID, "", "Inbound Thread", agent.ID,
-				tc.channel, "",
+				tc.channel, "", "",
 			)
 			require.NoError(t, err)
 			require.NotNil(t, inboundConv)
@@ -241,7 +241,7 @@ func TestOutbound_ExternalSurface_RawThreadID_InboundConversation_AcceptedAndFor
 			require.NoError(t, s.CreateProject(ctx, otherProject))
 			foreignConv, err := srv.resolveBrokerInboundConversation(
 				ctx, slog.Default(), otherProject.ID, tc.channel, tc.otherID, "", "Foreign Thread", "",
-				tc.channel, "",
+				tc.channel, "", "",
 			)
 			require.NoError(t, err)
 			require.NotNil(t, foreignConv)
@@ -271,7 +271,7 @@ func TestOutbound_GroupConvRef_ThreadIDConsistency(t *testing.T) {
 		const threadKey = "C555:1700000000.000555"
 		inboundConv, err := srv.resolveBrokerInboundConversation(
 			ctx, slog.Default(), project.ID, "slack", threadKey, "", "Slack Thread", agent.ID,
-			"slack", "",
+			"slack", "", "",
 		)
 		require.NoError(t, err)
 
@@ -323,7 +323,7 @@ func TestOutbound_GroupConvRef_ThreadIDConsistency(t *testing.T) {
 		const threadKey = "C777:1700000000.000777"
 		inboundConv, err := srv.resolveBrokerInboundConversation(
 			ctx, slog.Default(), project.ID, "slack", threadKey, "", "Slack Thread Raw", agent.ID,
-			"slack", "",
+			"slack", "", "",
 		)
 		require.NoError(t, err)
 
