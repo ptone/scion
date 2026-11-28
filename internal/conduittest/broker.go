@@ -39,6 +39,7 @@ type BrokerOptions struct {
 	Version         string
 	Incarnation     string
 	RPCHandler      conduit.RPCHandler
+	Session         conduit.Config
 	Rand            func(int64) int64
 	HTTPClient      *http.Client
 	TLSClientConfig *tls.Config
@@ -84,6 +85,7 @@ func StartBroker(opts BrokerOptions) (*Broker, error) {
 		Version:     version,
 		Incarnation: incarnation,
 		RPCHandler:  opts.RPCHandler,
+		Session:     opts.Session,
 		WS:          wsDialer.Dialer(),
 		Rand:        randFn,
 	})

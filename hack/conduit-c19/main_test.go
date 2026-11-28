@@ -19,10 +19,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,7 +61,20 @@ func TestParseFlags_ValidationAndEnvFallback(t *testing.T) {
 	_, err = parseFlags([]string{"--mode=deliver", "--hub-url=http://h", "--agents-file=a.json", "--user-token=t"}, emptyEnv)
 	require.ErrorContains(t, err, "--broker-id")
 
-	// Env fallback + base64 secret + hub-rss-pids.
+	// R1: L6 modes refuse to start without hub RSS budget/source or drain config
+	// unless waived via --allow-unevaluated.
+	_, err = parseFlags([]string{
+		"--mode=phase2", "--hub-url=http://h", "--agents-file=a.json", "--user-token=t",
+	}, emptyEnv)
+	require.ErrorContains(t, err, "hub RSS")
+
+	_, err = parseFlags([]string{
+		"--mode=phase2", "--hub-url=http://h", "--agents-file=a.json", "--user-token=t",
+		"--allow-unevaluated=hub_rss_peak",
+	}, emptyEnv)
+	require.ErrorContains(t, err, "planned drain")
+
+	// Env fallback + base64 secret + hub-rss-pids + default rpc-concurrency=128.
 	b64 := base64.StdEncoding.EncodeToString([]byte("secret-bytes"))
 	envMap := map[string]string{
 		"C19_HUB_URL":           "http://hub.local/",
@@ -72,9 +87,9 @@ func TestParseFlags_ValidationAndEnvFallback(t *testing.T) {
 	cfg, err := parseFlags([]string{
 		"--mode=deliver",
 		"--duration=10s",
-		"--rpc-concurrency=96",
 		"--clock-skew=25ms",
 		"--memory-budget-mb=512",
+		"--expect-drain",
 	}, func(k string) string { return envMap[k] })
 	require.NoError(t, err)
 	assert.Equal(t, c19driver.ModeDeliver, cfg.Mode)
@@ -82,32 +97,41 @@ func TestParseFlags_ValidationAndEnvFallback(t *testing.T) {
 	assert.Equal(t, "tok-1", cfg.UserToken)
 	assert.Equal(t, "brk-1", cfg.BrokerID)
 	assert.Equal(t, []byte("secret-bytes"), cfg.BrokerSecret)
-	assert.Equal(t, 96, cfg.BrokerRPCConcurrency)
+	assert.Equal(t, 128, cfg.BrokerRPCConcurrency, "default --rpc-concurrency must be 128")
 	assert.Equal(t, 25*time.Millisecond, cfg.ClockSkew)
 	assert.Equal(t, []int{12, 34}, cfg.HubRSSPIDs)
 	assert.Equal(t, int64(512*1024*1024), cfg.MemoryBudgetBytes)
+	assert.NotEmpty(t, cfg.RunTag)
 }
 
-// fakeLiveHub is a lightweight in-process HTTP + Conduit WS hub that exercises
-// the exact live CLI wire paths:
-//   - /api/v1/conduit WS admission for fake agents and fake broker
-//   - POST /api/v1/agents/{id}/message (creates real message row, dispatches to broker)
-//   - POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/deliver (binds row, stamps not_after, calls agent /v1/control/deliver-message)
-//   - GET /api/v1/agents/{id}/logs (routes envelope RPC over broker's conduit session)
-//   - GET /api/v1/agents/{id}/pty (preflight JSON or WS PTY echo + optional 4503 drain close)
-type fakeLiveHub struct {
-	server *httptest.Server
+// R6: No self/MemStats fallback; unreadable configured PID fails the sample.
+func TestMemorySampler_NoSelfFallbackAndUnreadablePIDFails(t *testing.T) {
+	assert.Nil(t, makeMemorySampler(nil, ""), "must not fall back to driver self RSS")
 
-	mu              sync.Mutex
-	agentSessions   map[string]conduit.LocalSession
-	brokerSession   conduit.LocalSession
-	messages        map[string]string // msgID -> state ("dispatched" | "delivered")
-	brokerRPCDelay  time.Duration
-	drainPTYAfter   int // close PTY with 4503 after N echoes if > 0
-	deliverCalls    atomic.Int64
-	largeDeliveries atomic.Int64
-	messageRows     atomic.Int64
-	brokerRPCCalls  atomic.Int64
+	sampler := makeMemorySampler([]int{999999999}, "")
+	require.NotNil(t, sampler)
+	_, err := sampler(context.Background())
+	require.Error(t, err, "unreadable PID must fail sample rather than returning partial sum")
+
+	// Valid PID (current process) succeeds with source=proc_hub_pids and pid_count=1.
+	validSampler := makeMemorySampler([]int{os.Getpid()}, "")
+	require.NotNil(t, validSampler)
+	s, err := validSampler(context.Background())
+	require.NoError(t, err)
+	assert.Greater(t, s.Bytes, int64(0))
+	assert.Equal(t, "proc_hub_pids", s.Source)
+	assert.Equal(t, 1, s.PIDCount)
+}
+
+func TestSplitMessageChunks(t *testing.T) {
+	body := strings.Repeat("A", c19driver.LargeBodyBytes)
+	chunks := splitMessageChunks(body, maxMessageChunkBytes)
+	assert.Len(t, chunks, largeBodyRowsPerDelivery)
+	assert.Equal(t, 33, len(chunks))
+	for _, c := range chunks {
+		assert.LessOrEqual(t, len(c), maxMessageChunkBytes)
+	}
+	assert.Equal(t, body, strings.Join(chunks, ""))
 }
 
 type fakeAdmitter struct {
@@ -129,13 +153,45 @@ func (a *fakeAdmitter) Refresh(_ context.Context, _ *conduitv1.AuthRefresh) erro
 	return nil
 }
 
-func newFakeLiveHub(t *testing.T, brokerRPCDelay time.Duration, drainPTYAfter int) *fakeLiveHub {
+type fakeMsgRow struct {
+	state string
+	text  string
+}
+
+// fakeLiveHub is an in-process HTTP + Conduit WS hub that mirrors real Hub
+// semantics:
+//   - /api/v1/conduit WS admission for fake agents and fake broker
+//   - POST /api/v1/agents/{id}/message (enforces 16,000-char limit, stores row text, dispatches to broker)
+//   - POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/deliver (verifies concatenated stored row texts == delivered text, stamps not_after, calls agent /v1/control/deliver-message)
+//   - GET /api/v1/agents/{id}/logs (routes envelope RPC over broker's conduit session and maps broker 429 -> HTTP 502 matching handleAgentLogs + brokerStatusError)
+//   - GET /api/v1/agents/{id}/pty (preflight JSON or WS PTY echo + configurable 4503 close reason)
+type fakeLiveHub struct {
+	server *httptest.Server
+
+	mu              sync.Mutex
+	agentSessions   map[string]conduit.LocalSession
+	brokerSession   conduit.LocalSession
+	messages        map[string]fakeMsgRow
+	drainPTYAfter   int
+	drainPTYReason  string
+	deliverCalls    atomic.Int64
+	largeDeliveries atomic.Int64
+	largeRowCounts  []int
+	textMismatches  atomic.Int64
+	messageRows     atomic.Int64
+	brokerRPCCalls  atomic.Int64
+}
+
+func newFakeLiveHub(t *testing.T, drainPTYAfter int, drainPTYReason string) *fakeLiveHub {
 	t.Helper()
+	if drainPTYReason == "" {
+		drainPTYReason = "relay_restart"
+	}
 	h := &fakeLiveHub{
 		agentSessions:  make(map[string]conduit.LocalSession),
-		messages:       make(map[string]string),
-		brokerRPCDelay: brokerRPCDelay,
+		messages:       make(map[string]fakeMsgRow),
 		drainPTYAfter:  drainPTYAfter,
+		drainPTYReason: drainPTYReason,
 	}
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
@@ -176,9 +232,20 @@ func newFakeLiveHub(t *testing.T, brokerRPCDelay time.Duration, drainPTYAfter in
 		agentID, sub := parts[0], parts[1]
 		switch sub {
 		case "message":
+			var body struct {
+				Message string `json:"message"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if len(body.Message) > maxMessageChunkBytes {
+				http.Error(w, "message exceeds 16000 character limit", http.StatusBadRequest)
+				return
+			}
 			msgID := uuid.NewString()
 			h.mu.Lock()
-			h.messages[msgID] = "dispatched"
+			h.messages[msgID] = fakeMsgRow{state: "dispatched", text: body.Message}
 			bs := h.brokerSession
 			h.mu.Unlock()
 			h.messageRows.Add(1)
@@ -195,14 +262,6 @@ func newFakeLiveHub(t *testing.T, brokerRPCDelay time.Duration, drainPTYAfter in
 			})
 		case "logs":
 			h.brokerRPCCalls.Add(1)
-			if h.brokerRPCDelay > 0 {
-				select {
-				case <-r.Context().Done():
-					http.Error(w, "cancelled", http.StatusGatewayTimeout)
-					return
-				case <-time.After(h.brokerRPCDelay):
-				}
-			}
 			h.mu.Lock()
 			bs := h.brokerSession
 			h.mu.Unlock()
@@ -216,6 +275,20 @@ func newFakeLiveHub(t *testing.T, brokerRPCDelay time.Duration, drainPTYAfter in
 			resp, err := bs.Call(r.Context(), rpcReq)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			// Mirror real Hub handleAgentLogs + brokerStatusError: any broker
+			// status >= 400 (including conduit session 429) is returned as HTTP
+			// 502 with "Failed to retrieve logs from broker: runtime broker returned error <code>".
+			if resp.GetStatus() >= 400 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{
+						"code":    "internal_error",
+						"message": fmt.Sprintf("Failed to retrieve logs from broker: runtime broker returned error %d", resp.GetStatus()),
+					},
+				})
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -244,7 +317,7 @@ func newFakeLiveHub(t *testing.T, brokerRPCDelay time.Duration, drainPTYAfter in
 				echoes++
 				if h.drainPTYAfter > 0 && echoes >= h.drainPTYAfter {
 					_ = conn.WriteControl(websocket.CloseMessage,
-						websocket.FormatCloseMessage(wsprotocol.ClosePTYUpstreamUnavailable, "relay_restart"),
+						websocket.FormatCloseMessage(wsprotocol.ClosePTYUpstreamUnavailable, h.drainPTYReason),
 						time.Now().Add(time.Second))
 					return
 				}
@@ -271,15 +344,25 @@ func newFakeLiveHub(t *testing.T, brokerRPCDelay time.Duration, drainPTYAfter in
 			return
 		}
 		h.mu.Lock()
+		var storedText strings.Builder
 		for _, mid := range req.MessageIDs {
-			if _, ok := h.messages[mid]; !ok {
+			row, ok := h.messages[mid]
+			if !ok {
 				h.mu.Unlock()
 				http.Error(w, "unknown message_id", http.StatusBadRequest)
 				return
 			}
+			storedText.WriteString(row.text)
 		}
 		as := h.agentSessions[agentID]
 		h.mu.Unlock()
+
+		// R8 verification: concatenated stored row texts must equal delivered text.
+		if req.Text != nil && storedText.String() != *req.Text {
+			h.textMismatches.Add(1)
+			http.Error(w, "stored row text does not match delivered text", http.StatusBadRequest)
+			return
+		}
 		if as == nil {
 			http.Error(w, "no agent session", http.StatusServiceUnavailable)
 			return
@@ -304,12 +387,19 @@ func newFakeLiveHub(t *testing.T, brokerRPCDelay time.Duration, drainPTYAfter in
 		h.deliverCalls.Add(1)
 		if req.Text != nil && len(*req.Text) >= c19driver.LargeBodyBytes {
 			h.largeDeliveries.Add(1)
+			h.mu.Lock()
+			h.largeRowCounts = append(h.largeRowCounts, len(req.MessageIDs))
+			h.mu.Unlock()
 		}
-		h.mu.Lock()
-		for _, mid := range req.MessageIDs {
-			h.messages[mid] = "delivered"
+		if rpcResp.GetStatus() == http.StatusOK {
+			h.mu.Lock()
+			for _, mid := range req.MessageIDs {
+				row := h.messages[mid]
+				row.state = "delivered"
+				h.messages[mid] = row
+			}
+			h.mu.Unlock()
 		}
-		h.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(int(rpcResp.GetStatus()))
 		_, _ = w.Write(rpcResp.GetBody())
@@ -338,13 +428,17 @@ func writeAgentsFixture(t *testing.T, count int) string {
 	return p
 }
 
+// Covers R1, R3, R4, R6, R7, R8 (33 rows per 512 KiB delivery whose texts
+// concatenate to the delivered body), and message-ids-file auditability.
 func TestCLI_EndToEnd_DeliverMode(t *testing.T) {
-	hub := newFakeLiveHub(t, 5*time.Millisecond, 0)
+	hub := newFakeLiveHub(t, 0, "")
 	agentsFile := writeAgentsFixture(t, 4)
 	outFile := filepath.Join(t.TempDir(), "c19-deliver.json")
+	idsFile := filepath.Join(t.TempDir(), "msg-ids.txt")
 
 	cfg, err := parseFlags([]string{
 		"--mode=deliver",
+		"--run-tag=c19-e2e-deliver",
 		"--hub-url=" + hub.server.URL,
 		"--agents-file=" + agentsFile,
 		"--user-token=user-tok",
@@ -354,10 +448,16 @@ func TestCLI_EndToEnd_DeliverMode(t *testing.T) {
 		"--deliver-interval=600ms",
 		"--large-body-count=2",
 		"--rpc-concurrency=16",
+		"--broker-rpc-latency=5ms",
 		"--baseline-samples=4",
+		"--control-probe-rate=10",
 		"--stalled-tunnel=false",
 		"--extra-submits=2",
 		"--extra-submit-delay=50ms",
+		"--hub-rss-pids=" + strconv.Itoa(os.Getpid()),
+		"--memory-budget-mb=4096",
+		"--allow-unevaluated=planned_drain_4503,rotate_token_mix",
+		"--message-ids-file=" + idsFile,
 		"--output=" + outFile,
 	}, func(string) string { return "" })
 	require.NoError(t, err)
@@ -365,43 +465,58 @@ func TestCLI_EndToEnd_DeliverMode(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	rep, err := run(context.Background(), cfg, &stdout, &stderr)
 	require.NoError(t, err)
-	assert.True(t, rep.Pass, "deliver mode report must pass; table:\n%s", stdout.String())
+	assert.Equal(t, c19driver.VerdictPass, rep.Verdict, "table:\n%s", stdout.String())
+	assert.True(t, rep.Pass)
+	assert.Equal(t, "c19-e2e-deliver", rep.RunTag)
 	assert.GreaterOrEqual(t, rep.Counts.DeliverSucceeded, int64(4))
 	assert.Equal(t, int64(2), rep.Counts.LargeBodySucceeded)
 	assert.Equal(t, int64(0), rep.Counts.DeliverErrors)
+	assert.Equal(t, int64(0), rep.Counts.BrokerRPCErrors)
 	assert.Equal(t, int64(0), rep.Counts.Total429s)
-	assert.GreaterOrEqual(t, hub.messageRows.Load(), int64(6), "real message rows must be created via POST /message")
-	assert.GreaterOrEqual(t, hub.deliverCalls.Load(), int64(6), "real /deliver RPCs must reach agents")
-	assert.Equal(t, int64(2), hub.largeDeliveries.Load(), "512 KiB deliveries must reach agents")
-	assert.Greater(t, rep.Latencies.DeliverPaste512K.Count, 0, "512 KiB paste timing must be recorded")
-	assert.Greater(t, rep.Latencies.SendToReceipt.Count, 0, "send-to-receipt timing must be recorded")
-	assert.Greater(t, rep.Latencies.CombinedDeliver.Count, 0, "combined timing must be recorded")
-	assert.Greater(t, rep.Latencies.ControlBaseline.Count, 0, "baseline control latency must be recorded")
-	assert.Greater(t, rep.Latencies.ControlLoad.Count, 0, "load control latency must be recorded")
-	assert.GreaterOrEqual(t, rep.Counts.MaxConcurrentBrokerRPCs, int64(4), "concurrent broker RPCs must run in parallel")
+	assert.Equal(t, int64(0), hub.textMismatches.Load(), "concatenated stored row texts must equal delivered text")
+	assert.Equal(t, int64(2), hub.largeDeliveries.Load())
+	assert.Equal(t, []int{33, 33}, hub.largeRowCounts, "each 512 KiB delivery must bind 33 message rows")
+	assert.Equal(t, 33, rep.Counts.LargeBodyRowsPerDelivery)
+	assert.Equal(t, hub.messageRows.Load(), rep.Counts.MessageRowsCreated)
+	assert.Equal(t, 2, rep.Latencies.DeliverPaste512K.Count)
+	assert.Greater(t, rep.Latencies.SendToReceipt.Count, 0)
+	assert.Greater(t, rep.Latencies.CombinedDeliver.Count, 0)
+	assert.Greater(t, rep.Latencies.ControlBaseline.Count, 0)
+	assert.Greater(t, rep.Latencies.ControlLoad.Count, 0)
+	assert.Greater(t, rep.Counts.MaxConcurrentBrokerSessionRPCs, int64(0))
 
 	// Confirm every created message row ended in delivered state.
 	hub.mu.Lock()
-	for id, st := range hub.messages {
-		assert.Equal(t, "delivered", st, "message row %s", id)
+	for id, row := range hub.messages {
+		assert.Equal(t, "delivered", row.state, "message row %s", id)
 	}
 	hub.mu.Unlock()
 
+	// Confirm message IDs file contains exact created count.
+	idLines := strings.Split(strings.TrimSpace(mustReadFile(t, idsFile)), "\n")
+	assert.Len(t, idLines, int(rep.Counts.MessageRowsCreated))
+
 	// Confirm output JSON file is valid and matches report.
-	raw, err := os.ReadFile(outFile)
-	require.NoError(t, err)
 	var diskRep c19driver.Report
-	require.NoError(t, json.Unmarshal(raw, &diskRep))
-	assert.True(t, diskRep.Pass)
+	require.NoError(t, json.Unmarshal([]byte(mustReadFile(t, outFile)), &diskRep))
+	assert.Equal(t, c19driver.VerdictPass, diskRep.Verdict)
 	assert.Equal(t, rep.Counts.DeliverSucceeded, diskRep.Counts.DeliverSucceeded)
 }
 
+func mustReadFile(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	require.NoError(t, err)
+	return string(b)
+}
+
+// R5: Broker-side handler latency proves real in-flight concurrency on the
+// broker conduit session reaches >= 0.9 * configured concurrency.
 func TestCLI_EndToEnd_BrokerRPCConcurrency(t *testing.T) {
-	// Use a 40ms handler delay with --rpc-concurrency=32 so concurrent in-flight
-	// broker RPCs demonstrably reach high concurrency (>=16, well above CI smoke's ~3).
-	hub := newFakeLiveHub(t, 40*time.Millisecond, 0)
+	hub := newFakeLiveHub(t, 0, "")
 	agentsFile := writeAgentsFixture(t, 4)
 
+	const wantConc = 32
 	cfg, err := parseFlags([]string{
 		"--mode=broker-rpc",
 		"--hub-url=" + hub.server.URL,
@@ -409,46 +524,127 @@ func TestCLI_EndToEnd_BrokerRPCConcurrency(t *testing.T) {
 		"--user-token=user-tok",
 		"--broker-id=broker-1",
 		"--broker-secret=super-secret-key",
-		"--duration=500ms",
-		"--rpc-concurrency=32",
+		"--duration=600ms",
+		"--rpc-concurrency=" + strconv.Itoa(wantConc),
+		"--broker-rpc-latency=40ms",
 		"--baseline-samples=2",
+		"--control-probe-rate=10",
 		"--stalled-tunnel=false",
+		"--allow-unevaluated=hub_rss_peak,planned_drain_4503",
 	}, func(string) string { return "" })
 	require.NoError(t, err)
 
 	var stdout, stderr bytes.Buffer
 	rep, err := run(context.Background(), cfg, &stdout, &stderr)
 	require.NoError(t, err)
-	assert.True(t, rep.Pass, "broker-rpc mode must pass; table:\n%s", stdout.String())
-	assert.GreaterOrEqual(t, rep.Counts.MaxConcurrentBrokerRPCs, int64(16),
-		"broker-rpc concurrency must actually reach configured high concurrency (got %d)", rep.Counts.MaxConcurrentBrokerRPCs)
-	assert.Greater(t, rep.Counts.BrokerRPCSucceeded, int64(32))
+	assert.Equal(t, c19driver.VerdictPass, rep.Verdict, "table:\n%s", stdout.String())
+	const minExpected int64 = 29 // ceil(0.9 * 32)
+	assert.GreaterOrEqual(t, rep.Counts.MaxConcurrentBrokerSessionRPCs, minExpected,
+		"broker-side session high-water must reach >= 0.9x configured (%d), got %d", minExpected, rep.Counts.MaxConcurrentBrokerSessionRPCs)
+	assert.Greater(t, rep.Counts.BrokerRPCSucceeded, int64(wantConc))
 	assert.Equal(t, int64(0), rep.Counts.BrokerRPCErrors)
 	assert.Equal(t, int64(0), rep.Counts.Total429s)
 }
 
+// R4: Broker-session 429s (triggered by a low MaxConcurrentRPCs on the broker
+// conduit session and mapped by the Hub's /logs handler to HTTP 502) must be
+// counted in http_429_count and FAIL both broker-rpc and deliver modes.
+func TestCLI_EndToEnd_BrokerSession429Detected(t *testing.T) {
+	for _, mode := range []string{"broker-rpc", "deliver"} {
+		t.Run(mode, func(t *testing.T) {
+			hub := newFakeLiveHub(t, 0, "")
+			agentsFile := writeAgentsFixture(t, 2)
+
+			args := []string{
+				"--mode=" + mode,
+				"--hub-url=" + hub.server.URL,
+				"--agents-file=" + agentsFile,
+				"--user-token=user-tok",
+				"--broker-id=broker-1",
+				"--broker-secret=super-secret-key",
+				"--duration=600ms",
+				"--rpc-concurrency=16",
+				"--broker-rpc-latency=30ms",
+				"--broker-max-concurrent-rpcs=2",
+				"--baseline-samples=1",
+				"--stalled-tunnel=false",
+				"--allow-unevaluated=hub_rss_peak,planned_drain_4503,rotate_token_mix",
+			}
+			if mode == "deliver" {
+				args = append(args, "--deliver-interval=500ms", "--large-body-count=1", "--extra-submits=0")
+			}
+
+			cfg, err := parseFlags(args, func(string) string { return "" })
+			require.NoError(t, err)
+
+			var stdout, stderr bytes.Buffer
+			rep, err := run(context.Background(), cfg, &stdout, &stderr)
+			require.NoError(t, err)
+			assert.Equal(t, c19driver.VerdictFail, rep.Verdict, "table:\n%s", stdout.String())
+			assert.False(t, rep.Pass)
+			assert.Greater(t, rep.Counts.BrokerRPC429s, int64(0), "broker-session 429 mapped via hub 502 must be counted")
+			assert.Greater(t, rep.Counts.Total429s, int64(0), "total 429 count must reflect broker-session 429s")
+			assert.Greater(t, rep.Counts.BrokerRPCErrors, int64(0))
+		})
+	}
+}
+
+// Phase 2 + planned-drain 4503 reason check (relay_restart passes; other 4503
+// reason is tracked separately and fails planned_drain_4503).
 func TestCLI_EndToEnd_Phase2AndPlannedDrain4503(t *testing.T) {
-	hub := newFakeLiveHub(t, 0, 2) // close PTY with 4503 relay_restart after 2 echoes
-	agentsFile := writeAgentsFixture(t, 2)
+	t.Run("relay_restart_passes", func(t *testing.T) {
+		hub := newFakeLiveHub(t, 2, "relay_restart")
+		agentsFile := writeAgentsFixture(t, 2)
 
-	cfg, err := parseFlags([]string{
-		"--mode=phase2",
-		"--hub-url=" + hub.server.URL,
-		"--agents-file=" + agentsFile,
-		"--user-token=user-tok",
-		"--duration=1500ms",
-		"--pty-count=2",
-		"--baseline-samples=3",
-		"--stalled-tunnel=false",
-		"--expect-drain",
-	}, func(string) string { return "" })
-	require.NoError(t, err)
+		cfg, err := parseFlags([]string{
+			"--mode=phase2",
+			"--hub-url=" + hub.server.URL,
+			"--agents-file=" + agentsFile,
+			"--user-token=user-tok",
+			"--duration=1200ms",
+			"--pty-count=2",
+			"--baseline-samples=3",
+			"--control-probe-rate=10",
+			"--stalled-tunnel=false",
+			"--expect-drain",
+			"--allow-unevaluated=hub_rss_peak",
+		}, func(string) string { return "" })
+		require.NoError(t, err)
 
-	var stdout, stderr bytes.Buffer
-	rep, err := run(context.Background(), cfg, &stdout, &stderr)
-	require.NoError(t, err)
-	assert.True(t, rep.Pass, "phase2 mode with expected 4503 drain must pass; table:\n%s", stdout.String())
-	assert.GreaterOrEqual(t, rep.Counts.PTYEchoSucceeded, int64(4))
-	assert.GreaterOrEqual(t, rep.Drain.Count4503, int64(2))
-	assert.Contains(t, rep.Drain.Reasons, "relay_restart")
+		var stdout, stderr bytes.Buffer
+		rep, err := run(context.Background(), cfg, &stdout, &stderr)
+		require.NoError(t, err)
+		assert.Equal(t, c19driver.VerdictPass, rep.Verdict, "table:\n%s", stdout.String())
+		assert.GreaterOrEqual(t, rep.Counts.PTYEchoSucceeded, int64(4))
+		assert.GreaterOrEqual(t, rep.Drain.RelayRestartCount, int64(2))
+		assert.Equal(t, int64(0), rep.Drain.OtherCount)
+	})
+
+	t.Run("non_relay_restart_4503_fails", func(t *testing.T) {
+		hub := newFakeLiveHub(t, 2, "broker_disconnected")
+		agentsFile := writeAgentsFixture(t, 2)
+
+		cfg, err := parseFlags([]string{
+			"--mode=phase2",
+			"--hub-url=" + hub.server.URL,
+			"--agents-file=" + agentsFile,
+			"--user-token=user-tok",
+			"--duration=1200ms",
+			"--pty-count=2",
+			"--baseline-samples=3",
+			"--control-probe-rate=10",
+			"--stalled-tunnel=false",
+			"--expect-drain",
+			"--allow-unevaluated=hub_rss_peak",
+		}, func(string) string { return "" })
+		require.NoError(t, err)
+
+		var stdout, stderr bytes.Buffer
+		rep, err := run(context.Background(), cfg, &stdout, &stderr)
+		require.NoError(t, err)
+		assert.Equal(t, c19driver.VerdictFail, rep.Verdict, "table:\n%s", stdout.String())
+		assert.Equal(t, int64(0), rep.Drain.RelayRestartCount)
+		assert.GreaterOrEqual(t, rep.Drain.OtherCount, int64(2))
+		assert.Contains(t, rep.Drain.OtherReasons, "broker_disconnected")
+	})
 }

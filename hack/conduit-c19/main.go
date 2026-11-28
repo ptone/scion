@@ -31,10 +31,11 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -53,41 +54,54 @@ import (
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
+// maxMessageChunkBytes matches messages.MaxMessageLength (16,000 chars) so
+// each 512 KiB large delivery creates ceil(524288 / 16000) = 33 real message
+// rows whose texts concatenate to the exact delivered body (v2.22 §1.6).
+const maxMessageChunkBytes = 16000
+
+const largeBodyRowsPerDelivery = (c19driver.LargeBodyBytes + maxMessageChunkBytes - 1) / maxMessageChunkBytes
+
 type cliConfig struct {
-	Mode                   c19driver.Mode
-	HubURL                 string
-	HubURLs                []string
-	AgentsFile             string
-	AgentLimit             int
-	UserToken              string
-	UserID                 string
-	BrokerID               string
-	BrokerSecret           []byte
-	Duration               time.Duration
-	DeliverInterval        time.Duration
-	LargeBodyCount         int
-	RotateTokenCount       int
-	RotateURLTemplate      string
-	BrokerRPCCount         int
-	BrokerRPCConcurrency   int
-	BrokerRPCPacing        time.Duration
-	ControlConcurrency     int
-	BaselineControlSamples int
-	PTYCount               int
-	StalledTunnel          bool
-	StalledTunnelPort      int
-	ExtraSubmits           int
-	ExtraSubmitDelay       time.Duration
-	ClockSkew              time.Duration
-	HubRSSPIDs             []int
-	HubRSSCmd              string
-	MemoryBudgetBytes      int64
-	DrainAfter             time.Duration
-	DrainCmd               string
-	ExpectDrain            bool
-	OutputPath             string
-	JSONStdout             bool
-	InsecureSkipVerify     bool
+	Mode                    c19driver.Mode
+	RunTag                  string
+	HubURL                  string
+	HubURLs                 []string
+	AgentsFile              string
+	AgentLimit              int
+	UserToken               string
+	UserID                  string
+	BrokerID                string
+	BrokerSecret            []byte
+	Duration                time.Duration
+	DeliverInterval         time.Duration
+	LargeBodyCount          int
+	RotateTokenCount        int
+	RotateURLTemplate       string
+	BrokerRPCCount          int
+	BrokerRPCConcurrency    int
+	BrokerRPCPacing         time.Duration
+	BrokerRPCLatency        time.Duration
+	BrokerMaxConcurrentRPCs int
+	ControlConcurrency      int
+	BaselineControlSamples  int
+	ControlProbeRate        float64
+	PTYCount                int
+	StalledTunnel           bool
+	StalledTunnelPort       int
+	ExtraSubmits            int
+	ExtraSubmitDelay        time.Duration
+	ClockSkew               time.Duration
+	HubRSSPIDs              []int
+	HubRSSCmd               string
+	MemoryBudgetBytes       int64
+	DrainAfter              time.Duration
+	DrainCmd                string
+	ExpectDrain             bool
+	AllowUnevaluated        []string
+	MessageIDsFile          string
+	OutputPath              string
+	JSONStdout              bool
+	InsecureSkipVerify      bool
 }
 
 func main() {
@@ -108,7 +122,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "conduit-c19: %v\n", err)
 		os.Exit(1)
 	}
-	if !report.Pass {
+	if report.Verdict != c19driver.VerdictPass || !report.Pass {
 		os.Exit(1)
 	}
 }
@@ -118,34 +132,39 @@ func parseFlags(args []string, getenv func(string) string) (*cliConfig, error) {
 	cfg := &cliConfig{}
 
 	var (
-		modeStr         string
-		hubURLsStr      string
-		brokerSecretStr string
-		brokerSecretB64 string
-		hubRSSPIDsStr   string
-		memoryBudgetMB  int64
+		modeStr             string
+		hubURLsStr          string
+		brokerSecretStr     string
+		brokerSecretB64     string
+		hubRSSPIDsStr       string
+		memoryBudgetMB      int64
+		allowUnevaluatedStr string
 	)
 
 	fs.StringVar(&modeStr, "mode", string(c19driver.ModeDeliver), "Traffic mode: phase2, broker-rpc, or deliver")
+	fs.StringVar(&cfg.RunTag, "run-tag", "", "Unique tag included in message payloads and report (default: auto-generated)")
 	fs.StringVar(&cfg.HubURL, "hub-url", getenv("C19_HUB_URL"), "Hub or load-balancer base URL (env: C19_HUB_URL)")
 	fs.StringVar(&hubURLsStr, "hub-urls", getenv("C19_HUB_URLS"), "Optional comma-separated hub URLs to split agents across")
 	fs.StringVar(&cfg.AgentsFile, "agents-file", getenv("C19_AGENTS_FILE"), "Path to JSON file listing AgentTarget entries (env: C19_AGENTS_FILE)")
 	fs.IntVar(&cfg.AgentLimit, "agents", 0, "Maximum number of agents to use from --agents-file (0 = all)")
-	fs.StringVar(&cfg.UserToken, "user-token", getenv("C19_USER_TOKEN"), "User/admin bearer token for Hub API calls (env: C19_USER_TOKEN)")
+	fs.StringVar(&cfg.UserToken, "user-token", getenv("C19_USER_TOKEN"), "User/admin bearer token for Hub API calls (prefer env C19_USER_TOKEN)")
 	fs.StringVar(&cfg.UserID, "user-id", getenv("C19_USER_ID"), "User principal ID for Conduit tunnel Hello (env: C19_USER_ID)")
 	fs.StringVar(&cfg.BrokerID, "broker-id", getenv("C19_BROKER_ID"), "Runtime broker ID for Conduit broker session and /deliver (env: C19_BROKER_ID)")
-	fs.StringVar(&brokerSecretStr, "broker-secret", getenv("C19_BROKER_SECRET"), "Raw broker HMAC secret (env: C19_BROKER_SECRET)")
-	fs.StringVar(&brokerSecretB64, "broker-secret-b64", getenv("C19_BROKER_SECRET_B64"), "Base64-encoded broker HMAC secret (env: C19_BROKER_SECRET_B64)")
+	fs.StringVar(&brokerSecretStr, "broker-secret", getenv("C19_BROKER_SECRET"), "Raw broker HMAC secret (prefer env C19_BROKER_SECRET over CLI flag)")
+	fs.StringVar(&brokerSecretB64, "broker-secret-b64", getenv("C19_BROKER_SECRET_B64"), "Base64-encoded broker HMAC secret (prefer env C19_BROKER_SECRET_B64)")
 	fs.DurationVar(&cfg.Duration, "duration", 30*time.Second, "Active load duration")
 	fs.DurationVar(&cfg.DeliverInterval, "deliver-interval", 2*time.Second, "Per-agent delivery cadence in deliver mode")
 	fs.IntVar(&cfg.LargeBodyCount, "large-body-count", 10, "Number of 512 KiB deliveries to inject in deliver mode")
 	fs.IntVar(&cfg.RotateTokenCount, "rotate-count", 0, "Number of rotate-token calls (requires --rotate-url-template)")
 	fs.StringVar(&cfg.RotateURLTemplate, "rotate-url-template", getenv("C19_ROTATE_URL_TEMPLATE"), "Optional URL template with {agent_id} for POST rotate-token control RPCs")
 	fs.IntVar(&cfg.BrokerRPCCount, "broker-rpc-count", 0, "Total broker RPCs (0 = continuous for --duration)")
-	fs.IntVar(&cfg.BrokerRPCConcurrency, "rpc-concurrency", 64, "Concurrent broker-RPC workers (set >=64..128 to exercise MaxConcurrentRPCs)")
+	fs.IntVar(&cfg.BrokerRPCConcurrency, "rpc-concurrency", 128, "Concurrent broker-RPC workers (default 128 to exercise MaxConcurrentRPCs)")
 	fs.DurationVar(&cfg.BrokerRPCPacing, "rpc-pacing", 0, "Optional per-worker delay between broker RPCs for smooth pacing")
+	fs.DurationVar(&cfg.BrokerRPCLatency, "broker-rpc-latency", 0, "Simulated latency inside the fake broker RPC handler so in-flight RPCs overlap on the broker session")
+	fs.IntVar(&cfg.BrokerMaxConcurrentRPCs, "broker-max-concurrent-rpcs", 0, "Override MaxConcurrentRPCs on the fake broker conduit session (0 = library default 128)")
 	fs.IntVar(&cfg.ControlConcurrency, "control-concurrency", 8, "Concurrent control RPC workers")
 	fs.IntVar(&cfg.BaselineControlSamples, "baseline-samples", 20, "Baseline control probes measured before load starts")
+	fs.Float64Var(&cfg.ControlProbeRate, "control-probe-rate", c19driver.DefaultControlProbeRate, "Under-load control probe frequency in probes/sec (default 4.0)")
 	fs.IntVar(&cfg.PTYCount, "pty-count", 4, "Number of concurrent PTY echo/keepalive sessions in phase2 mode (or drain observers)")
 	fs.BoolVar(&cfg.StalledTunnel, "stalled-tunnel", true, "Open a stalled bulk TCP tunnel on agent 0")
 	fs.IntVar(&cfg.StalledTunnelPort, "stalled-tunnel-port", 8080, "Exposed port on agent 0 for the stalled bulk TCP tunnel")
@@ -154,10 +173,12 @@ func parseFlags(args []string, getenv func(string) string) (*cliConfig, error) {
 	fs.DurationVar(&cfg.ClockSkew, "clock-skew", 0, "Known agent-minus-hub clock skew subtracted from send-to-receipt delay")
 	fs.StringVar(&hubRSSPIDsStr, "hub-rss-pids", getenv("C19_HUB_RSS_PIDS"), "Comma-separated hub PIDs to sum VmRSS from /proc/<pid>/status")
 	fs.StringVar(&cfg.HubRSSCmd, "hub-rss-cmd", getenv("C19_HUB_RSS_CMD"), "Optional shell command printing aggregate hub RSS in bytes")
-	fs.Int64Var(&memoryBudgetMB, "memory-budget-mb", 0, "Optional peak RSS budget in MiB (0 = report only)")
+	fs.Int64Var(&memoryBudgetMB, "memory-budget-mb", 0, "Peak hub RSS budget in MiB (required unless hub_rss_peak is in --allow-unevaluated)")
 	fs.DurationVar(&cfg.DrainAfter, "drain-after", 0, "Optional delay into the load window before running --drain-cmd")
 	fs.StringVar(&cfg.DrainCmd, "drain-cmd", "", "Optional shell command to trigger a planned hub drain")
-	fs.BoolVar(&cfg.ExpectDrain, "expect-drain", false, "Require at least one 4503 planned-drain close observation to pass")
+	fs.BoolVar(&cfg.ExpectDrain, "expect-drain", false, "Require at least one 4503 relay_restart planned-drain close observation")
+	fs.StringVar(&allowUnevaluatedStr, "allow-unevaluated", "", "Comma-separated bar names explicitly permitted to remain unevaluated (echoed in report)")
+	fs.StringVar(&cfg.MessageIDsFile, "message-ids-file", "", "Optional path to write created Hub message IDs (one per line) for PG audit")
 	fs.StringVar(&cfg.OutputPath, "output", "", "Write machine-readable JSON report to this file path")
 	fs.BoolVar(&cfg.JSONStdout, "json", false, "Print JSON report to stdout instead of the human table")
 	fs.BoolVar(&cfg.InsecureSkipVerify, "insecure-skip-verify", false, "Skip TLS certificate verification (for self-signed testbed LB)")
@@ -169,6 +190,9 @@ func parseFlags(args []string, getenv func(string) string) (*cliConfig, error) {
 	cfg.Mode = c19driver.Mode(modeStr)
 	if !cfg.Mode.Valid() {
 		return nil, fmt.Errorf("invalid --mode %q (want phase2, broker-rpc, or deliver)", modeStr)
+	}
+	if cfg.RunTag == "" {
+		cfg.RunTag = "c19-" + uuid.NewString()[:8]
 	}
 	if hubURLsStr != "" {
 		for _, u := range strings.Split(hubURLsStr, ",") {
@@ -196,6 +220,9 @@ func parseFlags(args []string, getenv func(string) string) (*cliConfig, error) {
 	}
 	if cfg.BrokerRPCConcurrency <= 0 {
 		return nil, errors.New("--rpc-concurrency must be positive")
+	}
+	if cfg.ControlProbeRate <= 0 {
+		return nil, errors.New("--control-probe-rate must be positive")
 	}
 	if brokerSecretB64 != "" {
 		b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(brokerSecretB64))
@@ -233,6 +260,31 @@ func parseFlags(args []string, getenv func(string) string) (*cliConfig, error) {
 	if memoryBudgetMB > 0 {
 		cfg.MemoryBudgetBytes = memoryBudgetMB * 1024 * 1024
 	}
+	if allowUnevaluatedStr != "" {
+		for _, name := range strings.Split(allowUnevaluatedStr, ",") {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				cfg.AllowUnevaluated = append(cfg.AllowUnevaluated, name)
+			}
+		}
+	}
+
+	// Refuse to start in L6 modes without hub RSS budget/source or planned-drain
+	// config unless explicitly waived via --allow-unevaluated (R1).
+	if !slices.Contains(cfg.AllowUnevaluated, c19driver.BarHubRSSPeak) {
+		if cfg.MemoryBudgetBytes <= 0 || (len(cfg.HubRSSPIDs) == 0 && cfg.HubRSSCmd == "") {
+			return nil, errors.New("hub RSS measurement requires --memory-budget-mb and (--hub-rss-pids or --hub-rss-cmd), or pass --allow-unevaluated=hub_rss_peak")
+		}
+	}
+	if !slices.Contains(cfg.AllowUnevaluated, c19driver.BarPlannedDrain4503) {
+		if !cfg.ExpectDrain && cfg.DrainCmd == "" {
+			return nil, errors.New("planned drain verification requires --expect-drain (and optionally --drain-cmd), or pass --allow-unevaluated=planned_drain_4503")
+		}
+	}
+	if cfg.DrainCmd != "" && !cfg.ExpectDrain {
+		cfg.ExpectDrain = true
+	}
+
 	if cfg.UserID == "" {
 		cfg.UserID = "c19-load-user"
 	}
@@ -269,6 +321,18 @@ func loadAgentsFile(path string, limit int, hubURLs []string, defaultHubURL stri
 	return targets, nil
 }
 
+func updateAtomicHighWater(high *atomic.Int64, cur int64) {
+	for {
+		prev := high.Load()
+		if cur <= prev {
+			return
+		}
+		if high.CompareAndSwap(prev, cur) {
+			return
+		}
+	}
+}
+
 func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driver.Report, error) {
 	targets, err := loadAgentsFile(cfg.AgentsFile, cfg.AgentLimit, cfg.HubURLs, cfg.HubURL)
 	if err != nil {
@@ -289,11 +353,29 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		Timeout: 120 * time.Second,
 	}
 
-	// Start fake broker when needed (deliver and broker-rpc modes).
-	var broker *conduittest.Broker
+	var (
+		broker                 *conduittest.Broker
+		brokerSessionInFlight  atomic.Int64
+		brokerSessionHighWater atomic.Int64
+	)
 	if cfg.BrokerID != "" && len(cfg.BrokerSecret) > 0 {
-		rpcHandler := conduit.RPCHandlerFunc(func(_ context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+		rpcHandler := conduit.RPCHandlerFunc(func(rctx context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+			cur := brokerSessionInFlight.Add(1)
+			updateAtomicHighWater(&brokerSessionHighWater, cur)
+			defer brokerSessionInFlight.Add(-1)
+
 			envReq := envelope.RPCToRequest(req)
+			if cfg.BrokerRPCLatency > 0 && strings.HasSuffix(envReq.Path, "/logs") {
+				select {
+				case <-rctx.Done():
+					return envelope.ResponseToRPC(wsprotocol.NewResponseEnvelope(
+						envReq.RequestID, http.StatusGatewayTimeout,
+						map[string]string{"Content-Type": "application/json"},
+						[]byte(`{"error":"cancelled"}`),
+					))
+				case <-time.After(cfg.BrokerRPCLatency):
+				}
+			}
 			switch {
 			case strings.HasSuffix(envReq.Path, "/logs"):
 				return envelope.ResponseToRPC(wsprotocol.NewResponseEnvelope(
@@ -317,11 +399,16 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 				))
 			}
 		})
+		var sessCfg conduit.Config
+		if cfg.BrokerMaxConcurrentRPCs > 0 {
+			sessCfg.MaxConcurrentRPCs = cfg.BrokerMaxConcurrentRPCs
+		}
 		broker, err = conduittest.StartBroker(conduittest.BrokerOptions{
 			HubURL:          cfg.HubURL,
 			BrokerID:        cfg.BrokerID,
 			BrokerSecret:    cfg.BrokerSecret,
 			RPCHandler:      rpcHandler,
+			Session:         sessCfg,
 			HTTPClient:      httpClient,
 			TLSClientConfig: tlsCfg,
 		})
@@ -338,8 +425,23 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		}
 	}
 
+	var (
+		msgRowsCreated atomic.Int64
+		msgIDsMu       sync.Mutex
+		createdMsgIDs  []string
+	)
+	recordMsgIDs := func(ids []string) {
+		msgRowsCreated.Add(int64(len(ids)))
+		if cfg.MessageIDsFile != "" {
+			msgIDsMu.Lock()
+			createdMsgIDs = append(createdMsgIDs, ids...)
+			msgIDsMu.Unlock()
+		}
+	}
+
 	driverCfg := c19driver.Config{
 		Mode:                     cfg.Mode,
+		RunTag:                   cfg.RunTag,
 		Agents:                   targets,
 		DefaultHubURL:            cfg.HubURL,
 		HTTPClient:               httpClient,
@@ -352,8 +454,10 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		BrokerRPCContinuous:      cfg.Mode == c19driver.ModeBrokerRPC || (cfg.Mode == c19driver.ModeDeliver && cfg.BrokerRPCCount == 0 && broker != nil),
 		BrokerRPCConcurrency:     cfg.BrokerRPCConcurrency,
 		BrokerRPCPacing:          cfg.BrokerRPCPacing,
+		BrokerSessionHighWater:   func() int64 { return brokerSessionHighWater.Load() },
 		ControlConcurrency:       cfg.ControlConcurrency,
 		BaselineControlSamples:   cfg.BaselineControlSamples,
+		ControlProbeRate:         cfg.ControlProbeRate,
 		EnableBulkTunnelOnAgent0: cfg.StalledTunnel,
 		EnablePTY:                cfg.Mode == c19driver.ModePhase2 || cfg.ExpectDrain,
 		ClockSkew:                cfg.ClockSkew,
@@ -362,7 +466,7 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 	}
 
 	if cfg.Mode == c19driver.ModeDeliver {
-		driverCfg.Deliver = makeLiveDeliver(httpClient, cfg, broker)
+		driverCfg.Deliver = makeLiveDeliver(httpClient, cfg, broker, recordMsgIDs)
 	}
 	if broker != nil {
 		driverCfg.BrokerRPC = makeLiveBrokerRPC(httpClient, cfg, targets)
@@ -400,11 +504,28 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		return c19driver.Report{}, err
 	}
 
+	if cfg.MessageIDsFile != "" {
+		msgIDsMu.Lock()
+		content := strings.Join(createdMsgIDs, "\n")
+		if len(createdMsgIDs) > 0 {
+			content += "\n"
+		}
+		msgIDsMu.Unlock()
+		if err := os.WriteFile(cfg.MessageIDsFile, []byte(content), 0o644); err != nil {
+			return c19driver.Report{}, fmt.Errorf("write message IDs file %s: %w", cfg.MessageIDsFile, err)
+		}
+	}
+
 	report := c19driver.BuildReport(res, c19driver.EvalOptions{
-		MemoryBudgetBytes: cfg.MemoryBudgetBytes,
-		ExpectDrain:       cfg.ExpectDrain,
-		ClockSkew:         cfg.ClockSkew,
-		HubURL:            cfg.HubURL,
+		MemoryBudgetBytes:        cfg.MemoryBudgetBytes,
+		ExpectDrain:              cfg.ExpectDrain,
+		AllowUnevaluated:         cfg.AllowUnevaluated,
+		ClockSkew:                cfg.ClockSkew,
+		HubURL:                   cfg.HubURL,
+		RunTag:                   cfg.RunTag,
+		MessageRowsCreated:       msgRowsCreated.Load(),
+		LargeBodyRowsPerDelivery: largeBodyRowsPerDelivery,
+		ExpectedLargeBodyCount:   cfg.LargeBodyCount,
 	})
 
 	jsonBytes, err := json.MarshalIndent(report, "", "  ")
@@ -428,21 +549,46 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 	return report, nil
 }
 
-// makeLiveDeliver creates a real message row via POST /api/v1/agents/{id}/message
-// on the Hub API, then sends the deliver-message flush via the broker's
+// splitMessageChunks partitions body into slices of at most maxChunk bytes so
+// that strings.Join(chunks, "") == body and every chunk fits within
+// messages.MaxMessageLength (16,000 chars).
+func splitMessageChunks(body string, maxChunk int) []string {
+	if maxChunk <= 0 || len(body) <= maxChunk {
+		return []string{body}
+	}
+	chunks := make([]string, 0, (len(body)+maxChunk-1)/maxChunk)
+	for off := 0; off < len(body); off += maxChunk {
+		end := min(off+maxChunk, len(body))
+		chunks = append(chunks, body[off:end])
+	}
+	return chunks
+}
+
+// makeLiveDeliver creates real message rows via POST /api/v1/agents/{id}/message
+// (splitting 512 KiB bodies into ceil(512KiB/16000) = 33 rows whose texts
+// concatenate to the delivered body, matching v2.22 §1.6), then sends one
+// deliver-message flush binding all created message_ids via the broker's
 // POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/deliver endpoint.
-func makeLiveDeliver(hc *http.Client, cfg *cliConfig, broker *conduittest.Broker) func(context.Context, string, string) (int, string, error) {
+func makeLiveDeliver(hc *http.Client, cfg *cliConfig, broker *conduittest.Broker, onIDs func([]string)) func(context.Context, string, string) (int, string, error) {
 	return func(ctx context.Context, agentID, body string) (int, string, error) {
-		msgID, status, err := createHubMessageRow(ctx, hc, cfg.HubURL, cfg.UserToken, agentID, body)
-		if err != nil {
-			return status, "", err
+		chunks := splitMessageChunks(body, maxMessageChunkBytes)
+		msgIDs := make([]string, 0, len(chunks))
+		for _, chunk := range chunks {
+			msgID, status, err := createHubMessageRow(ctx, hc, cfg.HubURL, cfg.UserToken, agentID, chunk)
+			if err != nil {
+				return status, "", err
+			}
+			msgIDs = append(msgIDs, msgID)
+		}
+		if onIDs != nil {
+			onIDs(msgIDs)
 		}
 
 		text := body
 		req := &agentcontrol.DeliverRequest{
 			V:          1,
 			DeliveryID: "c19-" + uuid.NewString(),
-			MessageIDs: []string{msgID},
+			MessageIDs: msgIDs,
 			Op:         agentcontrol.OpPaste,
 			Text:       &text,
 			DeadlineMS: 92000,
@@ -459,15 +605,8 @@ func makeLiveDeliver(hc *http.Client, cfg *cliConfig, broker *conduittest.Broker
 	}
 }
 
-func createHubMessageRow(ctx context.Context, hc *http.Client, hubURL, userToken, agentID, body string) (string, int, error) {
-	// POST /api/v1/agents/{id}/message enforces messages.MaxMessageLength
-	// (16,000 chars), while /deliver carries up to 512 KiB (v2.22 §5.1).
-	// Keep the stored row text concise when body is a 512 KiB payload.
-	rowText := body
-	if len(rowText) > 512 {
-		rowText = fmt.Sprintf("c19-large-body-%d-bytes", len(body))
-	}
-	payload, err := json.Marshal(map[string]any{"message": rowText})
+func createHubMessageRow(ctx context.Context, hc *http.Client, hubURL, userToken, agentID, chunk string) (string, int, error) {
+	payload, err := json.Marshal(map[string]any{"message": chunk})
 	if err != nil {
 		return "", 0, err
 	}
@@ -502,6 +641,16 @@ func createHubMessageRow(ctx context.Context, hc *http.Client, hubURL, userToken
 	return out.MessageID, resp.StatusCode, nil
 }
 
+// isBrokerSession429Body detects a broker conduit session 429 refusal that the
+// Hub's handleAgentLogs maps to HTTP 502 with brokerStatusError's text
+// ("runtime broker returned error 429").
+func isBrokerSession429Body(status int, body string) bool {
+	if status == http.StatusTooManyRequests {
+		return true
+	}
+	return status == http.StatusBadGateway && strings.Contains(body, "runtime broker returned error 429")
+}
+
 func makeLiveBrokerRPC(hc *http.Client, cfg *cliConfig, targets []c19driver.AgentTarget) func(context.Context, int) error {
 	return func(ctx context.Context, seq int) error {
 		agentID := targets[seq%len(targets)].AgentID
@@ -515,14 +664,17 @@ func makeLiveBrokerRPC(hc *http.Client, cfg *cliConfig, targets []c19driver.Agen
 			return err
 		}
 		defer func() { _ = resp.Body.Close() }()
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
-		if resp.StatusCode != http.StatusOK {
-			return &c19driver.HTTPStatusError{
-				Status: resp.StatusCode,
-				Err:    fmt.Errorf("GET /api/v1/agents/%s/logs answered %d", agentID, resp.StatusCode),
-			}
+		if resp.StatusCode == http.StatusOK {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+			return nil
 		}
-		return nil
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		bodyStr := strings.TrimSpace(string(raw))
+		return &c19driver.HTTPStatusError{
+			Status:     resp.StatusCode,
+			Session429: isBrokerSession429Body(resp.StatusCode, bodyStr),
+			Err:        fmt.Errorf("GET /api/v1/agents/%s/logs answered %d: %s", agentID, resp.StatusCode, bodyStr),
+		}
 	}
 }
 
@@ -758,16 +910,21 @@ func recordPTYClose(pr *c19driver.PTYResult, ce *websocket.CloseError) {
 	}
 }
 
+// makeMemorySampler returns a hub RSS sampler for --hub-rss-cmd or
+// --hub-rss-pids. It never falls back to the driver's own RSS: when neither
+// hub source is configured it returns nil so hub_rss_peak stays unevaluated.
+// When --hub-rss-pids is set, every configured PID must be readable on each
+// sample or the sample fails.
 func makeMemorySampler(pids []int, cmdStr string) func(context.Context) (c19driver.MemorySample, error) {
 	if cmdStr != "" {
 		return func(ctx context.Context) (c19driver.MemorySample, error) {
 			out, err := exec.CommandContext(ctx, "sh", "-c", cmdStr).Output()
 			if err != nil {
-				return c19driver.MemorySample{}, err
+				return c19driver.MemorySample{}, fmt.Errorf("hub-rss-cmd: %w", err)
 			}
 			val, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-			if err != nil {
-				return c19driver.MemorySample{}, err
+			if err != nil || val <= 0 {
+				return c19driver.MemorySample{}, fmt.Errorf("hub-rss-cmd invalid byte count %q", strings.TrimSpace(string(out)))
 			}
 			return c19driver.MemorySample{
 				Timestamp: time.Now().UTC(),
@@ -781,33 +938,20 @@ func makeMemorySampler(pids []int, cmdStr string) func(context.Context) (c19driv
 			var total int64
 			for _, pid := range pids {
 				b, err := readProcVmRSS(fmt.Sprintf("/proc/%d/status", pid))
-				if err == nil {
-					total += b
+				if err != nil {
+					return c19driver.MemorySample{}, fmt.Errorf("read VmRSS for pid %d: %w", pid, err)
 				}
+				total += b
 			}
 			return c19driver.MemorySample{
 				Timestamp: time.Now().UTC(),
 				Bytes:     total,
 				Source:    "proc_hub_pids",
+				PIDCount:  len(pids),
 			}, nil
 		}
 	}
-	return func(_ context.Context) (c19driver.MemorySample, error) {
-		if b, err := readProcVmRSS("/proc/self/status"); err == nil && b > 0 {
-			return c19driver.MemorySample{
-				Timestamp: time.Now().UTC(),
-				Bytes:     b,
-				Source:    "driver_self_rss",
-			}, nil
-		}
-		var ms runtime.MemStats
-		runtime.ReadMemStats(&ms)
-		return c19driver.MemorySample{
-			Timestamp: time.Now().UTC(),
-			Bytes:     int64(ms.Sys),
-			Source:    "driver_self_sys",
-		}, nil
-	}
+	return nil
 }
 
 func readProcVmRSS(path string) (int64, error) {
