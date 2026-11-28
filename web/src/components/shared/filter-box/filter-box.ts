@@ -83,6 +83,17 @@ export class ScionFilterBox extends LitElement {
   @property({ type: String })
   notice = '';
 
+  /**
+   * Optional formatted result count supplied by the host view (for example
+   * `"12 of 84 agents"` or `"12 matching"`). Rendered in a polite live region
+   * beside the input; hosts may also supply custom markup via `slot="count"`.
+   */
+  @property({ type: String, attribute: 'result-count' })
+  resultCount = '';
+
+  @state()
+  private hasSlottedCount = false;
+
   @state()
   private suggestions: Suggestion[] = [];
 
@@ -142,7 +153,40 @@ export class ScionFilterBox extends LitElement {
       position: relative;
       min-width: 240px;
       flex: 1 1 280px;
+      max-width: 560px;
+    }
+
+    .input-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.25rem 0.625rem;
+    }
+
+    .input-wrap {
+      position: relative;
+      flex: 1 1 220px;
+      min-width: 0;
       max-width: 480px;
+    }
+
+    .result-count {
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted);
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+      flex-shrink: 0;
+    }
+
+    .result-count:not(.has-count) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      border: 0;
     }
 
     .input-shell {
@@ -832,128 +876,153 @@ export class ScionFilterBox extends LitElement {
     this.inputEl?.focus();
   }
 
+  private onCountSlotChange(e: Event): void {
+    const slot = e.target as HTMLSlotElement;
+    const nodes = slot.assignedNodes({ flatten: true });
+    this.hasSlottedCount = nodes.some((node) => (node.textContent ?? '').trim() !== '');
+  }
+
   override render() {
     const activeOptionId =
       this.open && this.activeIndex >= 0 ? `${this.listboxId}-opt-${this.activeIndex}` : undefined;
     const shownError = this.visibleError;
+    const hasCount = this.resultCount.trim() !== '' || this.hasSlottedCount;
 
     return html`
-      <div class="input-shell ${shownError ? 'has-error' : ''}">
-        <sl-icon class="prefix-icon" name="funnel"></sl-icon>
-        <input
-          type="text"
-          role="combobox"
-          aria-autocomplete="list"
-          aria-expanded=${this.open ? 'true' : 'false'}
-          aria-controls=${this.listboxId}
-          aria-activedescendant=${activeOptionId ?? nothing}
-          aria-invalid=${shownError ? 'true' : 'false'}
-          aria-label="Filter query"
-          placeholder=${this.placeholder}
-          @input=${this.onInput}
-          @focus=${this.onFocus}
-          @blur=${this.onBlur}
-          @keydown=${this.onKeydown}
-        />
-        ${this.value
-          ? html`
-              <button
-                type="button"
-                class="clear-btn"
-                aria-label="Clear filter"
-                @mousedown=${(e: MouseEvent) => {
-                  e.preventDefault();
+      <div class="input-row">
+        <div class="input-wrap">
+          <div class="input-shell ${shownError ? 'has-error' : ''}">
+            <sl-icon class="prefix-icon" name="funnel"></sl-icon>
+            <input
+              type="text"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded=${this.open ? 'true' : 'false'}
+              aria-controls=${this.listboxId}
+              aria-activedescendant=${activeOptionId ?? nothing}
+              aria-invalid=${shownError ? 'true' : 'false'}
+              aria-label="Filter query"
+              placeholder=${this.placeholder}
+              @input=${this.onInput}
+              @focus=${this.onFocus}
+              @blur=${this.onBlur}
+              @keydown=${this.onKeydown}
+            />
+            ${this.value
+              ? html`
+                  <button
+                    type="button"
+                    class="clear-btn"
+                    aria-label="Clear filter"
+                    @mousedown=${(e: MouseEvent) => {
+                      e.preventDefault();
+                    }}
+                    @click=${this.onClear}
+                  >
+                    <sl-icon name="x-lg"></sl-icon>
+                  </button>
+                `
+              : nothing}
+            <sl-popup placement="bottom-end" distance="6" ?active=${this.helpOpen} flip shift>
+              <sl-icon-button
+                slot="anchor"
+                class="help-btn"
+                name="question-circle"
+                label="Filter syntax help"
+                @click=${() => {
+                  this.helpOpen = !this.helpOpen;
                 }}
-                @click=${this.onClear}
-              >
-                <sl-icon name="x-lg"></sl-icon>
-              </button>
-            `
-          : nothing}
-        <sl-popup placement="bottom-end" distance="6" ?active=${this.helpOpen} flip shift>
-          <sl-icon-button
-            slot="anchor"
-            class="help-btn"
-            name="question-circle"
-            label="Filter syntax help"
-            @click=${() => {
-              this.helpOpen = !this.helpOpen;
-            }}
-          ></sl-icon-button>
-          ${this.helpOpen ? renderFilterHelp(this.schema) : nothing}
-        </sl-popup>
-      </div>
+              ></sl-icon-button>
+              ${this.helpOpen ? renderFilterHelp(this.schema) : nothing}
+            </sl-popup>
+          </div>
 
-      ${this.open &&
-      (this.suggestions.length > 0 || this.remoteLoading || this.remoteError || this.remoteEmpty)
-        ? html`
-            <div class="listbox-popover">
-              <ul
-                id=${this.listboxId}
-                class="listbox"
-                role="listbox"
-                aria-busy=${this.remoteLoading ? 'true' : nothing}
-              >
-                ${this.remoteLoading
-                  ? html`
-                      <li class="status-row" role="presentation" data-remote-status="loading">
-                        <span class="spinner" aria-hidden="true"></span>
-                        <span>Searching…</span>
-                      </li>
-                    `
-                  : nothing}
-                ${this.remoteError
-                  ? html`
-                      <li
-                        class="status-row status-warn"
-                        role="presentation"
-                        data-remote-status="error"
-                      >
-                        <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
-                        <span>Couldn't load suggestions. You can still type a value.</span>
-                      </li>
-                    `
-                  : nothing}
-                ${!this.remoteLoading && !this.remoteError && this.remoteEmpty
-                  ? html`
-                      <li class="status-row" role="presentation" data-remote-status="empty">
-                        <span>${this.formatNoMatchText()}</span>
-                      </li>
-                    `
-                  : nothing}
-                ${this.suggestions.map(
-                  (s, idx) => html`
-                    <li
-                      id="${this.listboxId}-opt-${idx}"
-                      class="option ${idx === this.activeIndex ? 'active' : ''} ${this.remoteLoading
-                        ? 'dim'
-                        : ''}"
-                      role="option"
-                      aria-selected=${idx === this.activeIndex ? 'true' : 'false'}
-                      @mousedown=${(e: MouseEvent) => {
-                        e.preventDefault();
-                        this.acceptSuggestion(s);
-                      }}
-                    >
-                      <span class="option-label">${s.label}</span>
-                      ${s.help ? html`<span class="option-help">${s.help}</span>` : nothing}
-                    </li>
-                  `
-                )}
-              </ul>
-              ${!this.remoteLoading &&
-              !this.remoteError &&
-              this.remoteTotal !== null &&
-              this.suggestions.length > 0
-                ? html`
-                    <div class="listbox-footer" data-remote-footer>
-                      Showing ${this.suggestions.length} of ${this.remoteTotal} · keep typing
-                    </div>
-                  `
-                : nothing}
-            </div>
-          `
-        : nothing}
+          ${this.open &&
+          (this.suggestions.length > 0 ||
+            this.remoteLoading ||
+            this.remoteError ||
+            this.remoteEmpty)
+            ? html`
+                <div class="listbox-popover">
+                  <ul
+                    id=${this.listboxId}
+                    class="listbox"
+                    role="listbox"
+                    aria-busy=${this.remoteLoading ? 'true' : nothing}
+                  >
+                    ${this.remoteLoading
+                      ? html`
+                          <li class="status-row" role="presentation" data-remote-status="loading">
+                            <span class="spinner" aria-hidden="true"></span>
+                            <span>Searching…</span>
+                          </li>
+                        `
+                      : nothing}
+                    ${this.remoteError
+                      ? html`
+                          <li
+                            class="status-row status-warn"
+                            role="presentation"
+                            data-remote-status="error"
+                          >
+                            <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
+                            <span>Couldn't load suggestions. You can still type a value.</span>
+                          </li>
+                        `
+                      : nothing}
+                    ${!this.remoteLoading && !this.remoteError && this.remoteEmpty
+                      ? html`
+                          <li class="status-row" role="presentation" data-remote-status="empty">
+                            <span>${this.formatNoMatchText()}</span>
+                          </li>
+                        `
+                      : nothing}
+                    ${this.suggestions.map(
+                      (s, idx) => html`
+                        <li
+                          id="${this.listboxId}-opt-${idx}"
+                          class="option ${idx === this.activeIndex ? 'active' : ''} ${this
+                            .remoteLoading
+                            ? 'dim'
+                            : ''}"
+                          role="option"
+                          aria-selected=${idx === this.activeIndex ? 'true' : 'false'}
+                          @mousedown=${(e: MouseEvent) => {
+                            e.preventDefault();
+                            this.acceptSuggestion(s);
+                          }}
+                        >
+                          <span class="option-label">${s.label}</span>
+                          ${s.help ? html`<span class="option-help">${s.help}</span>` : nothing}
+                        </li>
+                      `
+                    )}
+                  </ul>
+                  ${!this.remoteLoading &&
+                  !this.remoteError &&
+                  this.remoteTotal !== null &&
+                  this.suggestions.length > 0
+                    ? html`
+                        <div class="listbox-footer" data-remote-footer>
+                          Showing ${this.suggestions.length} of ${this.remoteTotal} · keep typing
+                        </div>
+                      `
+                    : nothing}
+                </div>
+              `
+            : nothing}
+        </div>
+
+        <span
+          class="result-count ${hasCount ? 'has-count' : ''}"
+          part="result-count"
+          aria-live="polite"
+          aria-atomic="true"
+          ><slot name="count" @slotchange=${this.onCountSlotChange}
+            >${this.resultCount || nothing}</slot
+          ></span
+        >
+      </div>
 
       <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
         ${this.liveAnnouncement}

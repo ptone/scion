@@ -105,6 +105,7 @@ import {
 import { replaceSearch } from '../../client/navigation.js';
 import '../shared/filter-box/filter-box.js';
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
+import { formatFilterResultCount } from '../shared/filter-box/filter-count.js';
 import {
   buildAgentValueSuggestions,
   canLiveAddAgent,
@@ -133,6 +134,7 @@ import {
   collectMissingAncestorIds,
   expandGraphMatchesWithAncestors,
   fetchMissingGraphAncestors,
+  isEmptyGraphQuery,
   type GraphFilterResult,
 } from './agent-graph-filter.js';
 import '../shared/messageability-indicator.js';
@@ -277,6 +279,10 @@ export class ScionPageAgents extends LitElement {
   /** The server `?q=` that the currently adopted local set (`this.agents`) was fetched with. */
   private loadedServerQ = '';
   private committedHasClientOnly = false;
+  private unfilteredTotal: number | null = null;
+  private unfilteredTotalApproximate = false;
+  /** True only when `this.agents` was fetched with no server `?q=` filter (including no `phase:`). */
+  private agentsIsUnfiltered = false;
 
   private get filterContext(): AgentFilterContext {
     return {
@@ -1003,6 +1009,11 @@ export class ScionPageAgents extends LitElement {
    * refresh then costs nothing (the phase changes arrive live).
    */
   private adoptCompleteSet(): void {
+    if (this.loadedServerQ === '') {
+      this.agentsIsUnfiltered = true;
+      this.unfilteredTotal = this.agents.length;
+      this.unfilteredTotalApproximate = false;
+    }
     this.agentWindow.adoptDrain({
       complete: true,
       capped: false,
@@ -1236,12 +1247,24 @@ export class ScionPageAgents extends LitElement {
           partial: false,
           isMember: (agent) => canLiveAddAgent(fq, agent, this.filterContext),
         }).agents;
+        if (serverQ === '') {
+          this.agentsIsUnfiltered = true;
+          this.unfilteredTotal = this.agents.length;
+          this.unfilteredTotalApproximate = false;
+        } else {
+          this.agentsIsUnfiltered = false;
+        }
         this.agentWindow.setSmall(epoch.sawResync);
         this.markCompleteSet(loadedQ);
       } else {
         // Paged: `this.agents` stays empty; stats and Stop-all read the
         // member index through the window.
         this.agents = [];
+        this.agentsIsUnfiltered = false;
+        if (serverQ === '') {
+          this.unfilteredTotal = data.totalCount ?? null;
+          this.unfilteredTotalApproximate = Boolean(data.totalCountApproximate);
+        }
         this.agentWindow.setPaged(this.seedPage(epoch, data), ticket.key);
       }
       return true;
@@ -1282,6 +1305,18 @@ export class ScionPageAgents extends LitElement {
     }
     this.loadedServerQ = drainQ;
     this.agents = result.agents;
+    if (drainQ === '') {
+      this.agentsIsUnfiltered = true;
+      if (result.complete && !result.capped && !result.error) {
+        this.unfilteredTotal = result.agents.length;
+        this.unfilteredTotalApproximate = false;
+      } else if (result.capped) {
+        this.unfilteredTotal = result.agents.length;
+        this.unfilteredTotalApproximate = true;
+      }
+    } else {
+      this.agentsIsUnfiltered = false;
+    }
     this.adoptScopeCapabilities(result.capabilities);
     this.agentWindow.adoptDrain(result);
     if (result.complete && !result.capped && !result.error) {
@@ -1781,6 +1816,7 @@ export class ScionPageAgents extends LitElement {
           .value=${this.filterQueryText}
           .notice=${this.filterNotice}
           .valueSuggestions=${this.agentValueSuggestions}
+          .resultCount=${this.getFilterResultCount()}
           placeholder="Filter agents… (try phase:running,error -label:tmp)"
           @filter-input=${this.handleFilterInput}
           @filter-commit=${this.handleFilterCommit}
@@ -1837,6 +1873,73 @@ export class ScionPageAgents extends LitElement {
   /** Whether a filter query is currently active. */
   private get hasActiveFilter(): boolean {
     return this.filterQueryText.trim() !== '' || this.committedServerQ !== '';
+  }
+
+  private get hasCommittedFilter(): boolean {
+    return (
+      this.committedServerQ !== '' ||
+      (this.committedFilterQuery !== null && !isEmptyGraphQuery(this.committedFilterQuery))
+    );
+  }
+
+  private getFilterResultCount(): string {
+    if (!this.hasCommittedFilter || this.loading || Boolean(this.error)) {
+      return '';
+    }
+    const win = this.agentWindow;
+    let matched: number;
+    let matchedApproximate: boolean;
+    let total: number | null = null;
+    let totalApproximate = false;
+
+    if (win.state === 'paged') {
+      matched = typeof win.total === 'number' ? win.total : 0;
+      matchedApproximate = win.totalApproximate;
+      if (
+        !hasNonPhaseServerPredicate(this.committedFilterQuery, AGENTS_FILTER_SCHEMA) &&
+        (win.memberIndex.countOnly || win.memberIndex.size > 0)
+      ) {
+        total = win.stats.total;
+        totalApproximate = win.memberIndex.approximate;
+      } else if (
+        stateManager.isAgentSetComplete('full') ||
+        stateManager.isAgentSetComplete('compact')
+      ) {
+        total = stateManager.getAgents().length;
+      } else if (this.unfilteredTotal !== null) {
+        total = this.unfilteredTotal;
+        totalApproximate = this.unfilteredTotalApproximate;
+      }
+    } else {
+      matched = win.display.length;
+      matchedApproximate = win.incompleteReason !== null;
+      if (this.agentsIsUnfiltered) {
+        if (win.incompleteReason === null) {
+          total = this.agents.length;
+        } else if (win.incompleteReason === 'capped') {
+          total = this.agents.length;
+          totalApproximate = true;
+        }
+      } else if (
+        stateManager.isAgentSetComplete('full') ||
+        stateManager.isAgentSetComplete('compact')
+      ) {
+        total = stateManager.getAgents().length;
+      } else if (this.unfilteredTotal !== null) {
+        total = this.unfilteredTotal;
+        totalApproximate = this.unfilteredTotalApproximate;
+      }
+    }
+
+    return formatFilterResultCount({
+      active: true,
+      matched,
+      matchedApproximate,
+      total,
+      totalApproximate,
+      singular: 'agent',
+      plural: 'agents',
+    });
   }
 
   private renderNoMatchingAgents(): TemplateResult {
