@@ -329,6 +329,26 @@ func TestEvents_CapabilitiesListPollAndStreamUnit(t *testing.T) {
 	_ = trResp.Body.Close()
 
 	// 7. Stream cap (MaxStreamsPerPrincipal = 2): 3rd concurrent stream returns -32025.
+	// Wait for cancelled streams from steps 5-6 to finish releasing their limiter slots
+	// on the server side before opening the 2 cap-filling streams.
+	waitLimiterCount := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			srv.streamLimiter.mu.Lock()
+			got := srv.streamLimiter.counts["user-ev-1"]
+			srv.streamLimiter.mu.Unlock()
+			if got == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for streamLimiter count = %d, still %d", want, got)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	waitLimiterCount(0)
+
 	capCtx, capCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer capCancel()
 	var openResps []*http.Response
@@ -341,6 +361,11 @@ func TestEvents_CapabilitiesListPollAndStreamUnit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open stream %d: %v", i, err)
 		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+			b, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			t.Fatalf("open stream %d: Content-Type = %q, want text/event-stream (body=%s)", i, ct, string(b))
+		}
 		openResps = append(openResps, resp)
 		ch := make(chan sseRPCMessage, 4)
 		wg.Add(1)
@@ -348,8 +373,12 @@ func TestEvents_CapabilitiesListPollAndStreamUnit(t *testing.T) {
 			defer wg.Done()
 			readSSEJSONRPCFrames(r, ch)
 		}(resp.Body)
-		<-ch // wait for active so stream is held
+		fr, ok := <-ch // wait for active so stream is held
+		if !ok || fr.Method != "notifications/events/active" {
+			t.Fatalf("open stream %d: expected notifications/events/active, got ok=%v frame=%+v", i, ok, fr)
+		}
 	}
+	waitLimiterCount(2)
 
 	thirdReq, _ := http.NewRequestWithContext(capCtx, http.MethodPost, ts.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":22,"method":"events/stream","params":{"name":"conversation.message.created","arguments":{"conversation_id":"conv-1"}}}`))
 	thirdReq.Header.Set("Authorization", "Bearer scion_pat_ev")
@@ -369,6 +398,7 @@ func TestEvents_CapabilitiesListPollAndStreamUnit(t *testing.T) {
 		_ = r.Body.Close()
 	}
 	wg.Wait()
+	waitLimiterCount(0)
 
 	// Verify audit logs were written for events/list, events/poll, and events/stream.
 	logs := logBuf.String()
