@@ -17,13 +17,13 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -36,6 +36,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/hack/conduit-c19/c19cli"
 	"github.com/GoogleCloudPlatform/scion/hack/conduit-c19/c19driver"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
@@ -272,12 +273,6 @@ func TestConduitHA_C19_LiveCLI(t *testing.T) {
 	env.HubB.EnableBrokerRouting(t)
 	haSetBrokerAttach(t, env, false)
 
-	// Build the live CLI binary once into a temp dir.
-	binPath := filepath.Join(t.TempDir(), "conduit-c19")
-	buildCmd := exec.Command("go", "build", "-buildvcs=false", "-o", binPath, "../../hack/conduit-c19")
-	buildOut, err := buildCmd.CombinedOutput()
-	require.NoError(t, err, "build hack/conduit-c19: %s", string(buildOut))
-
 	// Seed 6 agents split across Hub A (odd) and Hub B (even); agent 0 is on
 	// Hub B with port 8080 exposed so the stalled TCP tunnel from Hub A crosses
 	// the internal relay hop.
@@ -340,18 +335,15 @@ func TestConduitHA_C19_LiveCLI(t *testing.T) {
 			"--memory-budget-mb=8192",
 			"--output=" + outFile,
 		}, extraArgs...)
-		cmd := exec.CommandContext(ctx, binPath, args...)
-		cmd.Env = append(os.Environ(),
-			"C19_USER_TOKEN="+ownerTok,
-			"C19_BROKER_ID="+env.BrokerID,
-			"C19_BROKER_SECRET_B64="+brokerSecretB64,
-		)
-		out, runErr := cmd.CombinedOutput()
-		var rep c19driver.Report
-		if raw, rerr := os.ReadFile(outFile); rerr == nil {
-			_ = json.Unmarshal(raw, &rep)
+		envMap := map[string]string{
+			"C19_USER_TOKEN":        ownerTok,
+			"C19_BROKER_ID":         env.BrokerID,
+			"C19_BROKER_SECRET_B64": brokerSecretB64,
 		}
-		return rep, string(out), runErr
+		getenv := func(k string) string { return envMap[k] }
+		var buf bytes.Buffer
+		rep, runErr := c19cli.RunArgs(ctx, args, getenv, &buf, &buf)
+		return rep, buf.String(), runErr
 	}
 
 	t.Run("phase2", func(t *testing.T) {
@@ -367,6 +359,8 @@ func TestConduitHA_C19_LiveCLI(t *testing.T) {
 		assert.Equal(t, rep.Counts.StalledBulkBytesAtStart, rep.Counts.StalledBulkBytesWritten,
 			"stalled tunnel must stay backpressured")
 		assert.Greater(t, rep.Counts.PTYEchoSucceeded, int64(0))
+		assert.Equal(t, int64(0), rep.Counts.PTYEchoErrors)
+		assert.Equal(t, int64(0), rep.Counts.ControlProbeErrors)
 		assert.Greater(t, rep.Latencies.ControlBaseline.Count, 0)
 		assert.Greater(t, rep.Latencies.ControlLoad.Count, 0)
 	})
@@ -375,8 +369,8 @@ func TestConduitHA_C19_LiveCLI(t *testing.T) {
 		rep, out, err := runCLI(t,
 			"--mode=broker-rpc",
 			"--rpc-concurrency=8",
-			"--rpc-pacing=50ms",
-			"--broker-rpc-latency=15ms",
+			"--rpc-pacing=10ms",
+			"--broker-rpc-latency=150ms",
 			"--allow-unevaluated=planned_drain_4503",
 		)
 		require.NoError(t, err, "broker-rpc CLI failed:\n%s", out)
@@ -385,21 +379,21 @@ func TestConduitHA_C19_LiveCLI(t *testing.T) {
 		assert.Greater(t, rep.Counts.BrokerRPCSucceeded, int64(16))
 		assert.Equal(t, int64(0), rep.Counts.BrokerRPCErrors)
 		assert.Equal(t, int64(0), rep.Counts.Total429s)
-		assert.Greater(t, rep.Counts.MaxConcurrentBrokerSessionRPCs, int64(0))
+		assert.GreaterOrEqual(t, rep.Counts.MaxConcurrentBrokerSessionRPCs, int64(8))
 	})
 
 	t.Run("deliver", func(t *testing.T) {
 		idsFile := filepath.Join(t.TempDir(), "msg-ids.txt")
 		rep, out, err := runCLI(t,
 			"--mode=deliver",
-			"--duration=3500ms",
+			"--duration=4000ms",
 			"--deliver-interval=1500ms",
 			"--large-body-count=1",
 			"--large-body-pacing=-1ms",
 			"--rpc-concurrency=4",
-			"--rpc-pacing=50ms",
-			"--broker-rpc-latency=10ms",
-			"--broker-debounce=750ms",
+			"--rpc-pacing=10ms",
+			"--broker-rpc-latency=150ms",
+			"--broker-debounce=400ms",
 			"--extra-submits=2",
 			"--extra-submit-delay=50ms",
 			"--message-ids-file="+idsFile,
@@ -410,6 +404,8 @@ func TestConduitHA_C19_LiveCLI(t *testing.T) {
 		assert.GreaterOrEqual(t, rep.Counts.StalledBulkBytesAtStart, int64(conduit.DefaultStreamWindow))
 		assert.GreaterOrEqual(t, rep.Counts.DeliverSucceeded, int64(numAgents))
 		assert.Equal(t, int64(1), rep.Counts.LargeBodySucceeded)
+		assert.GreaterOrEqual(t, rep.Latencies.DeliverPaste512KMinBytes, c19driver.LargeBodyMinBytes)
+		assert.GreaterOrEqual(t, rep.Counts.MaxConcurrentBrokerSessionRPCs, int64(4))
 		assert.Equal(t, int64(0), rep.Counts.DeliverErrors)
 		assert.Equal(t, int64(0), rep.Counts.Total429s)
 		assert.Equal(t, 1, rep.Latencies.DeliverPaste512K.Count)

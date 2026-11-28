@@ -688,6 +688,10 @@ func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 		defer func() { _ = resp.Body.Close() }()
 		require.Equal(t, http.StatusNoContent, resp.StatusCode)
 
+		// Allow real-time settle so any unblocked PG NOTIFY would arrive before
+		// the non-vacuous before-interval echo check.
+		time.Sleep(500 * time.Millisecond)
+
 		// Non-vacuous check: just before the authorization interval, the stream
 		// must remain open and echo normally (neither NOTIFY nor sweep fired).
 		clk.Advance(intervalMax - time.Millisecond)

@@ -98,8 +98,12 @@ func TestBuildReport_AllBarsPass(t *testing.T) {
 		DeliverAttempts:                250,
 		DeliverSucceeded:               250,
 		LargeBodySucceeded:             2,
+		LargeBodyMinBytesObserved:      509000,
+		LargeBodyMaxBytesObserved:      511000,
 		RotateTokenSucceeded:           5,
 		BrokerRPCSucceeded:             500,
+		ExpectedBrokerRPCConcurrency:   128,
+		EffectiveMaxConcurrentRPCs:     128,
 		MaxConcurrentBrokerRPCs:        128,
 		MaxConcurrentBrokerSessionRPCs: 120,
 		BaselineControlLatencies:       []time.Duration{5 * time.Millisecond, 10 * time.Millisecond},
@@ -118,6 +122,8 @@ func TestBuildReport_AllBarsPass(t *testing.T) {
 		Drain4503Reasons:               []string{"relay_restart", "relay_restart"},
 		Drain4503Delays:                []time.Duration{10 * time.Second, 14 * time.Second},
 		PostDrainWorkSucceeded:         12,
+		PostDrainReplacementWork:       5,
+		SessionReconnections:           2,
 	}
 
 	rep := BuildReport(res, EvalOptions{
@@ -137,7 +143,7 @@ func TestBuildReport_AllBarsPass(t *testing.T) {
 	assert.InDelta(t, 15.0, rep.Latencies.ControlP99AddedMS, 0.01)
 	assert.Contains(t, findBar(t, rep.Bars, BarHubRSSPeak).Observed, "source=proc_hub_pids, pids=2")
 	assert.Contains(t, findBar(t, rep.Bars, BarDeliverPasteP99).Note, "RecordingTmuxRunner")
-	assert.Contains(t, findBar(t, rep.Bars, BarHTTP429Count).Note, "per-source split")
+	assert.Contains(t, findBar(t, rep.Bars, BarHTTP429Count).Note, "retried attempts")
 	assert.Equal(t, int64(314), rep.Counts.MessageRowsCreated)
 	assert.Equal(t, 33, rep.Counts.LargeBodyRowsPerDelivery)
 	assert.Equal(t, int64(120), rep.Counts.MaxConcurrentBrokerSessionRPCs)
@@ -173,14 +179,18 @@ func TestBuildReport_AllBarsPass(t *testing.T) {
 // pass=true on an unevaluated bar.
 func TestBuildReport_UnevaluatedRequiredBarsIncomplete(t *testing.T) {
 	res := &Result{
-		Mode:                     ModeDeliver,
-		Duration:                 5 * time.Second,
-		AgentCount:               10,
-		ExpectedLargeBodyCount:   2,
-		DeliverSucceeded:         10,
-		LargePasteLatencies:      []time.Duration{500 * time.Millisecond, 600 * time.Millisecond},
-		SendToReceiptDelays:      []time.Duration{10 * time.Millisecond},
-		CombinedDeliverLatencies: []time.Duration{610 * time.Millisecond},
+		Mode:                      ModeDeliver,
+		Duration:                  5 * time.Second,
+		DeliverInterval:           2 * time.Second,
+		AgentCount:                10,
+		ExpectedLargeBodyCount:    2,
+		DeliverAttempts:           25,
+		DeliverSucceeded:          25,
+		LargePasteLatencies:       []time.Duration{500 * time.Millisecond, 600 * time.Millisecond},
+		LargeBodyMinBytesObserved: 509000,
+		LargeBodyMaxBytesObserved: 511000,
+		SendToReceiptDelays:       []time.Duration{10 * time.Millisecond},
+		CombinedDeliverLatencies:  []time.Duration{610 * time.Millisecond},
 	}
 
 	rep := BuildReport(res, EvalOptions{})
@@ -192,6 +202,7 @@ func TestBuildReport_UnevaluatedRequiredBarsIncomplete(t *testing.T) {
 		}
 	}
 	assert.False(t, findBar(t, rep.Bars, BarControlP99Added).Evaluated)
+	assert.False(t, findBar(t, rep.Bars, BarSessionStall).Evaluated)
 	assert.False(t, findBar(t, rep.Bars, BarHubRSSPeak).Evaluated)
 	assert.False(t, findBar(t, rep.Bars, BarPlannedDrain4503).Evaluated)
 	rotBar := findBar(t, rep.Bars, BarRotateTokenMix)
@@ -200,12 +211,13 @@ func TestBuildReport_UnevaluatedRequiredBarsIncomplete(t *testing.T) {
 	assert.Contains(t, FormatTable(rep), "[INCOMPLETE]")
 
 	// Explicitly waiving those unevaluated bars is echoed in report and allows PASS.
+	waivers := []string{BarControlP99Added, BarSessionStall, BarHubRSSPeak, BarPlannedDrain4503, BarRotateTokenMix}
 	repWaived := BuildReport(res, EvalOptions{
-		AllowUnevaluated: []string{BarControlP99Added, BarHubRSSPeak, BarPlannedDrain4503, BarRotateTokenMix},
+		AllowUnevaluated: waivers,
 	})
 	assert.Equal(t, VerdictPass, repWaived.Verdict)
 	assert.True(t, repWaived.Pass)
-	assert.Equal(t, []string{BarControlP99Added, BarHubRSSPeak, BarPlannedDrain4503, BarRotateTokenMix}, repWaived.AllowUnevaluated)
+	assert.Equal(t, waivers, repWaived.AllowUnevaluated)
 	for _, b := range repWaived.Bars {
 		if !b.Evaluated {
 			assert.False(t, b.Pass, "waived unevaluated bar %q must still have pass=false", b.Name)
@@ -274,11 +286,13 @@ func TestBuildReport_PlannedDrainClauses(t *testing.T) {
 	assert.Equal(t, VerdictFail, repNoRepl.Verdict)
 	assert.False(t, findBar(t, repNoRepl.Bars, BarPlannedDrain4503).Pass)
 
-	// 4. relay_restart within deadline AND post-drain work >= 1 -> PASS.
+	// 4. relay_restart within deadline AND reconnect >= 1 AND replacement work >= 1 -> PASS.
 	rOK := base()
 	rOK.DrainTriggeredAt = time.Now().Add(-10 * time.Second)
 	rOK.Drain4503Delays = []time.Duration{8 * time.Second}
 	rOK.PostDrainWorkSucceeded = 3
+	rOK.PostDrainReplacementWork = 3
+	rOK.SessionReconnections = 1
 	repOK := BuildReport(rOK, EvalOptions{
 		MemoryBudgetBytes:      512 * 1024 * 1024,
 		ExpectDrain:            true,

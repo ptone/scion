@@ -112,21 +112,24 @@ type AgentTarget struct {
 // PTYResult summarizes one PTY worker's echo/keepalive loop and any observed
 // planned-drain 4503 close frame.
 type PTYResult struct {
-	EchoSucceeded int64
-	EchoErrors    int64
-	Latencies     []time.Duration
-	Drain4503     bool
-	CloseCode     int
-	CloseReason   string
-	ClosedAt      time.Time
+	EchoSucceeded          int64
+	EchoErrors             int64
+	DrainWindowErrors      int64
+	PostDrainEchoSucceeded int64
+	Latencies              []time.Duration
+	Drain4503              bool
+	CloseCode              int
+	CloseReason            string
+	ClosedAt               time.Time
 }
 
 // MemorySample records one point-in-time RSS / memory observation.
 type MemorySample struct {
-	Timestamp time.Time `json:"timestamp"`
-	Bytes     int64     `json:"bytes"`
-	Source    string    `json:"source"`
-	PIDCount  int       `json:"pid_count,omitempty"`
+	Timestamp            time.Time `json:"timestamp"`
+	Bytes                int64     `json:"bytes"`
+	Source               string    `json:"source"`
+	PIDCount             int       `json:"pid_count,omitempty"`
+	ExitedAfterDrainPIDs int       `json:"exited_after_drain_pids,omitempty"`
 }
 
 // Config configures a C19 load run.
@@ -170,6 +173,9 @@ type Config struct {
 	// BrokerRPCPacing optionally sleeps for this duration between successive
 	// BrokerRPC calls within each worker (0 = no sleep).
 	BrokerRPCPacing time.Duration
+	// BrokerMaxConcurrentRPCs records the effective MaxConcurrentRPCs on the
+	// broker conduit session (0 = default 128) for the broker_session_concurrency bar.
+	BrokerMaxConcurrentRPCs int
 	// ControlConcurrency is the number of concurrent workers for RotateToken
 	// during load (default 1).
 	ControlConcurrency int
@@ -196,6 +202,10 @@ type Config struct {
 	ClockSkew time.Duration
 	// DrainAfter triggers OnDrainTrigger after this offset into Duration.
 	DrainAfter time.Duration
+	// DrainDeadline defines the drain window [DrainTriggeredAt, DrainTriggeredAt+DrainDeadline]
+	// during which control-probe and PTY errors on drained sessions are excused
+	// and reported separately (default 30s when DrainAfter > 0).
+	DrainDeadline time.Duration
 	// MemorySampleInterval controls how often MemorySampler is called during
 	// the load window (default 1s when MemorySampler != nil).
 	MemorySampleInterval time.Duration
@@ -203,6 +213,10 @@ type Config struct {
 	// Deliver sends one deliver-message flush to agentID with body and returns
 	// the HTTP status code, outcome string, and any error. Required in ModeDeliver.
 	Deliver func(ctx context.Context, agentID, body string) (status int, outcome string, err error)
+	// FlusherAttemptStats optionally returns total HTTP 429 and 503 counts
+	// observed across all /deliver attempts (including retried attempts) inside
+	// the broker flusher so retried 429s are never hidden from http_429_count.
+	FlusherAttemptStats func() (deliver429s, deliver503s int64)
 	// OnLoadComplete, when non-nil, is called after the load loops finish and
 	// before fake agents are closed (e.g. to drain buffered broker flushes).
 	OnLoadComplete func(ctx context.Context) error
@@ -291,24 +305,33 @@ type Result struct {
 	Mode                           Mode
 	RunTag                         string
 	Duration                       time.Duration
+	DeliverInterval                time.Duration
 	AgentCount                     int
 	ExpectedLargeBodyCount         int
 	ExpectedRotateTokenCount       int
+	ExpectedBrokerRPCConcurrency   int
+	EffectiveMaxConcurrentRPCs     int
 	BrokerRPCEnabled               bool
 	DeliverAttempts                int64
 	DeliverSucceeded               int64
 	DeliverNonDelivered            int64
 	Deliver429s                    int64
+	FlusherDeliver429s             int64
+	FlusherDeliver503s             int64
 	DeliverErrors                  int64
 	LargeBodySucceeded             int64
 	LargeBodyErrors                int64
+	LargeBodyMinBytesObserved      int
+	LargeBodyMaxBytesObserved      int
 	RotateTokenSucceeded           int64
 	RotateTokenErrors              int64
 	BrokerRPCSucceeded             int64
 	BrokerRPCErrors                int64
 	BrokerRPC429s                  int64
+	BaselineControlErrors          int64
 	ControlProbeSucceeded          int64
 	ControlProbeErrors             int64
+	DrainExcusedControlErrors      int64
 	Control429s                    int64
 	Total429s                      int64
 	MaxConcurrentBrokerRPCs        int64
@@ -316,6 +339,7 @@ type Result struct {
 	MaxConcurrentControls          int64
 	PTYEchoSucceeded               int64
 	PTYEchoErrors                  int64
+	DrainExcusedPTYErrors          int64
 	DrainTriggeredAt               time.Time
 	Drain4503Count                 int64
 	Drain4503RelayRestartCount     int64
@@ -324,6 +348,7 @@ type Result struct {
 	Drain4503OtherReasons          []string
 	Drain4503Delays                []time.Duration
 	PostDrainWorkSucceeded         int64
+	PostDrainReplacementWork       int64
 	SessionReconnections           int64
 	StalledBulkBytesAtStart        int64
 	StalledBulkBytesWritten        int64
@@ -331,6 +356,7 @@ type Result struct {
 	PeakMemoryBytes                int64
 	MemorySource                   string
 	MemoryPIDCount                 int
+	MemoryExitedAfterDrainPIDs     int
 	MemorySampleErrors             int64
 	MemorySamples                  []MemorySample
 
@@ -418,29 +444,57 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	enablePTY := cfg.EnablePTY || mode == ModePhase2 || cfg.PTYWorker != nil || cfg.ControlProbe != nil
 	runBrokerRPC := cfg.BrokerRPC != nil && (cfg.BrokerRPCCount > 0 || cfg.BrokerRPCContinuous || mode == ModeBrokerRPC)
+	drainWindow := cfg.DrainDeadline
+	if drainWindow <= 0 {
+		drainWindow = 30 * time.Second
+	}
+	effMaxConc := cfg.BrokerMaxConcurrentRPCs
+	if effMaxConc <= 0 {
+		effMaxConc = conduit.DefaultMaxConcurrentRPCs
+	}
 
 	var (
-		mu             sync.Mutex
-		bulkWritten    atomic.Int64
-		reconnections  atomic.Int64
-		clampedDelays  atomic.Int64
-		memSampleErrs  atomic.Int64
-		drainTriggered atomic.Int64 // unix nanos when OnDrainTrigger fired (0 if not triggered)
-		postDrainWork  atomic.Int64
-		admittedCounts = make([]atomic.Int64, len(cfg.Agents))
-		res            = &Result{
-			Mode:                     mode,
-			RunTag:                   cfg.RunTag,
-			Duration:                 cfg.Duration,
-			ExpectedLargeBodyCount:   cfg.LargeBodyCount,
-			ExpectedRotateTokenCount: cfg.RotateTokenCount,
-			BrokerRPCEnabled:         runBrokerRPC,
+		mu                       sync.Mutex
+		bulkWritten              atomic.Int64
+		reconnections            atomic.Int64
+		clampedDelays            atomic.Int64
+		memSampleErrs            atomic.Int64
+		drainTriggered           atomic.Int64 // unix nanos when OnDrainTrigger fired (0 if not triggered)
+		postDrainWork            atomic.Int64
+		postDrainReplacementWork atomic.Int64
+		baselineControlErr       atomic.Int64
+		drainExcusedControlErr   atomic.Int64
+		drainExcusedPTYErr       atomic.Int64
+		admittedCounts           = make([]atomic.Int64, len(cfg.Agents))
+		reAdmittedAfterDrain     = make([]atomic.Bool, len(cfg.Agents))
+		res                      = &Result{
+			Mode:                         mode,
+			RunTag:                       cfg.RunTag,
+			Duration:                     cfg.Duration,
+			DeliverInterval:              cfg.DeliverInterval,
+			ExpectedLargeBodyCount:       cfg.LargeBodyCount,
+			ExpectedRotateTokenCount:     cfg.RotateTokenCount,
+			ExpectedBrokerRPCConcurrency: cfg.BrokerRPCConcurrency,
+			EffectiveMaxConcurrentRPCs:   effMaxConc,
+			BrokerRPCEnabled:             runBrokerRPC,
 		}
 	)
 
-	recordPostDrain := func() {
-		if drainTriggered.Load() > 0 {
-			postDrainWork.Add(1)
+	inDrainWindow := func() bool {
+		trig := drainTriggered.Load()
+		if trig <= 0 {
+			return false
+		}
+		return time.Since(time.Unix(0, trig)) <= drainWindow
+	}
+
+	recordPostDrainForAgent := func(agentIdx int) {
+		if drainTriggered.Load() <= 0 {
+			return
+		}
+		postDrainWork.Add(1)
+		if agentIdx >= 0 && agentIdx < len(reAdmittedAfterDrain) && reAdmittedAfterDrain[agentIdx].Load() {
+			postDrainReplacementWork.Add(1)
 		}
 	}
 
@@ -464,6 +518,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			OnSession: func(_ *conduitv1.Welcome) {
 				if admittedCounts[agentIdx].Add(1) > 1 {
 					reconnections.Add(1)
+					if drainTriggered.Load() > 0 {
+						reAdmittedAfterDrain[agentIdx].Store(true)
+					}
 				}
 			},
 			OnDeliverTiming: func(dt conduittest.DeliverTiming) {
@@ -478,6 +535,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				res.DeliverPasteLatencies = append(res.DeliverPasteLatencies, dt.PasteDuration)
 				if dt.TextBytes >= LargeBodyMinBytes {
 					res.LargePasteLatencies = append(res.LargePasteLatencies, dt.PasteDuration)
+					if res.LargeBodyMinBytesObserved == 0 || dt.TextBytes < res.LargeBodyMinBytesObserved {
+						res.LargeBodyMinBytesObserved = dt.TextBytes
+					}
+					if dt.TextBytes > res.LargeBodyMaxBytesObserved {
+						res.LargeBodyMaxBytesObserved = dt.TextBytes
+					}
 				}
 				if hasDelay {
 					res.RawSendToReceiptDelays = append(res.RawSendToReceiptDelays, raw)
@@ -549,9 +612,16 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			err := cfg.ControlProbe(callCtx, probeAgentID)
 			elapsed := time.Since(start)
 			cancel()
-			if err == nil {
-				res.BaselineControlLatencies = append(res.BaselineControlLatencies, elapsed)
+			if err != nil {
+				baselineControlErr.Add(1)
+				mu.Lock()
+				if res.FirstError == nil {
+					res.FirstError = fmt.Errorf("baseline control probe agent %s: %w", probeAgentID, err)
+				}
+				mu.Unlock()
+				continue
 			}
+			res.BaselineControlLatencies = append(res.BaselineControlLatencies, elapsed)
 		}
 	}
 
@@ -594,6 +664,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		}
 		if sample.PIDCount > 0 {
 			res.MemoryPIDCount = sample.PIDCount
+		}
+		if sample.ExitedAfterDrainPIDs > res.MemoryExitedAfterDrainPIDs {
+			res.MemoryExitedAfterDrainPIDs = sample.ExitedAfterDrainPIDs
 		}
 		if sample.Bytes > res.PeakMemoryBytes {
 			res.PeakMemoryBytes = sample.Bytes
@@ -684,8 +757,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		drainOther          atomic.Int64
 	)
 
-	loadCtx, loadCancel := context.WithTimeout(ctx, cfg.Duration)
+	loadDeadline := time.Now().Add(cfg.Duration)
+	loadCtx, loadCancel := context.WithDeadline(ctx, loadDeadline)
 	defer loadCancel()
+	atLoadEnd := func() bool {
+		return loadCtx.Err() != nil || !time.Now().Before(loadDeadline.Add(-5*time.Millisecond))
+	}
 
 	var wg sync.WaitGroup
 
@@ -778,7 +855,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 						return
 					}
 					deliverOK.Add(1)
-					recordPostDrain()
+					recordPostDrainForAgent(idx)
 					mu.Lock()
 					res.DeliverLatencies = append(res.DeliverLatencies, elapsed)
 					mu.Unlock()
@@ -849,7 +926,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 					}
 					largeOK.Add(1)
 					deliverOK.Add(1)
-					recordPostDrain()
+					recordPostDrainForAgent(targetIdx)
 					mu.Lock()
 					res.DeliverLatencies = append(res.DeliverLatencies, elapsed)
 					mu.Unlock()
@@ -928,15 +1005,19 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 						control429.Add(1)
 					}
 					if err != nil {
-						if loadCtx.Err() != nil {
+						if atLoadEnd() {
 							return
 						}
-						controlErr.Add(1)
-						recordErr(fmt.Errorf("control probe agent %s: %w", probeAgentID, err))
+						if inDrainWindow() {
+							drainExcusedControlErr.Add(1)
+						} else {
+							controlErr.Add(1)
+							recordErr(fmt.Errorf("control probe agent %s: %w", probeAgentID, err))
+						}
 						continue
 					}
 					controlOK.Add(1)
-					recordPostDrain()
+					recordPostDrainForAgent(0)
 					mu.Lock()
 					res.LoadControlLatencies = append(res.LoadControlLatencies, elapsed)
 					mu.Unlock()
@@ -996,14 +1077,14 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 						broker429.Add(1)
 					}
 					if err != nil {
-						if cfg.BrokerRPCCount == 0 && loadCtx.Err() != nil {
+						if cfg.BrokerRPCCount == 0 && atLoadEnd() {
 							return
 						}
 						brokerErr.Add(1)
 						recordErr(fmt.Errorf("broker RPC %d: %w", seq, err))
 					} else {
 						brokerOK.Add(1)
-						recordPostDrain()
+						recordPostDrainForAgent(seq % len(cfg.Agents))
 						mu.Lock()
 						res.BrokerRPCLatencies = append(res.BrokerRPCLatencies, elapsed)
 						mu.Unlock()
@@ -1031,12 +1112,21 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				defer wg.Done()
 				pr, err := cfg.PTYWorker(loadCtx, agentID)
 				if err != nil {
-					ptyErr.Add(1)
-					recordErr(fmt.Errorf("pty agent %s: %w", agentID, err))
+					if inDrainWindow() {
+						drainExcusedPTYErr.Add(1)
+					} else {
+						ptyErr.Add(1)
+						recordErr(fmt.Errorf("pty agent %s: %w", agentID, err))
+					}
 				}
 				if pr != nil {
 					ptyOK.Add(pr.EchoSucceeded)
 					ptyErr.Add(pr.EchoErrors)
+					drainExcusedPTYErr.Add(pr.DrainWindowErrors)
+					if pr.PostDrainEchoSucceeded > 0 {
+						postDrainWork.Add(pr.PostDrainEchoSucceeded)
+						postDrainReplacementWork.Add(pr.PostDrainEchoSucceeded)
+					}
 					mu.Lock()
 					res.PTYLatencies = append(res.PTYLatencies, pr.Latencies...)
 					if pr.Drain4503 {
@@ -1076,6 +1166,11 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	res.DeliverSucceeded = deliverOK.Load()
 	res.DeliverNonDelivered = deliverNonDelivered.Load()
 	res.Deliver429s = deliver429.Load()
+	if cfg.FlusherAttemptStats != nil {
+		f429, f503 := cfg.FlusherAttemptStats()
+		res.FlusherDeliver429s = f429
+		res.FlusherDeliver503s = f503
+	}
 	res.DeliverErrors = deliverErr.Load()
 	res.LargeBodySucceeded = largeOK.Load()
 	res.LargeBodyErrors = largeErr.Load()
@@ -1084,10 +1179,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	res.BrokerRPCSucceeded = brokerOK.Load()
 	res.BrokerRPCErrors = brokerErr.Load()
 	res.BrokerRPC429s = broker429.Load()
+	res.BaselineControlErrors = baselineControlErr.Load()
 	res.ControlProbeSucceeded = controlOK.Load()
 	res.ControlProbeErrors = controlErr.Load()
+	res.DrainExcusedControlErrors = drainExcusedControlErr.Load()
 	res.Control429s = control429.Load()
-	res.Total429s = res.Deliver429s + res.BrokerRPC429s + res.Control429s
+	res.Total429s = res.Deliver429s + res.FlusherDeliver429s + res.BrokerRPC429s + res.Control429s
 	res.MaxConcurrentBrokerRPCs = brokerHighWater.Load()
 	if cfg.BrokerSessionHighWater != nil {
 		res.MaxConcurrentBrokerSessionRPCs = cfg.BrokerSessionHighWater()
@@ -1095,10 +1192,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	res.MaxConcurrentControls = controlHighWater.Load()
 	res.PTYEchoSucceeded = ptyOK.Load()
 	res.PTYEchoErrors = ptyErr.Load()
+	res.DrainExcusedPTYErrors = drainExcusedPTYErr.Load()
 	res.Drain4503Count = drain4503.Load()
 	res.Drain4503RelayRestartCount = drainRelayRestart.Load()
 	res.Drain4503OtherCount = drainOther.Load()
 	res.PostDrainWorkSucceeded = postDrainWork.Load()
+	res.PostDrainReplacementWork = postDrainReplacementWork.Load()
 	res.SessionReconnections = reconnections.Load()
 	res.StalledBulkBytesWritten = bulkWritten.Load()
 	res.SendToReceiptClamped = clampedDelays.Load()

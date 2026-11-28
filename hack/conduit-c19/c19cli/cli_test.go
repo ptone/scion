@@ -12,17 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package c19cli
 
 import (
 	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -37,6 +39,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/hack/conduit-c19/c19driver"
+	"github.com/GoogleCloudPlatform/scion/internal/conduittest"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
@@ -133,22 +136,141 @@ func TestR2_DecodeStreamIDAndResolveUserID(t *testing.T) {
 	require.ErrorContains(t, err, "401")
 }
 
-// R6: No self/MemStats fallback; unreadable configured PID fails the sample.
+// No self/MemStats fallback; unreadable non-drained PID fails the sample.
 func TestMemorySampler_NoSelfFallbackAndUnreadablePIDFails(t *testing.T) {
-	assert.Nil(t, makeMemorySampler(nil, ""), "must not fall back to driver self RSS")
+	assert.Nil(t, makeMemorySampler(nil, "", 0, nil), "must not fall back to driver self RSS")
 
-	sampler := makeMemorySampler([]int{999999999}, "")
+	sampler := makeMemorySampler([]int{999999999}, "", 0, nil)
 	require.NotNil(t, sampler)
 	_, err := sampler(context.Background())
 	require.Error(t, err, "unreadable PID must fail sample rather than returning partial sum")
 
-	validSampler := makeMemorySampler([]int{os.Getpid()}, "")
+	validSampler := makeMemorySampler([]int{os.Getpid()}, "", 0, nil)
 	require.NotNil(t, validSampler)
 	s, err := validSampler(context.Background())
 	require.NoError(t, err)
 	assert.Greater(t, s.Bytes, int64(0))
 	assert.Equal(t, "proc_hub_pids", s.Source)
 	assert.Equal(t, 1, s.PIDCount)
+}
+
+// R3: Two configured hub PIDs, one exits after drain trigger -> sampler records
+// the exit and continues summing surviving PIDs (no false FAIL). Exiting before
+// drain trigger still fails the sample.
+func TestMemorySampler_DrainedPIDExitsCleanly(t *testing.T) {
+	child := exec.Command("sleep", "30")
+	require.NoError(t, child.Start())
+	childPID := child.Process.Pid
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	})
+
+	var drainTriggered atomic.Bool
+	sampler := makeMemorySampler([]int{os.Getpid(), childPID}, "", 0, &drainTriggered)
+	require.NotNil(t, sampler)
+
+	// Pre-drain: both PIDs readable.
+	s1, err := sampler(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 2, s1.PIDCount)
+	assert.Equal(t, 0, s1.ExitedAfterDrainPIDs)
+
+	// Trigger drain, then kill and reap the drained PID so /proc/<pid>/status returns ENOENT.
+	drainTriggered.Store(true)
+	require.NoError(t, child.Process.Kill())
+	_ = child.Wait()
+
+	s2, err := sampler(context.Background())
+	require.NoError(t, err, "drained PID exiting after drain trigger must not fail hub_rss_peak")
+	assert.Greater(t, s2.Bytes, int64(0))
+	assert.Equal(t, 1, s2.PIDCount)
+	assert.Equal(t, 1, s2.ExitedAfterDrainPIDs)
+
+	// Contrast: killing a PID BEFORE drain trigger must FAIL the sample.
+	child2 := exec.Command("sleep", "30")
+	require.NoError(t, child2.Start())
+	child2PID := child2.Process.Pid
+	var notDrained atomic.Bool
+	sampler2 := makeMemorySampler([]int{os.Getpid(), child2PID}, "", 0, &notDrained)
+	_, err = sampler2(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, child2.Process.Kill())
+	_ = child2.Wait()
+	_, err = sampler2(context.Background())
+	require.Error(t, err, "PID exiting before drain trigger must fail the sample")
+}
+
+// R2 + v2.22 §2.4: A /deliver 429 that succeeds on retry must still be counted
+// in AttemptStats and fail http_429_count; pre-send connection errors (status 0)
+// are retryable when the parent context is alive.
+func TestFlusherRetried429StillCountedAndPreSendRetry(t *testing.T) {
+	assert.True(t, isRetryablePrePaste(0, "", errors.New("connection refused"), true))
+	assert.False(t, isRetryablePrePaste(0, "", errors.New("cancelled"), false))
+	assert.True(t, isRetryablePrePaste(http.StatusTooManyRequests, "", nil, true))
+	assert.False(t, isRetryablePrePaste(http.StatusBadRequest, "", nil, true))
+
+	var deliverCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/deliver") {
+			n := deliverCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			if n == 1 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"v":1,"delivery_id":"d1","outcome":"delivered"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	// Construct a conduittest.Broker pointed at srv (no conduit WS needed for DeliverMessage HTTP call).
+	b, err := conduittest.StartBroker(conduittest.BrokerOptions{
+		HubURL:       srv.URL,
+		BrokerID:     "b-test",
+		BrokerSecret: []byte("01234567890123456789012345678901"),
+		HTTPClient:   srv.Client(),
+	})
+	require.NoError(t, err)
+	defer func() { _ = b.Close() }()
+
+	flusher := newC19BrokerFlusher(map[string]string{"ag-slug": "ag-1"}, 20*time.Millisecond, 0, 0)
+	flusher.SetBroker(b)
+	flusher.enqueue("ag-1", queuedMsg{id: "m-1", text: "hello"}, true)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, outcome, werr := flusher.WaitForMessages(ctx, []string{"m-1"})
+	require.NoError(t, werr)
+	assert.Equal(t, http.StatusOK, st)
+	assert.Equal(t, string(agentcontrol.OutcomeDelivered), outcome)
+	assert.Equal(t, int32(2), deliverCalls.Load(), "should have retried once after 429")
+
+	c429, c503 := flusher.AttemptStats()
+	assert.Equal(t, int64(1), c429, "retried 429 must still be counted")
+	assert.Equal(t, int64(0), c503)
+
+	// Feed into BuildReport: http_429_count must FAIL even though Deliver429s == 0.
+	rep := c19driver.BuildReport(&c19driver.Result{
+		Mode:                     c19driver.ModePhase2,
+		Duration:                 5 * time.Second,
+		AgentCount:               1,
+		BaselineControlLatencies: []time.Duration{time.Millisecond},
+		LoadControlLatencies:     []time.Duration{2 * time.Millisecond},
+		FlusherDeliver429s:       c429,
+		PeakMemoryBytes:          10 * 1024 * 1024,
+		MemorySource:             "proc_hub_pids",
+		MemoryPIDCount:           1,
+	}, c19driver.EvalOptions{
+		MemoryBudgetBytes: 512 * 1024 * 1024,
+		AllowUnevaluated:  []string{c19driver.BarPlannedDrain4503},
+	})
+	assert.Equal(t, c19driver.VerdictFail, rep.Verdict)
+	assert.Equal(t, int64(1), rep.Counts.Total429s)
 }
 
 // R-1 / R8: 512 KiB chunking with "\n\n" join fits inside MaxDeliverText
@@ -461,10 +583,11 @@ func TestCLI_Plumbing_ControlProbeDetectsSessionDelay(t *testing.T) {
 		"injected agent-session delay must move control_p99_added >= 100ms (got %.2fms)", rep.Latencies.ControlP99AddedMS)
 }
 
-// R-5: Planned drain with trigger + deadline + post-drain work passes when
-// reason is relay_restart, and fails when reason is not relay_restart.
+// R-5 / R4: Planned drain with trigger + deadline fails when zero agent sessions
+// reconnect (even if probes on untouched sessions succeed), and fails when
+// 4503 close reason is not relay_restart.
 func TestCLI_Plumbing_PlannedDrain4503(t *testing.T) {
-	t.Run("relay_restart_with_trigger_passes", func(t *testing.T) {
+	t.Run("relay_restart_without_reconnect_fails", func(t *testing.T) {
 		hub := newFakePlumbingHub(t, 2, "relay_restart")
 		agentsFile := writeAgentsFixture(t, 2)
 
@@ -489,11 +612,9 @@ func TestCLI_Plumbing_PlannedDrain4503(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		rep, err := run(context.Background(), cfg, &stdout, &stderr)
 		require.NoError(t, err)
-		assert.Equal(t, c19driver.VerdictPass, rep.Verdict, "table:\n%s", stdout.String())
+		assert.Equal(t, c19driver.VerdictFail, rep.Verdict, "0 reconnects must FAIL planned_drain_4503:\n%s", stdout.String())
 		assert.GreaterOrEqual(t, rep.Drain.RelayRestartCount, int64(2))
-		assert.True(t, rep.Drain.DeadlineEvaluated)
-		assert.True(t, rep.Drain.ReplacementEvaluated)
-		assert.Greater(t, rep.Drain.PostDrainWork, int64(0))
+		assert.Equal(t, int64(0), rep.Drain.Reconnects)
 	})
 
 	t.Run("non_relay_restart_4503_fails", func(t *testing.T) {
@@ -527,5 +648,3 @@ func TestCLI_Plumbing_PlannedDrain4503(t *testing.T) {
 		assert.Contains(t, rep.Drain.OtherReasons, "broker_disconnected")
 	})
 }
-
-var _ = agentcontrol.OutcomeDelivered

@@ -16,6 +16,7 @@ package c19driver
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"text/tabwriter"
@@ -33,16 +34,19 @@ const (
 
 // Canonical bar names referenced by --allow-unevaluated and reports.
 const (
-	BarControlP99Added  = "control_p99_added"
-	BarHTTP429Count     = "http_429_count"
-	BarDeliverPasteP99  = "deliver_paste_p99"
-	BarSendToReceiptMax = "send_to_receipt_max"
-	BarCombinedDeliver  = "combined_deliver_max"
-	BarDeliverErrors    = "deliver_errors"
-	BarBrokerRPCErrors  = "broker_rpc_errors"
-	BarHubRSSPeak       = "hub_rss_peak"
-	BarPlannedDrain4503 = "planned_drain_4503"
-	BarRotateTokenMix   = "rotate_token_mix"
+	BarControlP99Added          = "control_p99_added"
+	BarSessionStall             = "session_stall"
+	BarHTTP429Count             = "http_429_count"
+	BarDeliverPasteP99          = "deliver_paste_p99"
+	BarSendToReceiptMax         = "send_to_receipt_max"
+	BarCombinedDeliver          = "combined_deliver_max"
+	BarDeliverErrors            = "deliver_errors"
+	BarOfferedLoad              = "offered_load"
+	BarBrokerRPCErrors          = "broker_rpc_errors"
+	BarBrokerSessionConcurrency = "broker_session_concurrency"
+	BarHubRSSPeak               = "hub_rss_peak"
+	BarPlannedDrain4503         = "planned_drain_4503"
+	BarRotateTokenMix           = "rotate_token_mix"
 )
 
 // Report verdicts.
@@ -152,11 +156,16 @@ type Report struct {
 		RotateTokenErrors              int64 `json:"rotate_token_errors"`
 		BrokerRPCSucceeded             int64 `json:"broker_rpc_succeeded"`
 		BrokerRPCErrors                int64 `json:"broker_rpc_errors"`
+		BaselineControlErrors          int64 `json:"baseline_control_errors"`
 		ControlProbeSucceeded          int64 `json:"control_probe_succeeded"`
 		ControlProbeErrors             int64 `json:"control_probe_errors"`
+		DrainExcusedControlErrors      int64 `json:"drain_excused_control_errors,omitempty"`
 		PTYEchoSucceeded               int64 `json:"pty_echo_succeeded"`
 		PTYEchoErrors                  int64 `json:"pty_echo_errors"`
+		DrainExcusedPTYErrors          int64 `json:"drain_excused_pty_errors,omitempty"`
 		Deliver429s                    int64 `json:"deliver_429s"`
+		FlusherDeliver429s             int64 `json:"flusher_deliver_429s"`
+		FlusherDeliver503s             int64 `json:"flusher_deliver_503s,omitempty"`
 		BrokerRPC429s                  int64 `json:"broker_rpc_429s"`
 		Control429s                    int64 `json:"control_429s"`
 		Total429s                      int64 `json:"total_429s"`
@@ -170,27 +179,30 @@ type Report struct {
 	} `json:"counts"`
 
 	Latencies struct {
-		ControlBaseline   LatencySummaryMS `json:"control_baseline"`
-		ControlLoad       LatencySummaryMS `json:"control_load"`
-		ControlP99AddedMS float64          `json:"control_p99_added_ms"`
-		DeliverEndToEnd   LatencySummaryMS `json:"deliver_end_to_end"`
-		DeliverPasteAll   LatencySummaryMS `json:"deliver_paste_all"`
-		DeliverPaste512K  LatencySummaryMS `json:"deliver_paste_512k"`
-		SendToReceipt     LatencySummaryMS `json:"send_to_receipt_skew_corrected"`
-		SendToReceiptRaw  LatencySummaryMS `json:"send_to_receipt_raw"`
-		CombinedDeliver   LatencySummaryMS `json:"combined_deliver"`
-		RotateToken       LatencySummaryMS `json:"rotate_token"`
-		BrokerRPC         LatencySummaryMS `json:"broker_rpc"`
-		PTYEcho           LatencySummaryMS `json:"pty_echo"`
+		ControlBaseline          LatencySummaryMS `json:"control_baseline"`
+		ControlLoad              LatencySummaryMS `json:"control_load"`
+		ControlP99AddedMS        float64          `json:"control_p99_added_ms"`
+		DeliverEndToEnd          LatencySummaryMS `json:"deliver_end_to_end"`
+		DeliverPasteAll          LatencySummaryMS `json:"deliver_paste_all"`
+		DeliverPaste512K         LatencySummaryMS `json:"deliver_paste_512k"`
+		DeliverPaste512KMinBytes int              `json:"deliver_paste_512k_min_bytes,omitempty"`
+		DeliverPaste512KMaxBytes int              `json:"deliver_paste_512k_max_bytes,omitempty"`
+		SendToReceipt            LatencySummaryMS `json:"send_to_receipt_skew_corrected"`
+		SendToReceiptRaw         LatencySummaryMS `json:"send_to_receipt_raw"`
+		CombinedDeliver          LatencySummaryMS `json:"combined_deliver"`
+		RotateToken              LatencySummaryMS `json:"rotate_token"`
+		BrokerRPC                LatencySummaryMS `json:"broker_rpc"`
+		PTYEcho                  LatencySummaryMS `json:"pty_echo"`
 	} `json:"latencies"`
 
 	Memory struct {
-		PeakBytes    int64          `json:"peak_bytes"`
-		BudgetBytes  int64          `json:"budget_bytes,omitempty"`
-		Source       string         `json:"source,omitempty"`
-		PIDCount     int            `json:"pid_count,omitempty"`
-		SampleErrors int64          `json:"sample_errors,omitempty"`
-		Samples      []MemorySample `json:"samples,omitempty"`
+		PeakBytes            int64          `json:"peak_bytes"`
+		BudgetBytes          int64          `json:"budget_bytes,omitempty"`
+		Source               string         `json:"source,omitempty"`
+		PIDCount             int            `json:"pid_count,omitempty"`
+		ExitedAfterDrainPIDs int            `json:"exited_after_drain_pids,omitempty"`
+		SampleErrors         int64          `json:"sample_errors,omitempty"`
+		Samples              []MemorySample `json:"samples,omitempty"`
 	} `json:"memory"`
 
 	Drain struct {
@@ -204,6 +216,7 @@ type Report struct {
 		DeadlineMS           int64    `json:"deadline_ms,omitempty"`
 		DeadlineEvaluated    bool     `json:"deadline_evaluated"`
 		PostDrainWork        int64    `json:"post_drain_work_succeeded"`
+		ReplacementWork      int64    `json:"post_drain_replacement_work"`
 		ReplacementEvaluated bool     `json:"replacement_evaluated"`
 		Reconnects           int64    `json:"session_reconnections"`
 	} `json:"drain"`
@@ -246,14 +259,20 @@ func BuildReport(res *Result, opts EvalOptions) Report {
 	r.Counts.RotateTokenErrors = res.RotateTokenErrors
 	r.Counts.BrokerRPCSucceeded = res.BrokerRPCSucceeded
 	r.Counts.BrokerRPCErrors = res.BrokerRPCErrors
+	r.Counts.BaselineControlErrors = res.BaselineControlErrors
 	r.Counts.ControlProbeSucceeded = res.ControlProbeSucceeded
 	r.Counts.ControlProbeErrors = res.ControlProbeErrors
+	r.Counts.DrainExcusedControlErrors = res.DrainExcusedControlErrors
 	r.Counts.PTYEchoSucceeded = res.PTYEchoSucceeded
 	r.Counts.PTYEchoErrors = res.PTYEchoErrors
+	r.Counts.DrainExcusedPTYErrors = res.DrainExcusedPTYErrors
 	r.Counts.Deliver429s = res.Deliver429s
+	r.Counts.FlusherDeliver429s = res.FlusherDeliver429s
+	r.Counts.FlusherDeliver503s = res.FlusherDeliver503s
 	r.Counts.BrokerRPC429s = res.BrokerRPC429s
 	r.Counts.Control429s = res.Control429s
-	r.Counts.Total429s = res.Total429s
+	sum429 := res.Deliver429s + res.FlusherDeliver429s + res.BrokerRPC429s + res.Control429s
+	r.Counts.Total429s = max(res.Total429s, sum429)
 	r.Counts.MaxConcurrentBrokerRPCs = res.MaxConcurrentBrokerRPCs
 	r.Counts.MaxConcurrentBrokerSessionRPCs = res.MaxConcurrentBrokerSessionRPCs
 	r.Counts.MaxConcurrentControls = res.MaxConcurrentControls
@@ -272,6 +291,8 @@ func BuildReport(res *Result, opts EvalOptions) Report {
 	r.Latencies.DeliverEndToEnd = summarizeMS(res.DeliverLatencies)
 	r.Latencies.DeliverPasteAll = summarizeMS(res.DeliverPasteLatencies)
 	r.Latencies.DeliverPaste512K = summarizeMS(res.LargePasteLatencies)
+	r.Latencies.DeliverPaste512KMinBytes = res.LargeBodyMinBytesObserved
+	r.Latencies.DeliverPaste512KMaxBytes = res.LargeBodyMaxBytesObserved
 	r.Latencies.SendToReceipt = summarizeMS(res.SendToReceiptDelays)
 	r.Latencies.SendToReceiptRaw = summarizeMS(res.RawSendToReceiptDelays)
 	r.Latencies.CombinedDeliver = summarizeMS(res.CombinedDeliverLatencies)
@@ -283,6 +304,7 @@ func BuildReport(res *Result, opts EvalOptions) Report {
 	r.Memory.BudgetBytes = opts.MemoryBudgetBytes
 	r.Memory.Source = res.MemorySource
 	r.Memory.PIDCount = res.MemoryPIDCount
+	r.Memory.ExitedAfterDrainPIDs = res.MemoryExitedAfterDrainPIDs
 	r.Memory.SampleErrors = res.MemorySampleErrors
 	r.Memory.Samples = res.MemorySamples
 
@@ -293,6 +315,7 @@ func BuildReport(res *Result, opts EvalOptions) Report {
 	r.Drain.Reasons = res.Drain4503Reasons
 	r.Drain.OtherReasons = res.Drain4503OtherReasons
 	r.Drain.PostDrainWork = res.PostDrainWorkSucceeded
+	r.Drain.ReplacementWork = res.PostDrainReplacementWork
 	r.Drain.Reconnects = res.SessionReconnections
 	r.Drain.DeadlineMS = opts.DrainDeadline.Milliseconds()
 	if len(res.Drain4503Delays) > 0 {
@@ -344,12 +367,38 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 	var bars []BarResult
 
 	// 1. Control RPC p99 added vs baseline (< 100 ms, v2.17). Required in all modes.
-	if r.Latencies.ControlBaseline.Count > 0 && r.Latencies.ControlLoad.Count > 0 {
+	//    Fails if baseline or non-drain load probes errored even when successful samples were fast.
+	probeNonDrainErrs := r.Counts.BaselineControlErrors + r.Counts.ControlProbeErrors
+	switch {
+	case probeNonDrainErrs > 0:
 		val := r.Latencies.ControlP99AddedMS
 		bars = append(bars, BarResult{
 			Name:      BarControlP99Added,
+			Threshold: "< 100 ms (0 probe errors)",
+			Observed: fmt.Sprintf("%.2f ms (base %.2f -> load %.2f, n=%d/%d, base_err=%d, load_err=%d)",
+				val, r.Latencies.ControlBaseline.P99MS, r.Latencies.ControlLoad.P99MS,
+				r.Latencies.ControlBaseline.Count, r.Latencies.ControlLoad.Count,
+				r.Counts.BaselineControlErrors, r.Counts.ControlProbeErrors),
+			Value:     val,
+			Unit:      "ms",
+			Required:  true,
+			Evaluated: true,
+			Pass:      false,
+			Note:      "agent-0 conduit session control probes failed outside drain window (possible session-window stall)",
+		})
+	case r.Latencies.ControlBaseline.Count > 0 && r.Latencies.ControlLoad.Count > 0:
+		val := r.Latencies.ControlP99AddedMS
+		obs := fmt.Sprintf("%.2f ms (base %.2f -> load %.2f, n=%d/%d",
+			val, r.Latencies.ControlBaseline.P99MS, r.Latencies.ControlLoad.P99MS,
+			r.Latencies.ControlBaseline.Count, r.Latencies.ControlLoad.Count)
+		if r.Counts.DrainExcusedControlErrors > 0 {
+			obs += fmt.Sprintf(", drain_excused=%d", r.Counts.DrainExcusedControlErrors)
+		}
+		obs += ")"
+		bars = append(bars, BarResult{
+			Name:      BarControlP99Added,
 			Threshold: "< 100 ms",
-			Observed:  fmt.Sprintf("%.2f ms (base %.2f -> load %.2f, n=%d/%d)", val, r.Latencies.ControlBaseline.P99MS, r.Latencies.ControlLoad.P99MS, r.Latencies.ControlBaseline.Count, r.Latencies.ControlLoad.Count),
+			Observed:  obs,
 			Value:     val,
 			Unit:      "ms",
 			Required:  true,
@@ -357,7 +406,7 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 			Pass:      val < BarControlP99AddedMaxMS,
 			Note:      "agent-0 conduit session PTY open+echo probe (off broker-RPC churn path)",
 		})
-	} else {
+	default:
 		bars = append(bars, BarResult{
 			Name:      BarControlP99Added,
 			Threshold: "< 100 ms",
@@ -370,17 +419,59 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 		})
 	}
 
+	// 1b. Session stall gate (L6a/L6c: "no session-window stall"). Required in all modes.
+	//     Gates non-drain control-probe (baseline + load) and PTY echo errors.
+	stallAttempts := int64(r.Latencies.ControlBaseline.Count) + r.Counts.BaselineControlErrors +
+		r.Counts.ControlProbeSucceeded + r.Counts.ControlProbeErrors + r.Counts.DrainExcusedControlErrors +
+		r.Counts.PTYEchoSucceeded + r.Counts.PTYEchoErrors + r.Counts.DrainExcusedPTYErrors
+	stallNonDrainErrs := r.Counts.BaselineControlErrors + r.Counts.ControlProbeErrors + r.Counts.PTYEchoErrors
+	if stallAttempts == 0 {
+		bars = append(bars, BarResult{
+			Name:      BarSessionStall,
+			Threshold: "0 non-drain probe/PTY errors",
+			Observed:  "unevaluated (0 probes/echoes)",
+			Unit:      "count",
+			Required:  true,
+			Evaluated: false,
+			Pass:      false,
+			Note:      "no agent-session control probes or PTY echoes attempted",
+		})
+	} else {
+		obs := fmt.Sprintf("base_err=%d probe_err=%d pty_err=%d",
+			r.Counts.BaselineControlErrors, r.Counts.ControlProbeErrors, r.Counts.PTYEchoErrors)
+		if r.Counts.DrainExcusedControlErrors > 0 || r.Counts.DrainExcusedPTYErrors > 0 {
+			obs += fmt.Sprintf(" (drain_excused: probe=%d pty=%d)", r.Counts.DrainExcusedControlErrors, r.Counts.DrainExcusedPTYErrors)
+		}
+		bars = append(bars, BarResult{
+			Name:      BarSessionStall,
+			Threshold: "0 non-drain probe/PTY errors",
+			Observed:  obs,
+			Value:     float64(stallNonDrainErrs),
+			Unit:      "count",
+			Required:  true,
+			Evaluated: true,
+			Pass:      stallNonDrainErrs == 0,
+			Note:      "fails on any baseline/load control-probe or PTY echo error outside the planned-drain window",
+		})
+	}
+
 	// 2. 429 count == 0 at default MaxConcurrentRPCs=128 (v2.17 / v2.22 §6.2). Required in all modes.
+	obs429 := fmt.Sprintf("%d (deliver=%d flusher_429=%d broker=%d control=%d",
+		r.Counts.Total429s, r.Counts.Deliver429s, r.Counts.FlusherDeliver429s, r.Counts.BrokerRPC429s, r.Counts.Control429s)
+	if r.Counts.FlusherDeliver503s > 0 {
+		obs429 += fmt.Sprintf(", flusher_503=%d", r.Counts.FlusherDeliver503s)
+	}
+	obs429 += ")"
 	bars = append(bars, BarResult{
 		Name:      BarHTTP429Count,
 		Threshold: "== 0",
-		Observed:  fmt.Sprintf("%d (deliver=%d broker=%d control=%d)", r.Counts.Total429s, r.Counts.Deliver429s, r.Counts.BrokerRPC429s, r.Counts.Control429s),
+		Observed:  obs429,
 		Value:     float64(r.Counts.Total429s),
 		Unit:      "count",
 		Required:  true,
 		Evaluated: true,
 		Pass:      r.Counts.Total429s <= Bar429MaxCount,
-		Note:      "counts direct HTTP 429s from /message, /deliver, and control probes plus broker-session 429s surfaced as Hub 502 (per-source split in observed)",
+		Note:      "counts direct HTTP 429s from /message, every /deliver attempt (incl. retried attempts in broker flusher), control probes, and broker-session 429s surfaced as Hub 502",
 	})
 
 	// 3. Deliver-mode bars (v2.22 §6.2).
@@ -390,6 +481,8 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 			wantLarge = opts.ExpectedLargeBodyCount
 		}
 		paste512 := r.Latencies.DeliverPaste512K
+		minB := r.Latencies.DeliverPaste512KMinBytes
+		maxB := r.Latencies.DeliverPaste512KMaxBytes
 		switch {
 		case paste512.Count == 0:
 			bars = append(bars, BarResult{
@@ -406,7 +499,7 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 			bars = append(bars, BarResult{
 				Name:      BarDeliverPasteP99,
 				Threshold: fmt.Sprintf("<= 8000 ms (n >= %d)", wantLarge),
-				Observed:  fmt.Sprintf("%.2f ms (n=%d < %d)", paste512.P99MS, paste512.Count, wantLarge),
+				Observed:  fmt.Sprintf("%.2f ms (n=%d < %d, bytes=%d..%d)", paste512.P99MS, paste512.Count, wantLarge, minB, maxB),
 				Value:     paste512.P99MS,
 				Unit:      "ms",
 				Required:  true,
@@ -414,17 +507,41 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 				Pass:      false,
 				Note:      "fewer 512 KiB paste samples than configured large-body-count",
 			})
+		case minB < LargeBodyMinBytes:
+			bars = append(bars, BarResult{
+				Name:      BarDeliverPasteP99,
+				Threshold: fmt.Sprintf("<= 8000 ms (bytes >= %d)", LargeBodyMinBytes),
+				Observed:  fmt.Sprintf("%.2f ms (n=%d, bytes=%d..%d < %d)", paste512.P99MS, paste512.Count, minB, maxB, LargeBodyMinBytes),
+				Value:     paste512.P99MS,
+				Unit:      "ms",
+				Required:  true,
+				Evaluated: true,
+				Pass:      false,
+				Note:      "large-body payload size unrecorded or below 496 KiB threshold",
+			})
+		case r.Counts.LargeBodyErrors > 0:
+			bars = append(bars, BarResult{
+				Name:      BarDeliverPasteP99,
+				Threshold: "<= 8000 ms (0 large errors)",
+				Observed:  fmt.Sprintf("%.2f ms (n=%d, large_err=%d, bytes=%d..%d)", paste512.P99MS, paste512.Count, r.Counts.LargeBodyErrors, minB, maxB),
+				Value:     paste512.P99MS,
+				Unit:      "ms",
+				Required:  true,
+				Evaluated: true,
+				Pass:      false,
+				Note:      "one or more 512 KiB deliveries errored",
+			})
 		default:
 			bars = append(bars, BarResult{
 				Name:      BarDeliverPasteP99,
 				Threshold: "<= 8000 ms (512 KiB)",
-				Observed:  fmt.Sprintf("%.2f ms (n=%d)", paste512.P99MS, paste512.Count),
+				Observed:  fmt.Sprintf("%.2f ms (n=%d, bytes=%d..%d)", paste512.P99MS, paste512.Count, minB, maxB),
 				Value:     paste512.P99MS,
 				Unit:      "ms",
 				Required:  true,
 				Evaluated: true,
 				Pass:      paste512.P99MS <= BarDeliverPasteP99MaxMS,
-				Note:      "512 KiB deliveries only; measures fake-agent RecordingTmuxRunner handler time (includes readiness wait and extra submits, not real tmux)",
+				Note:      "33 x 15,000-byte rows + Hub envelopes (~507-520 KiB); measures fake-agent RecordingTmuxRunner handler time (includes extra submits, not real tmux)",
 			})
 		}
 
@@ -484,7 +601,7 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 		}
 
 		// Zero delivery errors / non-delivered outcomes.
-		badDeliveries := r.Counts.DeliverErrors + r.Counts.DeliverNonDelivered
+		badDeliveries := r.Counts.DeliverErrors + r.Counts.DeliverNonDelivered + r.Counts.LargeBodyErrors
 		bars = append(bars, BarResult{
 			Name:      BarDeliverErrors,
 			Threshold: "== 0 (succeeded > 0)",
@@ -495,6 +612,46 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 			Evaluated: true,
 			Pass:      badDeliveries == 0 && r.Counts.DeliverSucceeded > 0,
 		})
+
+		// Offered-load gate (L6c: 1 delivery/agent/2s; prevents closed-loop coordinated omission).
+		interval := res.DeliverInterval
+		if interval <= 0 {
+			interval = 2 * time.Second
+		}
+		if res.AgentCount <= 0 || res.Duration <= 0 {
+			bars = append(bars, BarResult{
+				Name:      BarOfferedLoad,
+				Threshold: ">= 90% of configured delivery rate",
+				Observed:  "unevaluated",
+				Unit:      "attempts",
+				Required:  true,
+				Evaluated: false,
+				Pass:      false,
+				Note:      "missing agent count or duration for offered-load calculation",
+			})
+		} else {
+			expected := float64(res.AgentCount) * (float64(res.Duration) / float64(interval))
+			minAttempts := int64(math.Ceil(0.9 * expected))
+			if expected > 0 && minAttempts < 1 {
+				minAttempts = 1
+			}
+			pct := 0.0
+			if expected > 0 {
+				pct = 100.0 * float64(r.Counts.DeliverAttempts) / expected
+			}
+			ratePerSec := float64(r.Counts.DeliverAttempts) / res.Duration.Seconds()
+			bars = append(bars, BarResult{
+				Name:      BarOfferedLoad,
+				Threshold: fmt.Sprintf(">= %d attempts (90%% of %.0f)", minAttempts, expected),
+				Observed:  fmt.Sprintf("attempts=%d (%.0f%% of %.0f, %.1f/s)", r.Counts.DeliverAttempts, pct, expected, ratePerSec),
+				Value:     float64(r.Counts.DeliverAttempts),
+				Unit:      "attempts",
+				Required:  true,
+				Evaluated: true,
+				Pass:      r.Counts.DeliverAttempts >= minAttempts,
+				Note:      "detects closed-loop slowdown / dropped ticks below configured delivery cadence",
+			})
+		}
 
 		// Rotate-token mix disclosure.
 		if res.ExpectedRotateTokenCount > 0 {
@@ -517,12 +674,12 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 				Required:  true,
 				Evaluated: false,
 				Pass:      false,
-				Note:      "Hub has no HTTP route invoking Server.RequestAgentTokenRotation; waive via --allow-unevaluated=rotate_token_mix or supply --rotate-url-template",
+				Note:      "Hub has no HTTP route invoking Server.RequestAgentTokenRotation; waive via --allow-unevaluated=rotate_token_mix",
 			})
 		}
 	}
 
-	// 4. Broker RPC error bar in every mode where broker-RPC churn ran.
+	// 4. Broker RPC error & broker-session concurrency bars in every mode where broker-RPC churn ran.
 	if r.Mode == ModeBrokerRPC || res.BrokerRPCEnabled {
 		bars = append(bars, BarResult{
 			Name:      BarBrokerRPCErrors,
@@ -533,8 +690,46 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 			Required:  true,
 			Evaluated: true,
 			Pass:      r.Counts.BrokerRPCErrors == 0 && r.Counts.BrokerRPCSucceeded > 0,
-			Note:      "client_conc is driver goroutine concurrency (--rpc-concurrency); broker_session_conc is inbound in-flight high-water on the broker conduit session (subject to MaxConcurrentRPCs=128)",
+			Note:      "client_conc is driver goroutine concurrency (--rpc-concurrency); broker_session_conc is inbound in-flight high-water on the broker conduit session",
 		})
+
+		expConc := res.ExpectedBrokerRPCConcurrency
+		if expConc <= 0 {
+			expConc = int(r.Counts.MaxConcurrentBrokerRPCs)
+		}
+		maxConc := res.EffectiveMaxConcurrentRPCs
+		if maxConc <= 0 {
+			maxConc = 128
+		}
+		if expConc <= 0 {
+			bars = append(bars, BarResult{
+				Name:      BarBrokerSessionConcurrency,
+				Threshold: ">= 90% of min(rpc_concurrency, MaxConcurrentRPCs)",
+				Observed:  "unevaluated",
+				Unit:      "count",
+				Required:  true,
+				Evaluated: false,
+				Pass:      false,
+				Note:      "expected broker RPC concurrency not configured",
+			})
+		} else {
+			target := min(expConc, maxConc)
+			minHW := int64(math.Ceil(0.9 * float64(target)))
+			if minHW < 1 {
+				minHW = 1
+			}
+			bars = append(bars, BarResult{
+				Name:      BarBrokerSessionConcurrency,
+				Threshold: fmt.Sprintf(">= %d (90%% of %d)", minHW, target),
+				Observed:  fmt.Sprintf("broker_session_conc=%d (client_conc=%d, target=%d)", r.Counts.MaxConcurrentBrokerSessionRPCs, r.Counts.MaxConcurrentBrokerRPCs, target),
+				Value:     float64(r.Counts.MaxConcurrentBrokerSessionRPCs),
+				Unit:      "count",
+				Required:  true,
+				Evaluated: true,
+				Pass:      r.Counts.MaxConcurrentBrokerSessionRPCs >= minHW,
+				Note:      "ensures broker conduit session actually overlapped in-flight RPCs (prevents vacuous 0x429 with --broker-rpc-latency=0)",
+			})
+		}
 	}
 
 	// 5. Aggregate session memory / hub RSS. Required in all L6 modes.
@@ -549,12 +744,15 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 			Required:  true,
 			Evaluated: true,
 			Pass:      false,
-			Note:      "one or more hub RSS samples failed (e.g. unreadable PID)",
+			Note:      "one or more hub RSS samples failed (e.g. unreadable non-drained PID)",
 		})
 	case opts.MemoryBudgetBytes > 0 && r.Memory.PeakBytes > 0:
 		obs := fmt.Sprintf("%.1f MiB (source=%s", bytesMiB(r.Memory.PeakBytes), nonEmpty(r.Memory.Source, "unknown"))
 		if r.Memory.PIDCount > 0 {
 			obs += fmt.Sprintf(", pids=%d", r.Memory.PIDCount)
+		}
+		if r.Memory.ExitedAfterDrainPIDs > 0 {
+			obs += fmt.Sprintf(", exited_after_drain=%d", r.Memory.ExitedAfterDrainPIDs)
 		}
 		obs += ")"
 		bars = append(bars, BarResult{
@@ -585,14 +783,15 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 		})
 	}
 
-	// 6. Planned drain 4503 observation (R-5: evaluates relay_restart, deadline,
-	//    and post-drain replacement work; unmeasurable clause => unevaluated).
-	drainObs := fmt.Sprintf("relay_restart=%d other_4503=%d trigger_to_4503_max=%.0fms post_drain_work=%d reconnects=%d",
-		r.Drain.RelayRestartCount, r.Drain.OtherCount, r.Drain.TriggerTo4503MaxMS, r.Drain.PostDrainWork, r.Drain.Reconnects)
+	// 6. Planned drain 4503 observation: evaluates relay_restart, deadline,
+	//    session reconnection, and replacement work on re-admitted sessions /
+	//    re-dialed PTY streams; unmeasurable clause => unevaluated.
+	drainObs := fmt.Sprintf("relay_restart=%d other_4503=%d trigger_to_4503_max=%.0fms replacement_work=%d reconnects=%d",
+		r.Drain.RelayRestartCount, r.Drain.OtherCount, r.Drain.TriggerTo4503MaxMS, r.Drain.ReplacementWork, r.Drain.Reconnects)
 	if !opts.ExpectDrain {
 		bars = append(bars, BarResult{
 			Name:      BarPlannedDrain4503,
-			Threshold: ">= 1 relay_restart within deadline + post-drain work",
+			Threshold: ">= 1 relay_restart within deadline + reconnect + replacement work",
 			Observed:  drainObs,
 			Value:     float64(r.Drain.RelayRestartCount),
 			Unit:      "count",
@@ -614,10 +813,9 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 
 		switch {
 		case r.Drain.RelayRestartCount < 1:
-			// Definite failure: expected relay_restart 4503 was never observed.
 			bars = append(bars, BarResult{
 				Name:      BarPlannedDrain4503,
-				Threshold: ">= 1 relay_restart within deadline + post-drain work",
+				Threshold: ">= 1 relay_restart within deadline + reconnect + replacement work",
 				Observed:  drainObs,
 				Value:     0,
 				Unit:      "count",
@@ -627,10 +825,9 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 				Note:      "no 4503 relay_restart close observed",
 			})
 		case !hasTrigger || !hasDeadline:
-			// Unmeasurable deadline/replacement clauses must never PASS.
 			bars = append(bars, BarResult{
 				Name:      BarPlannedDrain4503,
-				Threshold: ">= 1 relay_restart within deadline + post-drain work",
+				Threshold: ">= 1 relay_restart within deadline + reconnect + replacement work",
 				Observed:  drainObs,
 				Value:     float64(r.Drain.RelayRestartCount),
 				Unit:      "count",
@@ -642,17 +839,20 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 		default:
 			maxDelay := SummarizeLatencies(res.Drain4503Delays).Max
 			withinDeadline := len(res.Drain4503Delays) > 0 && maxDelay <= deadlineBound
-			replacementOK := r.Drain.PostDrainWork >= 1
-			pass := withinDeadline && replacementOK
-			note := fmt.Sprintf("deadline<=%s (incl. %s tolerance), post_drain_work=%d", deadlineBound, tol, r.Drain.PostDrainWork)
+			reconnected := r.Drain.Reconnects >= 1
+			replacementOK := r.Drain.ReplacementWork >= 1
+			pass := withinDeadline && reconnected && replacementOK
+			note := fmt.Sprintf("deadline<=%s (incl. %s tolerance), reconnects=%d, replacement_work=%d", deadlineBound, tol, r.Drain.Reconnects, r.Drain.ReplacementWork)
 			if !withinDeadline {
 				note = fmt.Sprintf("4503 close delay %.0fms exceeded deadline %s", durMS(maxDelay), deadlineBound)
+			} else if !reconnected {
+				note = "no agent session re-admitted after drain trigger (reconnects == 0)"
 			} else if !replacementOK {
-				note = "no post-drain replacement work succeeded after drain trigger"
+				note = "no work succeeded on a re-admitted session or re-dialed PTY stream after drain trigger"
 			}
 			bars = append(bars, BarResult{
 				Name:      BarPlannedDrain4503,
-				Threshold: fmt.Sprintf(">= 1 relay_restart <= %s + post-drain work >= 1", deadlineBound),
+				Threshold: fmt.Sprintf(">= 1 relay_restart <= %s + reconnect >= 1 + replacement_work >= 1", deadlineBound),
 				Observed:  drainObs,
 				Value:     float64(r.Drain.RelayRestartCount),
 				Unit:      "count",

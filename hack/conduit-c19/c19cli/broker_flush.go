@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package c19cli
 
 import (
 	"context"
@@ -22,11 +22,11 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/GoogleCloudPlatform/scion/hack/conduit-c19/c19driver"
 	"github.com/GoogleCloudPlatform/scion/internal/conduittest"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 )
@@ -72,7 +72,7 @@ type agentFlushQueue struct {
 //     the same delivery_id.
 //
 // Deviation from production: production uses a fixed 2s debounce window; C19
-// allows a shorter --broker-debounce (default 150ms) so high-rate C19 runs
+// allows a shorter --broker-debounce (CLI default 500ms) so high-rate C19 runs
 // complete flushes within the test window. This deviation is disclosed in the
 // JSON report (broker_flush_mode, broker_debounce_ms) and README.
 type c19BrokerFlusher struct {
@@ -80,6 +80,9 @@ type c19BrokerFlusher struct {
 	debounce         time.Duration
 	extraSubmits     int
 	extraSubmitDelay time.Duration
+
+	deliver429s atomic.Int64
+	deliver503s atomic.Int64
 
 	mu       sync.Mutex
 	slugToID map[string]string
@@ -91,7 +94,7 @@ type c19BrokerFlusher struct {
 
 func newC19BrokerFlusher(slugToID map[string]string, debounce time.Duration, extraSubmits int, extraSubmitDelay time.Duration) *c19BrokerFlusher {
 	if debounce <= 0 {
-		debounce = 150 * time.Millisecond
+		debounce = 500 * time.Millisecond
 	}
 	cp := make(map[string]string, len(slugToID))
 	for k, v := range slugToID {
@@ -112,6 +115,13 @@ func (f *c19BrokerFlusher) SetBroker(b *conduittest.Broker) {
 	f.mu.Lock()
 	f.broker = b
 	f.mu.Unlock()
+}
+
+// AttemptStats returns the cumulative count of HTTP 429 and 503 responses
+// observed across every /deliver attempt (including retried attempts) so
+// retried 429s are never hidden from http_429_count.
+func (f *c19BrokerFlusher) AttemptStats() (deliver429s, deliver503s int64) {
+	return f.deliver429s.Load(), f.deliver503s.Load()
 }
 
 func (f *c19BrokerFlusher) resolveAgentID(slugOrID string) string {
@@ -295,11 +305,17 @@ func (f *c19BrokerFlusher) flushBatch(ctx context.Context, agentID string, q *ag
 			callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			status, resp, err := broker.DeliverMessage(callCtx, agentID, req)
 			cancel()
+			switch status {
+			case http.StatusTooManyRequests:
+				f.deliver429s.Add(1)
+			case http.StatusServiceUnavailable:
+				f.deliver503s.Add(1)
+			}
 			out = flushOutcome{status: status, outcome: string(resp.Outcome), err: err}
 			if err == nil && status == http.StatusOK {
 				break
 			}
-			if !isRetryablePrePaste(status, string(resp.Outcome)) || attempt == brokerFlushMaxAttempts {
+			if !isRetryablePrePaste(status, string(resp.Outcome), err, ctx.Err() == nil) || attempt == brokerFlushMaxAttempts {
 				break
 			}
 			time.Sleep(brokerFlushRetryBackoff)
@@ -308,7 +324,12 @@ func (f *c19BrokerFlusher) flushBatch(ctx context.Context, agentID string, q *ag
 	}
 }
 
-func isRetryablePrePaste(status int, outcome string) bool {
+func isRetryablePrePaste(status int, outcome string, err error, parentAlive bool) bool {
+	// v2.22 §2.4: retry pre-send transport/connection errors (status == 0)
+	// before the server responded, reusing the same delivery_id.
+	if status == 0 && err != nil && parentAlive {
+		return true
+	}
 	switch status {
 	case http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusNotImplemented, http.StatusUnprocessableEntity:
 		return true
@@ -417,9 +438,10 @@ func splitSubFlushes(msgs []queuedMsg) [][]queuedMsg {
 }
 
 // splitChunksForJoin partitions body into chunks <= maxChunk bytes such that
-// joining the chunks with sep ("\n\n") has total byte length == len(body) for
-// 512 KiB payloads (so 33 chunks joined with "\n\n" equal exactly 524,288 bytes
-// and fit in a single 33-row v2.22 /deliver flush).
+// joining the chunks with sep ("\n\n") preserves len(body). Used for non-large
+// messages that exceed maxMessageChunkBytes; 512 KiB deliveries instead post
+// 33 x 15,000-byte rows whose coalesced Hub RenderDeliveryText envelopes land
+// around 507-520 KiB.
 func splitChunksForJoin(body string, maxChunk int, sep string) []string {
 	if maxChunk <= 0 || len(body) <= maxChunk {
 		return []string{body}
@@ -449,5 +471,3 @@ func splitChunksForJoin(body string, maxChunk int, sep string) []string {
 	}
 	return chunks
 }
-
-var _ = c19driver.LargeBodyBytes // keep package import aligned with LargeBodyBytes
