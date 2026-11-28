@@ -5356,8 +5356,7 @@ func TestAgentStatusUpdate_DeleteGuard_MessageOnlyPostNotApplied(t *testing.T) {
 			seedAgentDeletion(t, s, agent.ID, seedLiveDeleting)
 		}},
 		{"soft deleted", func(t *testing.T, s store.Store, agent *store.Agent) {
-			agent.DeletedAt = time.Now()
-			require.NoError(t, s.UpdateAgent(context.Background(), agent))
+			markAgentSoftDeletedAt(t, context.Background(), s, agent.ID, time.Now())
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

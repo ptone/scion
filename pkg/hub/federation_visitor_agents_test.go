@@ -537,8 +537,7 @@ func TestVisitorAgents_DeletedAgentRefused(t *testing.T) {
 
 	row, err := f.st.GetAgent(ctx, gone.ID)
 	require.NoError(t, err)
-	row.DeletedAt = time.Now()
-	require.NoError(t, f.st.UpdateAgent(ctx, row))
+	markAgentSoftDeletedAt(t, ctx, f.st, row.ID, time.Now())
 
 	reference := f.do(t, alice, http.MethodPost, f.projectMessagePath("no-such-agent"), visitorTextBody("x"))
 	assertVisitorRefusal(t, reference, "5A refusal")
@@ -617,8 +616,7 @@ func TestVisitorMessaging_DeletedAgentRefused(t *testing.T) {
 
 	row, err := f.st.GetAgent(ctx, gone.ID)
 	require.NoError(t, err)
-	row.DeletedAt = time.Now()
-	require.NoError(t, f.st.UpdateAgent(ctx, row))
+	markAgentSoftDeletedAt(t, ctx, f.st, row.ID, time.Now())
 
 	reference := f.do(t, alice, http.MethodPost, f.projectMessagePath("no-such-agent"), visitorTextBody("x"))
 	assertVisitorRefusal(t, reference, "5A refusal")

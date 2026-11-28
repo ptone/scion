@@ -134,8 +134,7 @@ func TestAgentSecretRead_DeletedAgentDenied(t *testing.T) {
 	ctx := context.Background()
 
 	agent := f.getAgent(t)
-	agent.DeletedAt = time.Now()
-	require.NoError(t, f.Store.UpdateAgent(ctx, agent))
+	markAgentSoftDeletedAt(t, ctx, f.Store, agent.ID, time.Now())
 
 	ident := newFullAgentIdentity(f.AgentID, f.ProjectID, []string{f.UserID}, []AgentTokenScope{ScopeProjectSecretRead})
 	_, reason, status := f.Server.materialRuntimePrecheck(ctx, ident)

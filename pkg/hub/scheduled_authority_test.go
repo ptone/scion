@@ -873,8 +873,9 @@ func (d *softDeletingScheduledDispatcher) softDelete(agent *store.Agent) {
 		if gerr != nil {
 			return gerr
 		}
-		row.DeletedAt = time.Now()
-		if uerr := tx.UpdateAgent(context.Background(), row); uerr != nil {
+		now := time.Now()
+		row.DeletedAt = now
+		if _, uerr := tx.UpdateAgentDeletion(context.Background(), row.ID, store.DeletionPredicate{}, store.DeletionFields{DeletedAt: &now}); uerr != nil {
 			return uerr
 		}
 		return d.srv.softDeleteAgentTx(context.Background(), tx, row, AuditActor{})

@@ -837,8 +837,7 @@ func TestUserMeInboxSummary_WaitingCategory(t *testing.T) {
 		if deleted {
 			got, gErr := f.s.GetAgent(ctx, a.ID)
 			require.NoError(t, gErr)
-			got.DeletedAt = time.Now().UTC()
-			require.NoError(t, f.s.UpdateAgent(ctx, got))
+			markAgentSoftDeletedAt(t, ctx, f.s, got.ID, time.Now().UTC())
 		}
 		return a
 	}

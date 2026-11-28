@@ -189,6 +189,15 @@ func TestAgentStore_AncestryFilter(t *testing.T) {
 	assert.Empty(t, none.Items)
 }
 
+// softDeleteAgentAt marks agent id as soft-deleted at the given timestamp
+// through UpdateAgentDeletion (the store's soft-delete writer).
+func softDeleteAgentAt(t *testing.T, ctx context.Context, s store.AgentStore, id string, at time.Time) {
+	t.Helper()
+	n, err := s.UpdateAgentDeletion(ctx, id, store.DeletionPredicate{}, store.DeletionFields{DeletedAt: &at})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+}
+
 // TestAgentStore_SoftDeleteExclusion verifies soft-deleted agents are hidden
 // from default listings but returned when explicitly included.
 func TestAgentStore_SoftDeleteExclusion(t *testing.T) {
@@ -201,9 +210,8 @@ func TestAgentStore_SoftDeleteExclusion(t *testing.T) {
 	gone := makeAgent(projectID, "gone")
 	require.NoError(t, s.CreateAgent(ctx, gone))
 
-	// Soft-delete via UpdateAgent setting DeletedAt.
-	gone.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, gone))
+	// Soft-delete via UpdateAgentDeletion setting DeletedAt.
+	softDeleteAgentAt(t, ctx, s, gone.ID, time.Now())
 
 	// Default listing excludes the soft-deleted agent.
 	def, err := s.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{})
@@ -229,8 +237,7 @@ func TestAgentStore_GetAgentBySlugExcludesSoftDeleted(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, a))
 
 	// Soft-delete the agent.
-	a.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, a))
+	softDeleteAgentAt(t, ctx, s, a.ID, time.Now())
 
 	// Slug lookup must not return the soft-deleted record.
 	_, err := s.GetAgentBySlug(ctx, projectID, "reusable-slug")
@@ -671,8 +678,9 @@ func TestAgentStore_MarkStalledAgents_HarnessErrorExcluded(t *testing.T) {
 	assert.Equal(t, "model API: APIError (status 400)", got.Message)
 
 	// Heartbeats stop: offline is the truth.
-	got.LastSeen = now.Add(-10 * time.Minute)
-	require.NoError(t, s.UpdateAgent(ctx, got))
+	require.NoError(t, s.client.Agent.UpdateOneID(uuid.MustParse(got.ID)).
+		SetLastSeen(now.Add(-10*time.Minute)).
+		Exec(ctx))
 	offline, err := s.MarkStaleAgentsOffline(ctx, now.Add(-5*time.Minute))
 	require.NoError(t, err)
 	require.Len(t, offline, 1)
@@ -772,14 +780,12 @@ func TestCompositeStore_PurgeDeletedAgents_Cutoff(t *testing.T) {
 	// Old soft-deleted agent -> purged.
 	oldDeleted := makeAgent(projectID, "old-deleted")
 	require.NoError(t, s.CreateAgent(ctx, oldDeleted))
-	oldDeleted.DeletedAt = time.Now().Add(-48 * time.Hour)
-	require.NoError(t, s.UpdateAgent(ctx, oldDeleted))
+	softDeleteAgentAt(t, ctx, s, oldDeleted.ID, time.Now().Add(-48*time.Hour))
 
 	// Recently soft-deleted agent -> retained.
 	recentDeleted := makeAgent(projectID, "recent-deleted")
 	require.NoError(t, s.CreateAgent(ctx, recentDeleted))
-	recentDeleted.DeletedAt = time.Now().Add(-1 * time.Hour)
-	require.NoError(t, s.UpdateAgent(ctx, recentDeleted))
+	softDeleteAgentAt(t, ctx, s, recentDeleted.ID, time.Now().Add(-1*time.Hour))
 
 	// Live agent -> retained.
 	live := makeAgent(projectID, "live")
@@ -2344,8 +2350,7 @@ func TestAgentStore_SetAgentWorkspacePlacementSkipsSoftDeleted(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, a))
 	require.NoError(t, s.SetAgentWorkspacePlacement(ctx, a.ID, "export"))
 
-	a.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, a))
+	softDeleteAgentAt(t, ctx, s, a.ID, time.Now())
 
 	err := s.SetAgentWorkspacePlacement(ctx, a.ID, "local")
 	assert.ErrorIs(t, err, store.ErrNotFound)
@@ -2383,8 +2388,7 @@ func TestAgentStore_SetAgentAnnotation(t *testing.T) {
 	// Removing an absent key is a no-op.
 	require.NoError(t, s.SetAgentAnnotation(ctx, a.ID, "absent", ""))
 
-	got.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, got))
+	softDeleteAgentAt(t, ctx, s, got.ID, time.Now())
 	assert.ErrorIs(t, s.SetAgentAnnotation(ctx, a.ID, "scion.dev/test", "x"), store.ErrNotFound)
 	assert.ErrorIs(t, s.SetAgentAnnotation(ctx, uuid.NewString(), "k", "v"), store.ErrNotFound)
 }
@@ -2403,10 +2407,7 @@ func TestAgentStore_ListAgents_ActivityFilter(t *testing.T) {
 		a.Activity = activity
 		require.NoError(t, s.CreateAgent(ctx, a))
 		if deleted {
-			got, err := s.GetAgent(ctx, a.ID)
-			require.NoError(t, err)
-			got.DeletedAt = time.Now().UTC()
-			require.NoError(t, s.UpdateAgent(ctx, got))
+			softDeleteAgentAt(t, ctx, s, a.ID, time.Now().UTC())
 		}
 		return a
 	}

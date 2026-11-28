@@ -444,9 +444,12 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 					return err
 				}
 			}
-			if err := tx.UpdateAgent(ctx, &row); err != nil {
+			newVersion, err := tx.RestoreAgent(ctx, row.ID, row.StateVersion)
+			if err != nil {
 				return err
 			}
+			row.StateVersion = newVersion
+			row.Updated = now
 			if err := tx.SetAgentSoftDeleteOpID(ctx, row.ID, ""); err != nil {
 				return err
 			}

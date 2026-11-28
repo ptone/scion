@@ -100,8 +100,9 @@ func TestAdminResetAuthAll_DeletedCreator(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			row.DeletedAt = time.Now()
-			if err := tx.UpdateAgent(ctx, row); err != nil {
+			now := time.Now()
+			row.DeletedAt = now
+			if _, err := tx.UpdateAgentDeletion(ctx, row.ID, store.DeletionPredicate{}, store.DeletionFields{DeletedAt: &now}); err != nil {
 				return err
 			}
 			return f.srv.softDeleteAgentTx(ctx, tx, row, AuditActor{})

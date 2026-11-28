@@ -1266,8 +1266,7 @@ func TestCommandRequestOutput_AuthzAndSharing(t *testing.T) {
 	// 3f. Soft-delete exec container -> must fail closed with 403 for real approver (AC-S10).
 	ag, err := f.store.GetAgent(ctx, f.launched.ID)
 	require.NoError(t, err)
-	ag.DeletedAt = time.Now().UTC()
-	require.NoError(t, f.store.UpdateAgent(ctx, ag))
+	markAgentSoftDeletedAt(t, ctx, f.store, ag.ID, time.Now().UTC())
 	deletedReq := httptest.NewRequest(http.MethodGet, outURL, nil)
 	deletedReq = deletedReq.WithContext(contextWithCredentialContext(
 		contextWithIdentity(deletedReq.Context(), f.owner),

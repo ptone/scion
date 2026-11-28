@@ -49,8 +49,7 @@ func purgeByIDFixture(t *testing.T, cs *CompositeStore, deletedAgo ...time.Durat
 		require.NoError(t, cs.CreateAgent(ctx, a))
 		require.NoError(t, cs.ReplaceAgentIdentityKeys(ctx, id, projectID, []string{slug}))
 		if ago > 0 {
-			a.DeletedAt = time.Now().Add(-ago)
-			require.NoError(t, cs.UpdateAgent(ctx, a))
+			softDeleteAgentAt(t, ctx, cs, a.ID, time.Now().Add(-ago))
 		}
 		ids[i] = id
 	}

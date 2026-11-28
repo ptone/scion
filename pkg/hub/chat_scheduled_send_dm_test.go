@@ -152,8 +152,7 @@ func TestScheduledSend_AgentDM_DeletedAgent(t *testing.T) {
 		sm := f.scheduleIn(t, f.bob, key, "to a deleted agent")
 		agent, err := f.store.GetAgent(ctx, f.agent.ID)
 		require.NoError(t, err)
-		agent.DeletedAt = time.Now()
-		require.NoError(t, f.store.UpdateAgent(ctx, agent))
+		markAgentSoftDeletedAt(t, ctx, f.store, agent.ID, time.Now())
 
 		assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, time.Now().UTC()))
 		row := f.row(t, f.bob, sm.ID)

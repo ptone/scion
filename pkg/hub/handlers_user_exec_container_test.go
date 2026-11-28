@@ -232,8 +232,7 @@ func TestExecContainer_AC4_Uniform422AndAttachEligibility(t *testing.T) {
 	nonexistentID := api.NewUUID()
 	// 2. Soft-deleted shell agent owned by caller
 	softDeleted := ecAgent(t, s, projMember.ID, caller.ID, caller.ID, config.ShellHarnessConfigName, string(state.PhaseStopped), "")
-	softDeleted.DeletedAt = time.Now().UTC()
-	require.NoError(t, s.UpdateAgent(ctx, softDeleted))
+	markAgentSoftDeletedAt(t, ctx, s, softDeleted.ID, time.Now().UTC())
 	// 3. Another user's shell agent in a foreign project
 	otherForeign := ecAgent(t, s, projForeign.ID, other.ID, other.ID, config.ShellHarnessConfigName, string(state.PhaseRunning), string(state.ActivityIdle))
 	// 4. Own LLM-harness agent
@@ -441,8 +440,7 @@ func TestExecContainer_AC5_StateResolution(t *testing.T) {
 	t.Run("deleted", func(t *testing.T) {
 		a, err := s.GetAgent(ctx, agent.ID)
 		require.NoError(t, err)
-		a.DeletedAt = time.Now().UTC()
-		require.NoError(t, s.UpdateAgent(ctx, a))
+		markAgentSoftDeletedAt(t, ctx, s, a.ID, time.Now().UTC())
 		assertUnavailable(t, "soft-deleted")
 	})
 }

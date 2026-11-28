@@ -72,8 +72,7 @@ func softDeleteAgentRow(t *testing.T, s store.Store, agentID string) {
 	ctx := context.Background()
 	row, err := s.GetAgent(ctx, agentID)
 	require.NoError(t, err)
-	row.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, row))
+	markAgentSoftDeletedAt(t, ctx, s, row.ID, time.Now())
 }
 
 func TestExecDispatchStartRestart_RefusedWhileDeleting(t *testing.T) {

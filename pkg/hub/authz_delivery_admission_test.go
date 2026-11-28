@@ -623,8 +623,7 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 			setup: twoHop("inner-deleted", func(t *testing.T, f *goldenFixture, a, c string) *AuthzService {
 				ag, err := f.store.GetAgent(context.Background(), a)
 				require.NoError(t, err)
-				ag.DeletedAt = time.Now()
-				require.NoError(t, f.store.UpdateAgent(context.Background(), ag))
+				markAgentSoftDeletedAt(t, context.Background(), f.store, ag.ID, time.Now())
 				return f.authz
 			}),
 			wantReasonFor: func(*goldenFixture) string {
@@ -701,8 +700,7 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 				a, h, res := single("target-deleted", "", nil)(t, f)
 				ag, err := f.store.GetAgent(context.Background(), h.ID())
 				require.NoError(t, err)
-				ag.DeletedAt = time.Now()
-				require.NoError(t, f.store.UpdateAgent(context.Background(), ag))
+				markAgentSoftDeletedAt(t, context.Background(), f.store, ag.ID, time.Now())
 				return a, h, res
 			},
 			wantReason: "delivery provenance root denied: ", wantPrefix: true, wantCause: DenyCauseForProvenanceError(ErrProvenanceInactive),
@@ -797,8 +795,7 @@ func TestHubDelivery_LivenessCausesMatchOrdinaryWalk(t *testing.T) {
 				hdEdge(t, f.store, store.DelegationPrincipalAgent, a, c, f.projectAlpha.ID, nil)
 				ag, err := f.store.GetAgent(context.Background(), a)
 				require.NoError(t, err)
-				ag.DeletedAt = time.Now()
-				require.NoError(t, f.store.UpdateAgent(context.Background(), ag))
+				markAgentSoftDeletedAt(t, context.Background(), f.store, ag.ID, time.Now())
 				return c
 			},
 			want: DenyCauseCeilingOrphaned,
@@ -1189,8 +1186,7 @@ func TestHubDelivery_DecideRows(t *testing.T) {
 		t.Helper()
 		ag, err := f.store.GetAgent(context.Background(), id)
 		require.NoError(t, err)
-		ag.DeletedAt = time.Now()
-		require.NoError(t, f.store.UpdateAgent(context.Background(), ag))
+		markAgentSoftDeletedAt(t, context.Background(), f.store, ag.ID, time.Now())
 	}
 	overrideEdges := func(edges func(f *goldenFixture, c string) []*store.DelegationEdge) func(f *goldenFixture, c string) *materialFailingStore {
 		return func(f *goldenFixture, c string) *materialFailingStore {

@@ -241,10 +241,7 @@ func TestReplyRecipient_DeletedSender_Unreachable(t *testing.T) {
 	origMsgID := seedAgentMessage(t, s, proj, topicID, sender, "original message from sender")
 
 	// Soft-delete the sender after the original message was sent.
-	sender.DeletedAt = time.Now()
-	if err := s.UpdateAgent(ctx, sender); err != nil {
-		t.Fatalf("UpdateAgent (delete): %v", err)
-	}
+	markAgentSoftDeletedAt(t, ctx, s, sender.ID, time.Now())
 
 	// Wire a real ChannelEventPublisher and subscribe to the project chat SSE
 	// subject before posting so we verify the published event carries the
@@ -697,10 +694,7 @@ func TestReplyRecipient_SoftDeletedForeignProjectSender_FallsThroughToDefault(t 
 
 	// Soft-delete the foreign sender after the original message was sent, so
 	// resolveReplyTarget's soft-deleted branch (not the live branch) applies.
-	foreignSender.DeletedAt = time.Now()
-	if err := s.UpdateAgent(ctx, foreignSender); err != nil {
-		t.Fatalf("UpdateAgent (delete): %v", err)
-	}
+	markAgentSoftDeletedAt(t, ctx, s, foreignSender.ID, time.Now())
 
 	body := map[string]string{"content": "replying to you", "reply_to_id": origMsgID}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
@@ -773,10 +767,7 @@ func TestReplyRecipient_EmptyProjectID_SoftDeletedForeignSender_NotDispatched(t 
 
 	// Soft-delete the foreign sender after the original message was sent, so
 	// resolveReplyTarget's soft-deleted branch (not the live branch) applies.
-	foreignSender.DeletedAt = time.Now()
-	if err := s.UpdateAgent(ctx, foreignSender); err != nil {
-		t.Fatalf("UpdateAgent (delete): %v", err)
-	}
+	markAgentSoftDeletedAt(t, ctx, s, foreignSender.ID, time.Now())
 
 	body := map[string]string{"content": "replying to you", "reply_to_id": origMsgID}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages", body)

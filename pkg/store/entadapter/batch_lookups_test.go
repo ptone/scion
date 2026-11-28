@@ -195,8 +195,7 @@ func TestGetAgentsByIDsIncludingDeleted(t *testing.T) {
 	}
 	deleted, err := s.GetAgent(ctx, ids[2])
 	require.NoError(t, err)
-	deleted.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, deleted))
+	softDeleteAgentAt(t, ctx, s, deleted.ID, time.Now())
 
 	got, err := s.GetAgentsByIDsIncludingDeleted(ctx, append(ids, uuid.NewString(), "not-a-uuid"))
 	require.NoError(t, err)

@@ -352,8 +352,7 @@ func TestTreeMode_MatrixAndSymmetry(t *testing.T) {
 	})
 
 	t.Run("soft-deleted intermediate keeps descendants connected, sender denied by standing", func(t *testing.T) {
-		bar.DeletedAt = time.Now().UTC()
-		require_NoError(t, s.UpdateAgent(ctx, bar))
+		markAgentSoftDeletedAt(t, ctx, s, bar.ID, time.Now().UTC())
 
 		// Baz ↔ Bar2 still allowed via immutable Ancestry
 		check(t, baz, bar2, true, "")

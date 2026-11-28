@@ -414,8 +414,7 @@ func TestTriggerG4a_Reuse_TerminalSoftDeletedAndCreateFailure(t *testing.T) {
 	// 4. Soft-delete A2 -> claim released, new agent A3 dispatched.
 	ag2, err := f.sched.store.GetAgent(ctx, agentA2)
 	require.NoError(t, err)
-	ag2.DeletedAt = time.Now().UTC()
-	require.NoError(t, f.sched.store.UpdateAgent(ctx, ag2))
+	markAgentSoftDeletedAt(t, ctx, f.sched.store, ag2.ID, time.Now().UTC())
 
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-softdel-4", "pr_sync", "pr-77", []byte(`{}`)).Code)
 	f.drainOneTriggerEvent(t)

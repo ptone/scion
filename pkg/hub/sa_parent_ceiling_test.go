@@ -205,8 +205,7 @@ func TestSAParentCeiling_AgentSourceDeletedDenies(t *testing.T) {
 func markAgentDeleted(t *testing.T, s store.Store, agentID string) {
 	t.Helper()
 	agent := mustGetAgent(t, s, agentID)
-	agent.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+	markAgentSoftDeletedAt(t, context.Background(), s, agent.ID, time.Now())
 	require.False(t, mustGetAgent(t, s, agentID).DeletedAt.IsZero(), "precondition: the row reads as deleted")
 }
 

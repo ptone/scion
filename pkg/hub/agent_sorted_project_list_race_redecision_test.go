@@ -42,8 +42,7 @@ func softDeleteAgentForTest(t *testing.T, s store.Store, id string) {
 	ctx := context.Background()
 	a, err := s.GetAgent(ctx, id)
 	require.NoError(t, err)
-	a.DeletedAt = time.Now().UTC()
-	require.NoError(t, s.UpdateAgent(ctx, a))
+	markAgentSoftDeletedAt(t, ctx, s, a.ID, time.Now().UTC())
 }
 
 // TestListProjectAgentsSorted_IncludeDeleted_Complete reproduces and fixes a

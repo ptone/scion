@@ -682,12 +682,23 @@ type AgentStore interface {
 	// DeletedAt is set. Missing or malformed IDs are silently skipped.
 	GetAgentsByIDsIncludingDeleted(ctx context.Context, ids []string) (map[string]*Agent, error)
 
-	// UpdateAgent updates an existing agent.
+	// UpdateAgent updates an existing non-deleted agent.
 	// Uses optimistic locking via StateVersion.
-	// Returns ErrNotFound if agent doesn't exist.
-	// Returns ErrVersionConflict if the version doesn't match.
-	// It never writes soft_delete_op_id (see SetAgentSoftDeleteOpID).
+	// Returns ErrVersionConflict if the version doesn't match (including when
+	// a concurrent soft delete bumped StateVersion).
+	// Returns ErrNotFound if the agent doesn't exist, or if StateVersion
+	// matches on a soft-deleted row.
+	// It never writes soft_delete_op_id (see SetAgentSoftDeleteOpID),
+	// deleted_at (see UpdateAgentDeletion / FinalizeAgentDeletion / RestoreAgent),
+	// or last_seen (see CreateAgent / UpdateAgentStatus).
 	UpdateAgent(ctx context.Context, agent *Agent) error
+
+	// RestoreAgent clears deleted_at on a soft-deleted agent, compare-and-set
+	// on expectedVersion, and bumps state_version. It is the only post-create
+	// path that clears deleted_at. Returns the new state version; ErrNotFound
+	// if the agent does not exist or is not soft-deleted; ErrVersionConflict
+	// if the version does not match.
+	RestoreAgent(ctx context.Context, id string, expectedVersion int64) (int64, error)
 
 	// UpdateAgentConfig writes only the agent's applied config (and its
 	// harness_config shadow) and pending config, compare-and-set on

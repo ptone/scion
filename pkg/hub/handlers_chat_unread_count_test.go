@@ -375,8 +375,7 @@ func softDeleteChatPeerAgent(t *testing.T, s store.Store, agentID string) {
 	ctx := context.Background()
 	a, err := s.GetAgent(ctx, agentID)
 	require.NoError(t, err)
-	a.DeletedAt = time.Now().UTC()
-	require.NoError(t, s.UpdateAgent(ctx, a))
+	markAgentSoftDeletedAt(t, ctx, s, a.ID, time.Now().UTC())
 }
 
 // A DM with an agent that has since been deleted (hard or soft) is kept and

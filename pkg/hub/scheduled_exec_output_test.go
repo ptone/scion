@@ -185,8 +185,7 @@ func TestScheduledExecCapture_OneShotJSONIntegration(t *testing.T) {
 	// Soft-deleted target agent -> 403 even for the owner (A9).
 	a, err := f.store.GetAgent(context.Background(), f.launched.ID)
 	require.NoError(t, err)
-	a.DeletedAt = time.Now().UTC()
-	require.NoError(t, f.store.UpdateAgent(context.Background(), a))
+	markAgentSoftDeletedAt(t, context.Background(), f.store, a.ID, time.Now().UTC())
 	recDeleted := requestAsIdentity(t, f.srv, f.owner, http.MethodGet, outputURL, nil)
 	assert.Equal(t, http.StatusForbidden, recDeleted.Code)
 	assert.NotContains(t, recDeleted.Body.String(), canary)

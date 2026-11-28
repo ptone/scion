@@ -85,8 +85,7 @@ func TestMaterialChainStanding_DeletedParent(t *testing.T) {
 	child, token := materialChainAgent(t, f, "deleted-child", []string{f.UserID, parent}, store.DelegationPrincipalAgent, parent)
 	p, err := f.Store.GetAgent(context.Background(), parent)
 	require.NoError(t, err)
-	p.DeletedAt = p.Updated.Add(1)
-	require.NoError(t, f.Store.UpdateAgent(context.Background(), p))
+	markAgentSoftDeletedAt(t, context.Background(), f.Store, p.ID, p.Updated.Add(1))
 	requireChainStandingReason(t, f, child, standingReasonChainDeleted)
 	assertProjectDenied(t, f, child, token, "MMC_DELETED_KEY")
 }

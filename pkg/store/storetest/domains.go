@@ -491,6 +491,14 @@ func newOracleAgent(slug string) *store.Agent {
 	}
 }
 
+// softDeleteAgentAt marks agent id as soft-deleted at at via UpdateAgentDeletion.
+func softDeleteAgentAt(t *testing.T, ctx context.Context, s store.AgentStore, id string, at time.Time) {
+	t.Helper()
+	n, err := s.UpdateAgentDeletion(ctx, id, store.DeletionPredicate{}, store.DeletionFields{DeletedAt: &at})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+}
+
 // seedLiveAndDeleted inserts one live agent and one soft-deleted agent.
 func seedLiveAndDeleted(t *testing.T, ctx context.Context, s store.Store) {
 	t.Helper()
@@ -499,8 +507,7 @@ func seedLiveAndDeleted(t *testing.T, ctx context.Context, s store.Store) {
 
 	gone := newOracleAgent("gone")
 	require.NoError(t, s.CreateAgent(ctx, gone))
-	gone.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, gone))
+	softDeleteAgentAt(t, ctx, s, gone.ID, time.Now())
 }
 
 // AgentDomain describes the agent entity for the CRUD-parity oracle. Beyond the

@@ -146,8 +146,7 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 			require.NoError(t, s.UpdateAgent(ctx, a))
 		}},
 		{name: "soft deleted", broker: "broker-1", after: func(t *testing.T, a *store.Agent) {
-			a.DeletedAt = time.Now()
-			require.NoError(t, s.UpdateAgent(ctx, a))
+			softDeleteAgentAt(t, ctx, s, a.ID, time.Now())
 		}},
 	}
 	for _, stored := range []string{"", "preempted"} {

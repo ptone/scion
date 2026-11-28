@@ -908,8 +908,7 @@ func TestSecretRequests_DeletePurgeAndRollbackAudit(t *testing.T) {
 		Now: time.Now().UTC(),
 	})
 	require.NoError(t, err)
-	ag2.DeletedAt = time.Now().UTC().Add(-48 * time.Hour)
-	require.NoError(t, f.store.UpdateAgent(ctx, ag2))
+	markAgentSoftDeletedAt(t, ctx, f.store, ag2.ID, time.Now().UTC().Add(-48*time.Hour))
 
 	f.audit.reset()
 	n, err := f.srv.withAgentSecretCleanup(ctx, ag2.ID, func(txCtx context.Context) (int, error) {

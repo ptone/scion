@@ -25,22 +25,45 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-// singleWriterColumns maps each single-writer agents column (WP1 slice 3
-// addendum v12 section 1) to its ent setter family and the only function
-// ("file:Recv.Method") allowed to call it. The family covers every ent
-// type in pkg/ent that has the method: the create, update and update-one
-// builders, the bulk and upsert builders, and the mutation.
+// agentEntTypes names every ent builder and mutation type for the agents table
+// so columns that share a setter name with other entities (such as deleted_at
+// on conversations) are guarded only on agents.
+var agentEntTypes = map[string]bool{
+	"AgentCreate":     true,
+	"AgentCreateBulk": true,
+	"AgentUpdate":     true,
+	"AgentUpdateOne":  true,
+	"AgentUpsert":     true,
+	"AgentUpsertOne":  true,
+	"AgentUpsertBulk": true,
+	"AgentMutation":   true,
+}
+
+// singleWriterColumns maps each restricted agents column (WP1 slice 3
+// addendum v12 section 1; ptone/scion#9871) to its ent setter family and the
+// functions ("file:Recv.Method" or "file:Func") allowed to call it. The family
+// covers every ent type in pkg/ent for the agents table that has the method:
+// the create, update and update-one builders, the bulk and upsert builders,
+// and the mutation.
 var singleWriterColumns = map[string]struct {
 	setters []string
-	writer  string
+	writers []string
 }{
 	"effective_config": {
 		setters: []string{"SetEffectiveConfig", "SetNillableEffectiveConfig", "ClearEffectiveConfig", "UpdateEffectiveConfig"},
-		writer:  "effective_config_store.go:AgentStore.SetAgentEffectiveConfig",
+		writers: []string{"effective_config_store.go:AgentStore.SetAgentEffectiveConfig"},
 	},
 	"launch_run_id": {
 		setters: []string{"SetLaunchRunID", "SetNillableLaunchRunID", "ClearLaunchRunID", "UpdateLaunchRunID"},
-		writer:  "launch_store.go:AgentStore.beginLaunch",
+		writers: []string{"launch_store.go:AgentStore.beginLaunch"},
+	},
+	"deleted_at": {
+		setters: []string{"SetDeletedAt", "SetNillableDeletedAt", "ClearDeletedAt", "UpdateDeletedAt"},
+		writers: []string{
+			"agent_store.go:AgentStore.CreateAgent",
+			"agent_deletion_store.go:applyAgentDeletionFields",
+			"agent_store.go:AgentStore.RestoreAgent",
+		},
 	},
 }
 
@@ -88,7 +111,7 @@ func singleWriterSetterCalls(t *testing.T, patterns ...string) map[string]map[st
 						xt = p.Elem()
 					}
 					named, ok := xt.(*types.Named)
-					if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != entPkgPath {
+					if !ok || named.Obj().Pkg() == nil || named.Obj().Pkg().Path() != entPkgPath || !agentEntTypes[named.Obj().Name()] {
 						return true
 					}
 					if out[col] == nil {
@@ -104,8 +127,10 @@ func singleWriterSetterCalls(t *testing.T, patterns ...string) map[string]map[st
 }
 
 // TestAgentColumnSetterGuard: only SetAgentEffectiveConfig writes
-// agents.effective_config, and only beginLaunch writes
-// agents.launch_run_id (addendum v12 section 1; review r1 N4).
+// agents.effective_config, only beginLaunch writes agents.launch_run_id
+// (addendum v12 section 1; review r1 N4), and only CreateAgent,
+// applyAgentDeletionFields, and RestoreAgent write agents.deleted_at
+// (ptone/scion#9871).
 func TestAgentColumnSetterGuard(t *testing.T) {
 	if testing.Short() {
 		t.Skip("type-checks pkg/store and pkg/store/entadapter")
@@ -117,13 +142,16 @@ func TestAgentColumnSetterGuard(t *testing.T) {
 	}
 	sort.Strings(cols)
 	for _, col := range cols {
-		want := singleWriterColumns[col].writer
-		if len(calls[col][want]) == 0 {
-			t.Errorf("%s: its writer %s calls no setter of the family; the guard or the writer is broken", col, want)
+		allowed := make(map[string]bool, len(singleWriterColumns[col].writers))
+		for _, want := range singleWriterColumns[col].writers {
+			allowed[want] = true
+			if len(calls[col][want]) == 0 {
+				t.Errorf("%s: its writer %s calls no setter of the family; the guard or the writer is broken", col, want)
+			}
 		}
 		for fn, sites := range calls[col] {
-			if fn != want {
-				t.Errorf("%s is written outside %s: %s (%s)", col, want, fn, strings.Join(sites, "; "))
+			if !allowed[fn] {
+				t.Errorf("%s is written outside %v: %s (%s)", col, singleWriterColumns[col].writers, fn, strings.Join(sites, "; "))
 			}
 		}
 	}
@@ -139,6 +167,7 @@ func TestAgentColumnSetterGuardProof(t *testing.T) {
 	for col, want := range map[string]string{
 		"effective_config": "AgentUpdateOne.SetEffectiveConfig",
 		"launch_run_id":    "AgentUpdateOne.ClearLaunchRunID",
+		"deleted_at":       "AgentUpdateOne.ClearDeletedAt",
 	} {
 		sites := strings.Join(calls[col]["proof.go:setSingleWriterColumns"], "; ")
 		if !strings.Contains(sites, want) {

@@ -737,8 +737,7 @@ func TestAgentSecretsP2_L1_SoftDeleteRaceAndRetryCleanup(t *testing.T) {
 		require.NoError(t, err)
 
 		// Soft-delete agentX.
-		agentX.DeletedAt = time.Now().UTC()
-		require.NoError(t, s.UpdateAgent(ctx, agentX))
+		markAgentSoftDeletedAt(t, ctx, s, agentX.ID, time.Now().UTC())
 
 		// PUT returns 404.
 		rec := doRequestAsUser(t, srv, owner, http.MethodPut, "/api/v1/secrets/LATE", SetSecretRequest{

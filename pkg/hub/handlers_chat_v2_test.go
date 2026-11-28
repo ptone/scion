@@ -4430,10 +4430,7 @@ func TestDEF31_Rebinding_AfterSoftDelete(t *testing.T) {
 	}
 
 	// Soft-delete the agent.
-	liveAgent.DeletedAt = time.Now().UTC()
-	if err := f.store.UpdateAgent(ctx, liveAgent); err != nil {
-		t.Fatalf("UpdateAgent (soft-delete): %v", err)
-	}
+	markAgentSoftDeletedAt(t, ctx, f.store, liveAgent.ID, time.Now().UTC())
 
 	// Simulate what happens when an agent is deleted: ClearTopicDefaultAgent
 	// scrubs the binding from all topics in the project.

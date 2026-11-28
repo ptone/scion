@@ -123,8 +123,7 @@ func TestAgentDeleteRouted_StopAllSkipsDeletingRows(t *testing.T) {
 func TestAgentDeleteRouted_RestoreReturnsEnrichedShape(t *testing.T) {
 	srv, s, _, _ := engineTestServer(t)
 	agent := setupBrokerAgentInPhase(t, s, "restore-enriched", state.PhaseStopped)
-	agent.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+	markAgentSoftDeletedAt(t, context.Background(), s, agent.ID, time.Now())
 	// An ordinary failure from an earlier attempt, no outstanding intent:
 	// restore is allowed, and the response carries the banner.
 	seedAgentDeletion(t, s, agent.ID, deleteSeed{

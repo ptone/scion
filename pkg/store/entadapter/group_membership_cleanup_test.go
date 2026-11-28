@@ -209,8 +209,7 @@ func TestPurgeDeletedAgents_RemovesGroupMemberships(t *testing.T) {
 	ctx := context.Background()
 	f := newAgentGroupFixture(t)
 	for _, a := range []*store.Agent{f.a, f.b} {
-		a.DeletedAt = time.Now().Add(-48 * time.Hour)
-		require.NoError(t, f.cs.UpdateAgent(ctx, a))
+		softDeleteAgentAt(t, ctx, f.cs, a.ID, time.Now().Add(-48*time.Hour))
 	}
 	restoredUID := uuid.MustParse(f.b.ID)
 	purgeDeletedAgentsTestHook = func(tx *ent.Tx, _ []uuid.UUID) {

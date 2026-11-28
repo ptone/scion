@@ -125,8 +125,7 @@ func TestReport_H1_Deleted(t *testing.T) {
 
 	got, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
-	got.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, got))
+	softDeleteAgentAt(t, ctx, s, got.ID, time.Now())
 
 	answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
 		LaunchID: launchID, InstanceID: "instance-1", State: store.LaunchReportStateProgress,

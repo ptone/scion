@@ -152,10 +152,10 @@ func AllRegistryIDs() []string {
 // time.
 func SoftDeleteStoredAgent(t *testing.T, s store.Store, id string) {
 	t.Helper()
-	a, err := s.GetAgent(context.Background(), id)
+	now := time.Now()
+	n, err := s.UpdateAgentDeletion(context.Background(), id, store.DeletionPredicate{}, store.DeletionFields{DeletedAt: &now})
 	require.NoError(t, err)
-	a.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(context.Background(), a))
+	require.Equal(t, 1, n)
 }
 
 // AddProjectMemberWithRole is a small helper that adds the given user to the

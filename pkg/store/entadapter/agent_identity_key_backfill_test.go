@@ -256,8 +256,7 @@ func TestBackfillAgentIdentityKeys_IncludesSoftDeletedAgents(t *testing.T) {
 		ProjectID: projectID, Phase: "stopped",
 	}
 	require.NoError(t, cs.CreateAgent(ctx, a))
-	a.DeletedAt = time.Now().Add(-48 * time.Hour)
-	require.NoError(t, cs.UpdateAgent(ctx, a))
+	softDeleteAgentAt(t, ctx, cs, a.ID, time.Now().Add(-48*time.Hour))
 
 	require.NoError(t, cs.BackfillAgentIdentityKeys(ctx))
 

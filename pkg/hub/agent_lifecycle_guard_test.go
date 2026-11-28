@@ -152,9 +152,11 @@ func (d *softDeletingDispatcher) DispatchAgentCreateWithGather(ctx context.Conte
 		if err != nil {
 			return err
 		}
-		row.Phase = string(state.PhaseStopped)
-		row.DeletedAt = time.Now()
-		if err := tx.UpdateAgent(context.Background(), row); err != nil {
+		stopped := string(state.PhaseStopped)
+		now := time.Now()
+		row.Phase = stopped
+		row.DeletedAt = now
+		if _, err := tx.UpdateAgentDeletion(context.Background(), row.ID, store.DeletionPredicate{}, store.DeletionFields{Phase: &stopped, DeletedAt: &now}); err != nil {
 			return err
 		}
 		return d.srv.softDeleteAgentTx(context.Background(), tx, row, AuditActor{})
@@ -326,14 +328,15 @@ func TestRestoreRefusesNotLiveDelegator(t *testing.T) {
 		{
 			name: "soft-deleted agent", delegatorType: store.DelegationPrincipalAgent,
 			kill: func(t *testing.T, s store.Store, id string) {
-				a := mustGetAgent(t, s, id)
-				a.DeletedAt = time.Now()
-				require.NoError(t, s.UpdateAgent(context.Background(), a))
+				now := time.Now()
+				n, err := s.UpdateAgentDeletion(context.Background(), id, store.DeletionPredicate{}, store.DeletionFields{DeletedAt: &now})
+				require.NoError(t, err)
+				require.Equal(t, 1, n)
 			},
 			revive: func(t *testing.T, s store.Store, id string) {
 				a := mustGetAgent(t, s, id)
-				a.DeletedAt = time.Time{}
-				require.NoError(t, s.UpdateAgent(context.Background(), a))
+				_, err := s.RestoreAgent(context.Background(), a.ID, a.StateVersion)
+				require.NoError(t, err)
 			},
 		},
 		{
@@ -663,8 +666,7 @@ func newProjectEdgeFixture(t *testing.T, s store.Store, prefix string) *projectE
 		edge(store.DelegationPrincipalAgent, f.live.ID, f.outside), // project agent as delegator
 	}
 	f.kept = edge(store.DelegationPrincipalUser, f.ownerID, f.bystander) // unrelated
-	f.soft.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, f.soft))
+	markAgentSoftDeletedAt(t, ctx, s, f.soft.ID, time.Now())
 	return f
 }
 

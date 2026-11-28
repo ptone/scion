@@ -112,8 +112,7 @@ func TestNFSOrphans_ClassificationAndNeverDeletes(t *testing.T) {
 	}))
 	softRecent, err := env.s.GetAgent(ctx, softRecentID)
 	require.NoError(t, err)
-	softRecent.DeletedAt = now.Add(-1 * time.Hour)
-	require.NoError(t, env.s.UpdateAgent(ctx, softRecent))
+	markAgentSoftDeletedAt(t, ctx, env.s, softRecent.ID, now.Add(-1*time.Hour))
 
 	// Soft-deleted past retention (48h > 24h): MUST be reported as deleted.
 	softOldID := uuid.NewString()
@@ -122,8 +121,7 @@ func TestNFSOrphans_ClassificationAndNeverDeletes(t *testing.T) {
 	}))
 	softOld, err := env.s.GetAgent(ctx, softOldID)
 	require.NoError(t, err)
-	softOld.DeletedAt = now.Add(-48 * time.Hour)
-	require.NoError(t, env.s.UpdateAgent(ctx, softOld))
+	markAgentSoftDeletedAt(t, ctx, env.s, softOld.ID, now.Add(-48*time.Hour))
 
 	// Superseded child under live agent's slug (old incarnation ID).
 	oldIncarnationID := uuid.NewString()

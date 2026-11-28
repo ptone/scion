@@ -290,8 +290,7 @@ func TestDeleteGate_Restore(t *testing.T) {
 		t.Run(seed.name, func(t *testing.T) {
 			srv, s := testServer(t)
 			agent := setupBrokerAgentInPhase(t, s, "dg-restore-"+string(rune('a'+i)), state.PhaseStopped)
-			agent.DeletedAt = time.Now()
-			require.NoError(t, s.UpdateAgent(context.Background(), agent))
+			markAgentSoftDeletedAt(t, context.Background(), s, agent.ID, time.Now())
 			seedAgentDeletion(t, s, agent.ID, seed)
 
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+agent.ProjectID+"/agents/"+agent.ID+"/restore", nil)
@@ -395,8 +394,7 @@ func TestDeleteGuard_StatusReport(t *testing.T) {
 		pub := &trackingEventPublisher{}
 		srv.SetEventPublisher(pub)
 		agent := setupBrokerAgentInPhase(t, s, "dg-status-soft", state.PhaseRunning)
-		agent.DeletedAt = time.Now()
-		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+		markAgentSoftDeletedAt(t, context.Background(), s, agent.ID, time.Now())
 
 		post(t, srv, agent)
 
@@ -458,8 +456,7 @@ func TestDeleteGuard_Heartbeat(t *testing.T) {
 		pub := &trackingEventPublisher{}
 		srv.SetEventPublisher(pub)
 		agent := getAgentState(t, s, slug, projectID)
-		agent.DeletedAt = time.Now()
-		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+		markAgentSoftDeletedAt(t, context.Background(), s, agent.ID, time.Now())
 		_, err := s.GetAgentBySlug(context.Background(), projectID, slug)
 		require.ErrorIs(t, err, store.ErrNotFound, "precondition: the heartbeat cannot resolve a soft-deleted slug")
 

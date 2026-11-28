@@ -19,7 +19,6 @@ package entadapter
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -61,14 +60,10 @@ func TestUpdateAgentLeavesSoftDeleteOpIDUnchanged(t *testing.T) {
 	s, projectID := newTestAgentStore(t)
 	a := makeAgent(projectID, "soft-op-id-keep")
 	require.NoError(t, s.CreateAgent(ctx, a))
-	row, err := s.GetAgent(ctx, a.ID)
-	require.NoError(t, err)
-	row.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(ctx, row))
 	require.NoError(t, s.SetAgentSoftDeleteOpID(ctx, a.ID, "op-keep"))
 
 	for _, carried := range []string{"", "op-other"} {
-		row, err = s.GetAgent(ctx, a.ID)
+		row, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		row.SoftDeleteOpID = carried
 		row.Message = "write with op ID " + carried
@@ -77,6 +72,5 @@ func TestUpdateAgentLeavesSoftDeleteOpIDUnchanged(t *testing.T) {
 		got, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		assert.Equal(t, "op-keep", got.SoftDeleteOpID, "UpdateAgent carrying %q leaves the column unchanged", carried)
-		assert.False(t, got.DeletedAt.IsZero())
 	}
 }

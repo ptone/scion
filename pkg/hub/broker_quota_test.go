@@ -412,8 +412,7 @@ func TestBrokerQuota_ReconcileReleasesSoftDeletedAgent(t *testing.T) {
 	// Soft-delete without touching phase, to isolate DeletedAt as the signal
 	// under test (a real delete path also flips phase to stopped, which
 	// would let isBrokerQuotaCountedPhase alone catch this).
-	agent.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+	markAgentSoftDeletedAt(t, context.Background(), s, agent.ID, time.Now())
 
 	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
 
