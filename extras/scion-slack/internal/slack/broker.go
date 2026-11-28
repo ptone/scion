@@ -471,6 +471,9 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 			// project channel links and attach the thread_ts there.
 			fallbackThreadTS = convTarget.ExternalRef
 		default:
+			// Log-only: unrecognized explicit target formats are never appended
+			// to channelIDs; call authorizeExplicitTargetChannel solely to emit
+			// the structured deny reason before falling through.
 			if _, ok, reason := b.authorizeExplicitTargetChannel(ctx, store, authzProjectID, agentSlug, msg, convTarget.ExternalRef); !ok {
 				plugin.LogTargetDenied(b.log, "slack", authzProjectID, plugin.ConversationTargetSource(msg), convTarget.ExternalRef, reason)
 			}
@@ -529,10 +532,18 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 
 	isAgentToAgent := strings.HasPrefix(msg.Sender, "agent:") && strings.HasPrefix(msg.Recipient, "agent:")
 	isStateChange := msg.Type == messages.TypeStateChange
+	isUserRecipient := strings.HasPrefix(msg.Recipient, "user:")
 
 	var errs []error
 	for i, channelID := range channelIDs {
-		if isAgentToAgent || isStateChange {
+		// Agent-to-agent observer copies always require an active ChannelLink
+		// with ShowAgentToAgent enabled (fail closed). State-change messages
+		// apply the link / ShowStateChanges check to non-DM containers, while
+		// allowing delivery to a user recipient's own DM (D...) obtained via
+		// the authorized recipient path.
+		isUserDM := isUserRecipient && strings.HasPrefix(channelID, "D")
+		needsLinkFilter := isAgentToAgent || (isStateChange && !isUserDM)
+		if needsLinkFilter {
 			if store == nil {
 				continue
 			}
