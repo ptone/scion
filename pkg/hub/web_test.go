@@ -1127,6 +1127,38 @@ func TestMountHubAPI_RoutesToHub(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec2.Result().StatusCode)
 }
 
+func TestMountHubAPI_GitHubAppSetupForwardsExactPathOnly(t *testing.T) {
+	ws := newDevAuthWebServer(t, func(cfg *WebServerConfig) {
+		cfg.AssetsDir = t.TempDir()
+	})
+
+	var hubCalls []string
+	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalls = append(hubCalls, r.URL.Path)
+		w.Header().Set("Location", "/github-app/installed?installation_id=42")
+		w.WriteHeader(http.StatusFound)
+	})
+	ws.MountHubAPI(mockHandler, func(ctx context.Context) error { return nil })
+
+	// Unauthenticated GET /github-app/setup reaches the mounted hub handler.
+	req := httptest.NewRequest(http.MethodGet, "/github-app/setup?installation_id=42&setup_action=install", nil)
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusFound, rec.Code)
+	assert.Equal(t, []string{"/github-app/setup"}, hubCalls)
+
+	// Signed-in SPA paths under /github-app/ are not forwarded to the hub.
+	signedIn := devSignedIn(t, ws)
+	for _, path := range []string{"/github-app/installed?installation_id=42", "/github-app/setup/extra"} {
+		spaReq := httptest.NewRequest(http.MethodGet, path, nil)
+		spaRec := httptest.NewRecorder()
+		signedIn.ServeHTTP(spaRec, spaReq)
+		assert.Equal(t, http.StatusOK, spaRec.Code, "GET %s should be served by SPA", path)
+		assert.Contains(t, spaRec.Body.String(), "scion-app", "GET %s should return SPA shell", path)
+	}
+	assert.Equal(t, []string{"/github-app/setup"}, hubCalls, "non-setup paths must not hit mounted hub handler")
+}
+
 func TestSessionToBearerMiddleware(t *testing.T) {
 	// Verify that a session with a Hub JWT has the token injected
 	// as an Authorization header when routed to the Hub handler.
@@ -2105,6 +2137,9 @@ func TestIsPublicRoute(t *testing.T) {
 		{"/api/v1/projects", true},
 		{"/api/v1/agents", true},
 		{"/api/v1/auth/login", true},
+		{"/github-app/setup", true},
+		{"/github-app/installed", false},
+		{"/github-app/setup/extra", false},
 		{"/", false},
 		{"/projects", false},
 		{"/agents", false},

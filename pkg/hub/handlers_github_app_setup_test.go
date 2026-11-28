@@ -457,3 +457,97 @@ func TestHandleGitHubAppSetup_PublicRouteAuthorizationUnchanged(t *testing.T) {
 		t.Errorf("AccountLogin = %q, want acme", got.AccountLogin)
 	}
 }
+
+func TestCombinedWebServer_GitHubAppSetupForwardsToHub(t *testing.T) {
+	t.Run("unconfigured app returns 503 from hub handler", func(t *testing.T) {
+		srv, _ := webhookTestServer(t)
+		ws := newTestWebServer(t, WebServerConfig{
+			AssetsDir: t.TempDir(),
+		})
+		ws.MountHubAPI(srv.Handler(), func(context.Context) error { return nil })
+
+		req := httptest.NewRequest(http.MethodGet, "/github-app/setup?installation_id=12345&setup_action=install", nil)
+		rec := httptest.NewRecorder()
+		ws.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected status %d from handleGitHubAppSetup, got %d: %s",
+				http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "GitHub App not configured") {
+			t.Fatalf("expected body to contain %q, got %q", "GitHub App not configured", rec.Body.String())
+		}
+	})
+
+	t.Run("configured app redirects to installed page", func(t *testing.T) {
+		fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/app/installations/67890":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":67890,"app_id":42,"account":{"login":"acme","type":"Organization"}}`))
+			case r.Method == http.MethodPost && r.URL.Path == "/app/installations/67890/access_tokens":
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = fmt.Fprintf(w, `{"token":"ghs_test_token","expires_at":%q}`,
+					time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+			case r.Method == http.MethodGet && r.URL.Path == "/installation/repositories":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"total_count":1,"repositories":[{"full_name":"acme/combined"}]}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer fakeGH.Close()
+
+		srv, s := setupTestServer(t, fakeGH.URL)
+		ws := newTestWebServer(t, WebServerConfig{
+			AssetsDir: t.TempDir(),
+		})
+		ws.MountHubAPI(srv.Handler(), func(context.Context) error { return nil })
+
+		req := httptest.NewRequest(http.MethodGet, "/github-app/setup?installation_id=67890&setup_action=install", nil)
+		rec := httptest.NewRecorder()
+		ws.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusFound {
+			t.Fatalf("expected status %d, got %d: %s", http.StatusFound, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Location"); got != "/github-app/installed?installation_id=67890" {
+			t.Fatalf("Location = %q, want %q", got, "/github-app/installed?installation_id=67890")
+		}
+
+		got, err := s.GetGitHubInstallation(context.Background(), 67890)
+		if err != nil {
+			t.Fatalf("GetGitHubInstallation: %v", err)
+		}
+		if got.AccountLogin != "acme" {
+			t.Errorf("AccountLogin = %q, want acme", got.AccountLogin)
+		}
+	})
+
+	t.Run("SPA still serves installed and non-setup paths", func(t *testing.T) {
+		srv, _ := webhookTestServer(t)
+		ws := newDevAuthWebServer(t, func(cfg *WebServerConfig) {
+			cfg.AssetsDir = t.TempDir()
+		})
+		ws.MountHubAPI(srv.Handler(), func(context.Context) error { return nil })
+		handler := devSignedIn(t, ws)
+
+		for _, path := range []string{
+			"/github-app/installed?installation_id=67890",
+			"/github-app/setup/extra",
+			"/projects",
+		} {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s: expected SPA status %d, got %d: %s", path, http.StatusOK, rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "scion-app") {
+				t.Fatalf("GET %s: expected SPA shell containing scion-app, got %q", path, rec.Body.String())
+			}
+		}
+	})
+}
