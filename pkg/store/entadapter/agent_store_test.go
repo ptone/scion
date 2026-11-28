@@ -2169,6 +2169,8 @@ func TestUpdateAgentStatus_ClearTerminalRemnants(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	a := makeAgent(projectID, "clear-remnants")
+	a.Phase = "error"
+	a.Activity = "crashed"
 	require.NoError(t, s.CreateAgent(ctx, a))
 	code := 137
 	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
@@ -2233,6 +2235,7 @@ func TestUpdateAgentStatus_PreRunningToRunningClearsStaleMessage(t *testing.T) {
 		s, projectID := newTestAgentStore(t)
 		a := makeAgent(projectID, "starting-clear-msg")
 		a.Phase = "error"
+		a.Activity = ""
 		a.Message = staleErr
 		a.StalledFromActivity = "working"
 		require.NoError(t, s.CreateAgent(ctx, a))
@@ -2277,6 +2280,21 @@ func TestUpdateAgentStatus_PreRunningToRunningClearsStaleMessage(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "running", got.Phase)
 		assert.Empty(t, got.Message, "stale message must be cleared on suspended -> running")
+	})
+
+	t.Run("starting with live activity to running preserves new generation message", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "starting-live-activity-msg")
+		a.Phase = "starting"
+		a.Activity = "working"
+		a.Message = "Agent started"
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", StartWrite: true}))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "running", got.Phase)
+		assert.Equal(t, "Agent started", got.Message, "new generation message posted with live activity during wake readiness must survive starting -> running")
 	})
 
 	t.Run("suspended restore to running preserves message", func(t *testing.T) {

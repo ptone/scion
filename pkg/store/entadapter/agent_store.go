@@ -2567,21 +2567,29 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	}
 
 	// A move from a pre-running phase to running is the new run's first
-	// running write: the exit code, exit reason, prior message, and stalled
-	// marker describe the previous run or a prior failed launch, so they are
-	// cleared, whichever path brings running (ptone/scion#5384, ptone/scion#9889).
-	// The provisional starting write keeps them, since a rollback restores
-	// the prior stopped or error phase, which still needs them. A running to
-	// running write keeps them too: a disruption reason can be recorded on a
-	// live agent, and routine heartbeats must not wipe a live status message.
-	// This reads the final phase, after every guard above.
+	// running write: the exit code and exit reason describe the previous run,
+	// so they are cleared, whichever path brings running (ptone/scion#5384).
+	// The prior message and stalled marker are cleared here too when the row
+	// has no live activity yet (empty or terminal), so a stale launch-failure
+	// error from a prior run does not survive into later notifications
+	// (ptone/scion#9889). If a live activity is already recorded on the
+	// pre-running row (e.g. a DM wake whose starting write already cleared
+	// prior remnants and whose new container posted its readiness status
+	// during the wait), the message belongs to the new generation and is kept
+	// (ptone/scion#2014). The provisional starting write keeps them, since a
+	// rollback restores the prior stopped or error phase, which still needs
+	// them. A running to running write keeps them too: a disruption reason can
+	// be recorded on a live agent, and routine heartbeats must not wipe a live
+	// status message. This reads the final phase, after every guard above.
 	if su.Phase == string(state.PhaseRunning) && isPreRunningPhase(current.Phase) {
 		upd.ClearExitCode()
 		upd.SetExitReason("")
-		if su.Message == "" {
-			upd.SetMessage("")
+		if current.Activity == "" || isTerminalActivity(current.Activity) {
+			if su.Message == "" {
+				upd.SetMessage("")
+			}
+			upd.SetStalledFromActivity("")
 		}
-		upd.SetStalledFromActivity("")
 	}
 	// A direct suspended -> running write also starts a new run; clear any
 	// stale message from before suspension unless the update sets one or
