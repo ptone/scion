@@ -600,3 +600,53 @@ func TestQuotaStore_UpdateEntitlementBindingIfMatch(t *testing.T) {
 	_, err = cs.UpdateEntitlementBindingIfMatch(ctx, &missing, origUpdated)
 	require.ErrorIs(t, err, store.ErrNotFound)
 }
+
+func TestUsageBudgetStore_CountOpenUsageBudgetStates(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	defProj, err := cs.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         store.LimitLLMTokensPerProjectDay,
+		ResourceType: store.LimitResourceTypeLLMTokens,
+		Unit:         store.LimitUnitTokens,
+		DefaultValue: 0,
+		System:       true,
+	})
+	require.NoError(t, err)
+	defUser, err := cs.CreateLimitDefinition(ctx, &store.LimitDefinition{
+		Name:         store.LimitLLMTokensPerUserDay,
+		ResourceType: store.LimitResourceTypeLLMTokens,
+		Unit:         store.LimitUnitTokens,
+		DefaultValue: 0,
+		System:       true,
+	})
+	require.NoError(t, err)
+
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	dayStart := time.Date(2026, 11, 28, 0, 0, 0, 0, time.UTC)
+	dayEnd := dayStart.AddDate(0, 0, 1)
+	prevStart := dayStart.AddDate(0, 0, -1)
+
+	// Two open project/warn rows, one open project/exhausted, one closed project/exhausted, one open user/ok.
+	rows := []*store.UsageBudgetState{
+		{LimitDefinitionID: defProj.ID, ScopeKind: store.UsageScopeKindProject, ScopeID: "p1", WindowStartUTC: dayStart, WindowEndUTC: dayEnd, State: store.UsageBudgetStateWarn, ConsumedAtEval: 600, CapAtEval: 1000},
+		{LimitDefinitionID: defProj.ID, ScopeKind: store.UsageScopeKindProject, ScopeID: "p2", WindowStartUTC: dayStart, WindowEndUTC: dayEnd, State: store.UsageBudgetStateWarn, ConsumedAtEval: 850, CapAtEval: 1000},
+		{LimitDefinitionID: defProj.ID, ScopeKind: store.UsageScopeKindProject, ScopeID: "p3", WindowStartUTC: dayStart, WindowEndUTC: dayEnd, State: store.UsageBudgetStateExhausted, ConsumedAtEval: 1000, CapAtEval: 1000},
+		{LimitDefinitionID: defProj.ID, ScopeKind: store.UsageScopeKindProject, ScopeID: "p-closed", WindowStartUTC: prevStart, WindowEndUTC: dayStart, State: store.UsageBudgetStateExhausted, ConsumedAtEval: 1000, CapAtEval: 1000},
+		{LimitDefinitionID: defUser.ID, ScopeKind: store.UsageScopeKindUser, ScopeID: "u1", WindowStartUTC: dayStart, WindowEndUTC: dayEnd, State: store.UsageBudgetStateOK, ConsumedAtEval: 100, CapAtEval: 1000},
+	}
+	for _, r := range rows {
+		_, err := cs.CreateUsageBudgetState(ctx, r)
+		require.NoError(t, err)
+	}
+
+	counts, err := cs.CountOpenUsageBudgetStates(ctx, now)
+	require.NoError(t, err)
+	assert.Equal(t, []store.UsageBudgetStateCount{
+		{LimitName: store.LimitLLMTokensPerProjectDay, ScopeKind: store.UsageScopeKindProject, State: store.UsageBudgetStateExhausted, Count: 1},
+		{LimitName: store.LimitLLMTokensPerProjectDay, ScopeKind: store.UsageScopeKindProject, State: store.UsageBudgetStateWarn, Count: 2},
+		{LimitName: store.LimitLLMTokensPerUserDay, ScopeKind: store.UsageScopeKindUser, State: store.UsageBudgetStateOK, Count: 1},
+	}, counts)
+}

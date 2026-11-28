@@ -120,6 +120,15 @@ type UsageGroupMemberBreakdown struct {
 	Events         int64  `json:"events"`
 }
 
+// UsageBudgetStateCount holds the count of open-window usage_budget_state rows
+// for one (limit, scope_kind, state) tuple (used by scion_hub_budget_state).
+type UsageBudgetStateCount struct {
+	LimitName string
+	ScopeKind string
+	State     string
+	Count     int64
+}
+
 // UsageBudgetStore defines persistence operations for raw-token budget state
 // and scope-counter window sums (Tokenomics P3.1, P3.3).
 type UsageBudgetStore interface {
@@ -227,4 +236,10 @@ type UsageBudgetStore interface {
 	// incrementing state_version by 1. Returns ErrBudgetStateConflict if 0 rows
 	// were updated (version mismatch or row missing).
 	CompareAndSwapUsageBudgetState(ctx context.Context, expectedVersion int64, next *UsageBudgetState) (*UsageBudgetState, error)
+
+	// CountOpenUsageBudgetStates returns counts of open-window
+	// usage_budget_state rows (window_start_utc <= activeAt < window_end_utc)
+	// grouped by (limit_name, scope_kind, state) for the scion_hub_budget_state
+	// OTel gauge (D11).
+	CountOpenUsageBudgetStates(ctx context.Context, activeAt time.Time) ([]UsageBudgetStateCount, error)
 }

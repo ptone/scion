@@ -66,16 +66,17 @@ const SchemaVersion = 1
 
 // Analytics event types (the closed event_type enum).
 const (
-	EventTypeLifecycle = "agent.lifecycle"
-	EventTypeUsage     = "agent.usage"
-	EventTypeHealth    = "telemetry.health"
+	EventTypeLifecycle   = "agent.lifecycle"
+	EventTypeUsage       = "agent.usage"
+	EventTypeHealth      = "telemetry.health"
+	EventTypeUsageBudget = "usage.budget"
 )
 
 // ValidEventType reports whether v is a member of the closed event_type
 // enum.
 func ValidEventType(v string) bool {
 	switch v {
-	case EventTypeLifecycle, EventTypeUsage, EventTypeHealth:
+	case EventTypeLifecycle, EventTypeUsage, EventTypeHealth, EventTypeUsageBudget:
 		return true
 	default:
 		return false
