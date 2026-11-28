@@ -144,6 +144,8 @@ All icons use the Shoelace `<sl-icon>` component, which provides [Bootstrap Icon
 | **Settings** | `gear` | Navigation, project settings |
 | **Dashboard** | `house` | Navigation |
 | **Console** | `grid-1x2` | Header mode switcher |
+| **Skills** | `book` | Navigation, profile nav, skill list, detail header, create page, injected-skills panel |
+| **Triggers** | `lightning-charge` | Project detail button, triggers page header, trigger and webhook lists |
 
 ### Project Variant Icons
 

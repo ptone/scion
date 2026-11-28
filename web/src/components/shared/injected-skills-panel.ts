@@ -1185,7 +1185,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
     const canEdit = !this.readonly;
     return html`
       <div class="empty-state">
-        <sl-icon name="puzzle"></sl-icon>
+        <sl-icon name="book"></sl-icon>
         <h3>No Injected Skills</h3>
         <p>${this.renderDescription()}</p>
         ${canEdit
@@ -1407,7 +1407,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
                               }}
                             >
                               <sl-icon
-                                name="puzzle"
+                                name="book"
                                 style="color: var(--scion-primary, #3b82f6);"
                               ></sl-icon>
                               <div>

@@ -1327,3 +1327,33 @@ describe('scion-profile-nav — Inbox navigation & child routes (ptone/scion#929
     expect(execLink?.classList.contains('active')).toBe(true);
   });
 });
+
+describe('scion-profile-nav — Skills icon', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse({})))
+    );
+    await import('./profile-nav.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('uses the book icon for the Skills nav item', async () => {
+    element = await createNav(user('member'));
+
+    const skillsLink = element.shadowRoot?.querySelector<HTMLAnchorElement>(
+      'a[href="/profile/skills"]'
+    );
+    expect(skillsLink).not.toBeNull();
+    const icon = skillsLink?.querySelector('sl-icon');
+    expect(icon?.getAttribute('name')).toBe('book');
+  });
+});

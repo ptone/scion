@@ -981,3 +981,39 @@ describe('injected-skills-panel — search-mode picker URI', () => {
     expect(placeholder).not.toContain('skill://scion/core/');
   });
 });
+
+describe('injected-skills-panel — Skills icon', () => {
+  beforeAll(async () => {
+    await import('./injected-skills-panel.js');
+  });
+
+  afterEach(cleanup);
+
+  it('uses the book icon in the empty state', async () => {
+    const el = await createPanel('project', [], { entries: [] });
+
+    const icon = el.shadowRoot?.querySelector('.empty-state sl-icon');
+    expect(icon?.getAttribute('name')).toBe('book');
+  });
+
+  it('uses the book icon for skill search results in the add dialog', async () => {
+    const el = await createPanel('project', [], { entries: [] });
+    el.dialogOpen = true;
+    el.dialogMode = 'search';
+    el.dialogSkillResults = [
+      {
+        id: 'skill-1',
+        name: 'Code Review',
+        slug: 'code-review',
+        scope: 'global',
+        status: 'active',
+        created: '2026-01-01',
+        updated: '2026-01-01',
+      },
+    ];
+    await el.updateComplete;
+
+    const icon = el.shadowRoot?.querySelector('.search-result-item sl-icon');
+    expect(icon?.getAttribute('name')).toBe('book');
+  });
+});
