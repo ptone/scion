@@ -22,6 +22,7 @@ import (
 	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -90,11 +91,38 @@ func newSkillResolveErrorAt(ctx context.Context, level slog.Level, source, uri, 
 }
 
 // ghErrorStatus returns the HTTP status of the GitHub response that failed
-// a gh:// resolution (see ghStatusError), or 0 when none is known.
+// a gh:// resolution, or 0 when none is known.
 func ghErrorStatus(err error) int {
-	var se *ghStatusError
-	if errors.As(err, &se) {
-		return se.status
+	var ghe *githubfetch.Error
+	if errors.As(err, &ghe) {
+		return ghe.Status
 	}
 	return 0
+}
+
+// ghErrorCode maps a gh:// resolution error onto its ResolveSkillError code.
+func ghErrorCode(err error) string {
+	var ghe *githubfetch.Error
+	if errors.As(err, &ghe) {
+		switch ghe.Kind {
+		case githubfetch.KindNotFound:
+			return agent.SkillErrCodeNotFound
+		case githubfetch.KindAuthRejected, githubfetch.KindForbidden:
+			return agent.SkillErrCodeCredentialRejected
+		case githubfetch.KindRateLimited:
+			return agent.GitHubRateLimitedCode
+		case githubfetch.KindUnsupportedContent, githubfetch.KindTooLarge:
+			return agent.SkillErrCodeUnsupportedContent
+		default:
+			return agent.SkillErrCodeResolveFailed
+		}
+	}
+	var rl *agent.GitHubRateLimitError
+	if errors.As(err, &rl) {
+		return agent.GitHubRateLimitedCode
+	}
+	if agent.IsGitHubSkillTreeError(err) {
+		return agent.SkillErrCodeUnsupportedContent
+	}
+	return agent.SkillErrCodeResolveFailed
 }

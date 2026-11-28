@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,16 +35,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
-)
-
-const (
-	githubAPIBase = "https://api.github.com"
-	githubRawBase = "https://raw.githubusercontent.com"
 )
 
 const retiredSkillScopeCoreMessage = `invalid scope "core": the "core" skill scope is no longer supported; use "global" (skill://scion/global/<name>) instead`
@@ -1824,10 +1820,12 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Per-request memo for (owner,repo,ref,tokenScope) → commitSHA.
-	// URIs sharing the same tuple — the common case for a skill bundle in one
-	// repo — perform a single ref→SHA lookup instead of one per URI.
+	// Per-request memos for (owner,repo,ref,tokenScope) → commitSHA and
+	// (projectID, lower(owner), lower(repo)) → Credential. URIs sharing a repo
+	// in one batch pay one credential lookup and one ref→SHA lookup instead of
+	// repeating Secret Manager / DB / GitHub RPCs per URI.
 	refSHAMemo := newGHSHAMemo()
+	credMemo := newGHCredMemo()
 
 	for _, skillRef := range req.Skills {
 		// GitHub skill resolution: gh:// URIs are handled by the Hub's GitHub resolution cache
@@ -1837,19 +1835,10 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 					skillRef.URI, agent.SkillErrCodeForbidden, 0, ghDeniedMessage))
 				continue
 			}
-			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID, refSHAMemo)
+			ghResolved, err := s.resolveGitHubSkillWithCredMemo(ctx, skillRef.URI, req.ProjectID, refSHAMemo, credMemo)
 			if err != nil {
-				code := agent.SkillErrCodeResolveFailed
-				var rl *agent.GitHubRateLimitError
-				if errors.As(err, &rl) {
-					code = agent.GitHubRateLimitedCode
-				} else if isGHNotFound(err) {
-					code = agent.SkillErrCodeNotFound
-				} else if agent.IsGitHubSkillTreeError(err) {
-					code = agent.SkillErrCodeUnsupportedContent
-				}
 				resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceGitHub,
-					skillRef.URI, code, ghErrorStatus(err), err.Error()))
+					skillRef.URI, ghErrorCode(err), ghErrorStatus(err), err.Error()))
 			} else {
 				if !ghCanReceiveDownloadToken {
 					ghResolved.DownloadToken = ""
@@ -2148,34 +2137,55 @@ func (s *Server) tokenMayResolvePublicGitHubSkills(r *http.Request) bool {
 	return s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(store.SkillScopeGlobal, ""), ActionRead).Allowed
 }
 
-// resolveGitHubToken determines the GitHub token scope and mints a token if needed.
-// Returns (installID, token, error).
-// - installID is the GitHub App installation ID (as string) or "public" for unauthenticated.
-// - token is the minted GitHub App token (or empty for public).
-func (s *Server) resolveGitHubToken(ctx context.Context, projectID string) (installID, token string, err error) {
-	if projectID == "" {
-		return "public", "", nil
+// skillGitHubEndpoint returns the GitHub endpoint for Hub skill resolution,
+// honouring GitHub Enterprise APIBaseURL / RawBaseURL overrides when configured.
+func (s *Server) skillGitHubEndpoint() githubfetch.Endpoint {
+	ep := githubfetch.DefaultEndpoint()
+	if s.config.GitHubAppConfig.APIBaseURL != "" {
+		ep.APIBase = s.config.GitHubAppConfig.APIBaseURL
 	}
+	if s.config.GitHubAppConfig.RawBaseURL != "" {
+		ep.RawBase = s.config.GitHubAppConfig.RawBaseURL
+	}
+	return ep
+}
 
-	project, err := s.store.GetProject(ctx, projectID)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to get project: %w", err)
+// skillGitHubDoerForEndpoint returns the githubfetch.Doer used for Hub skill
+// resolution: tests may inject s.skillGitHubDoer; otherwise hosted Hubs use
+// remotefetch.NetworkVetted (SSRF-hardened, IP denylist) and workstation Hubs
+// use remotefetch.NetworkSystem (loopback, honours user proxy).
+func (s *Server) skillGitHubDoerForEndpoint(ep githubfetch.Endpoint) githubfetch.Doer {
+	if s.skillGitHubDoer != nil {
+		return s.skillGitHubDoer
 	}
-	if project == nil {
-		return "", "", fmt.Errorf("project %s not found", projectID)
+	lim := githubfetch.SkillLimits()
+	network := remotefetch.NetworkVetted
+	if s.workstation {
+		network = remotefetch.NetworkSystem
 	}
+	return githubfetch.NewDoer(ep, network, 16<<20, lim.RequestTimeout, s.resourceLog)
+}
 
-	if project.GitHubInstallationID == nil {
-		return "public", "", nil
-	}
+// getSkillGitHubClient returns a githubfetch.Client for Hub skill resolution.
+func (s *Server) getSkillGitHubClient(ep githubfetch.Endpoint) *githubfetch.Client {
+	return githubfetch.New(githubfetch.Options{
+		Endpoint:   ep,
+		Doer:       s.skillGitHubDoerForEndpoint(ep),
+		Cooldown:   s.githubCooldown(),
+		Clock:      s.ghClockNow,
+		MaxRetries: 1,
+	})
+}
 
-	mintedToken, _, err := s.MintGitHubAppTokenWithPermissions(ctx, project, skillGitHubReadOnlyPermissions)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to mint GitHub App token: %w", err)
+func (s *Server) deleteGHRepoScopeCache(ctx context.Context, ep githubfetch.Endpoint, owner, repo, scope string) {
+	if s.ghResolutionStore == nil {
+		return
 	}
-
-	installID = strconv.FormatInt(*project.GitHubInstallationID, 10)
-	return installID, mintedToken, nil
+	refPfx, treePfx := githubfetch.RepoCacheKeyPrefixes(ep.APIHost(), owner, repo)
+	if err := s.ghResolutionStore.DeleteByRepoAndScope(ctx, refPfx, treePfx, scope); err != nil {
+		slog.WarnContext(ctx, "github_resolution_cache: failed to delete denied repo scope entries",
+			"owner", owner, "repo", repo, "error", err)
+	}
 }
 
 // hubGitHubRefreshTimeout bounds a background cache refresh kicked off by a
@@ -2184,6 +2194,14 @@ func (s *Server) resolveGitHubToken(ctx context.Context, projectID string) (inst
 // — the Hub never downloads file bytes itself — without hanging forever if
 // upstream is unresponsive.
 const hubGitHubRefreshTimeout = 2 * time.Minute
+
+// hubGHStaleRevalidateTimeout caps how long a request with a stale credentialed
+// tree entry waits synchronously for a live revalidation flight before serving
+// the stale entry and letting the detached flight finish and record its own
+// outcome (transient refresh-failure backoff or authoritative denial purge).
+// Kept well below the broker's 30s Hub client timeout so a hanging GitHub
+// upstream serves stale instead of failing with a caller context timeout.
+var hubGHStaleRevalidateTimeout = 5 * time.Second
 
 // ghRefreshFailureBackoff is the nominal duration a background stale-refresh
 // waits before retrying the same cache key after a failure (jittered via
@@ -2295,6 +2313,38 @@ func (g *ghSHAMemo) set(key, value string) {
 	g.m[key] = value
 }
 
+// ghCredMemo is a per-request mutex-guarded memo mapping
+// (projectID, lower(owner), lower(repo)) to the resolved githubfetch.Credential
+// (including anonymous/absent results). Scoped strictly to one HTTP request so
+// rotation and revocation take effect on the next request.
+type ghCredMemo struct {
+	mu sync.Mutex
+	m  map[string]githubfetch.Credential
+}
+
+func newGHCredMemo() *ghCredMemo {
+	return &ghCredMemo{m: make(map[string]githubfetch.Credential)}
+}
+
+func (g *ghCredMemo) get(key string) (githubfetch.Credential, bool) {
+	if g == nil {
+		return githubfetch.Credential{}, false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	v, ok := g.m[key]
+	return v, ok
+}
+
+func (g *ghCredMemo) set(key string, cred githubfetch.Credential) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.m[key] = cred
+}
+
 // ghFlightJoinHook, when non-nil, is called immediately before every caller —
 // leader and followers alike — calls ghResolveFlight.DoChan for cacheKey.
 // Tests use it to know precisely when a second (or later) caller has reached
@@ -2339,37 +2389,26 @@ func (s *Server) githubCooldown() *agent.GitHubCooldown {
 	return agent.SharedGitHubCooldown()
 }
 
-// resolveGitHubSkill resolves a gh:// skill URI via the Hub's GitHub resolution cache.
-// This method is called by handleSkillsResolve for gh:// URIs. It:
-//  1. Parses the gh:// URI
-//  2. Determines the token scope (GitHub App installation ID or "public")
-//  3. Checks the DB-backed resolution cache
-//  4. On a fresh hit, returns it directly; on a stale hit (branch ref, past
-//     TTL but within agent.MaxResolutionStaleAge), returns the stale value and
-//     refreshes in the background
-//  5. Otherwise calls the GitHub API to resolve commit SHA and file list,
-//     coalescing concurrent callers for the same cache key into one call
-//  6. Stores the result in the cache and returns it
+// resolveGitHubSkill resolves a gh:// skill URI via the Hub's GitHub resolution
+// cache and pkg/githubfetch. Callers must enforce canUseProjectGitHubToken /
+// tokenMayResolvePublicGitHubSkills before calling this method.
 //
-// While the credential identity (the GitHub App installation, or anonymous)
-// is in a rate-limit cooldown (see agent.GitHubCooldown), a fresh or stale
-// cache entry is still served, but no background refresh is started, and a
-// miss fails at once with an *agent.GitHubRateLimitError naming the ref
-// instead of sending a request.
-//
-// refSHAMemo is a per-request memo keyed by "(owner)/(repo)@(ref):(tokenScope)"
-// that is shared across all URIs in one handleSkillsResolve call. It prevents
-// redundant commits/{ref} API lookups for URIs that share the same tuple. Pass
-// a non-nil *ghSHAMemo to enable memoisation; nil disables it (treated as
-// always-miss).
+// Cache and revocation rules:
+//   - Keys come from githubfetch.RefCacheKey and githubfetch.TreeCacheKey,
+//     scoped by cred.EffectiveScope() ("anon", "app:<id>", "secret:<hmac>").
+//   - For anon scopes, stale branch entries within MaxResolutionStaleAge (24h)
+//     are served immediately while a background refresh updates them.
+//   - For credentialed scopes (non-anon), stale entries are served only when
+//     the scope's cooldown is active or a live conditional refresh fails
+//     transiently (rate_limited, timeout, unreachable, upstream).
+//   - An authoritative denial (not_found, auth_rejected, forbidden) deletes all
+//     cached ref and tree rows for {host, owner, repo, scope}, writes the
+//     1-minute negative memo, and is never masked by a stale entry.
 func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID string, refSHAMemo *ghSHAMemo) (*ResolvedSkillResponse, error) {
-	// A caller whose context has already ended must not start a new flight:
-	// handleSkillsResolve's loop keeps going to the next gh:// URI after a
-	// per-URI error (including this one), on the same ctx and the same
-	// refSHAMemo, regardless of why the previous URI failed. Without this
-	// check, a request cancelled partway through a batch could start a fresh
-	// detached flight — up to the full ceiling — for every URI still left in
-	// the batch, for a caller that has already gone.
+	return s.resolveGitHubSkillWithCredMemo(ctx, rawURI, projectID, refSHAMemo, nil)
+}
+
+func (s *Server) resolveGitHubSkillWithCredMemo(ctx context.Context, rawURI, projectID string, refSHAMemo *ghSHAMemo, credMemo *ghCredMemo) (*ResolvedSkillResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -2381,209 +2420,286 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	}
 
 	// gh:// URIs with ?token= name a ProvisionCredentials secret that lives on
-	// the broker, not the Hub. Resolving here would silently substitute the
-	// project's GitHub App token and hand back raw.githubusercontent.com URLs
-	// the broker cannot authenticate. Return an error so the per-URI fallback
-	// routes these to the local resolver, which looks up the named secret.
+	// the broker, not the Hub.
 	if ghRef.TokenSecretName != "" {
 		return nil, fmt.Errorf("gh:// URI with ?token= must be resolved by the local resolver")
 	}
 
-	// Default an omitted ref to HEAD, matching the local resolver
-	// (github_skill_resolver.go resolveCommitSHA). Doing this before the cache
-	// key is computed also means gh://o/r/p and gh://o/r/p@HEAD share one
-	// entry rather than each missing the other's.
+	// Default an omitted ref to HEAD so gh://o/r/p and gh://o/r/p@HEAD share
+	// one cache entry.
 	if ghRef.Ref == "" {
 		ghRef.Ref = "HEAD"
 	}
-	// Commit-SHA refs are immutable, so staleness (4, below) has no meaning
-	// for them: they are only ever served fresh or re-resolved.
-	isBranchRef := !isFullCommitSHA(ghRef.Ref)
+	isBranchRef := !githubfetch.IsFullCommitSHA(ghRef.Ref)
 
-	// 2. Determine token scope
-	installID, token, err := s.resolveGitHubToken(ctx, projectID)
-	if err != nil {
-		return nil, err
+	// 2. Resolve credential via unified Hub precedence (D2), memoized per
+	// (projectID, lower(owner), lower(repo)) for this request. The caller has
+	// already passed canUseProjectGitHubToken for non-empty projectID.
+	var cred githubfetch.Credential
+	if projectID != "" {
+		credKey := projectID + "\x00" + strings.ToLower(ghRef.Owner) + "/" + strings.ToLower(ghRef.Repo)
+		if cached, ok := credMemo.get(credKey); ok {
+			cred = cached
+		} else {
+			cred = s.githubCredential(ctx, ghCredRequest{
+				Scope:          store.TemplateScopeProject,
+				ScopeID:        projectID,
+				Owner:          ghRef.Owner,
+				Repo:           ghRef.Repo,
+				Quiet:          true,
+				AppPermissions: &skillGitHubReadOnlyPermissions,
+			})
+			credMemo.set(credKey, cred)
+		}
+	} else {
+		cred = githubfetch.Credential{
+			Scope: githubfetch.AnonScope,
+			Kind:  githubfetch.CredAnonymous,
+		}
+	}
+	scope := cred.EffectiveScope()
+	isAnon := scope == githubfetch.AnonScope
+
+	// 3. Compute canonical cache and flight keys
+	ep := s.skillGitHubEndpoint()
+	apiHost := ep.APIHost()
+	var refKey, flightKey string
+	if isBranchRef {
+		refKey = githubfetch.RefCacheKey(apiHost, ghRef.Owner, ghRef.Repo, ghRef.Ref, scope)
+		flightKey = refKey + ":" + strings.Trim(ghRef.SkillPath, "/")
+	} else {
+		flightKey = githubfetch.TreeCacheKey(apiHost, ghRef.Owner, ghRef.Repo, ghRef.Ref, ghRef.SkillPath, scope)
 	}
 
-	// 3. Compute cache key
-	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, installID)
-	cooldownID := agent.GitHubCooldownIdentityForInstallation(installID)
+	// 4. Check DB cache
+	var freshRef *GitHubCacheEntry
+	var staleRef *GitHubCacheEntry
+	var staleTree *GitHubCacheEntry
 
-	// 4. Check cache
+	downloadToken := ""
+	if cred.Kind == githubfetch.CredAppInstallation {
+		downloadToken = cred.Token
+	}
+
 	if s.ghResolutionStore != nil {
-		entry, hit, err := s.ghResolutionStore.Get(ctx, cacheKey)
-		if err != nil {
-			slog.WarnContext(ctx, "github_resolution_cache: cache lookup failed",
-				"uri", rawURI, "error", err)
-		} else if hit {
-			slog.InfoContext(ctx, "github_resolution_cache: cache hit",
-				"uri", rawURI, "commit_sha", safeShortSHA(entry.CommitSHA), "cache_hit", true)
-			return buildResolvedSkillResponse(ghRef, entry, token), nil
-		} else if isBranchRef {
-			stale, ok, staleErr := s.ghResolutionStore.GetStale(ctx, cacheKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
-			if staleErr != nil {
-				slog.WarnContext(ctx, "github_resolution_cache: stale lookup failed",
-					"uri", rawURI, "error", staleErr)
-			} else if ok {
-				refreshStarted := false
-				if _, cooling := s.githubCooldown().Active(cooldownID); cooling {
-					slog.WarnContext(ctx, "github_resolution_cache: serving stale entry, skipping refresh during a rate-limit cooldown",
-						"uri", rawURI, "commit_sha", safeShortSHA(stale.CommitSHA))
-				} else if s.recentGHRefreshFailure(cacheKey) {
-					slog.WarnContext(ctx, "github_resolution_cache: serving stale entry, skipping refresh after a recent failure",
-						"uri", rawURI, "commit_sha", safeShortSHA(stale.CommitSHA))
-				} else {
-					slog.InfoContext(ctx, "github_resolution_cache: serving stale entry, refreshing in background",
-						"uri", rawURI, "commit_sha", safeShortSHA(stale.CommitSHA))
-					refreshStarted = true
-					go s.refreshGitHubSkillInBackground(cacheKey, rawURI, ghRef, token, installID, isBranchRef)
+		if !isBranchRef {
+			entry, hit, gerr := s.ghResolutionStore.Get(ctx, flightKey)
+			if gerr != nil {
+				slog.WarnContext(ctx, "github_resolution_cache: cache lookup failed",
+					"uri", rawURI, "error", gerr)
+			} else if hit {
+				slog.InfoContext(ctx, "github_resolution_cache: cache hit",
+					"uri", rawURI, "commit_sha", safeShortSHA(entry.CommitSHA), "cache_hit", true)
+				return buildResolvedSkillResponse(ghRef, entry, downloadToken), nil
+			}
+		} else {
+			refEntry, refHit, gerr := s.ghResolutionStore.Get(ctx, refKey)
+			if gerr != nil {
+				slog.WarnContext(ctx, "github_resolution_cache: ref cache lookup failed",
+					"uri", rawURI, "error", gerr)
+			} else if refHit {
+				freshRef = refEntry
+				treeKey := githubfetch.TreeCacheKey(apiHost, ghRef.Owner, ghRef.Repo, refEntry.CommitSHA, ghRef.SkillPath, scope)
+				treeEntry, treeHit, terr := s.ghResolutionStore.Get(ctx, treeKey)
+				if terr != nil {
+					slog.WarnContext(ctx, "github_resolution_cache: tree cache lookup failed",
+						"uri", rawURI, "error", terr)
+				} else if treeHit {
+					slog.InfoContext(ctx, "github_resolution_cache: cache hit",
+						"uri", rawURI, "commit_sha", safeShortSHA(treeEntry.CommitSHA), "cache_hit", true)
+					return buildResolvedSkillResponse(ghRef, treeEntry, downloadToken), nil
 				}
-				injectGHStaleServe(cacheKey, refreshStarted)
-				return buildResolvedSkillResponse(ghRef, stale, token), nil
+			} else {
+				sRef, sOK, sErr := s.ghResolutionStore.GetStale(ctx, refKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
+				if sErr != nil {
+					slog.WarnContext(ctx, "github_resolution_cache: stale lookup failed",
+						"uri", rawURI, "error", sErr)
+				} else if sOK {
+					staleRef = sRef
+					treeKey := githubfetch.TreeCacheKey(apiHost, ghRef.Owner, ghRef.Repo, sRef.CommitSHA, ghRef.SkillPath, scope)
+					sTree, tOK, tErr := s.ghResolutionStore.GetTreeForStaleRef(ctx, treeKey)
+					if tErr != nil {
+						slog.WarnContext(ctx, "github_resolution_cache: stale tree lookup failed",
+							"uri", rawURI, "error", tErr)
+					} else if tOK {
+						staleTree = sTree
+						if isAnon {
+							refreshStarted := false
+							if _, cooling := s.githubCooldown().Active(scope); cooling {
+								slog.WarnContext(ctx, "github_resolution_cache: serving stale entry, skipping refresh during a rate-limit cooldown",
+									"uri", rawURI, "commit_sha", safeShortSHA(staleTree.CommitSHA))
+							} else if s.recentGHRefreshFailure(flightKey) {
+								slog.WarnContext(ctx, "github_resolution_cache: serving stale entry, skipping refresh after a recent failure",
+									"uri", rawURI, "commit_sha", safeShortSHA(staleTree.CommitSHA))
+							} else {
+								slog.InfoContext(ctx, "github_resolution_cache: serving stale entry, refreshing in background",
+									"uri", rawURI, "commit_sha", safeShortSHA(staleTree.CommitSHA))
+								refreshStarted = true
+								go s.refreshGitHubSkillInBackground(ep, flightKey, refKey, rawURI, ghRef, cred, staleRef, staleTree)
+							}
+							injectGHStaleServe(flightKey, refreshStarted)
+							return buildResolvedSkillResponse(ghRef, staleTree, downloadToken), nil
+						}
+						// Non-anon scope: serve stale immediately when the
+						// scope's cooldown is active or a recent transient
+						// refresh failure is in backoff (avoiding paying a full
+						// upstream timeout on every request while GitHub is
+						// degraded). Authoritative denials never record a
+						// refresh failure — they purge the cache instead.
+						if _, cooling := s.githubCooldown().Active(scope); cooling {
+							slog.WarnContext(ctx, "github_resolution_cache: serving stale entry during active cooldown",
+								"uri", rawURI, "commit_sha", safeShortSHA(staleTree.CommitSHA))
+							injectGHStaleServe(flightKey, false)
+							return buildResolvedSkillResponse(ghRef, staleTree, downloadToken), nil
+						}
+						if s.recentGHRefreshFailure(flightKey) {
+							slog.WarnContext(ctx, "github_resolution_cache: serving stale entry during transient refresh-failure backoff",
+								"uri", rawURI, "commit_sha", safeShortSHA(staleTree.CommitSHA))
+							injectGHStaleServe(flightKey, false)
+							return buildResolvedSkillResponse(ghRef, staleTree, downloadToken), nil
+						}
+					}
+				}
 			}
 		}
 	}
 
-	// A row written before file modes were recorded is a miss above, so
-	// the ref is resolved again with its modes. If that re-resolve fails
-	// (a rate-limit cooldown, a network error), the row is served as it
-	// was before rather than failing the agent start over it, though its
-	// files may then lack exec bits (ptone/scion#5781).
-	modelessFallback := func(err error) (*ResolvedSkillResponse, error) {
-		if s.ghResolutionStore == nil || ctx.Err() != nil {
-			return nil, err
+	// Negative memo (not_found / auth_rejected / forbidden) within FailureMemoTTL.
+	if ferr := s.ghFailures.Recent(flightKey); ferr != nil {
+		slog.DebugContext(ctx, "github_resolution_cache: returning remembered denial", "uri", rawURI)
+		return nil, ferr
+	}
+
+	// A miss during a rate-limit cooldown fails immediately without starting a flight.
+	if retryAt, cooling := s.githubCooldown().Active(scope); cooling {
+		ra := retryAt.Sub(s.ghClockNow())
+		if ra < 0 {
+			ra = 0
 		}
-		legacy, ok, lerr := s.ghResolutionStore.GetModeless(ctx, cacheKey, isBranchRef, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
-		if lerr != nil || !ok {
-			return nil, err
+		return nil, &githubfetch.Error{
+			Kind:       githubfetch.KindRateLimited,
+			Status:     http.StatusTooManyRequests,
+			RetryAfter: ra,
+			Repo:       ghRef.Owner + "/" + ghRef.Repo,
+			CredKind:   cred.Kind,
+			Hint:       cred.Hint,
 		}
-		slog.WarnContext(ctx, "github_resolution_cache: re-resolve failed; serving an entry from before file modes were recorded, so its files may lack executable bits",
-			"uri", rawURI, "commit_sha", safeShortSHA(legacy.CommitSHA), "error", err)
-		return buildResolvedSkillResponse(ghRef, legacy, token), nil
 	}
 
-	// A ref GitHub reported as not found for this cache key within the last
-	// agent.FailureMemoTTL fails again now, without asking GitHub. A fresh or
-	// stale entry above still wins.
-	if ferr := s.ghFailures.Recent(cacheKey); ferr != nil {
-		slog.DebugContext(ctx, "github_resolution_cache: returning remembered not found", "uri", rawURI)
-		return modelessFallback(ferr)
-	}
-
-	// A miss during a rate-limit cooldown fails now, without starting a
-	// flight: no request could be sent for this identity anyway.
-	if retryAt, cooling := s.githubCooldown().Active(cooldownID); cooling {
-		return modelessFallback(&agent.GitHubRateLimitError{Ref: rawURI, RetryAt: retryAt, Unauthenticated: agent.GitHubCooldownIdentityIsAnonymous(cooldownID)})
-	}
-
-	// 5. Cache miss, with no usable stale entry: coalesce concurrent misses
-	// for this exact cache key into a single mint+commits+contents+Put
-	// sequence, so a burst hitting a cold or just-expired-past-staleness
-	// entry for the same ref does not send one request per caller to GitHub.
-	//
-	// Every caller — leader and followers alike — waits via DoChan and a
-	// select on its own ctx: a caller whose own context is done returns
-	// ctx.Err() immediately rather than blocking for the whole flight. The
-	// flight itself runs on a context detached from any one caller's
-	// cancellation (so the leader's own context ending does not fail the
-	// others, or skip the cache write), bounded only by the fixed
-	// hubGitHubRefreshTimeout ceiling — see the comment at that bound below
-	// for why it is not derived from any one caller's deadline.
-	injectGHFlightJoin(cacheKey)
-	resultCh := s.ghResolveFlight.DoChan(cacheKey, func() (result interface{}, ferr error) {
-		// DoChan always runs this function in a goroutine it spawns itself,
-		// never the calling goroutine (see golang.org/x/sync/singleflight) —
-		// unlike Do, there is no caller stack frame to recover a panic in. A
-		// panic here otherwise crashes the process outright (singleflight
-		// deliberately makes it unrecoverable once there is a channel
-		// waiter). Recovering here, inside the function singleflight runs,
-		// converts it into a normal error instead, delivered to every waiter
-		// through resultCh like any other failure.
+	// 5. Cache miss (or credentialed stale revalidation): coalesce concurrent
+	// callers for flightKey into one detached fetch.
+	injectGHFlightJoin(flightKey)
+	resultCh := s.ghResolveFlight.DoChan(flightKey, func() (result interface{}, ferr error) {
 		defer func() {
 			if r := recover(); r != nil {
-				ferr = fmt.Errorf("panic during GitHub skill resolution for %s: %v", cacheKey, r)
+				ferr = fmt.Errorf("panic during GitHub skill resolution for %s: %v", flightKey, r)
 			}
 		}()
 
-		// Bounded by the fixed ceiling only, not by the leader's own
-		// deadline: every waiter (including the leader) already returns on
-		// its own ctx.Done() via the select below, so no caller can wait
-		// past its own deadline regardless of this bound. Deriving the bound
-		// from the leader's deadline instead would fail every waiter with
-		// that leader's own "context deadline exceeded" the moment it
-		// expired — including waiters with no deadline, or a later one — the
-		// exact starvation this flight exists to prevent.
 		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hubGitHubRefreshTimeout)
 		defer cancel()
 
-		// Re-check: a concurrent flight for this exact key may have already
-		// landed while this call waited to become the flight leader. Uses
-		// flightCtx, not the leader's own ctx: DoChan can run this closure
-		// some time after the call that started the flight, and if that
-		// caller's own ctx had already ended by then, a Get keyed to it would
-		// fail outright and fall through to a redundant fetch — the detached
-		// flightCtx exists precisely so this flight never depends on any one
-		// caller's own context staying alive.
+		// Re-check fresh cache in case a concurrent flight just landed.
+		flightFreshRef := freshRef
 		if s.ghResolutionStore != nil {
-			if entry, hit, gerr := s.ghResolutionStore.Get(flightCtx, cacheKey); gerr == nil && hit {
-				return entry, nil
+			if !isBranchRef {
+				if entry, hit, gerr := s.ghResolutionStore.Get(flightCtx, flightKey); gerr == nil && hit {
+					return entry, nil
+				}
+			} else if rEntry, rHit, gerr := s.ghResolutionStore.Get(flightCtx, refKey); gerr == nil && rHit {
+				tKey := githubfetch.TreeCacheKey(apiHost, ghRef.Owner, ghRef.Repo, rEntry.CommitSHA, ghRef.SkillPath, scope)
+				if tEntry, tHit, terr := s.ghResolutionStore.Get(flightCtx, tKey); terr == nil && tHit {
+					return tEntry, nil
+				}
+				flightFreshRef = rEntry
 			}
 		}
-		if ferr := s.ghFailures.Recent(cacheKey); ferr != nil {
-			slog.DebugContext(ctx, "github_resolution_cache: returning remembered not found", "uri", rawURI)
+		if ferr := s.ghFailures.Recent(flightKey); ferr != nil {
+			slog.DebugContext(ctx, "github_resolution_cache: returning remembered denial", "uri", rawURI)
 			return nil, ferr
 		}
 
-		return s.fetchAndCacheGitHubSkill(flightCtx, cacheKey, rawURI, ghRef, token, installID, isBranchRef, refSHAMemo)
+		entry, ferr := s.fetchAndCacheGitHubSkill(flightCtx, ep, flightKey, refKey, rawURI, ghRef, cred, isBranchRef, flightFreshRef, staleRef, staleTree, refSHAMemo)
+		if ferr != nil {
+			// Record transient failures inside the detached flight so backoff
+			// takes effect even if the initiating caller stopped waiting early
+			// (e.g. hubGHStaleRevalidateTimeout fired or caller ctx ended).
+			// Authoritative denials are never transient and purge the cache
+			// instead of recording a refresh failure.
+			if isGHTransientFailure(ferr) {
+				s.recordGHRefreshFailure(flightKey)
+			}
+			return nil, ferr
+		}
+		s.clearGHRefreshFailure(flightKey)
+		return entry, nil
 	})
+
+	var staleTimer <-chan time.Time
+	if staleTree != nil {
+		t := time.NewTimer(hubGHStaleRevalidateTimeout)
+		defer t.Stop()
+		staleTimer = t.C
+	}
 
 	select {
 	case res := <-resultCh:
 		if res.Err != nil {
-			var rl *agent.GitHubRateLimitError
-			if errors.As(res.Err, &rl) {
-				return modelessFallback(rl.WithRef(rawURI))
+			if staleTree != nil && isGHTransientFailure(res.Err) {
+				slog.WarnContext(ctx, "github_resolution_cache: refresh failed transiently; serving stale entry",
+					"uri", rawURI, "commit_sha", safeShortSHA(staleTree.CommitSHA), "error", res.Err)
+				injectGHStaleServe(flightKey, false)
+				return buildResolvedSkillResponse(ghRef, staleTree, downloadToken), nil
 			}
-			return modelessFallback(res.Err)
+			return nil, res.Err
 		}
 		// Build the response from this caller's own ghRef, not whichever
 		// caller happened to lead or already have the result cached: the
 		// flight (and the cache re-check above) share one *GitHubCacheEntry
-		// across every caller keyed to cacheKey, but two callers can reach
-		// the same cacheKey with different raw URI text (a bare ref vs
+		// across every caller keyed to flightKey, but two callers can reach
+		// the same flightKey with different raw URI text (a bare ref vs
 		// "@HEAD", or different owner/repo letter case) — the entry carries
 		// none of that, so each caller supplies it from its own parsed ghRef.
-		return buildResolvedSkillResponse(ghRef, res.Val.(*GitHubCacheEntry), token), nil
+		return buildResolvedSkillResponse(ghRef, res.Val.(*GitHubCacheEntry), downloadToken), nil
+	case <-staleTimer:
+		slog.WarnContext(ctx, "github_resolution_cache: credentialed revalidation timed out; serving stale entry while flight completes",
+			"uri", rawURI, "commit_sha", safeShortSHA(staleTree.CommitSHA))
+		injectGHStaleServe(flightKey, true)
+		return buildResolvedSkillResponse(ghRef, staleTree, downloadToken), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
 // refreshGitHubSkillInBackground re-resolves ghRef and updates the cache on
-// behalf of a caller that was already served a stale value (see
-// resolveGitHubSkill, step 4). It runs detached from any specific request —
-// the stale caller has already returned — on a bounded timeout, and shares
-// ghResolveFlight's key with the synchronous miss path so a burst of stale
-// hits for the same ref collapses into one refresh. installID is the same
-// value resolveGitHubSkill resolved for this request, passed through so the
-// refreshed entry's TokenScope is preserved rather than overwritten with "".
-func (s *Server) refreshGitHubSkillInBackground(cacheKey, rawURI string, ghRef *agent.GitHubSkillRef, token, installID string, isBranchRef bool) {
-	injectGHFlightJoin(cacheKey)
+// behalf of an anonymous caller that was already served a stale value.
+func (s *Server) refreshGitHubSkillInBackground(
+	ep githubfetch.Endpoint,
+	flightKey, refKey, rawURI string,
+	ghRef *agent.GitHubSkillRef,
+	cred githubfetch.Credential,
+	staleRef, staleTree *GitHubCacheEntry,
+) {
+	injectGHFlightJoin(flightKey)
 	ctx, cancel := context.WithTimeout(context.Background(), hubGitHubRefreshTimeout)
 	defer cancel()
 
-	// A panic in fetchAndCacheGitHubSkill is recovered inside the DoChan
-	// closure below (see its comment), so this goroutine itself cannot panic
-	// from that; no recover needed at this level.
-	resultCh := s.ghResolveFlight.DoChan(cacheKey, func() (result interface{}, ferr error) {
+	scope := cred.EffectiveScope()
+	apiHost := ep.APIHost()
+
+	resultCh := s.ghResolveFlight.DoChan(flightKey, func() (result interface{}, ferr error) {
 		defer func() {
 			if r := recover(); r != nil {
-				ferr = fmt.Errorf("panic during background GitHub skill refresh for %s: %v", cacheKey, r)
+				ferr = fmt.Errorf("panic during background GitHub skill refresh for %s: %v", flightKey, r)
 			}
 		}()
-		if entry, hit, gerr := s.ghResolutionStore.Get(ctx, cacheKey); gerr == nil && hit {
-			return entry, nil
+		if s.ghResolutionStore != nil {
+			if rEntry, rHit, gerr := s.ghResolutionStore.Get(ctx, refKey); gerr == nil && rHit {
+				tKey := githubfetch.TreeCacheKey(apiHost, ghRef.Owner, ghRef.Repo, rEntry.CommitSHA, ghRef.SkillPath, scope)
+				if tEntry, tHit, terr := s.ghResolutionStore.Get(ctx, tKey); terr == nil && tHit {
+					return tEntry, nil
+				}
+			}
 		}
 		sem := s.ghRefreshSemaphore()
 		select {
@@ -2592,141 +2708,240 @@ func (s *Server) refreshGitHubSkillInBackground(cacheKey, rawURI string, ghRef *
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		// Re-check after waiting for a refresh slot: another instance may have
-		// populated the cache, or an earlier refresh may have tripped a
-		// rate-limit cooldown.
-		if entry, hit, gerr := s.ghResolutionStore.Get(ctx, cacheKey); gerr == nil && hit {
-			return entry, nil
-		}
-		cooldownID := agent.GitHubCooldownIdentityForInstallation(installID)
-		if retryAt, cooling := s.githubCooldown().Active(cooldownID); cooling {
-			return nil, &agent.GitHubRateLimitError{
-				Ref:             rawURI,
-				RetryAt:         retryAt,
-				Unauthenticated: agent.GitHubCooldownIdentityIsAnonymous(cooldownID),
+		if s.ghResolutionStore != nil {
+			if rEntry, rHit, gerr := s.ghResolutionStore.Get(ctx, refKey); gerr == nil && rHit {
+				tKey := githubfetch.TreeCacheKey(apiHost, ghRef.Owner, ghRef.Repo, rEntry.CommitSHA, ghRef.SkillPath, scope)
+				if tEntry, tHit, terr := s.ghResolutionStore.Get(ctx, tKey); terr == nil && tHit {
+					return tEntry, nil
+				}
 			}
 		}
-		return s.fetchAndCacheGitHubSkill(ctx, cacheKey, rawURI, ghRef, token, installID, isBranchRef, nil)
+		if retryAt, cooling := s.githubCooldown().Active(scope); cooling {
+			ra := retryAt.Sub(s.ghClockNow())
+			if ra < 0 {
+				ra = 0
+			}
+			return nil, &githubfetch.Error{
+				Kind:       githubfetch.KindRateLimited,
+				Status:     http.StatusTooManyRequests,
+				RetryAfter: ra,
+				Repo:       ghRef.Owner + "/" + ghRef.Repo,
+				CredKind:   cred.Kind,
+				Hint:       cred.Hint,
+			}
+		}
+		return s.fetchAndCacheGitHubSkill(ctx, ep, flightKey, refKey, rawURI, ghRef, cred, true, nil, staleRef, staleTree, nil)
 	})
 
 	select {
 	case res := <-resultCh:
 		if res.Err != nil {
-			s.recordGHRefreshFailure(cacheKey)
+			s.recordGHRefreshFailure(flightKey)
 			slog.WarnContext(ctx, "github_resolution_cache: background refresh failed",
 				"uri", rawURI, "error", res.Err)
 		} else {
-			s.clearGHRefreshFailure(cacheKey)
+			s.clearGHRefreshFailure(flightKey)
 		}
 	case <-ctx.Done():
-		s.recordGHRefreshFailure(cacheKey)
+		s.recordGHRefreshFailure(flightKey)
 		slog.WarnContext(ctx, "github_resolution_cache: background refresh timed out",
 			"uri", rawURI, "error", ctx.Err())
 	}
 }
 
-// fetchAndCacheGitHubSkill resolves ghRef against the GitHub API (commit SHA,
-// then the skill directory tree), stores the result in the resolution cache under
-// cacheKey, and returns the stored entry. installID is recorded on the cache
-// entry's TokenScope and must be the same value the triggering request
-// resolved via resolveGitHubToken — both the synchronous path and a
-// background refresh pass it through explicitly, so a refresh can never
-// overwrite an existing row's TokenScope with an empty value.
-//
-// The return value is the cache entry, not a *ResolvedSkillResponse: a
-// response is built from a specific caller's own ghRef (see
-// buildResolvedSkillResponse and its callers), and this result is shared, via
-// the flight, by every caller sharing cacheKey — which can include callers
-// whose raw URI text differs (a bare ref vs "@HEAD", or owner/repo letter
-// case) even though they compute the same cacheKey.
-//
-// Called from within s.ghResolveFlight.DoChan, so concurrent callers sharing
-// cacheKey share one execution — but refSHAMemo is also shared by every
-// flight in one handleSkillsResolve batch (one per distinct cacheKey), and a
-// detached flight can still be running after its own caller's ctx has ended
-// and resolveGitHubSkill has moved on to the next URI, so refSHAMemo must
-// tolerate concurrent access from more than one flight's goroutine — see
-// ghSHAMemo.
+// fetchAndCacheGitHubSkill resolves ghRef via githubfetch.Client (conditional
+// ResolveRef + ListTree), writes ref and tree entries into github_resolution_cache,
+// and returns the tree entry. On authoritative denial (not_found, auth_rejected,
+// forbidden), it purges all cached rows for {host, owner, repo, scope} and
+// writes the 1-minute negative memo.
 func (s *Server) fetchAndCacheGitHubSkill(
 	ctx context.Context,
-	cacheKey, rawURI string,
+	ep githubfetch.Endpoint,
+	flightKey, refKey, rawURI string,
 	ghRef *agent.GitHubSkillRef,
-	token, installID string,
+	cred githubfetch.Credential,
 	isBranchRef bool,
+	freshRef, staleRef, staleTree *GitHubCacheEntry,
 	refSHAMemo *ghSHAMemo,
 ) (*GitHubCacheEntry, error) {
-	apiBase := githubAPIBase
-	if s.config.GitHubAppConfig.APIBaseURL != "" {
-		apiBase = s.config.GitHubAppConfig.APIBaseURL
+	scope := cred.EffectiveScope()
+	apiHost := ep.APIHost()
+	src := githubfetch.Source{
+		Owner: ghRef.Owner,
+		Repo:  ghRef.Repo,
+		Ref:   ghRef.Ref,
+		Path:  ghRef.SkillPath,
 	}
-	rawBase := githubRawBase
-	if s.config.GitHubAppConfig.RawBaseURL != "" {
-		rawBase = s.config.GitHubAppConfig.RawBaseURL
+	client := s.getSkillGitHubClient(ep)
+
+	refreshTreeExpiry := func(tKey string, entry *GitHubCacheEntry) *GitHubCacheEntry {
+		if scope == githubfetch.AnonScope || s.ghResolutionStore == nil {
+			return entry
+		}
+		updated := *entry
+		updated.ExpiresAt = s.ghClockNow().Add(agent.JitteredTTL(agent.DefaultResolutionCacheTTL, s.ghRand()))
+		if err := s.ghResolutionStore.Put(ctx, tKey, updated); err != nil {
+			slog.WarnContext(ctx, "github_resolution_cache: failed to extend tree entry",
+				"uri", rawURI, "error", err)
+			return entry
+		}
+		return &updated
 	}
 
-	// Resolve ref → commit SHA, reusing a prior lookup if this (owner, repo,
-	// ref, tokenScope) tuple was already resolved within this request.
-	// The separators "/" "@" ":" are safe for GitHub names: owner/repo names
-	// cannot contain "@" or ":", and Git ref names cannot contain ":". The
-	// installID suffix is the same for every URI in one request (shared
-	// projectID → shared installation) but is included for forward-safety.
-	cooldown := s.githubCooldown()
-	cooldownID := agent.GitHubCooldownIdentityForInstallation(installID)
-
-	memoKey := strings.ToLower(ghRef.Owner) + "/" + strings.ToLower(ghRef.Repo) + "@" + ghRef.Ref + ":" + installID
-	commitSHA, seen := refSHAMemo.get(memoKey)
-	if !seen {
-		var err error
-		commitSHA, err = ghResolveCommitSHA(ctx, cooldown, cooldownID, apiBase, ghRef.Owner, ghRef.Repo, ghRef.Ref, token)
+	var commitSHA string
+	refProven := false
+	if !isBranchRef {
+		commitSHA = ghRef.Ref
+	} else if freshRef != nil {
+		commitSHA = freshRef.CommitSHA
+	} else if memoSHA, seen := refSHAMemo.get(refKey); seen {
+		commitSHA = memoSHA
+	} else {
+		prevETag := ""
+		if staleRef != nil {
+			prevETag = staleRef.ETag
+		}
+		resolved, _, notMod, err := client.ResolveRefConditional(ctx, src, cred, prevETag)
 		if err != nil {
-			err = fmt.Errorf("failed to resolve commit SHA: %w", err)
-			s.rememberGHNotFound(cacheKey, err)
+			if isGHAuthoritativeDenial(err) {
+				s.deleteGHRepoScopeCache(ctx, ep, ghRef.Owner, ghRef.Repo, scope)
+				s.rememberGHDenial(flightKey, err)
+			}
 			return nil, err
 		}
-		refSHAMemo.set(memoKey, commitSHA)
+		refProven = true
+		if notMod && staleRef != nil {
+			commitSHA = staleRef.CommitSHA
+			refEntry := GitHubCacheEntry{
+				CommitSHA:   commitSHA,
+				BundleHash:  "ref:" + commitSHA,
+				TokenScope:  scope,
+				ETag:        resolved.ETag,
+				ExpiresAt:   s.ghClockNow().Add(agent.JitteredTTL(agent.DefaultResolutionCacheTTL, s.ghRand())),
+				OriginalURI: rawURI,
+			}
+			s.ghFailures.Clear(flightKey)
+			if s.ghResolutionStore != nil {
+				if err := s.ghResolutionStore.Put(ctx, refKey, refEntry); err != nil {
+					slog.WarnContext(ctx, "github_resolution_cache: failed to extend ref entry after 304",
+						"uri", rawURI, "error", err)
+				}
+			}
+			if staleTree != nil {
+				tKey := githubfetch.TreeCacheKey(apiHost, ghRef.Owner, ghRef.Repo, commitSHA, ghRef.SkillPath, scope)
+				staleTree = refreshTreeExpiry(tKey, staleTree)
+				slog.InfoContext(ctx, "github_resolution_cache: ref 304 not modified, extended TTL without re-listing",
+					"uri", rawURI, "commit_sha", safeShortSHA(commitSHA))
+				return staleTree, nil
+			}
+		} else {
+			commitSHA = resolved.CommitSHA
+			refSHAMemo.set(refKey, commitSHA)
+			refEntry := GitHubCacheEntry{
+				CommitSHA:   commitSHA,
+				BundleHash:  "ref:" + commitSHA,
+				TokenScope:  scope,
+				ETag:        resolved.ETag,
+				ExpiresAt:   s.ghClockNow().Add(agent.JitteredTTL(agent.DefaultResolutionCacheTTL, s.ghRand())),
+				OriginalURI: rawURI,
+			}
+			if s.ghResolutionStore != nil {
+				if err := s.ghResolutionStore.Put(ctx, refKey, refEntry); err != nil {
+					slog.WarnContext(ctx, "github_resolution_cache: failed to store ref entry",
+						"uri", rawURI, "error", err)
+				}
+			}
+		}
 	}
 
-	fileEntries, err := ghListTree(ctx, cooldown, cooldownID, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
+	treeKey := githubfetch.TreeCacheKey(apiHost, ghRef.Owner, ghRef.Repo, commitSHA, ghRef.SkillPath, scope)
+	if staleTree != nil && staleTree.CommitSHA == commitSHA {
+		s.ghFailures.Clear(flightKey)
+		if refProven {
+			staleTree = refreshTreeExpiry(treeKey, staleTree)
+		}
+		return staleTree, nil
+	}
+	if s.ghResolutionStore != nil {
+		if existing, hit, gerr := s.ghResolutionStore.Get(ctx, treeKey); gerr == nil && hit {
+			s.ghFailures.Clear(flightKey)
+			if refProven {
+				existing = refreshTreeExpiry(treeKey, existing)
+			}
+			return existing, nil
+		}
+	}
+
+	tree, err := client.ListTree(ctx, src, commitSHA, cred, githubfetch.SkillLimits())
 	if err != nil {
-		err = fmt.Errorf("failed to list contents: %w", err)
-		s.rememberGHNotFound(cacheKey, err)
+		if isGHAuthoritativeDenial(err) {
+			var ghe *githubfetch.Error
+			if refProven && errors.As(err, &ghe) && ghe.Kind == githubfetch.KindNotFound {
+				// A live ResolveRefConditional call succeeded in this flight,
+				// proving repo and credential access right now; a 404 from
+				// ListTree therefore means this skill path does not exist at
+				// commitSHA. Delete only this path's tree row so a missing path
+				// does not evict other skills/refs in the shared repo scope.
+				if s.ghResolutionStore != nil {
+					if derr := s.ghResolutionStore.Delete(ctx, treeKey); derr != nil {
+						slog.WarnContext(ctx, "github_resolution_cache: failed to delete tree entry on path not_found",
+							"uri", rawURI, "error", derr)
+					}
+				}
+			} else {
+				// Purge the entire {host, owner, repo, scope} cache whenever
+				// access was not freshly proven in this flight (fresh ref cache
+				// hit, refSHAMemo hit, or SHA-pinned !isBranchRef) or on
+				// auth_rejected/forbidden. For SHA-pinned resolves, a ListTree
+				// 404 purges the repo scope (including anon rows) by design,
+				// since ListTree alone cannot distinguish a missing SHA from
+				// credential revocation.
+				s.deleteGHRepoScopeCache(ctx, ep, ghRef.Owner, ghRef.Repo, scope)
+			}
+			s.rememberGHDenial(flightKey, err)
+		}
 		return nil, err
 	}
 
-	if len(fileEntries) == 0 {
+	if len(tree.Files) == 0 {
 		return nil, fmt.Errorf("no files found at %s in %s/%s", ghRef.SkillPath, ghRef.Owner, ghRef.Repo)
 	}
 
-	// Compute bundle hash
-	bundleHash := computeBundleHash(fileEntries)
-
-	// Determine TTL based on ref type
-	var ttl time.Duration
-	if isBranchRef {
-		ttl = agent.DefaultResolutionCacheTTL
-	} else {
-		ttl = agent.DefaultSHAResolutionCacheTTL
+	fileEntries := make([]GitHubFileEntry, 0, len(tree.Files))
+	for _, f := range tree.Files {
+		fileEntries = append(fileEntries, GitHubFileEntry{
+			Path: f.Path,
+			URL:  ep.RawURL(src, commitSHA, f.Path),
+			Hash: f.BlobSHA,
+			Size: f.Size,
+			Mode: fmt.Sprintf("%04o", f.Mode),
+		})
 	}
 
-	// Store in cache. The TTL is jittered (see agent.JitteredTTL) so a burst
-	// of creates that all populate the cache at once — the common case this
-	// cache exists to absorb — do not all expire at exactly the same instant
-	// and stampede GitHub again together.
+	bundleHash := computeBundleHash(fileEntries)
+
+	// For non-anon scopes, cap every tree row (whether written by a branch
+	// resolve or a SHA-pinned resolve) to DefaultResolutionCacheTTL (30m) so a
+	// later SHA-pinned resolve reusing that TreeCacheKey can never serve stale
+	// metadata past one fresh TTL after credential revocation. Anon keeps 24h.
+	treeTTL := agent.DefaultSHAResolutionCacheTTL
+	if scope != githubfetch.AnonScope {
+		treeTTL = agent.DefaultResolutionCacheTTL
+	}
+
 	entry := GitHubCacheEntry{
 		CommitSHA:   commitSHA,
 		FileEntries: fileEntries,
 		BundleHash:  bundleHash,
-		TokenScope:  installID,
-		ExpiresAt:   s.ghClockNow().Add(agent.JitteredTTL(ttl, s.ghRand())),
+		TokenScope:  scope,
+		ExpiresAt:   s.ghClockNow().Add(agent.JitteredTTL(treeTTL, s.ghRand())),
 		OriginalURI: rawURI,
 	}
 
-	// A successful resolution replaces any remembered not found for this
-	// key, whether or not the store write below succeeds.
-	s.ghFailures.Clear(cacheKey)
+	s.ghFailures.Clear(flightKey)
 	if s.ghResolutionStore != nil {
-		if err := s.ghResolutionStore.Put(ctx, cacheKey, entry); err != nil {
-			slog.WarnContext(ctx, "github_resolution_cache: failed to store entry",
+		if err := s.ghResolutionStore.Put(ctx, treeKey, entry); err != nil {
+			slog.WarnContext(ctx, "github_resolution_cache: failed to store tree entry",
 				"uri", rawURI, "error", err)
 		}
 	}

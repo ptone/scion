@@ -2049,6 +2049,7 @@ var (
 		{Name: "file_entries", Type: field.TypeJSON},
 		{Name: "bundle_hash", Type: field.TypeString},
 		{Name: "token_scope", Type: field.TypeString, Default: "public"},
+		{Name: "etag", Type: field.TypeString, Default: ""},
 		{Name: "expires_at", Type: field.TypeTime},
 		{Name: "create_time", Type: field.TypeTime},
 	}
@@ -2066,7 +2067,7 @@ var (
 			{
 				Name:    "githubresolutioncache_expires_at",
 				Unique:  false,
-				Columns: []*schema.Column{GithubResolutionCacheColumns[7]},
+				Columns: []*schema.Column{GithubResolutionCacheColumns[8]},
 			},
 		},
 	}

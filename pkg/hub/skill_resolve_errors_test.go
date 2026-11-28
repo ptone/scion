@@ -640,13 +640,25 @@ func TestSkillsResolve_GitHubErrorsReturnFixedPhrase(t *testing.T) {
 			name:    "GitHub reports not found",
 			status:  http.StatusNotFound,
 			want:    wantResolveError{code: "not_found", message: "skill not found", status: http.StatusNotFound},
-			logText: "GitHub API error 404 resolving private-repo@",
+			logText: "acme/private-repo: GitHub repository, ref, or path not found",
+		},
+		{
+			name:    "GitHub rejects credential with 401",
+			status:  http.StatusUnauthorized,
+			want:    wantResolveError{code: "credential_rejected", message: "credential rejected by the skill source", status: http.StatusUnauthorized},
+			logText: "acme/private-repo: GitHub rejected the configured credential",
+		},
+		{
+			name:    "GitHub denies access with 403",
+			status:  http.StatusForbidden,
+			want:    wantResolveError{code: "credential_rejected", message: "credential rejected by the skill source", status: http.StatusForbidden},
+			logText: "acme/private-repo: GitHub denied access to the repository",
 		},
 		{
 			name:    "GitHub reports a server error",
 			status:  http.StatusInternalServerError,
 			want:    wantResolveError{code: "resolve_failed", message: "resolver error", status: http.StatusInternalServerError},
-			logText: "GitHub API error 500 resolving private-repo@",
+			logText: "acme/private-repo: GitHub returned HTTP 500",
 		},
 	}
 	for _, tc := range cases {
@@ -654,8 +666,7 @@ func TestSkillsResolve_GitHubErrorsReturnFixedPhrase(t *testing.T) {
 			srv, _, alice, _, project := setupSkillAuthzTest(t)
 			srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
 			gh, ghCalls := newFixedStatusGitHub(t, tc.status, `{"message":"`+marker+`"}`)
-			srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-			srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+			wireFakeSkillGitHub(srv, gh.URL)
 			logs := captureJSONSlog(t)
 
 			raw, errs, ids := resolveAsUser(t, srv, alice, ResolveSkillsRequest{
@@ -673,8 +684,8 @@ func TestSkillsResolve_GitHubErrorsReturnFixedPhrase(t *testing.T) {
 			}
 			rec := findResolveLog(t, logs(), id, tc.want.code)
 			got, _ := rec["error"].(string)
-			if !strings.Contains(got, tc.logText) || !strings.Contains(got, marker) {
-				t.Errorf("log error = %q, want it to hold %q and the upstream body", got, tc.logText)
+			if !strings.Contains(got, tc.logText) {
+				t.Errorf("log error = %q, want it to hold %q", got, tc.logText)
 			}
 			if rec["skill_uri"] != uri || rec["source"] != "github" || rec["status"] != float64(tc.status) {
 				t.Errorf("log record = %v, want skill_uri %q, source github, status %d", rec, uri, tc.status)
@@ -689,8 +700,7 @@ func TestSkillsResolve_GitHubErrorsReturnFixedPhrase(t *testing.T) {
 func TestSkillsResolve_GitHubForbiddenProjectReturnsFixedPhrase(t *testing.T) {
 	srv, _, _, bob, project := setupSkillAuthzTest(t)
 	gh, ghCalls := newFixedStatusGitHub(t, http.StatusInternalServerError, "unexpected")
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 	logs := captureJSONSlog(t)
 
 	const uri = "gh://acme/private-repo/s"
@@ -719,8 +729,7 @@ func TestSkillsResolve_GitHubForbiddenProjectReturnsFixedPhrase(t *testing.T) {
 func TestSkillsResolve_GitHubRedactedReference(t *testing.T) {
 	srv, _, alice, _, project := setupSkillAuthzTest(t)
 	gh, ghCalls := newFixedStatusGitHub(t, http.StatusInternalServerError, "unexpected")
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 	logs := captureJSONSlog(t)
 
 	const uri = "gh://acme/private-repo/s?token=ZQ_TOKEN_NAME"

@@ -19,6 +19,7 @@ import "testing"
 func TestSkillResolutionPhrase(t *testing.T) {
 	cases := map[string]string{
 		SkillErrCodeNotFound:           "skill not found",
+		SkillErrCodeCredentialRejected: "credential rejected by the skill source",
 		SkillErrCodeInvalidURI:         "invalid skill URI",
 		SkillErrCodeUnsupportedContent: "unsupported skill content",
 		"some_unlisted_code":           SkillResolutionDefaultPhrase,

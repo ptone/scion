@@ -2336,6 +2336,12 @@ type Server struct {
 	portViewKeys capabilityKeys
 	// githubScopeKeys HMAC-keys GitHub credential scopes (github_credential.go).
 	githubScopeKeys capabilityKeys
+	// githubScopeEphemeralKey is a lazily generated 32-byte per-process key used
+	// if githubScopeKeys is unconfigured or cannot issue (never falls back to
+	// unkeyed SHA-256). Guarded by mu.
+	githubScopeEphemeralKey []byte
+	// githubScopeKeyWarned ensures a failed githubScopeKeys.issue() warns once.
+	githubScopeKeyWarned atomic.Bool
 	// portViewClock replaces time.Now on the page view route (tests only).
 	portViewClock func() time.Time
 
@@ -3102,6 +3108,10 @@ type Server struct {
 	// templateGitHubClient fetches GitHub template sources for reimport. nil
 	// selects the default client (newTemplateGitHubClient); tests replace it.
 	templateGitHubClient *githubfetch.Client
+	// skillGitHubDoer overrides the HTTP transport used by Hub skill resolution
+	// (tests only). nil uses remotefetch (NetworkVetted hosted, NetworkSystem
+	// workstation).
+	skillGitHubDoer githubfetch.Doer
 
 	// templateDrift holds the caches and optional test seams for the Hub-side
 	// template drift check at agent creation (template_drift.go).
@@ -3230,9 +3240,10 @@ type Server struct {
 	ghNow         func() time.Time
 	ghRandFloat64 func() float64
 
-	// ghFailures remembers, per cache key, that GitHub recently reported a
-	// gh:// ref as not found (see rememberGHNotFound and resolveGitHubSkill).
-	// It is in memory only, per hub process, and never written to the store.
+	// ghFailures remembers, per flight key, that GitHub recently returned an
+	// authoritative denial (401/403/404) for a gh:// skill (see rememberGHDenial
+	// and resolveGitHubSkill). It is in memory only, per hub process, and never
+	// written to the store.
 	ghFailures agent.FailureMemo
 
 	// ghCooldown holds gh:// resolution requests back per credential

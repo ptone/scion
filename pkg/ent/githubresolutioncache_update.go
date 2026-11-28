@@ -112,6 +112,20 @@ func (_u *GitHubResolutionCacheUpdate) SetNillableTokenScope(v *string) *GitHubR
 	return _u
 }
 
+// SetEtag sets the "etag" field.
+func (_u *GitHubResolutionCacheUpdate) SetEtag(v string) *GitHubResolutionCacheUpdate {
+	_u.mutation.SetEtag(v)
+	return _u
+}
+
+// SetNillableEtag sets the "etag" field if the given value is not nil.
+func (_u *GitHubResolutionCacheUpdate) SetNillableEtag(v *string) *GitHubResolutionCacheUpdate {
+	if v != nil {
+		_u.SetEtag(*v)
+	}
+	return _u
+}
+
 // SetExpiresAt sets the "expires_at" field.
 func (_u *GitHubResolutionCacheUpdate) SetExpiresAt(v time.Time) *GitHubResolutionCacheUpdate {
 	_u.mutation.SetExpiresAt(v)
@@ -218,6 +232,9 @@ func (_u *GitHubResolutionCacheUpdate) sqlSave(ctx context.Context) (_node int, 
 	if value, ok := _u.mutation.TokenScope(); ok {
 		_spec.SetField(githubresolutioncache.FieldTokenScope, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.Etag(); ok {
+		_spec.SetField(githubresolutioncache.FieldEtag, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.ExpiresAt(); ok {
 		_spec.SetField(githubresolutioncache.FieldExpiresAt, field.TypeTime, value)
 	}
@@ -319,6 +336,20 @@ func (_u *GitHubResolutionCacheUpdateOne) SetTokenScope(v string) *GitHubResolut
 func (_u *GitHubResolutionCacheUpdateOne) SetNillableTokenScope(v *string) *GitHubResolutionCacheUpdateOne {
 	if v != nil {
 		_u.SetTokenScope(*v)
+	}
+	return _u
+}
+
+// SetEtag sets the "etag" field.
+func (_u *GitHubResolutionCacheUpdateOne) SetEtag(v string) *GitHubResolutionCacheUpdateOne {
+	_u.mutation.SetEtag(v)
+	return _u
+}
+
+// SetNillableEtag sets the "etag" field if the given value is not nil.
+func (_u *GitHubResolutionCacheUpdateOne) SetNillableEtag(v *string) *GitHubResolutionCacheUpdateOne {
+	if v != nil {
+		_u.SetEtag(*v)
 	}
 	return _u
 }
@@ -458,6 +489,9 @@ func (_u *GitHubResolutionCacheUpdateOne) sqlSave(ctx context.Context) (_node *G
 	}
 	if value, ok := _u.mutation.TokenScope(); ok {
 		_spec.SetField(githubresolutioncache.FieldTokenScope, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Etag(); ok {
+		_spec.SetField(githubresolutioncache.FieldEtag, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.ExpiresAt(); ok {
 		_spec.SetField(githubresolutioncache.FieldExpiresAt, field.TypeTime, value)

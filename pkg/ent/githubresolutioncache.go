@@ -20,7 +20,7 @@ type GitHubResolutionCache struct {
 	config `json:"-"`
 	// ID of the ent.
 	ID uuid.UUID `json:"id,omitempty"`
-	// sha256(normalized_uri + ":" + token_scope_id)
+	// Canonical githubfetch cache key (ref:{host}/{owner}/{repo}@{ref}#{scope} or tree:{host}/{owner}/{repo}@{sha}:{path}#{scope})
 	CacheKey string `json:"cache_key,omitempty"`
 	// Original gh:// URI for debugging
 	OriginalURI string `json:"original_uri,omitempty"`
@@ -30,8 +30,10 @@ type GitHubResolutionCache struct {
 	FileEntries []schema.GitHubFileEntry `json:"file_entries,omitempty"`
 	// Content-addressed bundle hash computed from file_entries
 	BundleHash string `json:"bundle_hash,omitempty"`
-	// GitHub App installation ID or 'public' for unauthenticated
+	// GitHub principal scope (anon, app:<id>, secret:<hmac>)
 	TokenScope string `json:"token_scope,omitempty"`
+	// HTTP ETag from the last ref resolution for conditional If-None-Match requests
+	Etag string `json:"etag,omitempty"`
 	// Cache entry expiration time
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
 	// CreateTime holds the value of the "create_time" field.
@@ -46,7 +48,7 @@ func (*GitHubResolutionCache) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case githubresolutioncache.FieldFileEntries:
 			values[i] = new([]byte)
-		case githubresolutioncache.FieldCacheKey, githubresolutioncache.FieldOriginalURI, githubresolutioncache.FieldCommitSha, githubresolutioncache.FieldBundleHash, githubresolutioncache.FieldTokenScope:
+		case githubresolutioncache.FieldCacheKey, githubresolutioncache.FieldOriginalURI, githubresolutioncache.FieldCommitSha, githubresolutioncache.FieldBundleHash, githubresolutioncache.FieldTokenScope, githubresolutioncache.FieldEtag:
 			values[i] = new(sql.NullString)
 		case githubresolutioncache.FieldExpiresAt, githubresolutioncache.FieldCreateTime:
 			values[i] = new(sql.NullTime)
@@ -110,6 +112,12 @@ func (_m *GitHubResolutionCache) assignValues(columns []string, values []any) er
 				return fmt.Errorf("unexpected type %T for field token_scope", values[i])
 			} else if value.Valid {
 				_m.TokenScope = value.String
+			}
+		case githubresolutioncache.FieldEtag:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field etag", values[i])
+			} else if value.Valid {
+				_m.Etag = value.String
 			}
 		case githubresolutioncache.FieldExpiresAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -176,6 +184,9 @@ func (_m *GitHubResolutionCache) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("token_scope=")
 	builder.WriteString(_m.TokenScope)
+	builder.WriteString(", ")
+	builder.WriteString("etag=")
+	builder.WriteString(_m.Etag)
 	builder.WriteString(", ")
 	builder.WriteString("expires_at=")
 	builder.WriteString(_m.ExpiresAt.Format(time.ANSIC))

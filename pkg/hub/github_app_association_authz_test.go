@@ -369,9 +369,16 @@ func TestGitHubAssociation_PreExistingUnauthorizedAssociationNoTokenAtMint(t *te
 	assert.Zero(t, repoCalls, "no creator token: GitHub is not even asked")
 	assert.Equal(t, githubAppErrAssociationUnauthorized, reloadProject(t, st, p.ID).GitHubAppStatus.ErrorCode)
 
-	// The skill path (direct mintGitHubAppToken caller) is refused too.
-	_, _, err = srv.resolveGitHubToken(ctx, p.ID)
-	require.Error(t, err)
+	// The skill path (unified githubCredential -> MintGitHubAppTokenForProject)
+	// is refused too: no App token is minted and it falls through anonymously with a Hint.
+	cred := srv.githubCredential(ctx, ghCredRequest{
+		Scope:   store.TemplateScopeProject,
+		ScopeID: p.ID,
+		Owner:   "acme",
+		Repo:    "widgets",
+	})
+	assert.Empty(t, cred.Token)
+	assert.NotEmpty(t, cred.Hint)
 	_, mints = gh.counts()
 	assert.Empty(t, mints)
 }

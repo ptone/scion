@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
@@ -361,4 +362,60 @@ func TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter(t *testing.T) {
 	_, ok, err = store.GetStale(ctx, justOutsideKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
 	require.NoError(t, err)
 	require.False(t, ok, "a row just outside the jitter-aware cutoff must not be stale-servable, and PurgeExpired must have removed it")
+}
+
+// TestGitHubResolutionStore_DeleteByRepoAndScope_IsolatesScopeAndSiblingRepo
+// verifies that DeleteByRepoAndScope deletes only the target scope's ref and
+// tree rows for the target repo, leaving other scopes on the same repo and
+// sibling repos with a shared name prefix untouched.
+func TestGitHubResolutionStore_DeleteByRepoAndScope_IsolatesScopeAndSiblingRepo(t *testing.T) {
+	client := enttest.NewClient(t)
+	ctx := context.Background()
+	st := NewGitHubResolutionStore(client)
+
+	const (
+		host = "api.github.com"
+		sha  = "1111111111111111111111111111111111111111"
+	)
+	exp := time.Now().Add(time.Hour)
+	seed := func(repo, scope string) (refKey, treeKey string) {
+		refKey = githubfetch.RefCacheKey(host, "acme", repo, "main", scope)
+		treeKey = githubfetch.TreeCacheKey(host, "acme", repo, sha, "skills/s", scope)
+		require.NoError(t, st.Put(ctx, refKey, GitHubCacheEntry{
+			CommitSHA:   sha,
+			BundleHash:  "ref:" + sha,
+			TokenScope:  scope,
+			ETag:        `"e1"`,
+			ExpiresAt:   exp,
+			OriginalURI: "gh://acme/" + repo + "/s@main",
+		}))
+		require.NoError(t, st.Put(ctx, treeKey, GitHubCacheEntry{
+			CommitSHA:   sha,
+			FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "https://raw.githubusercontent.com/acme/" + repo + "/" + sha + "/skills/s/SKILL.md", Hash: "a", Size: 1, Mode: "0644"}},
+			BundleHash:  "sha256:test",
+			TokenScope:  scope,
+			ExpiresAt:   exp,
+			OriginalURI: "gh://acme/" + repo + "/s@main",
+		}))
+		return refKey, treeKey
+	}
+
+	targetRef, targetTree := seed("repo", "secret:x")
+	appRef, appTree := seed("repo", "app:1")
+	anonRef, anonTree := seed("repo", githubfetch.AnonScope)
+	siblingRef, siblingTree := seed("repo-extra", "secret:x")
+
+	refPfx, treePfx := githubfetch.RepoCacheKeyPrefixes(host, "acme", "repo")
+	require.NoError(t, st.DeleteByRepoAndScope(ctx, refPfx, treePfx, "secret:x"))
+
+	for _, deleted := range []string{targetRef, targetTree} {
+		_, hit, err := st.Get(ctx, deleted)
+		require.NoError(t, err)
+		require.False(t, hit, "row %s must be deleted", deleted)
+	}
+	for _, kept := range []string{appRef, appTree, anonRef, anonTree, siblingRef, siblingTree} {
+		_, hit, err := st.Get(ctx, kept)
+		require.NoError(t, err)
+		require.True(t, hit, "row %s must survive DeleteByRepoAndScope for another scope/repo", kept)
+	}
 }

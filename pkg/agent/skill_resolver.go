@@ -94,6 +94,10 @@ const (
 	// skills for the project. It reaches the broker as a
 	// SkillResolutionError.Code through PreResolvedSkills.
 	SkillErrCodeForbidden = "forbidden"
+	// SkillErrCodeCredentialRejected is the per-URI code the Hub's batch skill
+	// resolve returns when GitHub rejects or denies the configured credential
+	// (HTTP 401 or non-rate-limit 403).
+	SkillErrCodeCredentialRejected = "credential_rejected"
 	// SkillErrCodeResolveFailed is the uncategorized per-ref resolution
 	// failure: the ref could not be resolved for a reason none of the codes
 	// above describes. The create path keeps it on the 5xx path.
@@ -427,10 +431,12 @@ func (c gitHubCredential) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f,
 // gitHubDownloadToken returns the credential installOneSkill presents for
 // skill's raw downloads:
 //  1. The resolving credential carried from the Hub (skill.downloadToken),
-//     when the Hub resolved a gh:// skill with a project credential
-//     (ptone/scion#5028).
-//  2. The credential the local GitHub resolver uses for skill.githubCredentialRef,
-//     when the skill came from that resolver's on-disk cache without content.
+//     when the Hub resolved a gh:// skill with a read-only GitHub App
+//     installation token (ptone/scion#5028).
+//  2. The credential the local GitHub resolver uses for skill.githubCredentialRef
+//     (GH_{OWNER}__{REPO} > GH_{OWNER} > GITHUB_TOKEN), when the skill came
+//     from the local resolver's on-disk cache without content or was resolved
+//     by the Hub without a DownloadToken (e.g. via a project PAT).
 //  3. Otherwise the context's default GitHub token.
 //
 // downloadSkillFile only ever sends any of these to GitHub hosts.

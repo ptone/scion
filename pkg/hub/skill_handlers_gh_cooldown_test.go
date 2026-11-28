@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
@@ -92,10 +93,10 @@ func setupGHCooldownTest(t *testing.T) (*Server, *ghCooldownFake, *ghCooldownClo
 	srv, _, alice, _, project := setupSkillAuthzTest(t)
 	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
 	clock := &ghCooldownClock{t: time.Now()}
-	srv.ghCooldown = agent.NewGitHubCooldown(clock.Now)
+	srv.ghNow = clock.Now
+	srv.ghCooldown = githubfetch.NewCooldown(clock.Now)
 	gh := newGHCooldownFake(t)
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	wireFakeSkillGitHub(srv, gh.URL)
 
 	resolve := func(t *testing.T, uris ...string) ResolveSkillsResponse {
 		t.Helper()
@@ -115,18 +116,8 @@ func setupGHCooldownTest(t *testing.T) (*Server, *ghCooldownFake, *ghCooldownClo
 
 func putGHCooldownEntry(t *testing.T, srv *Server, uri string, expiresAt time.Time) string {
 	t.Helper()
-	ghRef, err := agent.ParseGitHubSkillURI(uri)
-	require.NoError(t, err)
-	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
-	require.NoError(t, srv.ghResolutionStore.Put(context.Background(), cacheKey, GitHubCacheEntry{
-		CommitSHA:   ghCooldownTestSHA,
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
-		BundleHash:  "sha256:cached",
-		TokenScope:  "public",
-		ExpiresAt:   expiresAt,
-		OriginalURI: uri,
-	}))
-	return cacheKey
+	_, _, flightKey := seedGHSkillCache(t, srv, uri, githubfetch.AnonScope, ghCooldownTestSHA, "", expiresAt, nil)
+	return flightKey
 }
 
 // TestSkillsResolve_GHRateLimitedRefInBatch: a batch where one ref gets a
@@ -158,12 +149,15 @@ func TestSkillsResolve_GHRateLimitedRefInBatch(t *testing.T) {
 		assert.Equal(t, "rate limited by the skill source", e.Message, "%s", e.URI)
 	}
 	assert.Equal(t, int64(1), gh.limitedCalls.Load(), "the limited ref must be requested once, with no retry")
-	assert.Equal(t, int64(2), gh.calls.Load(), "only the first ref's commit + tree may be requested")
+	// Note: cached already populated the shared ref:acme/skills@main#anon row, so
+	// `first` only needs ListTree (1 call) or commits+tree (2 calls).
+	assert.LessOrEqual(t, gh.calls.Load(), int64(2), "at most commit + tree for first ref")
 
+	callsBefore := gh.calls.Load()
 	resp = resolve(t, limited, later)
 	require.Len(t, resp.Errors, 2)
 	assert.Equal(t, int64(1), gh.limitedCalls.Load(), "no request during the cooldown")
-	assert.Equal(t, int64(2), gh.calls.Load(), "no request during the cooldown")
+	assert.Equal(t, callsBefore, gh.calls.Load(), "no request during the cooldown")
 }
 
 // TestResolveGitHubSkill_StaleServedWithoutRefreshDuringCooldown: a stale
@@ -173,16 +167,16 @@ func TestResolveGitHubSkill_StaleServedWithoutRefreshDuringCooldown(t *testing.T
 	srv, gh, _, _, projectID := setupGHCooldownTest(t)
 	ctx := context.Background()
 	const uri = "gh://acme/skills/s@main"
-	cacheKey := putGHCooldownEntry(t, srv, uri, time.Now().Add(-time.Minute))
+	flightKey := putGHCooldownEntry(t, srv, uri, time.Now().Add(-time.Minute))
 
-	// Start the cooldown for the (anonymous) identity via a 429.
+	// Start the cooldown for the anonymous scope via a 429.
 	_, err := srv.resolveGitHubSkill(ctx, "gh://acme/limited/x@main", projectID, nil)
-	var rl *agent.GitHubRateLimitError
-	require.True(t, errors.As(err, &rl), "want a rate-limit error, got %v", err)
+	var ghe *githubfetch.Error
+	require.True(t, errors.As(err, &ghe) && ghe.Kind == githubfetch.KindRateLimited, "want KindRateLimited, got %v", err)
 
 	var served, started atomic.Int64
 	hook := func(key string, refreshStarted bool) {
-		if key != cacheKey {
+		if key != flightKey {
 			return
 		}
 		served.Add(1)
@@ -202,15 +196,15 @@ func TestResolveGitHubSkill_StaleServedWithoutRefreshDuringCooldown(t *testing.T
 }
 
 // TestResolveGitHubSkill_MissDuringCooldownFailsFast: with no cached entry, a
-// ref under an identity in a cooldown fails with a typed error and sends
-// nothing; after T it resolves and the cooldown is cleared.
+// ref under a scope in cooldown fails with KindRateLimited and sends nothing;
+// after T it resolves and the cooldown is cleared.
 func TestResolveGitHubSkill_MissDuringCooldownFailsFast(t *testing.T) {
 	srv, gh, clock, _, projectID := setupGHCooldownTest(t)
 	ctx := context.Background()
 
 	_, err := srv.resolveGitHubSkill(ctx, "gh://acme/limited/x@main", projectID, nil)
-	var rl *agent.GitHubRateLimitError
-	require.True(t, errors.As(err, &rl), "want a rate-limit error, got %v", err)
+	var ghe *githubfetch.Error
+	require.True(t, errors.As(err, &ghe) && ghe.Kind == githubfetch.KindRateLimited, "want KindRateLimited, got %v", err)
 	require.Equal(t, int64(1), gh.limitedCalls.Load())
 
 	const uri = "gh://acme/skills/s@main"
@@ -220,10 +214,8 @@ func TestResolveGitHubSkill_MissDuringCooldownFailsFast(t *testing.T) {
 	t.Cleanup(func() { ghFlightJoinHook.Store(nil) })
 
 	_, err = srv.resolveGitHubSkill(ctx, uri, projectID, nil)
-	require.True(t, errors.As(err, &rl), "want a rate-limit error, got %v", err)
-	assert.False(t, rl.Sent)
+	require.True(t, errors.As(err, &ghe) && ghe.Kind == githubfetch.KindRateLimited, "want KindRateLimited, got %v", err)
 	assert.Equal(t, int64(0), joins.Load(), "a miss during the cooldown must not start a flight")
-	assert.Equal(t, uri, rl.Ref)
 	assert.Equal(t, int64(0), gh.calls.Load(), "no request during the cooldown")
 
 	clock.Advance(30 * time.Second)
@@ -231,95 +223,77 @@ func TestResolveGitHubSkill_MissDuringCooldownFailsFast(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uri, resp.URI)
 	assert.Equal(t, int64(2), gh.calls.Load())
-	_, active := srv.ghCooldown.Active(agent.GitHubCooldownIdentityForInstallation("public"))
+	_, active := srv.ghCooldown.Active(githubfetch.AnonScope)
 	assert.False(t, active, "the cooldown must be over after T")
 }
 
-// TestResolveGitHubSkill_InstallationCooldownIsAuthenticated: for a project
-// with a GitHub App installation, a miss during the installation's cooldown
-// fails fast and is reported as authenticated, also when the minted
-// credential value is empty: whether a request is unauthenticated follows
-// the cooldown identity, not the credential value.
-func TestResolveGitHubSkill_InstallationCooldownIsAuthenticated(t *testing.T) {
-	for _, minted := range []string{"", "ghs_test_value"} {
-		t.Run("minted="+minted, func(t *testing.T) {
-			const instID = int64(424242)
-			srv, s, _, _, project := setupSkillAuthzTest(t)
-			srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
-			clock := &ghCooldownClock{t: time.Now()}
-			srv.ghCooldown = agent.NewGitHubCooldown(clock.Now)
+// TestResolveGitHubSkill_InstallationCooldownUsesUnifiedScope: for a project
+// with a GitHub App installation, cooldown uses Credential.Scope ("app:<id>")
+// shared with template reimport, and does not affect anonymous requests.
+func TestResolveGitHubSkill_InstallationCooldownUsesUnifiedScope(t *testing.T) {
+	const instID = int64(424242)
+	srv, s, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+	clock := &ghCooldownClock{t: time.Now()}
+	srv.ghNow = clock.Now
+	srv.ghCooldown = githubfetch.NewCooldown(clock.Now)
 
-			var repoCalls atomic.Int64
-			mux := http.NewServeMux()
-			mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodGet {
-					http.NotFound(w, r)
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"id":          1,
-					"slug":        "skill-cooldown-app",
-					"permissions": map[string]string{"contents": "write", "pull_requests": "write", "issues": "write", "metadata": "read"},
-				})
-			})
-			mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
-				if !strings.HasSuffix(r.URL.Path, "/access_tokens") {
-					http.NotFound(w, r)
-					return
-				}
-				w.WriteHeader(http.StatusCreated)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"token":      minted,
-					"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-				})
-			})
-			mux.HandleFunc("/repos/", func(w http.ResponseWriter, _ *http.Request) {
-				repoCalls.Add(1)
-				http.NotFound(w, nil)
-			})
-			gh := httptest.NewServer(mux)
-			t.Cleanup(gh.Close)
-			srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-			srv.config.GitHubAppConfig.RawBaseURL = gh.URL
-			srv.config.GitHubAppConfig.AppID = 1
-			srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
-
-			ctx := context.Background()
-			require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
-				InstallationID: instID,
-				AccountLogin:   "acme",
-				AccountType:    "Organization",
-				AppID:          1,
-				Status:         store.GitHubInstallationStatusActive,
-			}))
-			bindProjectForTest(t, srv, s, project, instID, "acme", "skills")
-
-			// Start the installation's cooldown with a 429 for one ref.
-			limitedMux := http.NewServeMux()
-			limitedMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Retry-After", "30")
-				w.WriteHeader(http.StatusTooManyRequests)
-			})
-			limited := httptest.NewServer(limitedMux)
-			t.Cleanup(limited.Close)
-			req, err := http.NewRequest(http.MethodGet, limited.URL, nil)
-			require.NoError(t, err)
-			identity := agent.GitHubCooldownIdentityForInstallation(strconv.FormatInt(instID, 10))
-			_, err = srv.ghCooldown.Do(limited.Client(), req, identity)
-			var rl *agent.GitHubRateLimitError
-			require.True(t, errors.As(err, &rl), "want a rate-limit error, got %v", err)
-
-			const uri = "gh://acme/skills/s@main"
-			_, err = srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
-			require.True(t, errors.As(err, &rl), "want a rate-limit error, got %v", err)
-			assert.False(t, rl.Sent)
-			assert.False(t, rl.Unauthenticated, "an installation-backed request is authenticated")
-			assert.NotContains(t, err.Error(), "GITHUB_TOKEN")
-			assert.Equal(t, int64(0), repoCalls.Load(), "no request during the cooldown")
-
-			_, anonActive := srv.ghCooldown.Active(agent.GitHubCooldownIdentityForInstallation("public"))
-			assert.False(t, anonActive, "the installation's cooldown must not apply to unauthenticated requests")
+	var repoCalls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":          1,
+			"slug":        "skill-cooldown-app",
+			"permissions": map[string]string{"contents": "write", "pull_requests": "write", "issues": "write", "metadata": "read"},
 		})
-	}
+	})
+	mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/access_tokens") {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"token":      "ghs_test_value",
+			"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		})
+	})
+	mux.HandleFunc("/repos/", func(w http.ResponseWriter, _ *http.Request) {
+		repoCalls.Add(1)
+		http.NotFound(w, nil)
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	wireFakeSkillGitHub(srv, gh.URL)
+	srv.config.GitHubAppConfig.AppID = 1
+	srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
+
+	ctx := context.Background()
+	require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: instID,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          1,
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+	bindProjectForTest(t, srv, s, project, instID, "acme", "skills")
+
+	// Start the installation's cooldown using the unified Credential.Scope ("app:<id>").
+	appScope := "app:" + strconv.FormatInt(instID, 10)
+	srv.ghCooldown.Record(appScope, 30*time.Second)
+
+	const uri = "gh://acme/skills/s@main"
+	_, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+	var ghe *githubfetch.Error
+	require.True(t, errors.As(err, &ghe) && ghe.Kind == githubfetch.KindRateLimited, "want KindRateLimited, got %v", err)
+	assert.Equal(t, githubfetch.CredAppInstallation, ghe.CredKind)
+	assert.Equal(t, int64(0), repoCalls.Load(), "no request during the cooldown")
+
+	_, anonActive := srv.ghCooldown.Active(githubfetch.AnonScope)
+	assert.False(t, anonActive, "the installation's cooldown must not apply to anonymous requests")
 }
