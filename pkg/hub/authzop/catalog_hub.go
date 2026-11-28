@@ -1016,12 +1016,12 @@ var hubOperations = []OperationSpec{
 	{
 		ID:          "hub.experiments.read",
 		Domain:      "hub",
-		Description: "Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them",
+		Description: "Read the resolved experiment flags. Any signed-in user, agent or broker reads the web-layer map (and any user access token reads it). Project visitors are admitted only for allowlisted named flag probes (?name=hub.mcp_server) and refused on the bare map",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/experiments", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalBroker},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialBrokerToken},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialBrokerToken, CredentialFederatedUser},
 		ResourceResolver: "none",
 		Effects:          []SecurityEffect{EffectReadOne},
 		DelegationKind:   DelegationNone,
@@ -1031,6 +1031,7 @@ var hubOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestExperimentsRead_AnyTokenReads"},
 			{Package: "pkg/hub", Function: "TestAuthenticatedReads_AgentTokenReads"},
 			{Package: "pkg/hub", Function: "TestAuthenticatedReads_BrokerReads"},
+			{Package: "pkg/hub", Function: "TestHandleExperiments_NamedProbe_VisitorUserAgent"},
 		},
 		Exemptions: []Exemption{{
 			Kind:   ExemptionAuthenticationOnly,

@@ -56,6 +56,17 @@ func TestValidateMCPStartup(t *testing.T) {
 			t.Fatalf("expected success with SCION_TRANSPORT_MODE=iap, got: %v", err)
 		}
 	})
+
+	t.Run("standalone_refuses_proxy_mode_without_resolvable_source", func(t *testing.T) {
+		t.Setenv("SCION_TRANSPORT_MODE", "iap")
+		t.Setenv("SCION_TRANSPORT_TOKEN", "")
+		t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
+		t.Setenv("SCION_TRANSPORT_AUDIENCE", "")
+		t.Setenv("SCION_HUB_OIDC_AUDIENCE", "")
+		if err := validateMCPStartup(&config.GlobalConfig{MCP: config.MCPServerConfig{Enabled: true, HubEndpoint: "https://hub.example.com"}}, false); err == nil {
+			t.Fatal("expected error when SCION_TRANSPORT_MODE=iap is set with no resolvable transport token source")
+		}
+	})
 }
 
 func TestV1ServerMCPRoundTrip(t *testing.T) {

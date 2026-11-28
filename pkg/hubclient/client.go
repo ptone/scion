@@ -192,6 +192,9 @@ type Client interface {
 	// Usage returns the Track 1 token usage read operations interface.
 	Usage() UsageService
 
+	// Experiments returns the resolved experiment flag read operations interface.
+	Experiments() ExperimentService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 
@@ -240,6 +243,7 @@ type client struct {
 	myDecisions           *myDecisionService
 	commandRequests       *commandRequestService
 	usage                 *usageService
+	experiments           *experimentService
 
 	// pluginName, when set (WithPluginName), is sent as
 	// X-Scion-Plugin-Name on the broker attachment requests.
@@ -311,8 +315,14 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.myDecisions = &myDecisionService{c: c}
 	c.commandRequests = &commandRequestService{c: c}
 	c.usage = &usageService{c: c}
+	c.experiments = &experimentService{c: c}
 
 	return c, nil
+}
+
+// Experiments returns the resolved experiment flag read operations interface.
+func (c *client) Experiments() ExperimentService {
+	return c.experiments
 }
 
 // Agents returns the agent operations interface.

@@ -282,10 +282,13 @@ func ResolveStandaloneTransportAuth() (transportauth.TokenSource, transportauth.
 	if err != nil {
 		return nil, 0, err
 	}
+	rawMode := os.Getenv(transportauth.EnvTransportMode)
 	if src == nil {
+		if transportauth.IsProxyMode(rawMode) {
+			return nil, 0, fmt.Errorf("standalone MCP server has %s=%q set, but no transport token source could be resolved (configure %s or %s)", transportauth.EnvTransportMode, rawMode, transportauth.EnvTransportAudience, transportauth.EnvTransportToken)
+		}
 		return nil, 0, nil
 	}
-	rawMode := os.Getenv(transportauth.EnvTransportMode)
 	if !transportauth.IsProxyMode(rawMode) {
 		return nil, 0, fmt.Errorf("standalone MCP server requires %s=iap or cloudrun_invoker when transport auth is configured (got %q); refusing to place bridge transport token in Authorization", transportauth.EnvTransportMode, rawMode)
 	}

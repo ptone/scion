@@ -16,28 +16,30 @@ package hubclient
 
 import (
 	"context"
-	"fmt"
 	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
+// ExperimentService provides read operations for resolved Hub experiment flags.
+type ExperimentService interface {
+	// Fetch queries GET /api/v1/experiments?name=<name> for a single flag on the
+	// Hub's narrow probe allowlist (such as hub.mcp_server).
+	Fetch(ctx context.Context, name string) (bool, error)
+}
+
+type experimentService struct {
+	c *client
+}
+
 type experimentsResponse struct {
 	Experiments map[string]bool `json:"experiments"`
 }
 
-// FetchExperiment queries GET /api/v1/experiments?name=<name> using the
-// client's configured HTTP transport, authenticator, and transport auth.
-// Only flags on the Hub's narrow probe allowlist (such as hub.mcp_server) are
-// accepted.
-func FetchExperiment(ctx context.Context, cl Client, name string) (bool, error) {
-	c, ok := cl.(*client)
-	if !ok {
-		return false, fmt.Errorf("hubclient: FetchExperiment requires a default *hubclient.client")
-	}
+func (s *experimentService) Fetch(ctx context.Context, name string) (bool, error) {
 	q := url.Values{}
 	q.Set("name", name)
-	resp, err := c.get(ctx, "/api/v1/experiments?"+q.Encode(), nil)
+	resp, err := s.c.get(ctx, "/api/v1/experiments?"+q.Encode(), nil)
 	if err != nil {
 		return false, err
 	}

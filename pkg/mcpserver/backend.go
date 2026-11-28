@@ -27,7 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/google/uuid"
-	"golang.org/x/sync/singleflight"
 )
 
 // HubBackend is the narrow interface over the Hub REST API used by MCP tools
@@ -60,8 +59,8 @@ type BackendOptions struct {
 	// Version is the server version stamped into User-Agent: scion-mcp/<ver>.
 	Version string
 	// ExperimentChecker resolves hub experiments per request. When nil, the
-	// backend queries GET /api/v1/experiments?include=server using the caller's
-	// credential and caches the result for ExperimentCacheTTL (default 30s).
+	// backend queries GET /api/v1/experiments?name=<flag> using the caller's
+	// credential and caches successful results for ExperimentCacheTTL (default 30s).
 	ExperimentChecker ExperimentChecker
 	// ExperimentCacheTTL overrides the 30s cache TTL for standalone experiment
 	// probing when ExperimentChecker is nil.
@@ -85,7 +84,6 @@ type hubBackend struct {
 	transport         http.RoundTripper
 	expCheck          ExperimentChecker
 	expCache          *experimentCache
-	expGroup          singleflight.Group
 	transportAuthSrc  transportauth.TokenSource
 	transportAuthMode transportauth.HeaderMode
 	transportAuthErr  error
@@ -223,25 +221,16 @@ func (b *hubBackend) ExperimentEnabled(ctx context.Context, c Credential, name s
 	if val, ok := b.expCache.get(name); ok {
 		return val, nil
 	}
-	v, err, _ := b.expGroup.Do(name, func() (any, error) {
-		if val, ok := b.expCache.get(name); ok {
-			return val, nil
-		}
-		cl, err := b.clientFor(c)
-		if err != nil {
-			return false, err
-		}
-		enabled, err := hubclient.FetchExperiment(ctx, cl, name)
-		if err != nil {
-			return false, err
-		}
-		b.expCache.set(name, enabled)
-		return enabled, nil
-	})
+	cl, err := b.clientFor(c)
 	if err != nil {
 		return false, err
 	}
-	return v.(bool), nil
+	enabled, err := cl.Experiments().Fetch(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	b.expCache.set(name, enabled)
+	return enabled, nil
 }
 
 // experimentCache caches resolved hub-wide experiment flags for at most ttl
@@ -379,10 +368,25 @@ func hubStatusCode(err error) int {
 	return 0
 }
 
+// isUpstreamProxyAuthError reports whether err is a non-JSON 401/403 from an
+// upstream proxy (such as IAP or Cloud Run invoker IAM) rejecting the bridge's
+// transport credentials rather than a structured Hub JSON error.
+func isUpstreamProxyAuthError(err error) bool {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.NonJSONBody && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden)
+}
+
 // formatHubToolError formats a Hub error for an MCP tool error result,
-// preserving the Hub's error code and message verbatim (e.g. missing UAT
-// selector or 403 reason).
+// preserving the Hub's structured error code and message verbatim (e.g.
+// missing UAT selector or 403 reason) while redacting non-JSON upstream proxy
+// 401/403 rejections so they are never presented as caller credential errors.
 func formatHubToolError(err error) string {
+	if isUpstreamProxyAuthError(err) {
+		return "upstream Hub proxy rejected the MCP server's transport credentials (upstream_auth_failed; operator action needed)"
+	}
 	var apiErr *apiclient.APIError
 	if errors.As(err, &apiErr) {
 		if apiErr.Code != "" {

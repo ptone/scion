@@ -100,6 +100,9 @@ func (s *Server) handleSendMessage(ctx context.Context, req *mcp.CallToolRequest
 	res, err := s.backend.SendToAgent(ctx, auth.Credential, in.Project, in.Agent, in.Text)
 	if err != nil {
 		status := hubStatusCode(err)
+		if isUpstreamProxyAuthError(err) {
+			s.logger.Warn("MCP tool call rejected by upstream proxy", "tool", "send_message", "status", status, "error", err)
+		}
 		s.auditToolCall(req, auth, "send_message", "", "error", status, time.Since(start))
 		return toolErrorResult(formatHubToolError(err)), SendResult{}, nil
 	}
@@ -147,6 +150,9 @@ func (s *Server) handleReadMessages(ctx context.Context, req *mcp.CallToolReques
 	wRes, err := s.backend.Watch(ctx, auth.Credential, in.ConversationID, watchOpts)
 	if err != nil {
 		status := hubStatusCode(err)
+		if isUpstreamProxyAuthError(err) {
+			s.logger.Warn("MCP tool call rejected by upstream proxy", "tool", "read_messages", "status", status, "error", err)
+		}
 		s.auditToolCall(req, auth, "read_messages", in.ConversationID, "error", status, time.Since(start))
 		if watchOpts.Start == "tail" && isUnsupportedTailError(err) {
 			return toolErrorResult("this Hub does not support tail reads (start=tail returned 400); pass from_start=true or a cursor to read messages"), ReadMessagesOutput{}, nil
@@ -220,8 +226,7 @@ func isUnsupportedTailError(err error) bool {
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
 		return false
 	}
-	msg := strings.ToLower(apiErr.Message)
-	return strings.Contains(msg, "start") || strings.Contains(msg, "tail")
+	return strings.Contains(strings.ToLower(apiErr.Message), "invalid 'start' parameter")
 }
 
 func toolErrorResult(msg string) *mcp.CallToolResult {

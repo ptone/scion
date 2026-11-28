@@ -94,6 +94,9 @@ func TestStandalone_HeaderAllowlistStripsCookieAndIAP(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer scion_pat_standalone")
 	req.Header.Set("Cookie", "session=secret-cookie")
 	req.Header.Set("X-Goog-Iap-Jwt-Assertion", "eyJ.iap.assertion")
+	req.Header.Set("X-Forwarded-For", "203.0.113.42")
+	req.Header.Set("Forwarded", "for=203.0.113.42;proto=https")
+	req.Header.Set("X-Real-IP", "203.0.113.42")
 	req.Header.Set("X-Custom-Untrusted", "drop-me")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -117,6 +120,15 @@ func TestStandalone_HeaderAllowlistStripsCookieAndIAP(t *testing.T) {
 		}
 		if h.Get("X-Goog-Iap-Jwt-Assertion") != "" {
 			t.Errorf("request[%d]: X-Goog-Iap-Jwt-Assertion leaked to Hub: %q", i, h.Get("X-Goog-Iap-Jwt-Assertion"))
+		}
+		if h.Get("X-Forwarded-For") != "" {
+			t.Errorf("request[%d]: X-Forwarded-For leaked to Hub: %q", i, h.Get("X-Forwarded-For"))
+		}
+		if h.Get("Forwarded") != "" {
+			t.Errorf("request[%d]: Forwarded leaked to Hub: %q", i, h.Get("Forwarded"))
+		}
+		if h.Get("X-Real-IP") != "" {
+			t.Errorf("request[%d]: X-Real-IP leaked to Hub: %q", i, h.Get("X-Real-IP"))
 		}
 		if h.Get("X-Custom-Untrusted") != "" {
 			t.Errorf("request[%d]: X-Custom-Untrusted leaked to Hub: %q", i, h.Get("X-Custom-Untrusted"))
@@ -844,6 +856,258 @@ func TestStandalone_UpstreamProxyAuthRejectionReturns503Not401(t *testing.T) {
 			}
 			if body["error"] != tc.wantErrCode {
 				t.Fatalf("error = %q, want %q", body["error"], tc.wantErrCode)
+			}
+		})
+	}
+}
+
+// TestStandalone_ExperimentProbeIsolationAcrossConcurrentCallers verifies R1:
+//   - a bad-credential leader blocking on a cold experiment probe does not
+//     cause a concurrent good-credential caller to inherit its 401;
+//   - cancelling a leader's request context does not fail a concurrent caller.
+func TestStandalone_ExperimentProbeIsolationAcrossConcurrentCallers(t *testing.T) {
+	t.Run("bad_leader_does_not_fail_good_joiner", func(t *testing.T) {
+		badStarted := make(chan struct{})
+		releaseBad := make(chan struct{})
+
+		fakeHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Header.Get("Authorization") == "Bearer scion_pat_bad" {
+				select {
+				case <-badStarted:
+				default:
+					close(badStarted)
+				}
+				<-releaseBad
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{"code": "unauthorized", "message": "bad token"},
+				})
+				return
+			}
+			switch r.URL.Path {
+			case "/api/v1/experiments":
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"experiments": map[string]bool{experiments.MCPServer: true},
+				})
+			case "/api/v1/auth/me":
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": "u1", "email": "u1@example.com"})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer fakeHub.Close()
+
+		backend := NewBackend(BackendOptions{
+			HubBaseURL:           fakeHub.URL,
+			Transport:            fakeHub.Client().Transport,
+			DisableTransportAuth: true,
+		})
+		srv, err := New(Options{Backend: backend})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		mcpTS := httptest.NewServer(srv.Handler())
+		defer mcpTS.Close()
+
+		postInit := func(token string) int {
+			initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"conc-test","version":"0.1"}}}`
+			req, _ := http.NewRequest(http.MethodPost, mcpTS.URL+"/mcp", strings.NewReader(initBody))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			req.Header.Set("Authorization", "Bearer "+token)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("Do(%s): %v", token, err)
+			}
+			_ = resp.Body.Close()
+			return resp.StatusCode
+		}
+
+		badStatus := make(chan int, 1)
+		go func() { badStatus <- postInit("scion_pat_bad") }()
+		<-badStarted
+
+		goodStatus := make(chan int, 1)
+		go func() { goodStatus <- postInit("scion_pat_good") }()
+
+		// Good caller must succeed even while bad caller is still in flight or releasing.
+		close(releaseBad)
+		if got := <-goodStatus; got != http.StatusOK {
+			t.Fatalf("good concurrent caller status = %d, want 200", got)
+		}
+		if got := <-badStatus; got != http.StatusUnauthorized {
+			t.Fatalf("bad leader status = %d, want 401", got)
+		}
+	})
+
+	t.Run("cancelled_leader_does_not_fail_joiner", func(t *testing.T) {
+		leaderEntered := make(chan struct{})
+		fakeHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Header.Get("Authorization") == "Bearer scion_pat_leader" {
+				select {
+				case <-leaderEntered:
+				default:
+					close(leaderEntered)
+				}
+				<-r.Context().Done()
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"experiments": map[string]bool{experiments.MCPServer: true},
+			})
+		}))
+		defer fakeHub.Close()
+
+		backend := NewBackend(BackendOptions{
+			HubBaseURL:           fakeHub.URL,
+			Transport:            fakeHub.Client().Transport,
+			DisableTransportAuth: true,
+		})
+
+		leaderCtx, leaderCancel := context.WithCancel(context.Background())
+		leaderErr := make(chan error, 1)
+		go func() {
+			_, err := backend.ExperimentEnabled(leaderCtx, Credential{Bearer: "scion_pat_leader"}, experiments.MCPServer)
+			leaderErr <- err
+		}()
+		<-leaderEntered
+
+		joinerRes := make(chan struct {
+			ok  bool
+			err error
+		}, 1)
+		go func() {
+			ok, err := backend.ExperimentEnabled(context.Background(), Credential{Bearer: "scion_pat_joiner"}, experiments.MCPServer)
+			joinerRes <- struct {
+				ok  bool
+				err error
+			}{ok, err}
+		}()
+
+		leaderCancel()
+		if err := <-leaderErr; err == nil {
+			t.Fatal("expected cancelled leader to return error")
+		}
+		jr := <-joinerRes
+		if jr.err != nil || !jr.ok {
+			t.Fatalf("joiner after leader cancel: ok=%v err=%v, want ok=true err=nil", jr.ok, jr.err)
+		}
+	})
+}
+
+// TestToolPath_UpstreamProxyRejectionDoesNotEchoBodyOrBlameCaller verifies R2:
+// when a tool's Hub call receives a non-JSON 401/403 from an upstream proxy
+// (IAP / Cloud Run invoker), the tool error reports upstream_auth_failed and
+// never echoes the proxy diagnostic body or presents it as a caller 401/403.
+func TestToolPath_UpstreamProxyRejectionDoesNotEchoBodyOrBlameCaller(t *testing.T) {
+	const leakedBody = "<html>Invalid IAP credentials: secret-audience-98765</html>"
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			fakeHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/experiments":
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"experiments": map[string]bool{experiments.MCPServer: true},
+					})
+				case "/api/v1/auth/me":
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"id": "u1", "email": "u1@example.com"})
+				default:
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					w.WriteHeader(status)
+					_, _ = io.WriteString(w, leakedBody)
+				}
+			}))
+			defer fakeHub.Close()
+
+			backend := NewBackend(BackendOptions{
+				HubBaseURL:           fakeHub.URL,
+				Transport:            fakeHub.Client().Transport,
+				DisableTransportAuth: true,
+			})
+			srv, err := New(Options{Backend: backend})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			mcpTS := httptest.NewServer(srv.Handler())
+			defer mcpTS.Close()
+
+			ctx := context.Background()
+			cl := mcp.NewClient(&mcp.Implementation{Name: "tool-proxy-test", Version: "0.1"}, nil)
+			hc := &http.Client{
+				Transport: &staticHeaderTransport{
+					base:    &http.Transport{DisableKeepAlives: true},
+					headers: map[string]string{"Authorization": "Bearer scion_pat_test"},
+				},
+			}
+			sess, err := cl.Connect(ctx, &mcp.StreamableClientTransport{
+				Endpoint:   mcpTS.URL + "/mcp",
+				HTTPClient: hc,
+			}, nil)
+			if err != nil {
+				t.Fatalf("Connect: %v", err)
+			}
+			defer func() { _ = sess.Close() }()
+
+			for _, call := range []mcp.CallToolParams{
+				{
+					Name: "send_message",
+					Arguments: map[string]any{
+						"project": "11111111-1111-1111-1111-111111111111",
+						"agent":   "echo-t",
+						"text":    "hi",
+					},
+				},
+				{
+					Name: "read_messages",
+					Arguments: map[string]any{
+						"conversation_id": "conv-1",
+					},
+				},
+			} {
+				res, err := sess.CallTool(ctx, &call)
+				if err != nil {
+					t.Fatalf("%s protocol error: %v", call.Name, err)
+				}
+				if !res.IsError {
+					t.Fatalf("%s: expected tool error, got success", call.Name)
+				}
+				got := res.Content[0].(*mcp.TextContent).Text
+				if !strings.Contains(got, "upstream_auth_failed") {
+					t.Errorf("%s: tool error = %q, want upstream_auth_failed", call.Name, got)
+				}
+				for _, forbidden := range []string{"401", "403", "Invalid IAP", "secret-audience-98765"} {
+					if strings.Contains(got, forbidden) {
+						t.Errorf("%s: tool error must not contain %q, got %q", call.Name, forbidden, got)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestStandalone_RefusesProxyModeWithNoResolvableSource verifies O1:
+// setting SCION_TRANSPORT_MODE=iap|cloudrun_invoker when no transport token
+// source can be resolved fails closed at startup instead of starting silently
+// without transport auth.
+func TestStandalone_RefusesProxyModeWithNoResolvableSource(t *testing.T) {
+	origOnGCE := transportauth.IsOnGCEFunc
+	transportauth.IsOnGCEFunc = func() bool { return false }
+	t.Cleanup(func() { transportauth.IsOnGCEFunc = origOnGCE })
+
+	for _, mode := range []string{"iap", "cloudrun_invoker"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("SCION_TRANSPORT_MODE", mode)
+			t.Setenv("SCION_TRANSPORT_TOKEN", "")
+			t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
+			t.Setenv("SCION_TRANSPORT_AUDIENCE", "")
+			t.Setenv("SCION_HUB_OIDC_AUDIENCE", "")
+
+			if _, _, err := ResolveStandaloneTransportAuth(); err == nil {
+				t.Fatalf("ResolveStandaloneTransportAuth(mode=%q, no source) = nil, want error", mode)
 			}
 		})
 	}

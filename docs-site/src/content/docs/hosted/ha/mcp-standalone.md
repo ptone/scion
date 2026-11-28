@@ -83,7 +83,11 @@ Notes for Cloud Run:
 
 ## Recipe 2: GKE Service without IAP
 
-On GKE, you can run standalone MCP replicas as a separate `Deployment` talking to the Hub's internal cluster Service (bypassing IAP entirely) and exposed via a dedicated non-IAP `Service` and `Ingress`/`HTTPRoute`:
+On GKE, you can run standalone MCP replicas as a separate `Deployment` exposed via a dedicated non-IAP `Service` and `Ingress`/`HTTPRoute`, talking to the Hub's internal cluster Service directly inside the cluster network:
+
+:::note[In-cluster transport security]
+Because the standalone MCP server forwards caller UATs and federation tokens to `server.mcp.hub_endpoint`, use `https://` or a service mesh with mTLS (paired with a Kubernetes `NetworkPolicy` restricting traffic to the Hub Service) wherever pod-to-pod traffic is not trusted. Never point `hub_endpoint` at a plaintext `http://` URL outside the cluster.
+:::
 
 ```yaml
 apiVersion: apps/v1
