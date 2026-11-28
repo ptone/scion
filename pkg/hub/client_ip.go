@@ -52,6 +52,12 @@ func (s *Server) clientIP(r *http.Request) string {
 	return trustedClientIP(r, s.clientIPTrustedNets)
 }
 
+// ResolveClientIP returns the client address resolved for r using the server's
+// configured trusted_proxies list.
+func (s *Server) ResolveClientIP(r *http.Request) string {
+	return s.clientIP(r)
+}
+
 // splitXFF splits every X-Forwarded-For header line on commas and trims
 // whitespace, preserving hop order across lines.
 func splitXFF(lines []string) []string {

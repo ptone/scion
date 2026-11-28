@@ -19,7 +19,6 @@ package mcpserver_test
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,7 +30,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -541,13 +539,9 @@ func TestIntegration_P2_AuditM1_HubTrustedProxiesXFF(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Build an unsigned Google-shaped JWT (triggers Hub's externalBearerRateLimiter
-	// on /api/v1/auth/me when a Google user issuer is configured).
-	hdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
-	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"iss":"https://accounts.google.com","sub":"fake"}`))
-	fakeGoogleJWT := hdr + "." + payload + ".invalidsig"
+	const forwardedClientIP = "198.51.100.42"
 
-	runCase := func(t *testing.T, trustedProxies []string, wantHub429 bool) {
+	runCase := func(t *testing.T, trustedProxies []string, wantClientIP string) {
 		t.Helper()
 		dbPath := filepath.Join(t.TempDir(), "hub.db")
 		entClient, err := entc.OpenSQLite(dbPath, entc.PoolConfig{MaxOpenConns: 1})
@@ -564,38 +558,28 @@ func TestIntegration_P2_AuditM1_HubTrustedProxiesXFF(t *testing.T) {
 			Host:           "127.0.0.1",
 			Port:           0,
 			TrustedProxies: trustedProxies,
-			Federation: config.FederationConfig{
-				Enabled: true,
-				TrustedIssuers: []config.TrustedIssuerConfig{
-					{
-						IssuerURL:        "https://accounts.google.com",
-						IssuerType:       "user",
-						ExpectedAudience: "mcp-audit-m1-test",
-					},
-				},
-			},
 		}, st)
 		if err != nil {
 			t.Fatalf("hub.New: %v", err)
 		}
 
-		// Record the Hub's actual HTTP status codes and forwarded XFF headers.
+		// Record the forwarded XFF header, peer RemoteAddr, and the client IP
+		// the real Hub resolves for the request reaching /api/v1/auth/me.
 		var mu sync.Mutex
-		var hub429Count int
-		var sawXFF int
+		var gotXFF string
+		var gotRemoteAddr string
+		var gotClientIP string
+		var sawAuthMe int
 		spyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			rec := &statusCapturingWriter{ResponseWriter: w, status: http.StatusOK}
-			hubSrv.Handler().ServeHTTP(rec, r)
 			if r.URL.Path == "/api/v1/auth/me" {
 				mu.Lock()
-				if r.Header.Get("X-Forwarded-For") != "" {
-					sawXFF++
-				}
-				if rec.status == http.StatusTooManyRequests {
-					hub429Count++
-				}
+				sawAuthMe++
+				gotXFF = r.Header.Get("X-Forwarded-For")
+				gotRemoteAddr = r.RemoteAddr
+				gotClientIP = hubSrv.ResolveClientIP(r)
 				mu.Unlock()
 			}
+			hubSrv.Handler().ServeHTTP(w, r)
 		})
 
 		backend := mcpserver.NewBackend(mcpserver.BackendOptions{
@@ -625,54 +609,45 @@ func TestIntegration_P2_AuditM1_HubTrustedProxiesXFF(t *testing.T) {
 			}
 		}()
 
-		// Send 25 distinct uncached requests (exceeding the per-IP burst of 20) from distinct XFF IPs.
 		initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"xff-client","version":"1.0"}}}`
-		for i := 1; i <= 25; i++ {
-			token := fmt.Sprintf("%s.%d", fakeGoogleJWT, i)
-			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+ln.Addr().String()+"/mcp", strings.NewReader(initBody))
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Accept", "application/json, text/event-stream")
-			req.Header.Set("Authorization", "Bearer "+token)
-			req.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i))
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatalf("POST /mcp #%d: %v", i, err)
-			}
-			_ = resp.Body.Close()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+ln.Addr().String()+"/mcp", strings.NewReader(initBody))
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
 		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("Authorization", "Bearer scion_pat_test_xff_probe")
+		req.Header.Set("X-Forwarded-For", forwardedClientIP)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST /mcp: %v", err)
+		}
+		_ = resp.Body.Close()
 
 		mu.Lock()
-		got429 := hub429Count
-		gotXFF := sawXFF
-		mu.Unlock()
-
-		if gotXFF != 25 {
-			t.Fatalf("Hub saw X-Forwarded-For on %d/25 requests, want 25", gotXFF)
+		defer mu.Unlock()
+		if sawAuthMe != 1 {
+			t.Fatalf("expected 1 /api/v1/auth/me request to reach Hub, got %d", sawAuthMe)
 		}
-		if wantHub429 && got429 == 0 {
-			t.Fatalf("untrusted proxy: expected Hub 429 rate-limit hits when 25 requests collapse to 127.0.0.1, got 0")
+		if gotXFF != forwardedClientIP {
+			t.Fatalf("Hub saw X-Forwarded-For=%q, want %q", gotXFF, forwardedClientIP)
 		}
-		if !wantHub429 && got429 > 0 {
-			t.Fatalf("trusted proxy: expected 0 Hub 429s across 25 distinct XFF client IPs, got %d", got429)
+		peerHost, _, err := net.SplitHostPort(gotRemoteAddr)
+		if err != nil || peerHost != "127.0.0.1" {
+			t.Fatalf("Hub saw RemoteAddr=%q, want 127.0.0.1:<port>", gotRemoteAddr)
+		}
+		if gotClientIP != wantClientIP {
+			t.Fatalf("Hub ResolveClientIP(r) = %q, want %q (trusted_proxies=%v, XFF=%q, RemoteAddr=%q)",
+				gotClientIP, wantClientIP, trustedProxies, gotXFF, gotRemoteAddr)
 		}
 	}
 
 	t.Run("trusted_proxy_honours_xff", func(t *testing.T) {
-		runCase(t, []string{"127.0.0.0/8"}, false)
+		runCase(t, []string{"127.0.0.0/8"}, forwardedClientIP)
 	})
 	t.Run("untrusted_proxy_ignores_xff", func(t *testing.T) {
-		runCase(t, nil, true)
+		runCase(t, nil, "127.0.0.1")
 	})
-}
-
-type statusCapturingWriter struct {
-	http.ResponseWriter
-	status int
-}
-
-func (w *statusCapturingWriter) WriteHeader(code int) {
-	w.status = code
-	w.ResponseWriter.WriteHeader(code)
 }
 
 func TestIntegration_P2_ShutdownDrainsInFlightWaitForMessages(t *testing.T) {
