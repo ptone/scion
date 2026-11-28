@@ -18,11 +18,13 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1118,4 +1120,149 @@ func TestActionInboxGenericity_NoSecretRequestBranches(t *testing.T) {
 		assert.False(t, strings.Contains(src, forbidden),
 			"AC-12: pkg/hub/action_inbox.go must remain kind-neutral and not reference %q", forbidden)
 	}
+}
+
+type convLookupFaultStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	cleared atomic.Bool
+}
+
+func (w *convLookupFaultStore) GetConversation(ctx context.Context, id string) (*store.Conversation, error) {
+	if w.fault.Active() && !w.cleared.Load() {
+		return nil, errProbeFault
+	}
+	return w.Store.GetConversation(ctx, id)
+}
+
+func TestActionInbox_IsRecipient_ConversationLookupErrorFailsClosedAndDoesNotMemoise(t *testing.T) {
+	srv, rawStore, alice, bob, project, faultStore, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *convLookupFaultStore {
+		return &convLookupFaultStore{Store: inner, fault: f}
+	})
+	ctx := context.Background()
+
+	// Create an outsider who is NOT a member of project, so the keyed topic
+	// authz refuses them, while seeding them in conversation_participants and
+	// as prompt RecipientID so the lenient no-key fallback would admit them.
+	outsider := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "departed@example.com",
+		DisplayName: "Departed User",
+		Role:        "member",
+		Status:      store.UserStatusActive,
+	}
+	require.NoError(t, rawStore.CreateUser(ctx, outsider))
+
+	// Create a native topic in project with a linked conversation.
+	dbp, ok := rawStore.(interface{ DB() *sql.DB })
+	require.True(t, ok, "rawStore must expose DB()")
+	wcs := NewWebChatStore(dbp.DB(), "sqlite")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+
+	topicID := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: project.ID,
+		Name:      "fv-r1-topic",
+		CreatedBy: alice.ID,
+		CreatedAt: time.Now().UTC(),
+	}))
+	conv, err := rawStore.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		ProjectID:   &project.ID,
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "thread:" + project.ID + ":" + topicID,
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+	require.NoError(t, rawStore.AddParticipant(ctx, &store.ConversationParticipant{
+		ID:             api.NewUUID(),
+		ConversationID: conv.ID,
+		PrincipalKind:  "user",
+		PrincipalID:    alice.ID,
+		Role:           "member",
+		JoinedAt:       time.Now().UTC(),
+	}))
+	// Seed outsider as a participant row and also set them as RecipientID on
+	// the prompt, then mark them as having left. Even with an active or left
+	// participant row, a GetConversation error must NOT fall through to the
+	// no-key RecipientID / ListParticipants branch.
+	require.NoError(t, rawStore.AddParticipant(ctx, &store.ConversationParticipant{
+		ID:             api.NewUUID(),
+		ConversationID: conv.ID,
+		PrincipalKind:  "user",
+		PrincipalID:    outsider.ID,
+		Role:           "member",
+		JoinedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, rawStore.RemoveParticipant(ctx, conv.ID, "user", outsider.ID))
+
+	// Also create a second outsider who still has an active participant row
+	// (no LeftAt) but has no project read access.
+	lostProjectUser := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "lost-project@example.com",
+		DisplayName: "Lost Project User",
+		Role:        "member",
+		Status:      store.UserStatusActive,
+	}
+	require.NoError(t, rawStore.CreateUser(ctx, lostProjectUser))
+	require.NoError(t, rawStore.AddParticipant(ctx, &store.ConversationParticipant{
+		ID:             api.NewUUID(),
+		ConversationID: conv.ID,
+		PrincipalKind:  "user",
+		PrincipalID:    lostProjectUser.ID,
+		Role:           "member",
+		JoinedAt:       time.Now().UTC(),
+	}))
+
+	promptID := api.NewUUID()
+	require.NoError(t, rawStore.CreateMessage(ctx, &store.Message{
+		ID:             promptID,
+		ProjectID:      project.ID,
+		Sender:         "user:" + alice.Email,
+		SenderID:       alice.ID,
+		Recipient:      "user:" + outsider.Email,
+		RecipientID:    outsider.ID,
+		Msg:            "topic decision prompt",
+		Type:           messages.TypeChat,
+		Channel:        "web",
+		ThreadID:       "",
+		ConversationID: conv.ID,
+		CreatedAt:      time.Now().UTC(),
+	}))
+
+	_ = bob
+	validIdent := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, alice.Role, string(ClientTypeWeb))
+	departedIdent := NewAuthenticatedUser(outsider.ID, outsider.Email, outsider.DisplayName, outsider.Role, string(ClientTypeWeb))
+	lostProjectIdent := NewAuthenticatedUser(lostProjectUser.ID, lostProjectUser.Email, lostProjectUser.DisplayName, lostProjectUser.Role, string(ClientTypeWeb))
+
+	validScope, err := srv.newActionInboxScope(ctx, validIdent)
+	require.NoError(t, err)
+	departedScope, err := srv.newActionInboxScope(ctx, departedIdent)
+	require.NoError(t, err)
+	lostProjectScope, err := srv.newActionInboxScope(ctx, lostProjectIdent)
+	require.NoError(t, err)
+
+	// Under GetConversation fault: all three must fail closed (false), and the
+	// transient failure must NOT be memoised on the scope.
+	fault.Arm()
+	assert.False(t, departedScope.isRecipient(ctx, "", promptID, false),
+		"departed user with RecipientID must be refused when GetConversation errors")
+	assert.False(t, lostProjectScope.isRecipient(ctx, "", promptID, false),
+		"participant without project access must be refused when GetConversation errors")
+	assert.False(t, validScope.isRecipient(ctx, "", promptID, false),
+		"valid participant must fail closed when GetConversation errors")
+
+	// Disarm the fault and reuse the same scopes: validScope must now succeed
+	// (proving failure was not memoised and keyed authz works), while both
+	// departed and lost-project users remain refused by the keyed path.
+	faultStore.cleared.Store(true)
+	assert.True(t, validScope.isRecipient(ctx, "", promptID, false),
+		"valid participant must be authorised once GetConversation recovers (failure not memoised)")
+	assert.False(t, departedScope.isRecipient(ctx, "", promptID, false),
+		"departed user must remain refused by keyed topic authz")
+	assert.False(t, lostProjectScope.isRecipient(ctx, "", promptID, false),
+		"user without project read must remain refused by keyed topic authz")
 }
