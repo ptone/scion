@@ -115,6 +115,7 @@ var requestPathSites = []requestPathSite{
 	{"download_signing.go", "Server.signSkillFileDownloadURLs", "URL(bare)", 3, "not a request URL: a signed storage URL field"},
 	{"download_signing.go", "isSignedSkillFileRequest", "URL.Path", 3, "comparison: shape check of a signed skill file read"},
 	{"federation_visitor_messaging.go", "matchVisitorAgentSubRoute", "URL.EscapedPath", 1, "routing: resolves the agent sub-route a visitor may use from the percent-encoded path; compared only, never logged"},
+	{"federation_visitor_messaging.go", "matchVisitorConversationSubRoute", "URL.Path", 1, "routing: checks the /api/v1/conversations/ prefix before extracting the conversation id and action; compared only, never logged"},
 	{"federation_visitor_messaging.go", "matchVisitorDMSubRoute", "URL.Path", 1, "routing: matches the visitor DM sub-route and cuts its conversation key; compared only, never logged"},
 	{"federation_visitor_messaging.go", "matchVisitorProjectAgentsSubRoute", "URL.EscapedPath", 1, "routing: resolves the project agent list or agent read sub-route a visitor may use from the percent-encoded path; compared only, never logged"},
 	{"google_credential_validator.go", "NewGoogleCredentialValidator", "URL(bare)", 1, "not the served request: an outbound redirect to a pinned Google endpoint"},
