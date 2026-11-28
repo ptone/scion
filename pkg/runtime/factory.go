@@ -324,6 +324,11 @@ func (s runtimeSelection) build() Runtime {
 		if err != nil {
 			return &ErrorRuntime{Err: err}
 		}
+		if gs, _, gerr := config.LoadGlobalSettingsWithOverlayFor(context.Background()); gerr == nil && gs != nil {
+			if gs.ResolveHomeStorage().Backend == config.HomeStorageBackendNFS {
+				rt.HomeStorageBackend = HomeStorageNFS
+			}
+		}
 		return rt
 	case "cloudrun":
 		cfg := rtConfig.CloudRun

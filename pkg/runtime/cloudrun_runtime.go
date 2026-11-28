@@ -254,6 +254,12 @@ func (r *CloudRunRuntime) resolveConfig(ctx context.Context) error {
 
 func (r *CloudRunRuntime) Name() string { return "cloudrun" }
 
+// HomeReadableByBroker implements BrokerReadableHomeRuntime: Cloud Run
+// Instances mount the broker-mounted NFS home leaf directly.
+func (r *CloudRunRuntime) HomeReadableByBroker() bool { return true }
+
+var _ BrokerReadableHomeRuntime = (*CloudRunRuntime)(nil)
+
 // ExecAvailable implements ExecCapability: exec needs a configured exec
 // connector (IAP).
 func (r *CloudRunRuntime) ExecAvailable() bool { return r.exec != nil }

@@ -54,6 +54,14 @@ func (r *DockerRuntime) Name() string {
 	return "docker"
 }
 
+// HomeReadableByBroker implements BrokerReadableHomeRuntime: Docker bind-mounts
+// the broker-local agent home into the container.
+func (r *DockerRuntime) HomeReadableByBroker() bool {
+	return true
+}
+
+var _ BrokerReadableHomeRuntime = (*DockerRuntime)(nil)
+
 func (r *DockerRuntime) ExecUser() string {
 	return "scion"
 }
