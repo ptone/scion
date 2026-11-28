@@ -1473,3 +1473,598 @@ func TestProjectMembersGroupRead_ExcludedProjectAndAgentIdentity(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, visible, "agent in projectB must not see projectA members group")
 }
+
+// TestProjectAgentsGroupRead_ListFilteredByProjectReadAccess verifies that
+// GET /api/v1/groups filters project_agents groups (with or without query
+// filters) by project read access, including when annotations are absent.
+func TestProjectAgentsGroupRead_ListFilteredByProjectReadAccess(t *testing.T) {
+	srv, s, alice, bob, projectA := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	srv.createProjectGroup(ctx, projectA)
+
+	carol := &store.User{
+		ID:          tid("user-carol-agents-list"),
+		Email:       "carol-agents-list@test.com",
+		DisplayName: "Carol",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, carol))
+	ensureHubMembership(ctx, s, carol.ID)
+	grantProjectRoleForTest(t, s, projectA.ID, store.ProjectRoleViewer, store.RoleBindingPrincipalUser, carol.ID)
+
+	hubAdmin := &store.User{
+		ID:          tid("user-admin-agents-list"),
+		Email:       "admin-agents-list@test.com",
+		DisplayName: "Hub Admin",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, hubAdmin))
+	ensureHubMembership(ctx, s, hubAdmin.ID)
+	grantSystemRoleForTest(t, s, store.SystemRoleHubAdmin, hubAdmin.ID)
+
+	projectB := &store.Project{
+		ID:        tid("project-bob-agents-list"),
+		Name:      "Bob Agents Project",
+		Slug:      "bob-agents-project",
+		OwnerID:   bob.ID,
+		CreatedBy: bob.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, projectB))
+	srv.seedProjectCreatorMembership(ctx, projectB)
+	srv.createProjectGroup(ctx, projectB)
+
+	// A project-scoped group without marker annotations still has ProjectID set.
+	unannotatedProjGroup := &store.Group{
+		ID:        tid("proj-unannotated-group"),
+		Name:      "Project A Extra Group",
+		Slug:      "project:" + projectA.Slug + ":extra",
+		GroupType: store.GroupTypeExplicit,
+		ProjectID: projectA.ID,
+		OwnerID:   alice.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateGroup(ctx, unannotatedProjGroup))
+
+	dirGroup := &store.Group{
+		ID:        tid("dir-group-agents-list"),
+		Name:      "Team Delta",
+		Slug:      "team-delta",
+		GroupType: store.GroupTypeExplicit,
+		OwnerID:   alice.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateGroup(ctx, dirGroup))
+
+	agentsGroupA, err := s.GetGroupBySlug(ctx, "project:"+projectA.Slug+":agents")
+	require.NoError(t, err)
+	agentsGroupB, err := s.GetGroupBySlug(ctx, "project:"+projectB.Slug+":agents")
+	require.NoError(t, err)
+
+	// Bob (non-member on projectA) sees dirGroup and projectB's agents group,
+	// but neither projectA's agents group nor unannotatedProjGroup.
+	rec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/groups?limit=100", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var bobResp ListGroupsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&bobResp))
+	bobIDs := listGroupIDsFromResponse(bobResp)
+	assert.Contains(t, bobIDs, dirGroup.ID)
+	assert.Contains(t, bobIDs, agentsGroupB.ID)
+	assert.NotContains(t, bobIDs, agentsGroupA.ID)
+	assert.NotContains(t, bobIDs, unannotatedProjGroup.ID)
+	assert.Equal(t, len(bobResp.Groups), bobResp.TotalCount)
+
+	// Filtering by groupType=project_agents returns only readable projects' agents groups.
+	rec = doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/groups?groupType=project_agents&limit=100", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var bobTypeResp ListGroupsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&bobTypeResp))
+	bobTypeIDs := listGroupIDsFromResponse(bobTypeResp)
+	assert.Contains(t, bobTypeIDs, agentsGroupB.ID)
+	assert.NotContains(t, bobTypeIDs, agentsGroupA.ID)
+	assert.Equal(t, len(bobTypeResp.Groups), bobTypeResp.TotalCount)
+
+	// Filtering by projectId or search for projectA returns no projectA groups for bob.
+	rec = doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/groups?projectId="+url.QueryEscape(projectA.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var bobProjResp ListGroupsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&bobProjResp))
+	assert.Empty(t, bobProjResp.Groups)
+	assert.Equal(t, 0, bobProjResp.TotalCount)
+	assert.Empty(t, bobProjResp.NextCursor)
+
+	rec = doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/groups?search="+url.QueryEscape(projectA.Name), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var bobSearchResp ListGroupsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&bobSearchResp))
+	assert.NotContains(t, listGroupIDsFromResponse(bobSearchResp), agentsGroupA.ID)
+	assert.Equal(t, len(bobSearchResp.Groups), bobSearchResp.TotalCount)
+
+	// Alice (projectA owner) and Carol (projectA viewer) see projectA's agents group
+	// and do not see projectB's agents group.
+	for _, tc := range []struct {
+		name string
+		user *store.User
+	}{
+		{"project owner", alice},
+		{"project viewer", carol},
+	} {
+		rec = doRequestAsUser(t, srv, tc.user, http.MethodGet, "/api/v1/groups?groupType=project_agents&limit=100", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", tc.name, rec.Body.String())
+		var resp ListGroupsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		ids := listGroupIDsFromResponse(resp)
+		assert.Contains(t, ids, agentsGroupA.ID, "%s should see projectA agents group", tc.name)
+		assert.NotContains(t, ids, agentsGroupB.ID, "%s should not see projectB agents group", tc.name)
+		assert.Equal(t, len(resp.Groups), resp.TotalCount)
+	}
+
+	// Hub admin sees both projectA and projectB agents groups.
+	rec = doRequestAsUser(t, srv, hubAdmin, http.MethodGet, "/api/v1/groups?groupType=project_agents&limit=100", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var adminResp ListGroupsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&adminResp))
+	adminIDs := listGroupIDsFromResponse(adminResp)
+	assert.Contains(t, adminIDs, agentsGroupA.ID)
+	assert.Contains(t, adminIDs, agentsGroupB.ID)
+	assert.Equal(t, len(adminResp.Groups), adminResp.TotalCount)
+
+	// Granting hub-members project-viewer on projectA makes agentsGroupA visible to bob.
+	hubMembers, err := s.GetGroupBySlug(ctx, hubMembersSlug)
+	require.NoError(t, err)
+	grantProjectRoleForTest(t, s, projectA.ID, store.ProjectRoleViewer, store.RoleBindingPrincipalGroup, hubMembers.ID)
+
+	rec = doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/groups?groupType=project_agents&limit=100", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var bobAfterResp ListGroupsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&bobAfterResp))
+	assert.Contains(t, listGroupIDsFromResponse(bobAfterResp), agentsGroupA.ID)
+}
+
+// TestProjectAgentsGroupRead_GetMembersAndPrincipals verifies that GET group,
+// GET group members, GET group member by ID, GET principal group/agent, and
+// GET agent groups enforce project read access for project_agents groups.
+func TestProjectAgentsGroupRead_GetMembersAndPrincipals(t *testing.T) {
+	srv, s, alice, bob, projectA := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	srv.createProjectGroup(ctx, projectA)
+	agentsGroupA, err := s.GetGroupBySlug(ctx, "project:"+projectA.Slug+":agents")
+	require.NoError(t, err)
+
+	carol := &store.User{
+		ID:          tid("user-carol-agents-get"),
+		Email:       "carol-agents-get@test.com",
+		DisplayName: "Carol",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, carol))
+	ensureHubMembership(ctx, s, carol.ID)
+	grantProjectRoleForTest(t, s, projectA.ID, store.ProjectRoleViewer, store.RoleBindingPrincipalUser, carol.ID)
+
+	hubAdmin := &store.User{
+		ID:          tid("user-admin-agents-get"),
+		Email:       "admin-agents-get@test.com",
+		DisplayName: "Hub Admin",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, hubAdmin))
+	ensureHubMembership(ctx, s, hubAdmin.ID)
+	grantSystemRoleForTest(t, s, store.SystemRoleHubAdmin, hubAdmin.ID)
+
+	dirGroup := &store.Group{
+		ID:        tid("dir-group-agents-get"),
+		Name:      "Team Epsilon",
+		Slug:      "team-epsilon",
+		GroupType: store.GroupTypeExplicit,
+		OwnerID:   alice.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateGroup(ctx, dirGroup))
+
+	agentA := &store.Agent{
+		ID:        tid("agent-project-a-member"),
+		Slug:      "agent-project-a-member",
+		Name:      "Project A Worker",
+		ProjectID: projectA.ID,
+		Phase:     string(state.PhaseRunning),
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agentA))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    dirGroup.ID,
+		MemberType: store.GroupMemberTypeAgent,
+		MemberID:   agentA.ID,
+		Role:       store.GroupMemberRoleMember,
+	}))
+
+	// 1. Group read and member endpoints return 404 matching nonexistent group for bob.
+	missingGroupRec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/groups/nonexistent-group-id", nil)
+	require.Equal(t, http.StatusNotFound, missingGroupRec.Code)
+
+	for _, path := range []string{
+		"/api/v1/groups/" + agentsGroupA.ID,
+		"/api/v1/groups/" + agentsGroupA.Slug,
+		"/api/v1/groups/" + agentsGroupA.ID + "/members",
+		"/api/v1/groups/" + agentsGroupA.Slug + "/members",
+		"/api/v1/groups/" + agentsGroupA.ID + "/members/agent/" + agentA.ID,
+		"/api/v1/groups/" + agentsGroupA.Slug + "/members/agent/" + agentA.ID,
+	} {
+		rec := doRequestAsUser(t, srv, bob, http.MethodGet, path, nil)
+		assertResponseMatchesMissing(t, "GET "+path, rec, missingGroupRec, "", "",
+			projectA.Name, agentsGroupA.Name, agentA.ID, agentA.Name)
+	}
+
+	// Project owner, project viewer, and hub admin can read agentsGroupA and its members.
+	for _, tc := range []struct {
+		name string
+		user *store.User
+	}{
+		{"project owner", alice},
+		{"project viewer", carol},
+		{"hub admin", hubAdmin},
+	} {
+		for _, path := range []string{
+			"/api/v1/groups/" + agentsGroupA.ID,
+			"/api/v1/groups/" + agentsGroupA.Slug,
+		} {
+			rec := doRequestAsUser(t, srv, tc.user, http.MethodGet, path, nil)
+			assert.Equal(t, http.StatusOK, rec.Code, "%s should read %s; body=%s", tc.name, path, rec.Body.String())
+		}
+
+		for _, path := range []string{
+			"/api/v1/groups/" + agentsGroupA.ID + "/members",
+			"/api/v1/groups/" + agentsGroupA.Slug + "/members",
+		} {
+			rec := doRequestAsUser(t, srv, tc.user, http.MethodGet, path, nil)
+			require.Equal(t, http.StatusOK, rec.Code, "%s should read %s; body=%s", tc.name, path, rec.Body.String())
+			var resp ListGroupMembersResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+			memberIDs := make([]string, 0, len(resp.Members))
+			for _, m := range resp.Members {
+				memberIDs = append(memberIDs, m.MemberID)
+			}
+			assert.Contains(t, memberIDs, agentA.ID, "%s should see agentA in %s", tc.name, path)
+		}
+	}
+
+	// 2. GET /api/v1/principals/group/{id}
+	missingPrincRec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/principals/group/nonexistent-group-id", nil)
+	require.Equal(t, http.StatusNotFound, missingPrincRec.Code)
+	hiddenPrincRec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/principals/group/"+agentsGroupA.ID, nil)
+	assertResponseMatchesMissing(t, "GET /api/v1/principals/group/{id}", hiddenPrincRec, missingPrincRec, "", "",
+		projectA.Name, agentsGroupA.Name)
+
+	for _, tc := range []struct {
+		name string
+		user *store.User
+	}{
+		{"project viewer", carol},
+		{"hub admin", hubAdmin},
+	} {
+		rec := doRequestAsUser(t, srv, tc.user, http.MethodGet, "/api/v1/principals/group/"+agentsGroupA.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", tc.name, rec.Body.String())
+		var resp PrincipalResolutionResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Equal(t, agentsGroupA.ID, resp.Principal.ID)
+	}
+
+	// 3. GET /api/v1/principals/agent/{agentA.ID}
+	bobAgentPrincRec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/principals/agent/"+agentA.ID, nil)
+	require.Equal(t, http.StatusOK, bobAgentPrincRec.Code, bobAgentPrincRec.Body.String())
+	var bobAgentPrincResp PrincipalResolutionResponse
+	require.NoError(t, json.NewDecoder(bobAgentPrincRec.Body).Decode(&bobAgentPrincResp))
+	assert.NotContains(t, bobAgentPrincResp.DirectGroups, agentsGroupA.ID)
+	assert.NotContains(t, bobAgentPrincResp.EffectiveGroups, agentsGroupA.ID)
+	assert.Contains(t, bobAgentPrincResp.EffectiveGroups, dirGroup.ID)
+
+	for _, tc := range []struct {
+		name string
+		user *store.User
+	}{
+		{"project viewer", carol},
+		{"hub admin", hubAdmin},
+	} {
+		rec := doRequestAsUser(t, srv, tc.user, http.MethodGet, "/api/v1/principals/agent/"+agentA.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", tc.name, rec.Body.String())
+		var resp PrincipalResolutionResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Contains(t, resp.EffectiveGroups, agentsGroupA.ID, "%s should see agentsGroupA in agent principal groups", tc.name)
+	}
+
+	// 4. GET /api/v1/agents/{agentA.ID}/groups for project viewer and hub admin
+	for _, tc := range []struct {
+		name string
+		user *store.User
+	}{
+		{"project viewer", carol},
+		{"hub admin", hubAdmin},
+	} {
+		rec := doRequestAsUser(t, srv, tc.user, http.MethodGet, "/api/v1/agents/"+agentA.ID+"/groups", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", tc.name, rec.Body.String())
+		var resp GroupsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		ids := make([]string, 0, len(resp.Groups))
+		for _, g := range resp.Groups {
+			ids = append(ids, g.ID)
+		}
+		assert.Contains(t, ids, agentsGroupA.ID, "%s should see agentsGroupA in agent groups", tc.name)
+	}
+}
+
+// TestProjectAgentsGroupRead_MutationsReferencesAndConstraints verifies that
+// mutation/reference endpoints return identical not-found responses for
+// unreadable project_agents groups, constrained hub admins lose visibility,
+// cross-project agents cannot see another project's agents group, and store
+// failures fail closed.
+func TestProjectAgentsGroupRead_MutationsReferencesAndConstraints(t *testing.T) {
+	srv, s, alice, bob, projectA, _, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *failingGetProjectStore {
+		return &failingGetProjectStore{Store: inner, fault: f}
+	})
+	ctx := context.Background()
+
+	srv.createProjectGroup(ctx, projectA)
+	agentsGroupA, err := s.GetGroupBySlug(ctx, "project:"+projectA.Slug+":agents")
+	require.NoError(t, err)
+
+	hubAdmin := &store.User{
+		ID:          tid("user-admin-agents-mut"),
+		Email:       "admin-agents-mut@test.com",
+		DisplayName: "Hub Admin",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, hubAdmin))
+	ensureHubMembership(ctx, s, hubAdmin.ID)
+	grantSystemRoleForTest(t, s, store.SystemRoleHubAdmin, hubAdmin.ID)
+
+	groupCreatorRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "custom-agents-group-creator",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"group.create", "group.read", "group.list"},
+	})
+	require.NoError(t, err)
+	bobGroupCreator := &store.User{
+		ID:          tid("user-bob-agents-creator"),
+		Email:       "bob-agents-creator@test.com",
+		DisplayName: "Bob Creator",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, bobGroupCreator))
+	ensureHubMembership(ctx, s, bobGroupCreator.ID)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: groupCreatorRole.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      bobGroupCreator.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	bobGroup := &store.Group{
+		ID:        tid("bob-agents-mut-group"),
+		Name:      "Bob Mut Group",
+		Slug:      "bob-mut-group",
+		GroupType: store.GroupTypeExplicit,
+		OwnerID:   bob.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateGroup(ctx, bobGroup))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    bobGroup.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   bob.ID,
+		Role:       store.GroupMemberRoleOwner,
+	}))
+
+	bobProject := &store.Project{
+		ID:        tid("bob-agents-mut-project"),
+		Name:      "Bob Mut Project",
+		Slug:      "bob-mut-project",
+		OwnerID:   bob.ID,
+		CreatedBy: bob.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, bobProject))
+	srv.seedProjectCreatorMembership(ctx, bobProject)
+
+	agentB := &store.Agent{
+		ID:        tid("agent-cross-agents-b"),
+		Slug:      "agent-cross-agents-b",
+		Name:      "Agent Cross B",
+		ProjectID: bobProject.ID,
+		Phase:     string(state.PhaseRunning),
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agentB))
+
+	viewerRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	missingSlug := "project:does-not-exist:agents"
+	missingID := tid("nonexistent-agents-group")
+
+	// POST /api/v1/groups with parentId=agentsGroupA.ID matches missing parent.
+	hiddenParentRec := doRequestAsUser(t, srv, bobGroupCreator, http.MethodPost, "/api/v1/groups", map[string]any{
+		"name":     "Child Of Agents Hidden",
+		"parentId": agentsGroupA.ID,
+	})
+	missingParentRec := doRequestAsUser(t, srv, bobGroupCreator, http.MethodPost, "/api/v1/groups", map[string]any{
+		"name":     "Child Of Agents Missing",
+		"parentId": missingID,
+	})
+	require.Equal(t, http.StatusBadRequest, missingParentRec.Code)
+	assertResponseMatchesMissing(t, "POST /api/v1/groups parentId", hiddenParentRec, missingParentRec,
+		agentsGroupA.ID, missingID, projectA.Name, agentsGroupA.Name)
+
+	for _, refPair := range []struct {
+		kind       string
+		hiddenRef  string
+		missingRef string
+	}{
+		{"slug", agentsGroupA.Slug, missingSlug},
+		{"id", agentsGroupA.ID, missingID},
+	} {
+		// PATCH /api/v1/groups/{ref}
+		hiddenRec := doRequestAsUser(t, srv, bob, http.MethodPatch, "/api/v1/groups/"+refPair.hiddenRef, map[string]any{"description": "updated"})
+		missingRec := doRequestAsUser(t, srv, bob, http.MethodPatch, "/api/v1/groups/"+refPair.missingRef, map[string]any{"description": "updated"})
+		require.Equal(t, http.StatusNotFound, missingRec.Code)
+		assertResponseMatchesMissing(t, "PATCH group ("+refPair.kind+")", hiddenRec, missingRec, "", "", agentsGroupA.ID, projectA.Name)
+
+		// DELETE /api/v1/groups/{ref}
+		hiddenRec = doRequestAsUser(t, srv, bob, http.MethodDelete, "/api/v1/groups/"+refPair.hiddenRef, nil)
+		missingRec = doRequestAsUser(t, srv, bob, http.MethodDelete, "/api/v1/groups/"+refPair.missingRef, nil)
+		require.Equal(t, http.StatusNotFound, missingRec.Code)
+		assertResponseMatchesMissing(t, "DELETE group ("+refPair.kind+")", hiddenRec, missingRec, "", "", agentsGroupA.ID, projectA.Name)
+
+		// POST /api/v1/groups/{ref}/members
+		hiddenRec = doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/groups/"+refPair.hiddenRef+"/members", map[string]any{
+			"memberType": "user",
+			"memberId":   bob.ID,
+			"role":       "member",
+		})
+		missingRec = doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/groups/"+refPair.missingRef+"/members", map[string]any{
+			"memberType": "user",
+			"memberId":   bob.ID,
+			"role":       "member",
+		})
+		require.Equal(t, http.StatusNotFound, missingRec.Code)
+		assertResponseMatchesMissing(t, "POST group members ("+refPair.kind+")", hiddenRec, missingRec, "", "", agentsGroupA.ID, projectA.Name)
+
+		// DELETE /api/v1/groups/{ref}/members/user/{aliceID}
+		hiddenRec = doRequestAsUser(t, srv, bob, http.MethodDelete, "/api/v1/groups/"+refPair.hiddenRef+"/members/user/"+alice.ID, nil)
+		missingRec = doRequestAsUser(t, srv, bob, http.MethodDelete, "/api/v1/groups/"+refPair.missingRef+"/members/user/"+alice.ID, nil)
+		require.Equal(t, http.StatusNotFound, missingRec.Code)
+		assertResponseMatchesMissing(t, "DELETE group member ("+refPair.kind+")", hiddenRec, missingRec, "", "", agentsGroupA.ID, projectA.Name)
+
+		// POST /api/v1/groups/{bobGroup}/members (memberId=agentsGroupA)
+		hiddenRec = doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/groups/"+bobGroup.ID+"/members", map[string]any{
+			"memberType": "group",
+			"memberId":   refPair.hiddenRef,
+			"role":       "member",
+		})
+		missingRec = doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/groups/"+bobGroup.ID+"/members", map[string]any{
+			"memberType": "group",
+			"memberId":   refPair.missingRef,
+			"role":       "member",
+		})
+		require.Equal(t, http.StatusBadRequest, missingRec.Code)
+		assertResponseMatchesMissing(t, "POST group member ref ("+refPair.kind+")", hiddenRec, missingRec,
+			refPair.hiddenRef, refPair.missingRef, agentsGroupA.ID, projectA.Name)
+
+		// POST /api/v1/projects/{bobProject}/members
+		hiddenRec = doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/projects/"+bobProject.ID+"/members", map[string]any{
+			"roleDefinitionId": viewerRole.ID,
+			"principalType":    "group",
+			"principalId":      refPair.hiddenRef,
+		})
+		missingRec = doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/projects/"+bobProject.ID+"/members", map[string]any{
+			"roleDefinitionId": viewerRole.ID,
+			"principalType":    "group",
+			"principalId":      refPair.missingRef,
+		})
+		require.Equal(t, http.StatusBadRequest, missingRec.Code)
+		assertResponseMatchesMissing(t, "POST project member ("+refPair.kind+")", hiddenRec, missingRec,
+			refPair.hiddenRef, refPair.missingRef, agentsGroupA.ID, projectA.Name)
+
+		// PUT /api/v1/projects/{bobProject}/members/principals/group/{ref}
+		hiddenRec = doRequestAsUser(t, srv, bob, http.MethodPut, "/api/v1/projects/"+bobProject.ID+"/members/principals/group/"+refPair.hiddenRef, map[string]any{
+			"roleDefinitionIds": []string{viewerRole.ID},
+		})
+		missingRec = doRequestAsUser(t, srv, bob, http.MethodPut, "/api/v1/projects/"+bobProject.ID+"/members/principals/group/"+refPair.missingRef, map[string]any{
+			"roleDefinitionIds": []string{viewerRole.ID},
+		})
+		require.Equal(t, http.StatusBadRequest, missingRec.Code)
+		assertResponseMatchesMissing(t, "PUT project member principal ("+refPair.kind+")", hiddenRec, missingRec,
+			refPair.hiddenRef, refPair.missingRef, agentsGroupA.ID, projectA.Name)
+
+		// DELETE /api/v1/projects/{bobProject}/members/principals/group/{ref}
+		hiddenRec = doRequestAsUser(t, srv, bob, http.MethodDelete, "/api/v1/projects/"+bobProject.ID+"/members/principals/group/"+refPair.hiddenRef, nil)
+		missingRec = doRequestAsUser(t, srv, bob, http.MethodDelete, "/api/v1/projects/"+bobProject.ID+"/members/principals/group/"+refPair.missingRef, nil)
+		require.Equal(t, http.StatusNotFound, missingRec.Code)
+		assertResponseMatchesMissing(t, "DELETE project member principal ("+refPair.kind+")", hiddenRec, missingRec,
+			"", "", agentsGroupA.ID, projectA.Name)
+
+		// POST /api/v1/admin/role-bindings
+		hiddenRec = doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/admin/role-bindings", map[string]any{
+			"roleDefinitionId": viewerRole.ID,
+			"principalType":    "group",
+			"principalId":      refPair.hiddenRef,
+			"scopeType":        "project",
+			"scopeId":          bobProject.ID,
+		})
+		missingRec = doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/admin/role-bindings", map[string]any{
+			"roleDefinitionId": viewerRole.ID,
+			"principalType":    "group",
+			"principalId":      refPair.missingRef,
+			"scopeType":        "project",
+			"scopeId":          bobProject.ID,
+		})
+		require.Equal(t, http.StatusBadRequest, missingRec.Code)
+		assertResponseMatchesMissing(t, "POST admin role-binding ("+refPair.kind+")", hiddenRec, missingRec,
+			refPair.hiddenRef, refPair.missingRef, agentsGroupA.ID, projectA.Name)
+	}
+
+	// Constrained hubAdmin excluding projectA cannot see agentsGroupA.
+	subjType := store.RoleBindingPrincipalUser
+	subjID := hubAdmin.ID
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 "exclude-project-a-agents",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &subjType,
+		SubjectPrincipalID:   &subjID,
+		ScopeType:            store.RoleScopeProject,
+		ScopeID:              projectA.ID,
+		MaximumPermissions:   []string{},
+		Purpose:              "test exclusion",
+		CreatedBy:            alice.ID,
+	})
+	require.NoError(t, err)
+
+	listRec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, "/api/v1/groups?groupType=project_agents&limit=100", nil)
+	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
+	var listResp ListGroupsResponse
+	require.NoError(t, json.NewDecoder(listRec.Body).Decode(&listResp))
+	assert.NotContains(t, listGroupIDsFromResponse(listResp), agentsGroupA.ID)
+
+	getRec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, "/api/v1/groups/"+agentsGroupA.ID, nil)
+	assert.Equal(t, http.StatusNotFound, getRec.Code)
+
+	// Agent identity in another project cannot see projectA's agents group.
+	agentIdent := &storedAgentIdentity{agent: agentB}
+	visible, err := srv.isGroupVisibleToCaller(ctx, agentIdent, agentsGroupA)
+	require.NoError(t, err)
+	assert.False(t, visible, "agent in projectB must not see projectA agents group")
+
+	// Store failure fails closed with 500 on project_agents group endpoints.
+	fault.Arm()
+	for _, path := range []string{
+		"/api/v1/groups?groupType=project_agents&limit=100",
+		"/api/v1/groups/" + agentsGroupA.ID,
+		"/api/v1/groups/" + agentsGroupA.ID + "/members",
+		"/api/v1/principals/group/" + agentsGroupA.ID,
+	} {
+		rec := doRequestAsUser(t, srv, bob, http.MethodGet, path, nil)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, "GET %s should fail closed with 500; body=%s", path, rec.Body.String())
+	}
+}
