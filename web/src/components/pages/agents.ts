@@ -105,6 +105,7 @@ import {
 import { replaceSearch } from '../../client/navigation.js';
 import '../shared/filter-box/filter-box.js';
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
+import { formatAgentWindowFilterCount } from './agent-filter-count.js';
 import {
   buildAgentValueSuggestions,
   canLiveAddAgent,
@@ -133,6 +134,7 @@ import {
   collectMissingAncestorIds,
   expandGraphMatchesWithAncestors,
   fetchMissingGraphAncestors,
+  isEmptyGraphQuery,
   type GraphFilterResult,
 } from './agent-graph-filter.js';
 import '../shared/messageability-indicator.js';
@@ -277,6 +279,10 @@ export class ScionPageAgents extends LitElement {
   /** The server `?q=` that the currently adopted local set (`this.agents`) was fetched with. */
   private loadedServerQ = '';
   private committedHasClientOnly = false;
+  private unfilteredTotal: number | null = null;
+  private unfilteredTotalApproximate = false;
+  /** True only when `this.agents` was fetched with no server `?q=` filter (including no `phase:`). */
+  private agentsIsUnfiltered = false;
 
   private get filterContext(): AgentFilterContext {
     return {
@@ -702,6 +708,10 @@ export class ScionPageAgents extends LitElement {
    * possibly stale.
    */
   private boundOnAgentCreated = (): void => {
+    if (this.unfilteredTotal !== null && !this.agentsIsUnfiltered) {
+      this.unfilteredTotal += 1;
+      this.requestUpdate();
+    }
     if (hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)) {
       this.agentWindow.markMembershipChanged();
     }
@@ -1003,6 +1013,11 @@ export class ScionPageAgents extends LitElement {
    * refresh then costs nothing (the phase changes arrive live).
    */
   private adoptCompleteSet(): void {
+    if (this.loadedServerQ === '') {
+      this.agentsIsUnfiltered = true;
+      this.unfilteredTotal = this.agents.length;
+      this.unfilteredTotalApproximate = false;
+    }
     this.agentWindow.adoptDrain({
       complete: true,
       capped: false,
@@ -1022,6 +1037,10 @@ export class ScionPageAgents extends LitElement {
     const detail = (e as CustomEvent<{ data: AgentsChangedDetail }>).detail.data;
     // Paged: the window applies the change to its page and member index.
     this.agentWindow.applyChanges(detail);
+    if (this.unfilteredTotal !== null && !this.agentsIsUnfiltered && detail.deleted.length > 0) {
+      this.unfilteredTotal = Math.max(0, this.unfilteredTotal - detail.deleted.length);
+      this.requestUpdate();
+    }
     if (this.agentWindow.state === 'paged') return;
     const merged = mergeChanged(this.agents, detail, {
       getAgent: (id) => stateManager.getAgent(id),
@@ -1039,6 +1058,15 @@ export class ScionPageAgents extends LitElement {
     });
     if (merged !== this.agents) {
       this.agents = merged;
+      if (this.agentsIsUnfiltered) {
+        if (this.agentWindow.incompleteReason === null) {
+          this.unfilteredTotal = merged.length;
+          this.unfilteredTotalApproximate = false;
+        } else if (this.agentWindow.incompleteReason === 'capped') {
+          this.unfilteredTotal = merged.length;
+          this.unfilteredTotalApproximate = true;
+        }
+      }
     } else if (this.hasGraphContextChange(detail)) {
       this.graphContextVersion++;
     }
@@ -1236,12 +1264,24 @@ export class ScionPageAgents extends LitElement {
           partial: false,
           isMember: (agent) => canLiveAddAgent(fq, agent, this.filterContext),
         }).agents;
+        if (serverQ === '') {
+          this.agentsIsUnfiltered = true;
+          this.unfilteredTotal = this.agents.length;
+          this.unfilteredTotalApproximate = false;
+        } else {
+          this.agentsIsUnfiltered = false;
+        }
         this.agentWindow.setSmall(epoch.sawResync);
         this.markCompleteSet(loadedQ);
       } else {
         // Paged: `this.agents` stays empty; stats and Stop-all read the
         // member index through the window.
         this.agents = [];
+        this.agentsIsUnfiltered = false;
+        if (serverQ === '') {
+          this.unfilteredTotal = data.totalCount ?? null;
+          this.unfilteredTotalApproximate = Boolean(data.totalCountApproximate);
+        }
         this.agentWindow.setPaged(this.seedPage(epoch, data), ticket.key);
       }
       return true;
@@ -1282,6 +1322,18 @@ export class ScionPageAgents extends LitElement {
     }
     this.loadedServerQ = drainQ;
     this.agents = result.agents;
+    if (drainQ === '') {
+      this.agentsIsUnfiltered = true;
+      if (result.complete && !result.capped && !result.error) {
+        this.unfilteredTotal = result.agents.length;
+        this.unfilteredTotalApproximate = false;
+      } else if (result.capped) {
+        this.unfilteredTotal = result.agents.length;
+        this.unfilteredTotalApproximate = true;
+      }
+    } else {
+      this.agentsIsUnfiltered = false;
+    }
     this.adoptScopeCapabilities(result.capabilities);
     this.agentWindow.adoptDrain(result);
     if (result.complete && !result.capped && !result.error) {
@@ -1781,6 +1833,7 @@ export class ScionPageAgents extends LitElement {
           .value=${this.filterQueryText}
           .notice=${this.filterNotice}
           .valueSuggestions=${this.agentValueSuggestions}
+          .resultCount=${this.getFilterResultCount()}
           placeholder="Filter agents… (try phase:running,error -label:tmp)"
           @filter-input=${this.handleFilterInput}
           @filter-commit=${this.handleFilterCommit}
@@ -1837,6 +1890,30 @@ export class ScionPageAgents extends LitElement {
   /** Whether a filter query is currently active. */
   private get hasActiveFilter(): boolean {
     return this.filterQueryText.trim() !== '' || this.committedServerQ !== '';
+  }
+
+  private get hasCommittedFilter(): boolean {
+    return (
+      this.committedServerQ !== '' ||
+      (this.committedFilterQuery !== null && !isEmptyGraphQuery(this.committedFilterQuery))
+    );
+  }
+
+  private getFilterResultCount(): string {
+    if (!this.hasCommittedFilter || this.loading || Boolean(this.error)) {
+      return '';
+    }
+    return formatAgentWindowFilterCount({
+      window: this.agentWindow,
+      agentsLength: this.agents.length,
+      agentsIsUnfiltered: this.agentsIsUnfiltered,
+      phaseOnlyServerFilter: !hasNonPhaseServerPredicate(
+        this.committedFilterQuery,
+        AGENTS_FILTER_SCHEMA
+      ),
+      unfilteredTotal: this.unfilteredTotal,
+      unfilteredTotalApproximate: this.unfilteredTotalApproximate,
+    });
   }
 
   private renderNoMatchingAgents(): TemplateResult {

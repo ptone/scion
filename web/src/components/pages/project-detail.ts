@@ -126,6 +126,7 @@ import { formatNumber } from '../../utils/format-number.js';
 import { replaceSearch } from '../../client/navigation.js';
 import '../shared/filter-box/filter-box.js';
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
+import { formatAgentWindowFilterCount } from './agent-filter-count.js';
 import {
   buildAgentValueSuggestions,
   canLiveAddAgent,
@@ -154,6 +155,7 @@ import {
   collectMissingAncestorIds,
   expandGraphMatchesWithAncestors,
   fetchMissingGraphAncestors,
+  isEmptyGraphQuery,
   type GraphFilterResult,
 } from './agent-graph-filter.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -217,6 +219,7 @@ interface SortedAgentsResponse {
   agents: Agent[];
   nextCursor?: string;
   totalCount: number;
+  totalCountApproximate?: boolean;
   complete?: boolean;
   sort?: string;
   dir?: string;
@@ -464,6 +467,12 @@ export class ScionPageProjectDetail extends LitElement {
   private serverQBeforeCommit = '';
   private filterQueryBeforeCommit: FilterQuery | null = null;
   private hasClientOnlyBeforeCommit = false;
+  private unfilteredTotal: number | null = null;
+  private unfilteredTotalApproximate = false;
+  /** True only when `this.agents` was fetched with no server `?q=` filter (including no `phase:`). */
+  private agentsIsUnfiltered = false;
+  @state()
+  private pendingFilterFetch = false;
 
   private get filterContext(): AgentFilterContext {
     return {
@@ -2175,6 +2184,9 @@ export class ScionPageProjectDetail extends LitElement {
     }
     const viewEpoch = this.viewEpoch;
     let adopted: boolean;
+    if (trigger === 'label-commit') {
+      this.pendingFilterFetch = true;
+    }
     this.beginLoadingIndicator();
     try {
       adopted =
@@ -2183,6 +2195,9 @@ export class ScionPageProjectDetail extends LitElement {
           : await this.drainProjectAgents(trigger);
     } finally {
       this.endLoadingIndicator();
+      if (trigger === 'label-commit') {
+        this.pendingFilterFetch = false;
+      }
     }
     if (adopted) {
       this.hasAgentsResult = true;
@@ -2294,6 +2309,13 @@ export class ScionPageProjectDetail extends LitElement {
         partial: false,
         isMember: (agent) => this.isProjectMember(agent),
       }).agents;
+      if (serverQ === '') {
+        this.agentsIsUnfiltered = true;
+        this.unfilteredTotal = this.agents.length;
+        this.unfilteredTotalApproximate = false;
+      } else {
+        this.agentsIsUnfiltered = false;
+      }
       if (!this.agentScopeCapabilities) {
         this.agentScopeCapabilities = this.agents.find((a) => a._capabilities)?._capabilities;
       }
@@ -2302,6 +2324,11 @@ export class ScionPageProjectDetail extends LitElement {
       // Paged: `this.agents` stays empty; stats and Stop-all read the
       // member index through `agentStats` instead.
       this.agents = [];
+      this.agentsIsUnfiltered = false;
+      if (serverQ === '') {
+        this.unfilteredTotal = data.totalCount;
+        this.unfilteredTotalApproximate = Boolean(data.totalCountApproximate);
+      }
       this.agentWindow.setPaged(this.seedPage(epoch, data), ticket.key);
     }
     return true;
@@ -2352,6 +2379,18 @@ export class ScionPageProjectDetail extends LitElement {
 
     this.loadedServerQ = drainQ;
     this.agents = result.agents;
+    if (drainQ === '') {
+      this.agentsIsUnfiltered = true;
+      if (result.complete && !result.capped && !result.error) {
+        this.unfilteredTotal = result.agents.length;
+        this.unfilteredTotalApproximate = false;
+      } else if (result.capped) {
+        this.unfilteredTotal = result.agents.length;
+        this.unfilteredTotalApproximate = true;
+      }
+    } else {
+      this.agentsIsUnfiltered = false;
+    }
     this.agentScopeCapabilities =
       result.capabilities ?? this.agents.find((a) => a._capabilities)?._capabilities;
     this.agentWindow.adoptDrain(result);
@@ -2503,6 +2542,7 @@ export class ScionPageProjectDetail extends LitElement {
       agents: seeded.agents,
       nextCursor: data.nextCursor,
       totalCount: data.totalCount,
+      totalCountApproximate: data.totalCountApproximate,
       stats: this.freshStats(data.stats),
       liveChanged: epoch.changedIds,
       liveUnknown: epoch.unknownChanges,
@@ -2921,6 +2961,36 @@ export class ScionPageProjectDetail extends LitElement {
     return this.filterQueryText.trim() !== '' || this.committedServerQ !== '';
   }
 
+  private get hasCommittedFilter(): boolean {
+    return (
+      this.committedServerQ !== '' ||
+      (this.committedFilterQuery !== null && !isEmptyGraphQuery(this.committedFilterQuery))
+    );
+  }
+
+  private getFilterResultCount(): string {
+    if (
+      !this.hasCommittedFilter ||
+      !this.hasAgentsResult ||
+      Boolean(this.agentsLoadError) ||
+      this.pendingFilterFetch
+    ) {
+      return '';
+    }
+    return formatAgentWindowFilterCount({
+      window: this.agentWindow,
+      agentsLength: this.agents.length,
+      agentsIsUnfiltered: this.agentsIsUnfiltered,
+      phaseOnlyServerFilter: !hasNonPhaseServerPredicate(
+        this.committedFilterQuery,
+        PROJECT_AGENTS_FILTER_SCHEMA
+      ),
+      unfilteredTotal: this.unfilteredTotal,
+      unfilteredTotalApproximate: this.unfilteredTotalApproximate,
+      fallbackTotal: typeof this.project?.agentCount === 'number' ? this.project.agentCount : null,
+    });
+  }
+
   private onToggleColumn(id: ProjectAgentColumnId): void {
     this.visibleColumnsLoaded = true;
     this.visibleColumns = toggleProjectAgentColumn(this.visibleColumns, id);
@@ -2995,6 +3065,7 @@ export class ScionPageProjectDetail extends LitElement {
           .value=${this.filterQueryText}
           .notice=${this.filterNotice}
           .valueSuggestions=${this.agentValueSuggestions}
+          .resultCount=${this.getFilterResultCount()}
           placeholder="Filter agents… (try phase:running,error -label:tmp)"
           @filter-input=${this.handleFilterInput}
           @filter-commit=${this.handleFilterCommit}

@@ -820,4 +820,50 @@ describe('<scion-filter-box>', () => {
     await el.updateComplete;
     expect(el.value).toBe('by:"Sam Taylor"');
   });
+
+  it('renders resultCount in a polite live region and collapses when empty', async () => {
+    const el = await mount();
+    const countEl = el.shadowRoot?.querySelector('.result-count') as HTMLElement | null;
+    expect(countEl).not.toBeNull();
+    expect(countEl?.getAttribute('aria-live')).toBe('polite');
+    expect(countEl?.getAttribute('aria-atomic')).toBe('true');
+    expect(countEl?.classList.contains('has-count')).toBe(false);
+    expect(countEl?.textContent?.trim()).toBe('');
+
+    el.resultCount = '12 of 84 agents';
+    await el.updateComplete;
+    expect(countEl?.classList.contains('has-count')).toBe(true);
+    expect(countEl?.textContent?.trim()).toBe('12 of 84 agents');
+
+    // Typing without committing does not clear or alter the host-owned resultCount.
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'phase:stopped';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    expect(countEl?.textContent?.trim()).toBe('12 of 84 agents');
+
+    el.resultCount = '';
+    await el.updateComplete;
+    expect(countEl?.classList.contains('has-count')).toBe(false);
+    expect(countEl?.textContent?.trim()).toBe('');
+  });
+
+  it('supports custom count content via the named count slot', async () => {
+    const el = await mount();
+    const span = document.createElement('span');
+    span.slot = 'count';
+    span.textContent = '3 matching';
+    el.appendChild(span);
+    await el.updateComplete;
+
+    const slot = el.shadowRoot?.querySelector('slot[name="count"]') as HTMLSlotElement | null;
+    expect(slot).not.toBeNull();
+    // HappyDOM may not always fire slotchange synchronously on append; trigger if needed.
+    slot?.dispatchEvent(new Event('slotchange'));
+    await el.updateComplete;
+
+    const countEl = el.shadowRoot?.querySelector('.result-count') as HTMLElement | null;
+    expect(countEl?.classList.contains('has-count')).toBe(true);
+    expect(slot?.assignedNodes({ flatten: true })).toContain(span);
+  });
 });

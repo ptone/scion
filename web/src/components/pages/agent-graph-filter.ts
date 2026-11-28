@@ -32,6 +32,8 @@ export interface GraphFilterResult {
   agents: Agent[];
   /** Ancestors included only as lineage context (ancestors(M) \ M). */
   contextIds: ReadonlySet<string>;
+  /** Number of directly matching agents (|M|, excluding lineage-only ancestors). */
+  matchCount: number;
   /** True when the query imposes at least one constraint. */
   hasActiveFilter: boolean;
 }
@@ -74,6 +76,7 @@ export function expandGraphMatchesWithAncestors(
     return {
       agents: allAgents as Agent[],
       contextIds: EMPTY_SET,
+      matchCount: allAgents.length,
       hasActiveFilter: false,
     };
   }
@@ -82,6 +85,7 @@ export function expandGraphMatchesWithAncestors(
     return {
       agents: [],
       contextIds: EMPTY_SET,
+      matchCount: 0,
       hasActiveFilter: true,
     };
   }
@@ -128,6 +132,7 @@ export function expandGraphMatchesWithAncestors(
   return {
     agents,
     contextIds,
+    matchCount: matched.size,
     hasActiveFilter: true,
   };
 }

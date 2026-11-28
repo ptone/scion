@@ -38,6 +38,7 @@ import '../shared/agent-tree-view.js';
 import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
 import '../shared/filter-box/filter-box.js';
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
+import { formatFilterResultCount } from '../shared/filter-box/filter-count.js';
 import {
   canonical,
   getViewSchema,
@@ -834,6 +835,38 @@ export class AgentGraphPage extends LitElement {
     return result;
   }
 
+  private getFilterResultCount(filtered: GraphFilterResult): string {
+    if (
+      !filtered.hasActiveFilter ||
+      this.loading ||
+      Boolean(this.error) ||
+      this.memberScope === null
+    ) {
+      return '';
+    }
+    const incomplete = this.incomplete;
+    const isIncomplete = incomplete !== null && !incomplete.shownComplete;
+    let total: number | null = null;
+    let totalApproximate = false;
+
+    if (!isIncomplete) {
+      total = this.agents.length;
+    } else if (incomplete.reason === 'capped') {
+      total = this.agents.length;
+      totalApproximate = true;
+    }
+
+    return formatFilterResultCount({
+      active: true,
+      matched: filtered.matchCount,
+      matchedApproximate: isIncomplete,
+      total,
+      totalApproximate,
+      singular: 'agent',
+      plural: 'agents',
+    });
+  }
+
   override render() {
     const filtered = this.getFilteredGraph();
     const shownAgents = filtered.agents;
@@ -842,6 +875,7 @@ export class AgentGraphPage extends LitElement {
       filtered.hasActiveFilter && shownAgents.length === 0 && !this.loading && !this.error
     );
     const treeFilterKey = this.activeFilterQuery ? canonical(this.activeFilterQuery) : '';
+    const filterResultCount = this.getFilterResultCount(filtered);
 
     return html`
       <div style="padding: var(--sl-spacing-large, 1.25rem);">
@@ -857,6 +891,7 @@ export class AgentGraphPage extends LitElement {
               view="graph"
               .value=${this.filterQueryText}
               .valueSuggestions=${this.valueSuggestions}
+              .resultCount=${filterResultCount}
               placeholder="Filter graph… (try phase:running harness:antigravity)"
               @filter-input=${this.onFilterInput}
               @filter-commit=${this.onFilterCommit}
