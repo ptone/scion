@@ -15,9 +15,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -266,5 +268,165 @@ func TestHubResolvedGHSkill_RejectedHubCredentialReportsSourceWithoutToken(t *te
 	}
 	if strings.Contains(err.Error(), projectToken) {
 		t.Fatal("error text leaked DownloadToken")
+	}
+}
+
+// TestHubResolvedGHSkill_DownloadsWithBrokerGHConventionPAT verifies R1 (fix round 4):
+// when the Hub resolves a private gh:// skill using a project PAT (GH_{OWNER}__{REPO}
+// or GH_{OWNER}) and omits DownloadToken, the broker resolves the download credential
+// from the skill URI via its GH_* > GITHUB_TOKEN chain rather than falling back to
+// GITHUB_TOKEN alone. When DownloadToken IS present (App-only), it still takes
+// precedence. Tokens are never logged or persisted.
+func TestHubResolvedGHSkill_DownloadsWithBrokerGHConventionPAT(t *testing.T) {
+	const (
+		acmePAT       = "ghp_acme_owner_pat_secret_value"
+		otherOwnerPAT = "ghp_other_owner_default_pat_secret"
+		appToken      = "ghs_project_app_installation_token"
+		skillBody     = "# Private PAT-resolved skill\n"
+		uri           = "gh://acme/private-repo/my-skill@main"
+	)
+
+	blobHash := transfer.GitBlobHashBytes([]byte(skillBody))
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{{Path: "SKILL.md", Hash: blobHash}})
+
+	captureLogs := func(t *testing.T) *bytes.Buffer {
+		t.Helper()
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+		return &buf
+	}
+
+	assertNoTokenLeaks := func(t *testing.T, logs string, record *SkillResolutionRecord) {
+		t.Helper()
+		recordJSON, err := json.Marshal(record)
+		if err != nil {
+			t.Fatalf("json.Marshal(record): %v", err)
+		}
+		for _, tok := range []string{acmePAT, otherOwnerPAT, appToken} {
+			if strings.Contains(logs, tok) {
+				t.Fatalf("slog output leaked token %q", tok)
+			}
+			if strings.Contains(string(recordJSON), tok) {
+				t.Fatalf("SkillResolutionRecord leaked token %q", tok)
+			}
+		}
+	}
+
+	hubResp := func(dlToken string) *hubclient.ResolveSkillsResponse {
+		return &hubclient.ResolveSkillsResponse{
+			Resolved: []hubclient.ResolvedSkill{{
+				URI:             uri,
+				Name:            "my-skill",
+				ResolvedVersion: "0123456789ab",
+				ContentHash:     bundleHash,
+				DownloadToken:   dlToken,
+				Files: []hubclient.DownloadURLInfo{{
+					Path: "SKILL.md",
+					URL:  fakeRawFileURL,
+					Hash: blobHash,
+					Size: int64(len(skillBody)),
+					Mode: "0644",
+				}},
+			}},
+		}
+	}
+
+	for _, tc := range []struct {
+		name          string
+		downloadToken string
+		defaultToken  string
+		provisionCred map[string]string
+		preResolved   bool
+		wantAuthToken string
+	}{
+		{
+			name:          "gh_acme_only_without_github_token",
+			downloadToken: "",
+			defaultToken:  "",
+			provisionCred: map[string]string{"GH_ACME": acmePAT},
+			wantAuthToken: acmePAT,
+		},
+		{
+			name:          "gh_acme_wins_over_other_owner_github_token",
+			downloadToken: "",
+			defaultToken:  otherOwnerPAT,
+			provisionCred: map[string]string{"GH_ACME": acmePAT},
+			wantAuthToken: acmePAT,
+		},
+		{
+			name:          "app_plus_gh_acme_pre_resolved_no_download_token",
+			downloadToken: "",
+			defaultToken:  otherOwnerPAT,
+			provisionCred: map[string]string{"GH_ACME": acmePAT},
+			preResolved:   true,
+			wantAuthToken: acmePAT,
+		},
+		{
+			name:          "app_only_download_token_takes_precedence",
+			downloadToken: appToken,
+			defaultToken:  otherOwnerPAT,
+			provisionCred: map[string]string{"GH_ACME": acmePAT},
+			wantAuthToken: appToken,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logBuf := captureLogs(t)
+
+			fake := installGitHubRawFake(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer "+tc.wantAuthToken {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte(skillBody))
+			})
+
+			var resolver SkillResolver
+			if tc.preResolved {
+				resolver = NewPreResolvedSkillResolver(hubResp(tc.downloadToken), nil, "")
+			} else {
+				resolver = NewHubSkillResolver(&mockSkillService{resolveResp: hubResp(tc.downloadToken)})
+			}
+
+			res, err := resolver.Resolve(context.Background(), []api.SkillReference{{URI: uri, Scope: "project"}}, ResolveOpts{ProjectID: "proj-1"})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if len(res.Resolved) != 1 {
+				t.Fatalf("got %d resolved skills, want 1", len(res.Resolved))
+			}
+
+			ghResolver := NewGitHubSkillResolverWithCredentials(tc.defaultToken, tc.provisionCred, nil)
+			ctx := ghResolver.WithInstallCredentials(context.Background(), tc.defaultToken)
+
+			agentHome := t.TempDir()
+			skillsDest := filepath.Join(agentHome, "skills")
+			record, skipped, err := installResolvedSkills(ctx, res.Resolved, skillsDest, agentHome)
+			if err != nil {
+				t.Fatalf("installResolvedSkills: %v", err)
+			}
+			if len(skipped) != 0 {
+				t.Fatalf("unexpected skipped skills: %+v", skipped)
+			}
+
+			reqs := fake.requests()
+			if len(reqs) != 1 {
+				t.Fatalf("requests = %d, want 1", len(reqs))
+			}
+			if reqs[0].auth != "Bearer "+tc.wantAuthToken {
+				t.Fatalf("Authorization = %q, want %q", reqs[0].auth, "Bearer "+tc.wantAuthToken)
+			}
+
+			got, err := os.ReadFile(filepath.Join(skillsDest, "my-skill", "SKILL.md"))
+			if err != nil {
+				t.Fatalf("read installed SKILL.md: %v", err)
+			}
+			if string(got) != skillBody {
+				t.Fatalf("SKILL.md = %q, want %q", got, skillBody)
+			}
+
+			assertNoTokenLeaks(t, logBuf.String(), record)
+		})
 	}
 }

@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -83,20 +84,31 @@ func hubResolveResponseToResult(refs []api.SkillReference, resp *hubclient.Resol
 				Mode: f.Mode,
 			}
 		}
+		var ghCredRef string
+		if strings.HasPrefix(rs.URI, "gh://") {
+			// When the Hub resolved a gh:// skill with a project PAT rather
+			// than a GitHub App installation token, it omits DownloadToken so
+			// static PATs are never transmitted over the resolve API. Record
+			// the URI so gitHubDownloadToken can look up the matching
+			// GH_{OWNER}__{REPO} > GH_{OWNER} > GITHUB_TOKEN credential on the
+			// broker; DownloadToken still takes precedence when present.
+			ghCredRef = rs.URI
+		}
 		result.Resolved = append(result.Resolved, ResolvedSkill{
-			Name:               rs.Name,
-			URI:                rs.URI,
-			As:                 ref.As,
-			Version:            rs.ResolvedVersion,
-			Hash:               rs.ContentHash,
-			HashV2:             rs.ContentHashV2,
-			Scope:              ref.Scope,
-			Files:              files,
-			Deprecated:         rs.Deprecated,
-			DeprecationMessage: rs.DeprecationMessage,
-			ReplacementURI:     rs.ReplacementURI,
-			Optional:           ref.Optional,
-			downloadToken:      rs.DownloadToken,
+			Name:                rs.Name,
+			URI:                 rs.URI,
+			As:                  ref.As,
+			Version:             rs.ResolvedVersion,
+			Hash:                rs.ContentHash,
+			HashV2:              rs.ContentHashV2,
+			Scope:               ref.Scope,
+			Files:               files,
+			Deprecated:          rs.Deprecated,
+			DeprecationMessage:  rs.DeprecationMessage,
+			ReplacementURI:      rs.ReplacementURI,
+			Optional:            ref.Optional,
+			downloadToken:       rs.DownloadToken,
+			githubCredentialRef: ghCredRef,
 		})
 	}
 

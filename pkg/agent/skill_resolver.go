@@ -431,10 +431,12 @@ func (c gitHubCredential) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f,
 // gitHubDownloadToken returns the credential installOneSkill presents for
 // skill's raw downloads:
 //  1. The resolving credential carried from the Hub (skill.downloadToken),
-//     when the Hub resolved a gh:// skill with a project credential
-//     (ptone/scion#5028).
-//  2. The credential the local GitHub resolver uses for skill.githubCredentialRef,
-//     when the skill came from that resolver's on-disk cache without content.
+//     when the Hub resolved a gh:// skill with a read-only GitHub App
+//     installation token (ptone/scion#5028).
+//  2. The credential the local GitHub resolver uses for skill.githubCredentialRef
+//     (GH_{OWNER}__{REPO} > GH_{OWNER} > GITHUB_TOKEN), when the skill came
+//     from the local resolver's on-disk cache without content or was resolved
+//     by the Hub without a DownloadToken (e.g. via a project PAT).
 //  3. Otherwise the context's default GitHub token.
 //
 // downloadSkillFile only ever sends any of these to GitHub hosts.
