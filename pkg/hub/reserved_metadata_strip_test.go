@@ -51,6 +51,7 @@ var stripExemptions = map[stripSiteKey]string{
 	{"agent_dm_operation.go", "agentDMAutoWakeItem"}:                  "dispatches the message ExecuteAgentDM already stripped (step 7b) before queuing it behind the auto-wake",
 	{"auto_wake.go", "chatSecondaryAutoWakeItemWithLog"}:              "dispatches the secondary copy sendAgentRouted / processMentions already stripped (mentionMsg.Metadata) before queuing it behind the auto-wake",
 	{"message_action_dispatch.go", "actionResponseAutoWakeItem"}:      "dispatches the action response dispatchActionResponse already stripped before queuing it behind the auto-wake",
+	{"token_budget_breach.go", "sendSuspendNotices"}:                  "hub-authored token budget exhaustion grace-period notice; plain string with nil StructuredMessage and no client metadata",
 }
 
 // TestReservedKeyStripCoverage requires every dispatchWithBrokerRetry /

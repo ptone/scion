@@ -37,6 +37,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -51,20 +52,23 @@ const (
 	maxBudgetEvalCASRetries = 16
 )
 
-// BudgetThresholdCrossing describes a monotonic state transition persisted via
-// CAS in usage_budget_state (e.g. "" -> warn, ok -> warn, warn -> exhausted,
-// "" -> exhausted). Consumed by P3.2 breach side effects (notifications,
-// suspend sweep, analytics, metrics) via BudgetThresholdHook.
+// BudgetThresholdCrossing describes a monotonic state or threshold transition
+// persisted via CAS in usage_budget_state (e.g. "" -> warn at 50%, warn 50% ->
+// 80%, warn -> exhausted at 100%, or "" -> exhausted carrying all crossed bits).
+// Consumed by P3.2 breach side effects (notifications, suspend sweep, analytics,
+// metrics) via BudgetThresholdHook.
 type BudgetThresholdCrossing struct {
+	StateID        string
 	LimitName      string
 	LimitDefID     string
-	ScopeKind      string // "project" | "user" | "user_project"
+	ScopeKind      string // "project" | "user" | "user_project" | "group"
 	ScopeID        string
 	ProjectScopeID string
 	WindowStartUTC time.Time
 	WindowEndUTC   time.Time
 	PrevState      string // "" when newly created, else "ok" | "warn" | "exhausted"
 	NewState       string // "warn" | "exhausted"
+	CrossedBits    int64  // bitmask of newly crossed thresholds (UsageBudgetThresholdBit{50,80,100})
 	Consumed       int64
 	Cap            int64
 	TokenAction    string // resolved effective action: "pause_new" | "suspend_and_pause" | "notify_only"
@@ -279,6 +283,68 @@ func maxBudgetState(a, b string) string {
 		return b
 	}
 	return a
+}
+
+// budgetThresholdBitsForRatio returns the bitmask of thresholds (50%, 80%, 100%)
+// currently met by consumed/capVal.
+func budgetThresholdBitsForRatio(consumed, capVal int64) int64 {
+	if capVal <= 0 {
+		return 0
+	}
+	var bits int64
+	if exceedsPercent(consumed, capVal, 50) {
+		bits |= store.UsageBudgetThresholdBit50
+	}
+	if exceedsPercent(consumed, capVal, 80) {
+		bits |= store.UsageBudgetThresholdBit80
+	}
+	if consumed >= capVal {
+		bits |= store.UsageBudgetThresholdBit100
+	}
+	return bits
+}
+
+// budgetCrossedThresholdBits computes the newly crossed threshold bitmask for a
+// winning create or CAS transition from (prevState, prevConsumed, prevCap) to
+// (nextState, nextConsumed, nextCap). Returns 0 when an override is active,
+// when nextState is not warn/exhausted, or when no new threshold was crossed.
+func budgetCrossedThresholdBits(
+	prevState string,
+	prevConsumed, prevCap int64,
+	nextState string,
+	nextConsumed, nextCap int64,
+	overrideActive bool,
+) int64 {
+	if overrideActive {
+		return 0
+	}
+	if nextState != store.UsageBudgetStateWarn && nextState != store.UsageBudgetStateExhausted {
+		return 0
+	}
+	nextBits := budgetThresholdBitsForRatio(nextConsumed, nextCap)
+	switch nextState {
+	case store.UsageBudgetStateExhausted:
+		nextBits |= store.UsageBudgetThresholdBit50 | store.UsageBudgetThresholdBit80 | store.UsageBudgetThresholdBit100
+	case store.UsageBudgetStateWarn:
+		// Warn state cannot cross 100%; ensure 50% bit is present if warn was entered.
+		nextBits &^= store.UsageBudgetThresholdBit100
+		if nextBits == 0 {
+			nextBits = store.UsageBudgetThresholdBit50
+		}
+	}
+
+	var prevBits int64
+	switch prevState {
+	case "", store.UsageBudgetStateOK:
+		prevBits = 0
+	case store.UsageBudgetStateExhausted:
+		prevBits = store.UsageBudgetThresholdBit50 | store.UsageBudgetThresholdBit80 | store.UsageBudgetThresholdBit100
+	default: // warn
+		prevBits = budgetThresholdBitsForRatio(prevConsumed, prevCap)
+		prevBits |= store.UsageBudgetThresholdBit50
+		prevBits &^= store.UsageBudgetThresholdBit100
+	}
+	return nextBits &^ prevBits
 }
 
 type budgetEvalSpec struct {
@@ -880,8 +946,9 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 				return nil, "", fmt.Errorf("create usage budget state: %w", createErr)
 			}
 			// Fire threshold hook strictly after successful create (outside any tx).
-			if computedState == store.UsageBudgetStateWarn || computedState == store.UsageBudgetStateExhausted {
+			if crossed := budgetCrossedThresholdBits("", 0, 0, computedState, created.ConsumedAtEval, created.CapAtEval, false); crossed != 0 {
 				e.fireThresholdHook(ctx, BudgetThresholdCrossing{
+					StateID:        created.ID,
 					LimitName:      spec.limitName,
 					LimitDefID:     def.ID,
 					ScopeKind:      spec.scopeKind,
@@ -891,6 +958,7 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 					WindowEndUTC:   created.WindowEndUTC,
 					PrevState:      "",
 					NewState:       computedState,
+					CrossedBits:    crossed,
 					Consumed:       created.ConsumedAtEval,
 					Cap:            created.CapAtEval,
 					TokenAction:    action,
@@ -904,8 +972,9 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 		// While an admin override is active (override_until > evaluator clock),
 		// do not re-raise state above existing.State (ok); state resumes rising
 		// once override_until elapses.
+		overrideActive := existing.OverrideUntil != nil && existing.OverrideUntil.After(e.now())
 		var nextState string
-		if existing.OverrideUntil != nil && existing.OverrideUntil.After(e.now()) {
+		if overrideActive {
 			nextState = existing.State
 		} else {
 			nextState = maxBudgetState(existing.State, computedState)
@@ -933,10 +1002,10 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 		}
 
 		// Fire threshold hook strictly after successful CAS and only on an
-		// upward state crossing (ok->warn, ok->exhausted, warn->exhausted).
-		if budgetStateRank(nextState) > budgetStateRank(existing.State) &&
-			(nextState == store.UsageBudgetStateWarn || nextState == store.UsageBudgetStateExhausted) {
+		// upward threshold crossing (50%, 80%, 100%).
+		if crossed := budgetCrossedThresholdBits(existing.State, existing.ConsumedAtEval, existing.CapAtEval, nextState, swapped.ConsumedAtEval, swapped.CapAtEval, overrideActive); crossed != 0 {
 			e.fireThresholdHook(ctx, BudgetThresholdCrossing{
+				StateID:        swapped.ID,
 				LimitName:      spec.limitName,
 				LimitDefID:     def.ID,
 				ScopeKind:      spec.scopeKind,
@@ -946,6 +1015,7 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 				WindowEndUTC:   swapped.WindowEndUTC,
 				PrevState:      existing.State,
 				NewState:       nextState,
+				CrossedBits:    crossed,
 				Consumed:       swapped.ConsumedAtEval,
 				Cap:            swapped.CapAtEval,
 				TokenAction:    action,
@@ -988,6 +1058,14 @@ func (s *Server) TokenBudgetEvaluator() *TokenBudgetEvaluator {
 			},
 		)
 		eval.SetPooledGroupResolver(s.pooledGroupResolver)
+		if s.budgetBreachHandler == nil {
+			var q durablequeue.Queue
+			if s.durableQueue != nil {
+				q = s.durableQueue
+			}
+			s.budgetBreachHandler = NewBudgetBreachHandler(s, q, slog.Default())
+		}
+		eval.SetThresholdHook(s.budgetBreachHandler.OnThresholdCrossing)
 		s.tokenBudgetEvaluator = eval
 	}
 	return s.tokenBudgetEvaluator

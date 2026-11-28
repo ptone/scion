@@ -44,6 +44,12 @@ const EnvHubUsageOTelCardinality = "SCION_HUB_USAGE_OTEL_CARDINALITY"
 // must aggregate across service.instance.id using max (not sum).
 const MetricUsageMeterStale = "scion.usage.meter_stale"
 
+// MetricHubBudgetState is the observable gauge reporting the count of
+// open-window usage_budget_state rows per {scope_kind, limit, state} (D11).
+// Every Hub replica reports the same value from the shared database, so
+// dashboards must aggregate across service.instance.id using max (not sum).
+const MetricHubBudgetState = "scion_hub_budget_state"
+
 const (
 	defaultMeterStaleCacheTTL     = 30 * time.Second
 	defaultMeterStaleQueryTimeout = 5 * time.Second
@@ -103,17 +109,25 @@ type staleMeterCounter interface {
 	CountStaleMetersByProject(ctx context.Context, staleBefore time.Time) (map[string]int64, error)
 }
 
+// budgetStateCounter is the narrow store surface required to compute
+// scion_hub_budget_state{scope_kind,limit,state}.
+type budgetStateCounter interface {
+	CountOpenUsageBudgetStates(ctx context.Context, activeAt time.Time) ([]store.UsageBudgetStateCount, error)
+}
+
 // UsageOTelOption configures NewUsageOTelMetrics.
 type UsageOTelOption func(*usageOTelConfig)
 
 type usageOTelConfig struct {
-	cardinality UsageOTelCardinality
-	hasSink     bool
-	staleStore  staleMeterCounter
-	enabledFn   func() bool
-	cacheTTL    time.Duration
-	zeroHold    time.Duration
-	now         func() time.Time
+	cardinality      UsageOTelCardinality
+	hasSink          bool
+	staleStore       staleMeterCounter
+	budgetStore      budgetStateCounter
+	enabledFn        func() bool
+	budgetsEnabledFn func() bool
+	cacheTTL         time.Duration
+	zeroHold         time.Duration
+	now              func() time.Time
 }
 
 // WithUsageOTelCardinality sets the attribution label cardinality mode.
@@ -151,30 +165,62 @@ func WithUsageOTelEnabled(fn func() bool) UsageOTelOption {
 	}
 }
 
+// WithUsageOTelBudgetStore wires the store used to compute the
+// scion_hub_budget_state{scope_kind,limit,state} observable gauge (D11).
+func WithUsageOTelBudgetStore(st budgetStateCounter) UsageOTelOption {
+	return func(cfg *usageOTelConfig) {
+		cfg.budgetStore = st
+	}
+}
+
+// WithUsageOTelBudgetsEnabled gates the scion_hub_budget_state observable gauge
+// callback on tokenomics.usage_ledger && tokenomics.token_budgets. When fn
+// returns false, the callback skips DB queries and records no observations.
+func WithUsageOTelBudgetsEnabled(fn func() bool) UsageOTelOption {
+	return func(cfg *usageOTelConfig) {
+		cfg.budgetsEnabledFn = fn
+	}
+}
+
+type budgetStateGaugeKey struct {
+	scopeKind string
+	limit     string
+	state     string
+}
+
 // UsageOTelMetrics re-emits canonical Track 1 usage counters
 // (gen_ai.api.calls, scion.usage.tokens) from committed usage_events rows and
-// exposes the scion.usage.meter_stale{project} observable gauge on the Hub's
-// MeterProvider (Tokenomics design §4.1 item 2).
+// exposes the scion.usage.meter_stale{project} and
+// scion_hub_budget_state{scope_kind,limit,state} observable gauges on the Hub's
+// MeterProvider (Tokenomics design §4.1 item 2, D11).
 type UsageOTelMetrics struct {
 	apiCalls    metric.Int64Counter
 	usageTokens metric.Int64Counter
 	meterStale  metric.Int64ObservableGauge
+	budgetState metric.Int64ObservableGauge
 	reg         metric.Registration
+	budgetReg   metric.Registration
 
-	cardinality UsageOTelCardinality
-	hasSink     bool
-	enabledFn   func() bool
+	cardinality      UsageOTelCardinality
+	hasSink          bool
+	enabledFn        func() bool
+	budgetsEnabledFn func() bool
 
-	staleStore staleMeterCounter
-	cacheTTL   time.Duration
-	zeroHold   time.Duration
-	now        func() time.Time
+	staleStore  staleMeterCounter
+	budgetStore budgetStateCounter
+	cacheTTL    time.Duration
+	zeroHold    time.Duration
+	now         func() time.Time
 
 	staleMu        sync.Mutex
 	staleFetchedAt time.Time
 	staleCache     map[string]int64
 	staleProjects  map[string]struct{}
 	recoveredUntil map[string]time.Time
+
+	budgetMu        sync.Mutex
+	budgetFetchedAt time.Time
+	budgetCache     map[budgetStateGaugeKey]int64
 }
 
 // NewUsageOTelMetrics registers the canonical usage counters and optional
@@ -215,17 +261,19 @@ func NewUsageOTelMetrics(mp metric.MeterProvider, opts ...UsageOTelOption) (*Usa
 	}
 
 	u := &UsageOTelMetrics{
-		apiCalls:       apiCalls,
-		usageTokens:    usageTokens,
-		cardinality:    cfg.cardinality,
-		hasSink:        cfg.hasSink,
-		enabledFn:      cfg.enabledFn,
-		staleStore:     cfg.staleStore,
-		cacheTTL:       cfg.cacheTTL,
-		zeroHold:       cfg.zeroHold,
-		now:            cfg.now,
-		staleProjects:  make(map[string]struct{}),
-		recoveredUntil: make(map[string]time.Time),
+		apiCalls:         apiCalls,
+		usageTokens:      usageTokens,
+		cardinality:      cfg.cardinality,
+		hasSink:          cfg.hasSink,
+		enabledFn:        cfg.enabledFn,
+		budgetsEnabledFn: cfg.budgetsEnabledFn,
+		staleStore:       cfg.staleStore,
+		budgetStore:      cfg.budgetStore,
+		cacheTTL:         cfg.cacheTTL,
+		zeroHold:         cfg.zeroHold,
+		now:              cfg.now,
+		staleProjects:    make(map[string]struct{}),
+		recoveredUntil:   make(map[string]time.Time),
 	}
 
 	if cfg.staleStore != nil {
@@ -242,6 +290,28 @@ func NewUsageOTelMetrics(mp metric.MeterProvider, opts ...UsageOTelOption) (*Usa
 		}
 		u.meterStale = gauge
 		u.reg = reg
+	}
+
+	if cfg.budgetStore != nil {
+		bg, err := m.Int64ObservableGauge(MetricHubBudgetState,
+			metric.WithUnit("{budget}"),
+			metric.WithDescription("Count of open-window raw-token usage budget states per scope_kind, limit, and state (take max across replicas)"),
+		)
+		if err != nil {
+			if u.reg != nil {
+				_ = u.reg.Unregister()
+			}
+			return nil, fmt.Errorf("creating %s gauge: %w", MetricHubBudgetState, err)
+		}
+		breg, err := m.RegisterCallback(u.observeBudgetStates, bg)
+		if err != nil {
+			if u.reg != nil {
+				_ = u.reg.Unregister()
+			}
+			return nil, fmt.Errorf("registering %s callback: %w", MetricHubBudgetState, err)
+		}
+		u.budgetState = bg
+		u.budgetReg = breg
 	}
 
 	return u, nil
@@ -263,10 +333,21 @@ func (u *UsageOTelMetrics) Cardinality() UsageOTelCardinality {
 
 // Close unregisters any observable gauge callbacks. Safe on nil receiver.
 func (u *UsageOTelMetrics) Close() error {
-	if u == nil || u.reg == nil {
+	if u == nil {
 		return nil
 	}
-	return u.reg.Unregister()
+	var firstErr error
+	if u.reg != nil {
+		if err := u.reg.Unregister(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if u.budgetReg != nil {
+		if err := u.budgetReg.Unregister(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // RecordCommittedEvents increments gen_ai.api.calls and scion.usage.tokens for
@@ -448,17 +529,87 @@ func copyInt64Map(src map[string]int64) map[string]int64 {
 	return dst
 }
 
-// RegisterUsageOTelMetrics constructs and wires UsageOTelMetrics on mp using
-// s.store for scion.usage.meter_stale computation, gated by
-// tokenomics.usage_ledger (D2).
-func (s *Server) RegisterUsageOTelMetrics(mp metric.MeterProvider, opts ...UsageOTelOption) error {
-	allOpts := make([]UsageOTelOption, 0, len(opts)+2)
-	if s.store != nil {
-		allOpts = append(allOpts, WithUsageOTelStaleStore(s.store))
+func (u *UsageOTelMetrics) observeBudgetStates(ctx context.Context, obs metric.Observer) error {
+	if u == nil || u.budgetStore == nil || u.budgetState == nil {
+		return nil
 	}
-	allOpts = append(allOpts, WithUsageOTelEnabled(func() bool {
-		return s.experimentEnabled(experiments.TokenomicsUsageLedger)
-	}))
+	if u.budgetsEnabledFn != nil && !u.budgetsEnabledFn() {
+		return nil
+	}
+
+	counts := u.cachedBudgetStateCounts(ctx)
+	for key, count := range counts {
+		obs.ObserveInt64(u.budgetState, count, metric.WithAttributes(
+			attribute.String("scope_kind", key.scopeKind),
+			attribute.String("limit", key.limit),
+			attribute.String("state", key.state),
+		))
+	}
+	return nil
+}
+
+func (u *UsageOTelMetrics) cachedBudgetStateCounts(ctx context.Context) map[budgetStateGaugeKey]int64 {
+	u.budgetMu.Lock()
+	defer u.budgetMu.Unlock()
+
+	now := u.now().UTC()
+	if u.budgetCache != nil && (u.cacheTTL <= 0 || now.Sub(u.budgetFetchedAt) < u.cacheTTL) {
+		return copyBudgetStateGaugeMap(u.budgetCache)
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, defaultMeterStaleQueryTimeout)
+	defer cancel()
+
+	rows, err := u.budgetStore.CountOpenUsageBudgetStates(queryCtx, now)
+	if err != nil {
+		slog.Warn("hub usage OTel: failed to query open usage budget states", "error", err)
+		return copyBudgetStateGaugeMap(u.budgetCache)
+	}
+
+	snapshot := make(map[budgetStateGaugeKey]int64, len(rows))
+	for _, r := range rows {
+		snapshot[budgetStateGaugeKey{
+			scopeKind: r.ScopeKind,
+			limit:     r.LimitName,
+			state:     r.State,
+		}] = r.Count
+	}
+	u.budgetCache = snapshot
+	u.budgetFetchedAt = now
+	return copyBudgetStateGaugeMap(snapshot)
+}
+
+func copyBudgetStateGaugeMap(src map[budgetStateGaugeKey]int64) map[budgetStateGaugeKey]int64 {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[budgetStateGaugeKey]int64, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+// RegisterUsageOTelMetrics constructs and wires UsageOTelMetrics on mp using
+// s.store for scion.usage.meter_stale and scion_hub_budget_state computation,
+// gated by tokenomics.usage_ledger and tokenomics.token_budgets.
+func (s *Server) RegisterUsageOTelMetrics(mp metric.MeterProvider, opts ...UsageOTelOption) error {
+	allOpts := make([]UsageOTelOption, 0, len(opts)+4)
+	if s.store != nil {
+		allOpts = append(allOpts,
+			WithUsageOTelStaleStore(s.store),
+			WithUsageOTelBudgetStore(s.store),
+		)
+	}
+	allOpts = append(allOpts,
+		WithUsageOTelEnabled(func() bool {
+			return s.experimentEnabled(experiments.TokenomicsUsageLedger)
+		}),
+		WithUsageOTelBudgetsEnabled(func() bool {
+			return s.experimentEnabled(experiments.TokenomicsUsageLedger) &&
+				s.experimentEnabled(experiments.TokenomicsTokenBudgets)
+		}),
+	)
 	allOpts = append(allOpts, opts...)
 	m, err := NewUsageOTelMetrics(mp, allOpts...)
 	if err != nil {

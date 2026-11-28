@@ -3002,6 +3002,10 @@ const (
 	// ResourceType is NotificationResourceTrigger and ResourceID is the
 	// trigger UUID.
 	NotificationKindTriggerFireFailed = "trigger_fire_failed"
+	// NotificationKindBudgetThreshold: a raw-token usage budget crossed a soft
+	// (50%, 80%) or hard (100%) threshold. ResourceType is
+	// NotificationResourceBudget and ResourceID is the usage_budget_state UUID.
+	NotificationKindBudgetThreshold = "budget_threshold"
 )
 
 // Notification.ResourceType values.
@@ -3015,6 +3019,8 @@ const (
 	NotificationResourceDecisions = "decisions"
 	// NotificationResourceTrigger: ResourceID is a trigger id.
 	NotificationResourceTrigger = "trigger"
+	// NotificationResourceBudget: ResourceID is a usage_budget_state UUID.
+	NotificationResourceBudget = "usage_budget"
 )
 
 // Notification.Status values of NotificationKindArtifactGrant rows.
@@ -3046,6 +3052,13 @@ const NotificationStatusDecisionsWaiting = "DECISIONS_WAITING"
 // NotificationStatusTriggerFireFailed is the Status of a
 // NotificationKindTriggerFireFailed row (Stage 2 §10).
 const NotificationStatusTriggerFireFailed = "TRIGGER_FIRE_FAILED"
+
+// Notification.Status values of NotificationKindBudgetThreshold rows.
+const (
+	NotificationStatusBudgetWarn50    = "BUDGET_WARN_50"
+	NotificationStatusBudgetWarn80    = "BUDGET_WARN_80"
+	NotificationStatusBudgetExhausted = "BUDGET_EXHAUSTED"
+)
 
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.

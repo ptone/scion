@@ -3383,6 +3383,14 @@ type Server struct {
 	// ingest commits (token_budget_evaluator.go).
 	tokenBudgetEvaluator *TokenBudgetEvaluator
 
+	// budgetBreachHandler handles P3.2 breach side effects (notifications,
+	// suspend_and_pause sweep, usage.budget analytics) asynchronously outside
+	// the ingest hot path (token_budget_breach.go).
+	budgetBreachHandler  *BudgetBreachHandler
+	budgetSuspendDrainer *durablequeue.Drainer
+	budgetSuspendCancel  context.CancelFunc
+	budgetSuspendDone    chan struct{}
+
 	// pooledGroupResolver caches effective pooled-budget group memberships per
 	// billing user on this replica (token_budget_groups.go).
 	pooledGroupResolver *PooledGroupResolver
@@ -8098,6 +8106,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// Reconcile Tokenomics raw-token budget limit definitions when enabled (P3.1, D5).
 	s.reconcileTokenBudgets(ctx)
 
+	// Start the usage.budget_suspend queue drainer when token budgets are enabled (P3.2 B2).
+	s.startBudgetSuspendDrainer(ctx)
+
 	// Start the trigger.event queue drainer when hub.triggers is enabled.
 	s.startTriggerDrainer(ctx)
 }
@@ -8188,12 +8199,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	_ = s.CleanupBackgroundResources(ctx)
 
 	// After the drain: wait for any in-flight async token-budget re-evaluations
-	// (honouring the shutdown ctx) before closing the audit writer / store.
+	// and breach handlers (honouring the shutdown ctx) before closing the audit
+	// writer / store.
+	s.stopBudgetSuspendDrainer(ctx)
 	s.mu.RLock()
 	budgetEval := s.tokenBudgetEvaluator
+	budgetBreach := s.budgetBreachHandler
 	s.mu.RUnlock()
 	if budgetEval != nil {
 		_ = budgetEval.WaitReevalContext(ctx)
+	}
+	if budgetBreach != nil {
+		_ = budgetBreach.WaitContext(ctx)
 	}
 
 	// After the drain: close the audit writer (bounded by its own drain

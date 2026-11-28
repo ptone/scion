@@ -1047,6 +1047,8 @@ func formatSuspendedNotificationMessage(agent *store.Agent, reason state.Suspend
 			return fmt.Sprintf("%s was automatically SUSPENDED (%s for %s; %s)", agent.Slug, reason, dur, wakeHint)
 		}
 		return fmt.Sprintf("%s was automatically SUSPENDED (%s; %s)", agent.Slug, reason, wakeHint)
+	case state.SuspendReasonBudgetExhausted:
+		return fmt.Sprintf("%s was SUSPENDED (token budget exhausted; resume with 'scion resume %s' after override, cap raise, or window reset)", agent.Slug, agent.Slug)
 	default:
 		return fmt.Sprintf("%s has reached status: SUSPENDED", agent.Slug)
 	}

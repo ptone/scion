@@ -113,6 +113,12 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "messagebroker.go", function: "publishDeliveryFailed", symbol: "dispatchMarkedAgentMessage",
 		class: "exempt", reason: "derivative: delivery-failure notice to original sender"},
 
+	// token_budget_breach.go: sendSuspendNotices — hub-authored budget
+	// exhaustion grace-period notice to running agents in scope of a
+	// suspend_and_pause crossing (Tokenomics P3.2 B2); no user/external text.
+	{file: "token_budget_breach.go", function: "sendSuspendNotices", symbol: "DispatchAgentMessage",
+		class: "exempt", reason: "hub-authored token budget exhaustion grace-period notice before suspend_and_pause; no user-controlled text or target"},
+
 	// messagebroker.go: publishDeliveryDeferred — derivative notice (design
 	// agent-reincarnate §3.7, O2 p2a-r1 review). Same shape as
 	// publishDeliveryFailed above: tells the original sender their message

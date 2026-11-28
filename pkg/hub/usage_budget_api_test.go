@@ -282,7 +282,7 @@ func TestUsageBudgets_ReadAndAuthzMatrix(t *testing.T) {
 			assert.Equal(t, store.TokenActionSuspendAndPause, day.TokenAction)
 			assert.Equal(t, int64(600), day.Consumed)
 			assert.Equal(t, store.UsageBudgetStateWarn, day.State)
-			assert.Equal(t, int64(1), day.StateVersion)
+			assert.GreaterOrEqual(t, day.StateVersion, int64(1))
 
 			month := byName[store.LimitLLMTokensPerProjectMonth]
 			assert.Empty(t, month.ID, "unlimited scope has no state row")
@@ -1165,6 +1165,9 @@ func TestUsageBudgets_ExpiredOverrideDisplaysComputedState(t *testing.T) {
 	dbNow, err := s.DBNow(ctx)
 	require.NoError(t, err)
 	ingestBudgetTestTokens(t, ctx, srv, s, "hub-bud-exp", "ev-exp-1", "run-exp", proj.ID, ag.ID, &admin.ID, dbNow, 1500)
+	if bh := srv.BudgetBreachHandler(); bh != nil {
+		bh.Wait()
+	}
 
 	// Persist state=ok with an already-expired override_until (in the past).
 	dayStart, _ := utcDayWindow(dbNow)

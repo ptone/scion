@@ -24,6 +24,7 @@ func TestSuspendReason_AutoWakes(t *testing.T) {
 		{SuspendReasonIdle, true},
 		{SuspendReasonStalled, true},
 		{SuspendReasonUser, false},
+		{SuspendReasonBudgetExhausted, false},
 		// A row suspended before suspend_reason existed has none and
 		// never auto-wakes.
 		{"", false},
@@ -38,7 +39,7 @@ func TestSuspendReason_AutoWakes(t *testing.T) {
 }
 
 func TestSuspendReason_IsValid(t *testing.T) {
-	for _, r := range []SuspendReason{"", SuspendReasonUser, SuspendReasonIdle, SuspendReasonStalled} {
+	for _, r := range []SuspendReason{"", SuspendReasonUser, SuspendReasonIdle, SuspendReasonStalled, SuspendReasonBudgetExhausted} {
 		if !r.IsValid() {
 			t.Errorf("SuspendReason(%q).IsValid() = false, want true", r)
 		}

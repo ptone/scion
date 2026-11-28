@@ -447,9 +447,9 @@ func (e *TokenBudgetEvaluator) OverrideBudgetState(
 	// (e.g., clearing an override early when consumption crossed warn/exhausted
 	// while the override was active). Downward transitions (setting an override)
 	// never fire the hook.
-	if budgetStateRank(swapped.State) > budgetStateRank(beforeCopy.State) &&
-		(swapped.State == store.UsageBudgetStateWarn || swapped.State == store.UsageBudgetStateExhausted) {
+	if crossed := budgetCrossedThresholdBits(beforeCopy.State, beforeCopy.ConsumedAtEval, beforeCopy.CapAtEval, swapped.State, swapped.ConsumedAtEval, swapped.CapAtEval, nextOverride != nil); crossed != 0 {
 		e.fireThresholdHook(ctx, BudgetThresholdCrossing{
+			StateID:        swapped.ID,
 			LimitName:      def.Name,
 			LimitDefID:     def.ID,
 			ScopeKind:      swapped.ScopeKind,
@@ -459,6 +459,7 @@ func (e *TokenBudgetEvaluator) OverrideBudgetState(
 			WindowEndUTC:   swapped.WindowEndUTC,
 			PrevState:      beforeCopy.State,
 			NewState:       swapped.State,
+			CrossedBits:    crossed,
 			Consumed:       swapped.ConsumedAtEval,
 			Cap:            swapped.CapAtEval,
 			TokenAction:    action,
@@ -791,8 +792,9 @@ func (e *TokenBudgetEvaluator) reevaluateSpec(
 				}
 				return fmt.Errorf("create usage budget state: %w", createErr)
 			}
-			if computedState == store.UsageBudgetStateWarn || computedState == store.UsageBudgetStateExhausted {
+			if crossed := budgetCrossedThresholdBits("", 0, 0, computedState, created.ConsumedAtEval, created.CapAtEval, false); crossed != 0 {
 				e.fireThresholdHook(ctx, BudgetThresholdCrossing{
+					StateID:        created.ID,
 					LimitName:      spec.limitName,
 					LimitDefID:     def.ID,
 					ScopeKind:      spec.scopeKind,
@@ -802,6 +804,7 @@ func (e *TokenBudgetEvaluator) reevaluateSpec(
 					WindowEndUTC:   created.WindowEndUTC,
 					PrevState:      "",
 					NewState:       computedState,
+					CrossedBits:    crossed,
 					Consumed:       created.ConsumedAtEval,
 					Cap:            created.CapAtEval,
 					TokenAction:    action,
@@ -811,8 +814,9 @@ func (e *TokenBudgetEvaluator) reevaluateSpec(
 			return nil
 		}
 
+		overrideActive := existing.OverrideUntil != nil && existing.OverrideUntil.After(now)
 		var nextState string
-		if existing.OverrideUntil != nil && existing.OverrideUntil.After(now) {
+		if overrideActive {
 			// Active override keeps state at ok until override_until elapses.
 			nextState = existing.State
 		} else if capVal <= 0 {
@@ -851,9 +855,9 @@ func (e *TokenBudgetEvaluator) reevaluateSpec(
 			return fmt.Errorf("cas usage budget state: %w", swapErr)
 		}
 
-		if budgetStateRank(nextState) > budgetStateRank(existing.State) &&
-			(nextState == store.UsageBudgetStateWarn || nextState == store.UsageBudgetStateExhausted) {
+		if crossed := budgetCrossedThresholdBits(existing.State, existing.ConsumedAtEval, existing.CapAtEval, nextState, swapped.ConsumedAtEval, swapped.CapAtEval, overrideActive); crossed != 0 {
 			e.fireThresholdHook(ctx, BudgetThresholdCrossing{
+				StateID:        swapped.ID,
 				LimitName:      spec.limitName,
 				LimitDefID:     def.ID,
 				ScopeKind:      spec.scopeKind,
@@ -863,6 +867,7 @@ func (e *TokenBudgetEvaluator) reevaluateSpec(
 				WindowEndUTC:   swapped.WindowEndUTC,
 				PrevState:      existing.State,
 				NewState:       nextState,
+				CrossedBits:    crossed,
 				Consumed:       swapped.ConsumedAtEval,
 				Cap:            swapped.CapAtEval,
 				TokenAction:    action,

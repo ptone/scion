@@ -17,11 +17,13 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/limitdefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegrouprollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagescopecounterdaily"
@@ -418,6 +420,81 @@ func (s *UsageLedgerStore) CompareAndSwapUsageBudgetState(ctx context.Context, e
 	out.StateVersion = nextVersion
 	out.UpdatedAt = now
 	return &out, nil
+}
+
+// CountOpenUsageBudgetStates implements store.UsageBudgetStore.CountOpenUsageBudgetStates.
+// Counts open-window usage_budget_state rows grouped by (limit_definition_id,
+// scope_kind, state) and resolves limit_definition_id to the canonical limit
+// name so SQLite and Postgres behave identically.
+func (s *UsageLedgerStore) CountOpenUsageBudgetStates(ctx context.Context, activeAt time.Time) ([]store.UsageBudgetStateCount, error) {
+	atUTC := activeAt.UTC().Truncate(time.Microsecond)
+	var grouped []struct {
+		LimitDefinitionID uuid.UUID `json:"limit_definition_id"`
+		ScopeKind         string    `json:"scope_kind"`
+		State             string    `json:"state"`
+		Count             int64     `json:"count"`
+	}
+	err := s.client.UsageBudgetState.Query().
+		Where(
+			usagebudgetstate.WindowStartUtcLTE(atUTC),
+			usagebudgetstate.WindowEndUtcGT(atUTC),
+		).
+		GroupBy(
+			usagebudgetstate.FieldLimitDefinitionID,
+			usagebudgetstate.FieldScopeKind,
+			usagebudgetstate.FieldState,
+		).
+		Aggregate(ent.Count()).
+		Scan(ctx, &grouped)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if len(grouped) == 0 {
+		return nil, nil
+	}
+
+	defIDSet := make(map[uuid.UUID]struct{}, len(grouped))
+	defIDs := make([]uuid.UUID, 0, len(grouped))
+	for _, g := range grouped {
+		if _, ok := defIDSet[g.LimitDefinitionID]; !ok {
+			defIDSet[g.LimitDefinitionID] = struct{}{}
+			defIDs = append(defIDs, g.LimitDefinitionID)
+		}
+	}
+	defs, err := s.client.LimitDefinition.Query().
+		Where(limitdefinition.IDIn(defIDs...)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	nameByID := make(map[uuid.UUID]string, len(defs))
+	for _, d := range defs {
+		nameByID[d.ID] = d.Name
+	}
+
+	out := make([]store.UsageBudgetStateCount, 0, len(grouped))
+	for _, g := range grouped {
+		limitName := nameByID[g.LimitDefinitionID]
+		if limitName == "" {
+			limitName = g.LimitDefinitionID.String()
+		}
+		out = append(out, store.UsageBudgetStateCount{
+			LimitName: limitName,
+			ScopeKind: g.ScopeKind,
+			State:     g.State,
+			Count:     g.Count,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ScopeKind != out[j].ScopeKind {
+			return out[i].ScopeKind < out[j].ScopeKind
+		}
+		if out[i].LimitName != out[j].LimitName {
+			return out[i].LimitName < out[j].LimitName
+		}
+		return out[i].State < out[j].State
+	})
+	return out, nil
 }
 
 // SweepUsageBudgetStateBatch implements store.UsageRetentionStore.SweepUsageBudgetStateBatch.

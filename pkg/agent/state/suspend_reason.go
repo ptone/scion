@@ -31,13 +31,18 @@ const (
 	// SuspendReasonStalled: the hub's auto_suspend_stalled policy suspended
 	// an agent that stopped reporting activity.
 	SuspendReasonStalled SuspendReason = "stalled"
+	// SuspendReasonBudgetExhausted: the hub's tokenomics suspend_and_pause
+	// breach policy suspended an agent whose scope exhausted its token budget.
+	// Never auto-wakes on incoming messages; requires explicit resume after
+	// override, cap raise, or window rollover.
+	SuspendReasonBudgetExhausted SuspendReason = "budget_exhausted"
 )
 
 // IsValid reports whether r is a recognised SuspendReason. Empty is valid
 // (no reason recorded).
 func (r SuspendReason) IsValid() bool {
 	switch r {
-	case "", SuspendReasonUser, SuspendReasonIdle, SuspendReasonStalled:
+	case "", SuspendReasonUser, SuspendReasonIdle, SuspendReasonStalled, SuspendReasonBudgetExhausted:
 		return true
 	}
 	return false
