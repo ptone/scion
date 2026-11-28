@@ -1312,6 +1312,11 @@ func (ws *WebServer) MountHubAPI(hubHandler http.Handler, hubShutdown func(conte
 	// public URL. The hub mux already has handleReadyz registered, and
 	// /readyz is in isHealthEndpoint() so auth middleware allows it through.
 	ws.mux.Handle("/readyz", hubHandler)
+	// Forward /github-app/setup (exact path) to the hub handler so GitHub's
+	// post-install redirect reaches handleGitHubAppSetup on the combined
+	// web+hub server instead of falling through to the SPA catch-all.
+	// /github-app/installed and any other /github-app/* paths stay on the SPA.
+	ws.mux.Handle("/github-app/setup", hubHandler)
 }
 
 // sessionToBearerMiddleware bridges cookie-based web sessions to the
@@ -3356,6 +3361,9 @@ func isPublicRoute(path string) bool {
 		return true
 	case strings.HasPrefix(path, "/.well-known/"):
 		// OIDC discovery endpoints must be publicly accessible (unauthenticated).
+		return true
+	case path == "/github-app/setup":
+		// GitHub App post-installation callback (public route on the hub).
 		return true
 	case path == "/login":
 		return true

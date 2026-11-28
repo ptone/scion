@@ -329,6 +329,19 @@ func (s *Server) processInstallationRepositoriesWebhook(ctx context.Context, bod
 	return nil
 }
 
+const maxLoggedSetupActionRunes = 32
+
+func truncateSetupAction(action string) string {
+	if len(action) <= maxLoggedSetupActionRunes {
+		return action
+	}
+	runes := []rune(action)
+	if len(runes) <= maxLoggedSetupActionRunes {
+		return action
+	}
+	return string(runes[:maxLoggedSetupActionRunes])
+}
+
 // handleGitHubAppSetup handles GET /github-app/setup.
 // This is the post-installation callback URL configured on the GitHub App.
 // GitHub redirects here after a user installs or configures the app.
@@ -336,6 +349,17 @@ func (s *Server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
 		return
+	}
+
+	if s.githubAppSetupRateLimiter != nil {
+		if allowed, retryAfter := s.githubAppSetupRateLimiter.Allow(r); !allowed {
+			if retryAfter < 1 {
+				retryAfter = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many setup callbacks", nil)
+			return
+		}
 	}
 
 	installationIDStr := r.URL.Query().Get("installation_id")
@@ -356,7 +380,7 @@ func (s *Server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("GitHub App setup callback",
 		"installation_id", installationID,
-		"setup_action", setupAction,
+		"setup_action", truncateSetupAction(setupAction),
 	)
 
 	// Get the GitHub App client to look up installation details
