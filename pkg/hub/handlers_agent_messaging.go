@@ -328,6 +328,28 @@ func outboundExternalThreadConversationState(
 	return conv, outboundThreadExists, nil
 }
 
+// writeOutboundThreadStateError writes the 422 response for a missing or
+// soft-deleted thread_id and returns a non-nil error when state is not
+// outboundThreadExists. Shared by both the native and external-surface gates.
+func writeOutboundThreadStateError(w http.ResponseWriter, state outboundThreadState, threadID string) error {
+	switch state {
+	case outboundThreadMissing:
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
+			fmt.Sprintf("thread_id %q does not match an existing conversation; "+
+				"address the conversation with conv:<uuid> (see 'scion conversation list'), "+
+				"or omit thread_id to message the recipient directly", threadID), nil)
+		return fmt.Errorf("thread %q does not resolve to an existing conversation", threadID)
+	case outboundThreadDeleted:
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
+			fmt.Sprintf("thread_id %q refers to a deleted conversation; "+
+				"address an active conversation with conv:<uuid> (see 'scion conversation list'), "+
+				"or omit thread_id to message the recipient directly", threadID), nil)
+		return fmt.Errorf("thread %q refers to a deleted conversation", threadID)
+	default:
+		return nil
+	}
+}
+
 // resolveOutboundRouting consolidates recipient resolution, conversation
 // authorization, and transport selection into a single routing decision.
 // Returns a routingResult that the handler uses to build the message envelope
@@ -754,19 +776,8 @@ func (s *Server) resolveOutboundRouting(
 						"thread conversation lookup failed", nil)
 					return nil, stateErr
 				}
-				switch state {
-				case outboundThreadMissing:
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
-						fmt.Sprintf("thread_id %q does not match an existing conversation; "+
-							"address the conversation with conv:<uuid> (see 'scion conversation list'), "+
-							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
-					return nil, fmt.Errorf("thread %q does not resolve to an existing conversation", req.ThreadID)
-				case outboundThreadDeleted:
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
-						fmt.Sprintf("thread_id %q refers to a deleted conversation; "+
-							"address an active conversation with conv:<uuid> (see 'scion conversation list'), "+
-							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
-					return nil, fmt.Errorf("thread %q refers to a deleted conversation", req.ThreadID)
+				if err := writeOutboundThreadStateError(w, state, req.ThreadID); err != nil {
+					return nil, err
 				}
 			} else if extSurface != "" {
 				existingConv, state, stateErr := outboundExternalThreadConversationState(ctx, s.store, extSurface, agent.ProjectID, extRef)
@@ -777,19 +788,8 @@ func (s *Server) resolveOutboundRouting(
 						"thread conversation lookup failed", nil)
 					return nil, stateErr
 				}
-				switch state {
-				case outboundThreadMissing:
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
-						fmt.Sprintf("thread_id %q does not match an existing conversation; "+
-							"address the conversation with conv:<uuid> (see 'scion conversation list'), "+
-							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
-					return nil, fmt.Errorf("thread %q does not resolve to an existing conversation", req.ThreadID)
-				case outboundThreadDeleted:
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
-						fmt.Sprintf("thread_id %q refers to a deleted conversation; "+
-							"address an active conversation with conv:<uuid> (see 'scion conversation list'), "+
-							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
-					return nil, fmt.Errorf("thread %q refers to a deleted conversation", req.ThreadID)
+				if err := writeOutboundThreadStateError(w, state, req.ThreadID); err != nil {
+					return nil, err
 				}
 				convResult = &messaging.ConversationResult{
 					ConversationID: existingConv.ID,
