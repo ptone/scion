@@ -256,13 +256,14 @@ func TestUTCTimestampNormalize_OrderingOverMigratedAndNewRows(t *testing.T) {
 		id string
 		at time.Time
 	}
+	convLegacyWeb, convLegacyJST := tid("norm-conv-lweb"), tid("norm-conv-ljst")
 	var all []row
 	addMsg := func(name string, at time.Time, legacy string) {
 		t.Helper()
 		id := tid("norm-order-" + name)
 		require.NoError(t, s.CreateMessage(ctx, &store.Message{
 			ID: id, ProjectID: proj.ID, Sender: "user:alice", Recipient: "agent:bot",
-			Msg: "needle " + name, Channel: "web", ThreadID: "topic-1", CreatedAt: at,
+			Msg: "needle " + name, Channel: "web", ThreadID: "topic-1", ConversationID: convLegacyWeb, CreatedAt: at,
 		}))
 		if legacy != "" {
 			execOne(t, db, "UPDATE messages SET created = ? WHERE id = ?", legacy, id)
@@ -278,7 +279,6 @@ func TestUTCTimestampNormalize_OrderingOverMigratedAndNewRows(t *testing.T) {
 	// Legacy conversations: a pre-fix webchat insert (RFC 3339 text) and a
 	// Tokyo-stamped ent row.
 	pid := proj.ID
-	convLegacyWeb, convLegacyJST := tid("norm-conv-lweb"), tid("norm-conv-ljst")
 	for _, c := range []struct {
 		id, text string
 	}{
