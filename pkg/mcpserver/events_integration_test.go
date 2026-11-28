@@ -488,6 +488,9 @@ func TestIntegration_Events_B2_B3_B4_B5_B6(t *testing.T) {
 	if len(pollRes.Events) != 1 || pollRes.Events[0].Data.Text != "b4-via-poll" {
 		t.Fatalf("B4 events/poll got %+v, want [b4-via-poll]", pollRes.Events)
 	}
+	if pollRes.Events[0].Cursor != "" {
+		t.Fatalf("B4 events/poll occurrence should omit per-event cursor per SEP-3415, got %q", pollRes.Events[0].Cursor)
+	}
 
 	// Resume stream from events/poll cursor.
 	f.agentReply(t, ctx, sendOut.ConversationID, "b4-via-stream")
@@ -571,16 +574,12 @@ func TestIntegration_Events_B2_B3_B4_B5_B6(t *testing.T) {
 		t.Fatalf("B6 poll ahead cursor expected truncated=true and fresh head cursor, got %+v", pollAhead)
 	}
 
-	// Ahead-of-head cursor on events/stream -> error notification + active{truncated:true}.
+	// Ahead-of-head cursor on events/stream -> active{truncated:true} directly (no error notification, per SEP-3415).
 	b6Ctx, b6Cancel := context.WithCancel(ctx)
 	r6, ch6 := f.openStream(t, b6Ctx, f.endpoint, f.fullUAT.Token, sendOut.ConversationID, aheadCursor)
-	errNotif := <-ch6
-	if errNotif.Method != "notifications/events/error" {
-		t.Fatalf("B6 stream ahead cursor first frame = %q, want notifications/events/error", errNotif.Method)
-	}
 	actTrunc := <-ch6
 	if actTrunc.Method != "notifications/events/active" {
-		t.Fatalf("B6 stream ahead cursor second frame = %q, want notifications/events/active", actTrunc.Method)
+		t.Fatalf("B6 stream ahead cursor first frame = %q, want notifications/events/active (no error frame per SEP-3415)", actTrunc.Method)
 	}
 	var actPayload struct {
 		Cursor    string `json:"cursor"`

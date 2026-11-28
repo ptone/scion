@@ -378,3 +378,453 @@ func TestEvents_CapabilitiesListPollAndStreamUnit(t *testing.T) {
 		}
 	}
 }
+
+func TestEventsStream_MaxAgeMsTruncatedActiveOnSSE(t *testing.T) {
+	now := time.Now().UTC()
+	oldTime := now.Add(-10 * time.Minute)
+	freshTime := now.Add(-5 * time.Second)
+
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/auth/me":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "user-age", "email": "age@example.com"})
+		case strings.HasSuffix(r.URL.Path, "/watch"):
+			fl := w.(http.Flusher)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			fl.Flush()
+			_, _ = fmt.Fprintf(w, "id: cur-0\nevent: active\ndata: {\"cursor\":\"cur-0\",\"truncated\":false}\n\n")
+			fl.Flush()
+			for i, ts := range []time.Time{oldTime, oldTime.Add(time.Second)} {
+				evJSON, _ := json.Marshal(map[string]any{
+					"eventId":    fmt.Sprintf("msg:old-%d", i),
+					"type":       EventNameConversationMessageCreated,
+					"occurredAt": ts,
+					"cursor":     fmt.Sprintf("cur-old-%d", i),
+					"data":       map[string]any{"id": fmt.Sprintf("old-%d", i), "conversationId": "conv-age", "sender": "agent:a", "msg": "old", "createdAt": ts},
+				})
+				_, _ = fmt.Fprintf(w, "id: cur-old-%d\nevent: message\ndata: %s\n\n", i, evJSON)
+				fl.Flush()
+			}
+			freshJSON, _ := json.Marshal(map[string]any{
+				"eventId":    "msg:fresh-1",
+				"type":       EventNameConversationMessageCreated,
+				"occurredAt": freshTime,
+				"cursor":     "cur-fresh-1",
+				"data":       map[string]any{"id": "fresh-1", "conversationId": "conv-age", "sender": "agent:a", "msg": "fresh", "createdAt": freshTime},
+			})
+			_, _ = fmt.Fprintf(w, "id: cur-fresh-1\nevent: message\ndata: %s\n\n", freshJSON)
+			fl.Flush()
+			<-r.Context().Done()
+		}
+	})
+
+	backend := NewBackend(BackendOptions{
+		HubBaseURL:           "http://in-process",
+		Transport:            &InProcessTransport{Handler: fakeHub},
+		ExperimentChecker:    func(context.Context, Credential, string) (bool, error) { return true, nil },
+		DisableTransportAuth: true,
+	})
+	srv, err := New(Options{Backend: backend, StreamWait: time.Second})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/mcp", strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"events/stream","params":{"name":"conversation.message.created","arguments":{"conversation_id":"conv-age"},"cursor":"cur-0","maxAgeMs":60000}}`,
+	))
+	req.Header.Set("Authorization", "Bearer scion_pat_age")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	frames := make(chan sseRPCMessage, 16)
+	go readSSEJSONRPCFrames(resp.Body, frames)
+
+	var sawTruncatedActiveBeforeEvent bool
+	for {
+		select {
+		case fr := <-frames:
+			switch fr.Method {
+			case "notifications/events/active":
+				var p struct {
+					Truncated bool `json:"truncated"`
+				}
+				_ = json.Unmarshal(fr.Params, &p)
+				if p.Truncated {
+					sawTruncatedActiveBeforeEvent = true
+				}
+			case "notifications/events/event":
+				var occ EventOccurrence
+				_ = json.Unmarshal(fr.Params, &occ)
+				if occ.Data.Text != "fresh" {
+					t.Fatalf("expected only fresh message, got %q", occ.Data.Text)
+				}
+				if !sawTruncatedActiveBeforeEvent {
+					t.Fatal("expected notifications/events/active with truncated:true before fresh event")
+				}
+				cancel()
+				return
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for fresh event")
+		}
+	}
+}
+
+func TestEventsStream_MidStreamGapAndErrorCodes(t *testing.T) {
+	t.Run("mid-stream 410 sends active truncated without error", func(t *testing.T) {
+		var calls atomic.Int32
+		fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/auth/me" {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": "u-gap", "email": "gap@example.com"})
+				return
+			}
+			n := calls.Add(1)
+			switch n {
+			case 1:
+				fl := w.(http.Flusher)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				fl.Flush()
+				_, _ = fmt.Fprintf(w, "id: cur-1\nevent: active\ndata: {\"cursor\":\"cur-1\",\"truncated\":false}\n\n")
+				fl.Flush()
+				// Close stream cleanly to trigger reconnect.
+			case 2:
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusGone)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "cursor_expired", "message": "ahead"}})
+			default:
+				fl := w.(http.Flusher)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				fl.Flush()
+				_, _ = fmt.Fprintf(w, "id: cur-head\nevent: active\ndata: {\"cursor\":\"cur-head\",\"truncated\":false}\n\n")
+				fl.Flush()
+				<-r.Context().Done()
+			}
+		})
+
+		backend := NewBackend(BackendOptions{
+			HubBaseURL:           "http://in-process",
+			Transport:            &InProcessTransport{Handler: fakeHub},
+			ExperimentChecker:    func(context.Context, Credential, string) (bool, error) { return true, nil },
+			DisableTransportAuth: true,
+		})
+		srv, err := New(Options{Backend: backend, StreamWait: time.Second})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/mcp", strings.NewReader(
+			`{"jsonrpc":"2.0","id":1,"method":"events/stream","params":{"name":"conversation.message.created","arguments":{"conversation_id":"conv-gap"}}}`,
+		))
+		req.Header.Set("Authorization", "Bearer scion_pat_gap")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		frames := make(chan sseRPCMessage, 16)
+		go readSSEJSONRPCFrames(resp.Body, frames)
+
+		// First active (initial connect).
+		f1 := <-frames
+		if f1.Method != "notifications/events/active" {
+			t.Fatalf("first frame = %q, want active", f1.Method)
+		}
+		// Second frame after mid-stream 410 must be active{truncated:true}, never error.
+		f2 := <-frames
+		if f2.Method != "notifications/events/active" {
+			t.Fatalf("mid-stream 410 frame = %q, want notifications/events/active (no error frame)", f2.Method)
+		}
+		var p struct {
+			Cursor    string `json:"cursor"`
+			Truncated bool   `json:"truncated"`
+		}
+		_ = json.Unmarshal(f2.Params, &p)
+		if !p.Truncated || p.Cursor != "cur-head" {
+			t.Fatalf("mid-stream 410 active = %+v, want truncated=true cursor=cur-head", p)
+		}
+		cancel()
+	})
+
+	for _, tc := range []struct {
+		name     string
+		status   int
+		hubCode  string
+		wantCode int64
+		wantKind string
+	}{
+		{"mid-stream 400 -> -32602", http.StatusBadRequest, "invalid_cursor", jsonrpc.CodeInvalidParams, ""},
+		{"mid-stream 404 -> -32023 kind=conversation", http.StatusNotFound, "not_found", codeNotFound, "conversation"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/auth/me" {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"id": "u-err", "email": "err@example.com"})
+					return
+				}
+				if calls.Add(1) == 1 {
+					fl := w.(http.Flusher)
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.WriteHeader(http.StatusOK)
+					fl.Flush()
+					_, _ = fmt.Fprintf(w, "id: cur-1\nevent: active\ndata: {\"cursor\":\"cur-1\",\"truncated\":false}\n\n")
+					fl.Flush()
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": tc.hubCode, "message": "hub err"}})
+			})
+
+			backend := NewBackend(BackendOptions{
+				HubBaseURL:           "http://in-process",
+				Transport:            &InProcessTransport{Handler: fakeHub},
+				ExperimentChecker:    func(context.Context, Credential, string) (bool, error) { return true, nil },
+				DisableTransportAuth: true,
+			})
+			srv, err := New(Options{Backend: backend, StreamWait: time.Second})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			ts := httptest.NewServer(srv.Handler())
+			defer ts.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/mcp", strings.NewReader(
+				`{"jsonrpc":"2.0","id":1,"method":"events/stream","params":{"name":"conversation.message.created","arguments":{"conversation_id":"conv-err"}}}`,
+			))
+			req.Header.Set("Authorization", "Bearer scion_pat_err")
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			frames := make(chan sseRPCMessage, 8)
+			go readSSEJSONRPCFrames(resp.Body, frames)
+			<-frames // active
+			term := <-frames
+			if term.Method != "notifications/events/terminated" {
+				t.Fatalf("expected terminated, got %q", term.Method)
+			}
+			var payload struct {
+				Error struct {
+					Code int64          `json:"code"`
+					Data map[string]any `json:"data"`
+				} `json:"error"`
+			}
+			_ = json.Unmarshal(term.Params, &payload)
+			if payload.Error.Code != tc.wantCode {
+				t.Fatalf("terminated error.code = %d, want %d (params=%s)", payload.Error.Code, tc.wantCode, string(term.Params))
+			}
+			if tc.wantKind != "" && payload.Error.Data["kind"] != tc.wantKind {
+				t.Fatalf("terminated error.data.kind = %v, want %q", payload.Error.Data["kind"], tc.wantKind)
+			}
+		})
+	}
+}
+
+func TestEventsStream_FrontDoorRefusals(t *testing.T) {
+	var expOn atomic.Bool
+	expOn.Store(true)
+
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "u-ref", "email": "ref@example.com"})
+	})
+	backend := NewBackend(BackendOptions{
+		HubBaseURL:           "http://in-process",
+		Transport:            &InProcessTransport{Handler: fakeHub},
+		ExperimentChecker:    func(context.Context, Credential, string) (bool, error) { return expOn.Load(), nil },
+		DisableTransportAuth: true,
+	})
+	srv, err := New(Options{
+		Backend:        backend,
+		AllowedOrigins: []string{"https://allowed.example.com"},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	streamBody := `{"jsonrpc":"2.0","id":1,"method":"events/stream","params":{"name":"conversation.message.created","arguments":{"conversation_id":"conv-1"}}}`
+	agentJWT := makeFakeJWT(t, map[string]any{
+		"iss":        "scion-hub",
+		"aud":        []string{"scion-hub-api"},
+		"sub":        "agent-1",
+		"project_id": "proj-1",
+		"scopes":     []string{"agent:status:update"},
+	})
+
+	cases := []struct {
+		name       string
+		setup      func()
+		headers    map[string]string
+		wantStatus int
+	}{
+		{
+			name:       "disallowed origin -> 403",
+			setup:      func() { expOn.Store(true) },
+			headers:    map[string]string{"Authorization": "Bearer scion_pat_ok", "Origin": "https://evil.example.com"},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "experiment off -> 404",
+			setup:      func() { expOn.Store(false) },
+			headers:    map[string]string{"Authorization": "Bearer scion_pat_ok"},
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "agent JWT -> 401",
+			setup:      func() { expOn.Store(true) },
+			headers:    map[string]string{"Authorization": "Bearer " + agentJWT},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "shutdown -> 503",
+			setup:      func() { expOn.Store(true); srv.BeginShutdown() },
+			headers:    map[string]string{"Authorization": "Bearer scion_pat_ok"},
+			wantStatus: http.StatusServiceUnavailable,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup()
+			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(streamBody))
+			req.Header.Set("Content-Type", "application/json")
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("got status %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestEventsStream_InvalidJSONRPCRequest(t *testing.T) {
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "u-inv", "email": "inv@example.com"})
+	})
+	backend := NewBackend(BackendOptions{
+		HubBaseURL:           "http://in-process",
+		Transport:            &InProcessTransport{Handler: fakeHub},
+		ExperimentChecker:    func(context.Context, Credential, string) (bool, error) { return true, nil },
+		DisableTransportAuth: true,
+	})
+	srv, err := New(Options{Backend: backend})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"missing id", `{"jsonrpc":"2.0","method":"events/stream","params":{"name":"conversation.message.created","arguments":{"conversation_id":"conv-1"}}}`},
+		{"null id", `{"jsonrpc":"2.0","id":null,"method":"events/stream","params":{"name":"conversation.message.created","arguments":{"conversation_id":"conv-1"}}}`},
+		{"wrong jsonrpc version", `{"jsonrpc":"1.0","id":1,"method":"events/stream","params":{"name":"conversation.message.created","arguments":{"conversation_id":"conv-1"}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, ts.URL+"/mcp", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer scion_pat_inv")
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if !strings.Contains(string(body), "-32600") {
+				t.Fatalf("expected -32600 InvalidRequest, got: %s", string(body))
+			}
+		})
+	}
+}
+
+func TestEventsStream_StreamWaitClampedTo55s(t *testing.T) {
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auth/me" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "u-clamp", "email": "clamp@example.com"})
+			return
+		}
+		fl := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl.Flush()
+		_, _ = fmt.Fprintf(w, "id: cur-1\nevent: active\ndata: {\"cursor\":\"cur-1\",\"truncated\":false}\n\n")
+		fl.Flush()
+		<-r.Context().Done()
+	})
+	backend := NewBackend(BackendOptions{
+		HubBaseURL:           "http://in-process",
+		Transport:            &InProcessTransport{Handler: fakeHub},
+		ExperimentChecker:    func(context.Context, Credential, string) (bool, error) { return true, nil },
+		DisableTransportAuth: true,
+	})
+	srv, err := New(Options{Backend: backend, StreamWait: 90 * time.Second})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/mcp", strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"events/stream","params":{"name":"conversation.message.created","arguments":{"conversation_id":"conv-1"}}}`,
+	))
+	req.Header.Set("Authorization", "Bearer scion_pat_clamp")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	frames := make(chan sseRPCMessage, 4)
+	go readSSEJSONRPCFrames(resp.Body, frames)
+	act := <-frames
+	var p struct {
+		HeartbeatMs int64 `json:"heartbeatMs"`
+	}
+	_ = json.Unmarshal(act.Params, &p)
+	if p.HeartbeatMs != MaxStreamWait.Milliseconds() {
+		t.Fatalf("active.heartbeatMs = %d, want clamped %d", p.HeartbeatMs, MaxStreamWait.Milliseconds())
+	}
+	cancel()
+}

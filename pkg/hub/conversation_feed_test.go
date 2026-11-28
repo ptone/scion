@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -1123,6 +1124,9 @@ func TestConversationWatch_DevUserDMAuthzParity(t *testing.T) {
 
 func TestConversationWatch_SSEMode(t *testing.T) {
 	srv, s := testServer(t)
+	ep := NewChannelEventPublisher()
+	t.Cleanup(ep.Close)
+	srv.SetEventPublisher(ep)
 	ctx := context.Background()
 
 	projID := uuid.NewString()
@@ -1222,14 +1226,14 @@ func TestConversationWatch_SSEMode(t *testing.T) {
 					raw := pending[:idx]
 					pending = pending[idx+2:]
 					var f sseFrame
-					for _, line := range splitLines(raw) {
+					for _, line := range strings.Split(raw, "\n") {
 						switch {
-						case len(line) >= 6 && line[:6] == "event:":
-							f.event = trimSpace(line[6:])
-						case len(line) >= 3 && line[:3] == "id:":
-							f.id = trimSpace(line[3:])
-						case len(line) >= 5 && line[:5] == "data:":
-							f.data = trimSpace(line[5:])
+						case strings.HasPrefix(line, "event:"):
+							f.event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+						case strings.HasPrefix(line, "id:"):
+							f.id = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
+						case strings.HasPrefix(line, "data:"):
+							f.data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 						}
 					}
 					if f.event != "" || f.data != "" {
@@ -1337,7 +1341,7 @@ func TestConversationWatch_SSEMode(t *testing.T) {
 	buf := make([]byte, 8192)
 	var collected string
 	readUntil := time.Now().Add(2 * time.Second)
-	for time.Now().Before(readUntil) && !containsStr(collected, "second message after resume") {
+	for time.Now().Before(readUntil) && !strings.Contains(collected, "second message after resume") {
 		n, rErr := resumeResp.Body.Read(buf)
 		if n > 0 {
 			collected += string(buf[:n])
@@ -1350,7 +1354,42 @@ func TestConversationWatch_SSEMode(t *testing.T) {
 	assert.NotContains(t, collected, "hello via sse")
 	cancelResume()
 
-	// 5. BeginShutdown closes an active SSE stream cleanly.
+	// 5. Membership-change event naming the user closes an active 30s SSE stream promptly (<2s).
+	memCtx, cancelMem := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelMem()
+	memReq, err := http.NewRequestWithContext(memCtx, http.MethodGet, ts.URL+"/api/v1/conversations/"+conv.ID+"/watch?wait=30s&filter=all", nil)
+	require.NoError(t, err)
+	memReq.Header.Set("Authorization", "Bearer "+memberTok)
+	memReq.Header.Set("Accept", "text/event-stream")
+	memResp, err := http.DefaultClient.Do(memReq)
+	require.NoError(t, err)
+	defer memResp.Body.Close()
+	require.Equal(t, http.StatusOK, memResp.StatusCode)
+
+	// Read active frame so the SSE stream is parked in Watch.
+	memBuf := make([]byte, 512)
+	_, err = memResp.Body.Read(memBuf)
+	require.NoError(t, err)
+
+	srv.getEventPublisher().PublishRaw(membershipChangedSubjectFor(member.ID), membershipChangedEvent{UserID: member.ID})
+	memClosed := make(chan struct{})
+	go func() {
+		defer close(memClosed)
+		tmp := make([]byte, 512)
+		for {
+			if _, rErr := memResp.Body.Read(tmp); rErr != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-memClosed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSE stream did not close within 2s after membership.changed event")
+	}
+	cancelMem()
+
+	// 6. BeginShutdown closes an active SSE stream cleanly.
 	shutCtx, cancelShut := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelShut()
 	shutReq, err := http.NewRequestWithContext(shutCtx, http.MethodGet, ts.URL+"/api/v1/conversations/"+conv.ID+"/watch?wait=30s&filter=all", nil)
@@ -1384,41 +1423,4 @@ func TestConversationWatch_SSEMode(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("SSE stream did not close promptly on BeginShutdown")
 	}
-}
-
-func splitLines(s string) []string {
-	var out []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			out = append(out, s[start:i])
-			start = i + 1
-		}
-	}
-	if start <= len(s) {
-		out = append(out, s[start:])
-	}
-	return out
-}
-
-func trimSpace(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t' || s[0] == '\r') {
-		s = s[1:]
-	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t' || s[len(s)-1] == '\r') {
-		s = s[:len(s)-1]
-	}
-	return s
-}
-
-func containsStr(haystack, needle string) bool {
-	if len(needle) == 0 {
-		return true
-	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return true
-		}
-	}
-	return false
 }

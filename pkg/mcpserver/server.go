@@ -108,6 +108,9 @@ func New(opts Options) (*Server, error) {
 	if streamWait <= 0 {
 		streamWait = DefaultStreamWait
 	}
+	if streamWait > MaxStreamWait {
+		streamWait = MaxStreamWait
+	}
 
 	origins := make(map[string]struct{}, len(opts.AllowedOrigins))
 	for _, o := range opts.AllowedOrigins {

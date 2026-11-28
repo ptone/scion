@@ -53,6 +53,11 @@ const (
 	// cadence) for events/stream.
 	DefaultStreamWait = 30 * time.Second
 
+	// MaxStreamWait matches the Hub's maximum /watch wait (eventfeed.DefaultMaxWait,
+	// 55s) so notifications/events/active.heartbeatMs never advertises a cadence
+	// longer than the Hub actually honors.
+	MaxStreamWait = 55 * time.Second
+
 	defaultEventsNextPollMs = 5000
 )
 
@@ -292,7 +297,8 @@ func (s *Server) handleEventsPoll(ctx context.Context, ss *mcp.ServerSession, pa
 			truncated = true
 			continue
 		}
-		occurrences = append(occurrences, projectEventOccurrence(ev, nil))
+		// Per SEP-3415, poll carries the cursor at the response level only.
+		occurrences = append(occurrences, projectEventOccurrence(ev, nil, false))
 	}
 
 	nextPollMs := int64(defaultEventsNextPollMs)
@@ -352,7 +358,7 @@ func parseConversationEventArgs(name string, args map[string]any) (convID, filte
 	return convID, filter, nil
 }
 
-func projectEventOccurrence(ev hubclient.WatchEvent, subID any) EventOccurrence {
+func projectEventOccurrence(ev hubclient.WatchEvent, subID any, includeCursor bool) EventOccurrence {
 	eventID := ev.EventID
 	if eventID == "" && ev.Data != nil && ev.Data.ID != "" {
 		eventID = "msg:" + ev.Data.ID
@@ -377,12 +383,17 @@ func projectEventOccurrence(ev hubclient.WatchEvent, subID any) EventOccurrence 
 		meta = nil
 	}
 
+	var cur string
+	if includeCursor {
+		cur = ev.Cursor
+	}
+
 	return EventOccurrence{
 		EventID:   eventID,
 		Name:      evName,
 		Timestamp: ts,
 		Data:      projectMessageDTO(ev),
-		Cursor:    ev.Cursor,
+		Cursor:    cur,
 		Meta:      meta,
 	}
 }

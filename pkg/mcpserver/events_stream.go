@@ -137,6 +137,14 @@ func (s *Server) handleEventsStream(w http.ResponseWriter, r *http.Request, rpcR
 		return
 	}
 
+	// Per SEP-3415, events/stream is a standard JSON-RPC 2.0 request with a non-null id.
+	trimmedID := bytes.TrimSpace(rpcReq.ID)
+	if rpcReq.JSONRPC != "2.0" || len(trimmedID) == 0 || bytes.Equal(trimmedID, []byte("null")) {
+		s.auditEventCall(nil, auth, "events/stream", "", "invalid_request", http.StatusBadRequest, time.Since(start))
+		writeJSONRPCErrorResponse(w, http.StatusOK, rpcReq.ID, newJSONRPCError(jsonrpc.CodeInvalidRequest, "events/stream requires jsonrpc \"2.0\" and a non-null id", nil))
+		return
+	}
+
 	// Validate SEP-2243 Mcp-Method header when present.
 	if hdrMethod := strings.TrimSpace(r.Header.Get("Mcp-Method")); hdrMethod != "" && hdrMethod != "events/stream" {
 		s.auditEventCall(nil, auth, "events/stream", "", "header_mismatch", http.StatusBadRequest, time.Since(start))
@@ -351,7 +359,7 @@ func (s *Server) handleEventsStream(w http.ResponseWriter, r *http.Request, rpcR
 	}
 
 	sendEvent := func(ev hubclient.WatchEvent) error {
-		return sendNotification("notifications/events/event", projectEventOccurrence(ev, subID))
+		return sendNotification("notifications/events/event", projectEventOccurrence(ev, subID, true))
 	}
 
 	sendError := func(code int64, msg string, data map[string]any) error {
@@ -368,19 +376,21 @@ func (s *Server) handleEventsStream(w http.ResponseWriter, r *http.Request, rpcR
 		})
 	}
 
-	sendTerminated := func(reason, detail string) {
-		msg := "Forbidden"
-		if reason == "unauthorized" {
-			msg = "Unauthorized"
+	sendTerminated := func(code int64, msg, reason, detail string, extraData map[string]any) {
+		data := make(map[string]any, len(extraData)+2)
+		for k, v := range extraData {
+			data[k] = v
 		}
-		data := map[string]any{"reason": reason}
+		if reason != "" {
+			data["reason"] = reason
+		}
 		if detail != "" {
 			data["detail"] = detail
 		}
 		_ = sendNotification("notifications/events/terminated", map[string]any{
 			"reason": reason,
 			"error": map[string]any{
-				"code":    codeForbidden,
+				"code":    code,
 				"message": msg,
 				"data":    data,
 			},
@@ -415,9 +425,8 @@ func (s *Server) handleEventsStream(w http.ResponseWriter, r *http.Request, rpcR
 	)
 
 	if initialExpired {
-		if err := sendError(jsonrpc.CodeInternalError, "cursor expired; restarting from head", map[string]any{"reason": "cursor_expired"}); err != nil {
-			return
-		}
+		// Per SEP-3415 ("Cursor Lifecycle"): a gap is not an error; reset to
+		// head and signal via notifications/events/active with truncated: true.
 		cursor = ""
 		pendingTruncated = true
 	}
@@ -528,6 +537,7 @@ func (s *Server) handleEventsStream(w http.ResponseWriter, r *http.Request, rpcR
 			})
 
 			streamGotFrame := false
+			droppedByMaxAge := false
 			for {
 				frame, readErr := curStream.Next()
 				if readErr != nil {
@@ -554,7 +564,20 @@ func (s *Server) handleEventsStream(w http.ResponseWriter, r *http.Request, rpcR
 				case "message":
 					if frame.Event != nil {
 						if !minTime.IsZero() && !frame.Event.OccurredAt.IsZero() && frame.Event.OccurredAt.Before(minTime) {
+							if frame.Event.Cursor != "" {
+								cursor = frame.Event.Cursor
+							}
+							droppedByMaxAge = true
 							continue
+						}
+						if droppedByMaxAge {
+							if err := sendActive(cursor, true); err != nil {
+								stopClose()
+								_ = curStream.Close()
+								return
+							}
+							droppedByMaxAge = false
+							minTime = time.Time{}
 						}
 						if err := sendEvent(*frame.Event); err != nil {
 							stopClose()
@@ -570,6 +593,15 @@ func (s *Server) handleEventsStream(w http.ResponseWriter, r *http.Request, rpcR
 				case "heartbeat":
 					if frame.Cursor != "" {
 						cursor = frame.Cursor
+					}
+					if droppedByMaxAge {
+						if err := sendActive(cursor, true); err != nil {
+							stopClose()
+							_ = curStream.Close()
+							return
+						}
+						droppedByMaxAge = false
+						minTime = time.Time{}
 					}
 					if err := sendHeartbeat(cursor); err != nil {
 						stopClose()
@@ -707,13 +739,12 @@ func handleStreamHubError(
 	finalHubStatus *int,
 	resultLabel *string,
 	sendError func(code int64, msg string, data map[string]any) error,
-	sendTerminated func(reason, detail string),
+	sendTerminated func(code int64, msg, reason, detail string, extraData map[string]any),
 	sendFinalResult func(),
 ) streamErrorAction {
 	if isCursorExpiredErr(err) {
-		if wErr := sendError(jsonrpc.CodeInternalError, "cursor expired; restarting from head", map[string]any{"reason": "cursor_expired"}); wErr != nil {
-			return streamActionStop
-		}
+		// Per SEP-3415 ("Cursor Lifecycle"): a gap is not an error; reset to
+		// head and signal via a fresh notifications/events/active with truncated: true.
 		*cursor = ""
 		*pendingTruncated = true
 		return streamActionRetryImmediate
@@ -725,25 +756,25 @@ func handleStreamHubError(
 		case http.StatusUnauthorized:
 			*finalHubStatus = http.StatusUnauthorized
 			*resultLabel = "terminated_unauthorized"
-			sendTerminated("unauthorized", apiErr.Message)
+			sendTerminated(codeForbidden, "Unauthorized", "unauthorized", apiErr.Message, nil)
 			sendFinalResult()
 			return streamActionStop
 		case http.StatusForbidden:
 			*finalHubStatus = http.StatusForbidden
 			*resultLabel = "terminated_forbidden"
-			sendTerminated("forbidden", apiErr.Message)
+			sendTerminated(codeForbidden, "Forbidden", "forbidden", apiErr.Message, nil)
 			sendFinalResult()
 			return streamActionStop
 		case http.StatusNotFound:
 			*finalHubStatus = http.StatusNotFound
 			*resultLabel = "terminated_not_found"
-			sendTerminated("forbidden", apiErr.Message)
+			sendTerminated(codeNotFound, "NotFound", "not_found", apiErr.Message, map[string]any{"kind": "conversation"})
 			sendFinalResult()
 			return streamActionStop
 		case http.StatusBadRequest:
 			*finalHubStatus = http.StatusBadRequest
 			*resultLabel = "invalid_cursor"
-			sendTerminated("invalid_cursor", apiErr.Message)
+			sendTerminated(jsonrpc.CodeInvalidParams, "Invalid params", "invalid_cursor", apiErr.Message, nil)
 			sendFinalResult()
 			return streamActionStop
 		}
