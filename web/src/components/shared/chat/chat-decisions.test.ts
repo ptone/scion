@@ -2249,4 +2249,177 @@ describe('scion-chat-decisions single-card optional comment (ptone/scion#9834)',
     expect(cmtSpan?.children.length).toBe(0);
     expect((window as unknown as { __cmtXss?: number }).__cmtXss).toBeUndefined();
   });
+
+  it('keeps a non-empty draft visible after answerability goes blocked then ok, and sends no comment key when field is collapsed', async () => {
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: {
+          ...answered('yes', { id: 'u-me', name: 'Me' }),
+          decision: {
+            ...answered('yes', { id: 'u-me', name: 'Me' }).decision!,
+            comment: 'secret plan B',
+          },
+        },
+        responseMessageId: 'resp-1',
+      })
+    );
+    const el = await mount([view()]);
+    await settle(el);
+
+    root(el).querySelector<HTMLButtonElement>('[data-action="add-comment"]')!.click();
+    await el.updateComplete;
+    const input = root(el).querySelector<HTMLElement & { value: string }>('.cbox sl-input')!;
+    input.value = 'secret plan B';
+    input.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+
+    // Transition blocked -> ok: field must stay visible with the draft (never hidden).
+    el.answerability = { state: 'blocked', reason: 'Agent paused.' };
+    await el.updateComplete;
+    expect(root(el).querySelector('.cbox')).toBeNull();
+
+    el.answerability = { state: 'ok' };
+    await el.updateComplete;
+    const visibleInput = root(el).querySelector<HTMLElement & { value: string }>('.cbox sl-input');
+    expect(visibleInput).toBeTruthy();
+    expect(visibleInput!.value).toBe('secret plan B');
+    expect(root(el).querySelector('[data-action="add-comment"]')).toBeNull();
+
+    button(el, 'yes').click();
+    await settle(el);
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    const body1 = JSON.parse(apiFetch.mock.calls[0]![1]!.body as string) as Record<string, unknown>;
+    expect(body1.choice_id).toBe('yes');
+    expect(body1.comment).toBe('secret plan B');
+
+    // Separate card with collapsed field (no draft) -> no comment key in POST body.
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: answered('no', { id: 'u-me', name: 'Me' }),
+        responseMessageId: 'resp-2',
+      })
+    );
+    const el2 = await mount([view({ rowId: 'r2' })]);
+    await settle(el2);
+    expect(root(el2).querySelector('.cbox')).toBeNull();
+    expect(root(el2).querySelector('[data-action="add-comment"]')).toBeTruthy();
+    button(el2, 'no').click();
+    await settle(el2);
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+    const body2 = JSON.parse(apiFetch.mock.calls[1]![1]!.body as string) as Record<string, unknown>;
+    expect(body2.choice_id).toBe('no');
+    expect('comment' in body2).toBe(false);
+  });
+
+  it('sends the trimmed comment draft on Enter on focused card, Other Send, and interpreted Confirm', async () => {
+    // 1. Enter on focused card sends defaultChoiceId + comment.
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: answered('yes', { id: 'u-me', name: 'Me' }),
+        responseMessageId: 'resp-enter',
+      })
+    );
+    const elEnter = await mount([view()]);
+    await settle(elEnter);
+    root(elEnter).querySelector<HTMLButtonElement>('[data-action="add-comment"]')!.click();
+    await elEnter.updateComplete;
+    const enterInput = root(elEnter).querySelector<HTMLElement & { value: string }>(
+      '.cbox sl-input'
+    )!;
+    enterInput.value = '  ship via Enter  ';
+    enterInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await elEnter.updateComplete;
+    card(elEnter).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle(elEnter);
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    const enterBody = JSON.parse(apiFetch.mock.calls[0]![1]!.body as string) as Record<
+      string,
+      unknown
+    >;
+    expect(enterBody.choice_id).toBe('yes');
+    expect(enterBody.comment).toBe('ship via Enter');
+
+    // 2. Other Send sends choice_id=$other, other_text, and comment.
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: answered('$other', { id: 'u-me', name: 'Me' }),
+        responseMessageId: 'resp-other',
+      })
+    );
+    const elOther = await mount([
+      view({
+        rowId: 'r-other',
+        other: { label: 'Another region', placeholder: 'e.g. europe-west4' },
+      }),
+    ]);
+    await settle(elOther);
+    button(elOther, '$other').click();
+    await elOther.updateComplete;
+    const otherInput = root(elOther).querySelector<HTMLElement & { value: string }>(
+      '.editor sl-input'
+    )!;
+    otherInput.value = 'europe-west4';
+    otherInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    root(elOther).querySelector<HTMLButtonElement>('[data-action="add-comment"]')!.click();
+    await elOther.updateComplete;
+    const otherCmt = root(elOther).querySelector<HTMLElement & { value: string }>(
+      '.cbox sl-input'
+    )!;
+    otherCmt.value = 'lowest latency';
+    otherCmt.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await elOther.updateComplete;
+    root(elOther).querySelector<HTMLElement>('[data-action="send-other"]')!.click();
+    await settle(elOther);
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+    const otherBody = JSON.parse(apiFetch.mock.calls[1]![1]!.body as string) as Record<
+      string,
+      unknown
+    >;
+    expect(otherBody.choice_id).toBe('$other');
+    expect(otherBody.other_text).toBe('europe-west4');
+    expect(otherBody.comment).toBe('lowest latency');
+
+    // 3. Interpreted Confirm sends choice_id + comment.
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: answered('yes', { id: 'u-me', name: 'Me' }),
+        responseMessageId: 'resp-confirm',
+      })
+    );
+    const elConfirm = await mount([
+      view({
+        rowId: 'r-confirm',
+        status: 'decided',
+        askerAgentName: 'release-bot',
+        decision: {
+          choiceId: 'yes',
+          label: 'Yes',
+          answeredByUserId: 'u-me',
+          answeredByName: 'Me',
+          provenance: 'agent_interpreted',
+          surface: 'native',
+          responseMessageId: 'resp-0',
+          at: '2026-11-12T15:42:00Z',
+        },
+      }),
+    ]);
+    await settle(elConfirm);
+    root(elConfirm).querySelector<HTMLButtonElement>('[data-action="add-comment"]')!.click();
+    await elConfirm.updateComplete;
+    const confirmCmt = root(elConfirm).querySelector<HTMLElement & { value: string }>(
+      '.cbox sl-input'
+    )!;
+    confirmCmt.value = 'Page me when green';
+    confirmCmt.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await elConfirm.updateComplete;
+    root(elConfirm).querySelector<HTMLElement>('[data-action="confirm"]')!.click();
+    await settle(elConfirm);
+    expect(apiFetch).toHaveBeenCalledTimes(3);
+    const confirmBody = JSON.parse(apiFetch.mock.calls[2]![1]!.body as string) as Record<
+      string,
+      unknown
+    >;
+    expect(confirmBody.choice_id).toBe('yes');
+    expect(confirmBody.comment).toBe('Page me when green');
+  });
 });
