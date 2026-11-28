@@ -1122,14 +1122,17 @@ func TestProjectGitHub_CreatorCheckBoundedConcurrencyAndNegativeCache(t *testing
 	assert.True(t, recovResp.Association.Verified)
 	assert.Equal(t, int32(4), calls.Load(), "GET after negative-cache TTL expiry should retry once")
 
-	// 3. Cancelling the caller's request context does not cancel the detached
-	// creator-access check, so the check completes and populates the access cache.
+	// 3. Cancelling the caller's request context returns immediately with the
+	// unverified state while the shared detached creator-access check continues
+	// and populates the access cache (and serves any other concurrent waiter).
 	advance(11 * time.Minute)
 	detachStarted := make(chan struct{})
 	detachRelease := make(chan struct{})
+	detachReturned := make(chan struct{})
 	var detachOnce sync.Once
 	var checkCtxErr atomic.Value
 	srv.githubRepoAccessCheck = func(checkCtx context.Context, _, _, _, _ string) (githubapp.RepoAccess, error) {
+		defer close(detachReturned)
 		calls.Add(1)
 		detachOnce.Do(func() { close(detachStarted) })
 		<-detachRelease
@@ -1141,20 +1144,62 @@ func TestProjectGitHub_CreatorCheckBoundedConcurrencyAndNegativeCache(t *testing
 
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	reqDone := make(chan struct{})
+	var cancelledCode int
+	var cancelledResp ProjectGitHubResponse
+	var cancelledDecodeErr error
 	go func() {
 		defer close(reqDone)
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil).WithContext(reqCtx)
 		req.Header.Set("Authorization", "Bearer "+token)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
+		cancelledCode = rec.Code
+		cancelledDecodeErr = json.Unmarshal(rec.Body.Bytes(), &cancelledResp)
 	}()
 
 	<-detachStarted
-	cancelReq()
-	time.Sleep(15 * time.Millisecond)
-	close(detachRelease)
-	<-reqDone
 
+	// Launch a second uncancelled caller that joins the same singleflight check.
+	waiterDone := make(chan struct{})
+	var waiterCode int
+	var waiterResp ProjectGitHubResponse
+	var waiterDecodeErr error
+	go func() {
+		defer close(waiterDone)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		waiterCode = rec.Code
+		waiterDecodeErr = json.Unmarshal(rec.Body.Bytes(), &waiterResp)
+	}()
+	time.Sleep(15 * time.Millisecond)
+
+	// Cancel the first request: it must return promptly while detachRelease is still blocked.
+	cancelReq()
+	select {
+	case <-reqDone:
+	case <-time.After(2 * time.Second):
+		close(detachRelease)
+		t.Fatal("cancelled request did not return early while detached check was blocked")
+	}
+	require.NoError(t, cancelledDecodeErr)
+	require.Equal(t, http.StatusOK, cancelledCode)
+	assert.False(t, cancelledResp.Association.Authorized)
+	assert.False(t, cancelledResp.Association.Verified)
+	assert.Equal(t, githubAppErrAssociationUnverified, cancelledResp.Association.ErrorCode)
+	assert.Equal(t, githubAppStatusMessage(githubAppErrAssociationCheckFailed), cancelledResp.Association.Reason)
+
+	// Unblock the shared detached check: it completes without context cancellation
+	// and delivers the authorized result to the uncancelled waiter.
+	close(detachRelease)
+	<-detachReturned
+	<-waiterDone
+
+	require.NoError(t, waiterDecodeErr)
+	require.Equal(t, http.StatusOK, waiterCode)
+	assert.True(t, waiterResp.Association.Authorized)
+	assert.True(t, waiterResp.Association.Verified)
 	assert.Nil(t, checkCtxErr.Load(), "cancelling caller request context must not cancel the creator-access check")
 	assert.Equal(t, int32(5), calls.Load())
 
@@ -1166,4 +1211,101 @@ func TestProjectGitHub_CreatorCheckBoundedConcurrencyAndNegativeCache(t *testing
 	assert.True(t, warmResp.Association.Authorized)
 	assert.True(t, warmResp.Association.Verified)
 	assert.Equal(t, int32(5), calls.Load(), "warm cache after detached check must require 0 additional calls")
+}
+
+func TestProjectGitHub_CreatorCheckCancelledRequestReturnsEarly(t *testing.T) {
+	fakeAPI := newProjectGitHubFakeAPI(t, "early-app", map[string]string{
+		"contents": "write",
+		"metadata": "read",
+	})
+	srv, st, admin := setupProjectGitHubTestHub(t, fakeAPI)
+	ctx := context.Background()
+
+	require.NoError(t, st.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: 8302,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          1,
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+	creator := &store.User{
+		ID:          tid("pg-early-creator"),
+		Email:       "pg-early-creator@example.com",
+		DisplayName: "Early Creator",
+		Role:        store.UserRoleMember,
+		Status:      store.UserStatusActive,
+	}
+	require.NoError(t, st.CreateUser(ctx, creator))
+	require.NoError(t, st.CreateSecret(ctx, &store.Secret{
+		ID:             tid("pg-early-creator-tok"),
+		Key:            "GITHUB_TOKEN",
+		EncryptedValue: "ghp_early_tok",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "GITHUB_TOKEN",
+		Scope:          store.ScopeUser,
+		ScopeID:        creator.ID,
+	}))
+	srv.SetSecretBackend(secret.NewLocalBackend(st, "test-hub-id", "test-secret"))
+
+	instID := int64(8302)
+	proj := &store.Project{
+		ID:                   tid("pg-early-proj"),
+		Name:                 "pg-early-proj",
+		Slug:                 tid("pg-early-proj"),
+		GitRemote:            fakeAPI.srv.URL + "/acme/early-repo",
+		CreatedBy:            creator.ID,
+		GitHubInstallationID: &instID,
+		Created:              time.Now(),
+		Updated:              time.Now(),
+	}
+	require.NoError(t, st.CreateProject(ctx, proj))
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	var calls atomic.Int32
+	origCheck := srv.githubRepoAccessCheck
+	t.Cleanup(func() { srv.githubRepoAccessCheck = origCheck })
+	srv.githubRepoAccessCheck = func(_ context.Context, _, _, _, _ string) (githubapp.RepoAccess, error) {
+		defer close(finished)
+		calls.Add(1)
+		close(started)
+		<-release
+		return githubapp.RepoAccess{}, errors.New("transient 503")
+	}
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan githubAssociationCachedEval, 1)
+	go func() {
+		eval, _ := srv.evaluateGitHubAssociationCached(reqCtx, proj, true)
+		done <- eval
+	}()
+
+	<-started
+	cancel()
+
+	select {
+	case eval := <-done:
+		assert.False(t, eval.Authorized)
+		assert.False(t, eval.Verified)
+		assert.Equal(t, githubAppErrAssociationUnverified, eval.ErrorCode)
+		assert.Equal(t, githubAppStatusMessage(githubAppErrAssociationCheckFailed), eval.Reason)
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("evaluateGitHubAssociationCached did not return early on context cancellation")
+	}
+
+	// Let the detached check finish with an inconclusive error; it must populate
+	// the read-model negative cache so a subsequent GET makes 0 additional calls.
+	close(release)
+	<-finished
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ProjectGitHubResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.False(t, resp.Association.Authorized)
+	assert.False(t, resp.Association.Verified)
+	assert.Equal(t, githubAppErrAssociationUnverified, resp.Association.ErrorCode)
+	assert.Equal(t, int32(1), calls.Load(), "detached inconclusive check must populate negative cache")
 }

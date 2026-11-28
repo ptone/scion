@@ -1143,7 +1143,7 @@ func (s *Server) evaluateGitHubAssociationCached(
 			eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
 			return eval, nil
 		}
-		v, accessErr, _ := s.githubReadModelSF.Do(key, func() (any, error) {
+		ch := s.githubReadModelSF.DoChan(key, func() (any, error) {
 			if s.githubReadModelInconclusive.recent(key) {
 				return githubapp.RepoAccess{}, errGitHubAssociationCheckFailed
 			}
@@ -1155,6 +1155,19 @@ func (s *Server) evaluateGitHubAssociationCached(
 			}
 			return access, err
 		})
+		var (
+			v         any
+			accessErr error
+		)
+		select {
+		case res := <-ch:
+			v, accessErr = res.Val, res.Err
+		case <-ctx.Done():
+			eval.Verified = false
+			eval.ErrorCode = githubAppErrAssociationUnverified
+			eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
+			return eval, nil
+		}
 		if accessErr != nil {
 			if errors.Is(accessErr, errGitHubAssociationCheckFailed) {
 				eval.Verified = false
