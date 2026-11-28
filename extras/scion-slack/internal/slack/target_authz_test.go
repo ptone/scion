@@ -75,6 +75,7 @@ func findLogEvent(entries []map[string]any, event string) []map[string]any {
 type faultStore struct {
 	Store
 	errGetChannelLink           error
+	nilGetChannelLink           bool
 	errGetUserMappingByEmail    error
 	errGetConversationContext   error
 	errGetLatestConversationCtx error
@@ -83,6 +84,9 @@ type faultStore struct {
 func (s faultStore) GetChannelLink(ctx context.Context, channelID string) (*ChannelLink, error) {
 	if s.errGetChannelLink != nil {
 		return nil, s.errGetChannelLink
+	}
+	if s.nilGetChannelLink {
+		return nil, nil
 	}
 	return s.Store.GetChannelLink(ctx, channelID)
 }
@@ -791,6 +795,32 @@ func TestSlackBroker_ObserverAndStateChangeFiltersFailClosed(t *testing.T) {
 		assert.Empty(t, getPosted())
 	})
 
+	t.Run("agent_to_agent_unlinked_container_skips", func(t *testing.T) {
+		srv, getPosted := newTestSlackServer(t)
+		b := NewBroker(nil)
+		b.client = slackapi.New("xoxb-test", slackapi.OptionAPIURL(srv.URL+"/"))
+		base := newTestStore(t)
+		require.NoError(t, base.CreateChannelLink(context.Background(), &ChannelLink{
+			ChannelID:        "C_PROJ_A",
+			ProjectID:        "proj-a",
+			Active:           true,
+			ShowAgentToAgent: true,
+		}))
+		// GetChannelLinksForProject yields C_PROJ_A, while GetChannelLink
+		// reports no link; agent-to-agent observer filter must fail closed.
+		b.store = faultStore{Store: base, nilGetChannelLink: true}
+
+		require.NoError(t, b.Publish(context.Background(), "scion.project.proj-a.agent.reviewer.messages", &messages.StructuredMessage{
+			Version:   messages.Version,
+			Sender:    "agent:coder",
+			Recipient: "agent:reviewer",
+			Msg:       "a2a unlinked container",
+			Type:      messages.TypeInstruction,
+		}))
+
+		assert.Empty(t, getPosted())
+	})
+
 	t.Run("agent_to_agent_flag_true_delivers", func(t *testing.T) {
 		srv, getPosted := newTestSlackServer(t)
 		b := NewBroker(nil)
@@ -817,9 +847,10 @@ func TestSlackBroker_ObserverAndStateChangeFiltersFailClosed(t *testing.T) {
 		assert.Equal(t, "C_PROJ_A", posted[0].Channel)
 	})
 
-	t.Run("state_change_unlinked_dm_skips", func(t *testing.T) {
+	t.Run("state_change_recipient_dm_delivers", func(t *testing.T) {
 		srv, getPosted := newTestSlackServer(t)
-		b := NewBroker(nil)
+		logBuf := &lockedLogBuffer{}
+		b := NewBroker(slog.New(slog.NewJSONHandler(logBuf, nil)))
 		b.client = slackapi.New("xoxb-test", slackapi.OptionAPIURL(srv.URL+"/"))
 		b.store = newTestStore(t)
 
@@ -830,6 +861,11 @@ func TestSlackBroker_ObserverAndStateChangeFiltersFailClosed(t *testing.T) {
 			ScionEmail:  "alice@example.com",
 			LinkedAt:    now,
 		}))
+		require.NoError(t, b.store.CreateUserMapping(ctx, &SlackUserMapping{
+			SlackUserID: "U_BOB",
+			ScionEmail:  "bob@example.com",
+			LinkedAt:    now,
+		}))
 		require.NoError(t, b.store.SetConversationContext(ctx, &ConversationContext{
 			SlackUserID:   "U_ALICE",
 			ProjectID:     "proj-a",
@@ -837,7 +873,15 @@ func TestSlackBroker_ObserverAndStateChangeFiltersFailClosed(t *testing.T) {
 			LastChannelID: "D_ALICE",
 			LastMessageAt: now,
 		}))
+		require.NoError(t, b.store.SetConversationContext(ctx, &ConversationContext{
+			SlackUserID:   "U_BOB",
+			ProjectID:     "proj-a",
+			AgentSlug:     "coder",
+			LastChannelID: "D_BOB",
+			LastMessageAt: now,
+		}))
 
+		// Implicit recipient path for user:alice -> delivers to D_ALICE without a ChannelLink.
 		require.NoError(t, b.Publish(ctx, "scion.project.proj-a.user.u1.messages", &messages.StructuredMessage{
 			Version:   messages.Version,
 			Sender:    "agent:coder",
@@ -847,7 +891,30 @@ func TestSlackBroker_ObserverAndStateChangeFiltersFailClosed(t *testing.T) {
 			Type:      messages.TypeStateChange,
 		}))
 
-		assert.Empty(t, getPosted())
+		posted := getPosted()
+		require.Len(t, posted, 1)
+		assert.Equal(t, "D_ALICE", posted[0].Channel)
+		assert.Empty(t, findLogEvent(logBuf.Entries(t), "outbound_target_denied"))
+
+		// Explicit DM target pointing to another user's DM (D_BOB) is still
+		// denied by authorizeExplicitTarget Rule 2 and falls through to D_ALICE.
+		require.NoError(t, b.Publish(ctx, "scion.project.proj-a.user.u1.messages", &messages.StructuredMessage{
+			Version:   messages.Version,
+			Sender:    "agent:coder",
+			Recipient: "user:alice@example.com",
+			Status:    "running",
+			Msg:       "agent running",
+			Type:      messages.TypeStateChange,
+			Channel:   "slack",
+			ThreadID:  "D_BOB:1700000000.000100",
+		}))
+
+		posted = getPosted()
+		require.Len(t, posted, 2)
+		assert.Equal(t, "D_ALICE", posted[1].Channel)
+		denied := findLogEvent(logBuf.Entries(t), "outbound_target_denied")
+		require.Len(t, denied, 1)
+		assert.Equal(t, string(plugin.DenyNotRecipientDM), denied[0]["reason"])
 	})
 
 	t.Run("state_change_flag_false_and_lookup_error_skip", func(t *testing.T) {
