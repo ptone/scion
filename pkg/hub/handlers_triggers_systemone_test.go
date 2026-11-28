@@ -31,6 +31,20 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+func enableSystemOneExperimentForTriggerTest(t *testing.T, srv *Server, enabled bool) {
+	t.Helper()
+	var active []experiments.Experiment
+	for _, e := range srv.experimentRegistry().All() {
+		if e.Name == experiments.SystemOne {
+			e.Default = enabled
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+}
+
 func TestTriggerAuthoring_SystemOneD1AllowlistAndD2AgentExclusion(t *testing.T) {
 	f := setupTriggersTestFixture(t)
 	ctx := context.Background()
@@ -43,16 +57,16 @@ func TestTriggerAuthoring_SystemOneD1AllowlistAndD2AgentExclusion(t *testing.T) 
 	// Create an enabled System One instance in the hub store.
 	now := time.Now().UTC()
 	inst := &store.SystemOneInstance{
-		ID:       tid("so-inst-1"),
-		Name:     "hub-judge",
-		Adapter:  "typesafe",
-		Model:    "jev-v1",
-		Endpoint: "https://judge.example.com",
-		AuthKind: "api_key",
-		Enabled:  true,
-		Revision: 1,
-		Created:  now,
-		Updated:  now,
+		ID:        tid("so-inst-1"),
+		Name:      "hub-judge",
+		Adapter:   "typesafe",
+		Model:     "jev-v1",
+		Endpoint:  "https://judge.example.com",
+		Auth:      store.SystemOneInstanceAuth{Kind: "api_key"},
+		Enabled:   true,
+		Revision:  1,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	require.NoError(t, f.store.CreateSystemOneInstance(ctx, inst))
 
@@ -76,10 +90,7 @@ func TestTriggerAuthoring_SystemOneD1AllowlistAndD2AgentExclusion(t *testing.T) 
 	assert.Equal(t, ruleengine.ReasonUnknownDialect, ebOff.Details["reason"])
 
 	// Enable hub.system_one experiment.
-	require.NoError(t, f.store.SetExperiment(ctx, &store.ExperimentState{
-		Name:    experiments.SystemOne,
-		Enabled: true,
-	}))
+	enableSystemOneExperimentForTriggerTest(t, f.srv, true)
 
 	// 2. D1: Project instance allowlist is EMPTY by default -> 400 invalid_rule (binding error).
 	recNoAllow := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
@@ -98,14 +109,11 @@ func TestTriggerAuthoring_SystemOneD1AllowlistAndD2AgentExclusion(t *testing.T) 
 	assert.Equal(t, "binding", ebNoAllow.Details["category"])
 
 	// Opt the project into "hub-judge" (D1 explicit opt-in).
-	require.NoError(t, f.store.SetProjectSystemOneInstances(ctx, f.projectID, []string{"hub-judge"}))
+	_, _, err := f.store.SetProjectSystemOneInstances(ctx, f.projectID, []string{"hub-judge"})
+	require.NoError(t, err)
 
 	// 3. D2: Agent caller may NOT author System One elements -> 400 invalid_rule {reason: agent_not_allowed}.
-	agentAuth := NewAgentTokenIdentity(f.targetAgent.ID, f.projectID, []AgentTokenScope{
-		ScopeAgentTriggerRead,
-		ScopeAgentTriggerWrite,
-	})
-	recAgentSO := f.doTrigger(t, agentAuth, "", http.MethodPost, CreateTriggerRequest{
+	recAgentSO := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, CreateTriggerRequest{
 		Name:   "so-agent-denied",
 		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
 		Match: &TriggerMatchSpec{
@@ -114,7 +122,7 @@ func TestTriggerAuthoring_SystemOneD1AllowlistAndD2AgentExclusion(t *testing.T) 
 				{Dialect: "system_one", Expr: soExpr},
 			},
 		},
-		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.agentA.ID, Message: "hi"},
 	})
 	require.Equal(t, http.StatusBadRequest, recAgentSO.Code, recAgentSO.Body.String())
 	ebAgent := decodeTriggerRuleError(t, recAgentSO)
@@ -135,10 +143,11 @@ func TestTriggerAuthoring_SystemOneD1AllowlistAndD2AgentExclusion(t *testing.T) 
 	})
 	require.Equal(t, http.StatusCreated, recOK.Code, recOK.Body.String())
 
-	// 5. Removing the instance from the project allowlist refuses subsequent PATCH/resume (400 invalid_rule).
+	// 5. Removing the instance from the project allowlist refuses subsequent resume (400 invalid_rule).
 	var created TriggerResponse
 	require.NoError(t, json.Unmarshal(recOK.Body.Bytes(), &created))
-	require.NoError(t, f.store.SetProjectSystemOneInstances(ctx, f.projectID, nil))
+	_, _, err = f.store.SetProjectSystemOneInstances(ctx, f.projectID, nil)
+	require.NoError(t, err)
 	pauseRec := f.doTrigger(t, f.ownerAuth, created.ID+"/pause", http.MethodPost, nil)
 	require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
 
