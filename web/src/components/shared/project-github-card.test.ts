@@ -11,6 +11,7 @@ import type { ProjectGitHubInfo, GitHubInstallation } from '../../shared/types.j
 import {
   filterBindableGitHubInstallations,
   formatGitHubCapReason,
+  formatMissingTriggerPermissions,
   type ScionProjectGithubCard,
 } from './project-github-card.js';
 
@@ -526,5 +527,235 @@ describe('Project GitHub App card (M1.1)', () => {
     expect(connRoot.querySelector('[data-testid="github-remove-button"]')).not.toBeNull();
     expect(connRoot.querySelector('[data-testid="github-permissions-table"]')).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('hides permissions editor controls when can.edit_permissions is false', async () => {
+    const el = await mountCard(
+      createFetchHandler({
+        githubInfo: makeProjectGitHub({
+          can: {
+            bind: false,
+            unbind: false,
+            check: false,
+            edit_permissions: false,
+            edit_extra_repos: false,
+            discover: false,
+          },
+        }),
+      })
+    );
+    const root = el.shadowRoot!;
+    expect(root.querySelector('[data-testid="github-permissions-table"]')).not.toBeNull();
+    expect(root.querySelector('[data-testid="github-perm-mode-toggle"]')).toBeNull();
+    expect(root.querySelector('[data-testid="github-perm-actions"]')).toBeNull();
+    expect(root.querySelector('[data-testid="github-perm-select-contents"]')).toBeNull();
+    // Custom-beyond-App-grant warning still shows in read-only view for issues (write > read).
+    expect(
+      root.querySelector('[data-testid="github-perm-beyond-grant-issues"]')?.textContent
+    ).toContain('The App does not grant this; tokens will fail until the App is updated');
+    expect(root.querySelector('[data-testid="github-perm-beyond-grant-contents"]')).toBeNull();
+  });
+
+  it('round-trips custom permissions save (PUT) and reset (DELETE) and shows beyond-grant warnings', async () => {
+    const putPayloads: Array<Record<string, string>> = [];
+    let deleteCount = 0;
+    let currentInfo = makeProjectGitHub({
+      permissions: {
+        mode: 'default',
+        app_grant_known: true,
+        requested: { contents: 'write', pull_requests: 'write', issues: 'write', metadata: 'read' },
+        app_granted: { contents: 'write', pull_requests: 'read', issues: 'read', metadata: 'read' },
+        effective: { contents: 'write', pull_requests: 'read', issues: 'read', metadata: 'read' },
+        capped: ['pull_requests', 'issues'],
+        cap_reasons: { pull_requests: 'app_grant', issues: 'app_grant' },
+      },
+    });
+
+    const fetchHandler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (
+        init?.method === 'PUT' &&
+        path.endsWith('/api/v1/projects/proj-gh-1/github-permissions')
+      ) {
+        const body = JSON.parse(init.body as string) as Record<string, string>;
+        putPayloads.push(body);
+        currentInfo = makeProjectGitHub({
+          permissions: {
+            mode: 'custom',
+            app_grant_known: true,
+            requested: body,
+            app_granted: {
+              contents: 'write',
+              pull_requests: 'read',
+              issues: 'read',
+              metadata: 'read',
+            },
+            effective: body,
+            capped: [],
+            cap_reasons: {},
+          },
+        });
+        return Promise.resolve(
+          new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      if (
+        init?.method === 'DELETE' &&
+        path.endsWith('/api/v1/projects/proj-gh-1/github-permissions')
+      ) {
+        deleteCount++;
+        currentInfo = makeProjectGitHub({
+          permissions: {
+            mode: 'default',
+            app_grant_known: true,
+            requested: {
+              contents: 'write',
+              pull_requests: 'write',
+              issues: 'write',
+              metadata: 'read',
+            },
+            app_granted: {
+              contents: 'write',
+              pull_requests: 'read',
+              issues: 'read',
+              metadata: 'read',
+            },
+            effective: {
+              contents: 'write',
+              pull_requests: 'read',
+              issues: 'read',
+              metadata: 'read',
+            },
+            capped: ['pull_requests', 'issues'],
+            cap_reasons: { pull_requests: 'app_grant', issues: 'app_grant' },
+          },
+        });
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      if (path.endsWith('/api/v1/projects/proj-gh-1/github')) {
+        return Promise.resolve(
+          new Response(JSON.stringify(currentInfo), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    };
+
+    const el = await mountCard(fetchHandler);
+    el.section = 'permissions';
+    await el.updateComplete;
+    const root = el.shadowRoot!;
+
+    // Initially in default mode: no selects, no reset button, no beyond-grant warning.
+    expect(root.querySelector('[data-testid="github-perm-select-contents"]')).toBeNull();
+    expect(root.querySelector('[data-testid="github-perm-reset-button"]')).toBeNull();
+    expect(root.querySelector('[data-testid="github-perm-beyond-grant-issues"]')).toBeNull();
+
+    // Switch mode toggle to Custom.
+    const modeGroup = root.querySelector(
+      '[data-testid="github-perm-mode-toggle"]'
+    ) as HTMLElement & {
+      value: string;
+    };
+    expect(modeGroup).not.toBeNull();
+    modeGroup.value = 'custom';
+    modeGroup.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+    await el.updateComplete;
+
+    // Now selects render and issues (seeded as write > app_granted read) shows beyond-grant warning.
+    const issuesSelect = root.querySelector(
+      '[data-testid="github-perm-select-issues"]'
+    ) as HTMLElement & {
+      value: string;
+    };
+    const prSelect = root.querySelector(
+      '[data-testid="github-perm-select-pull_requests"]'
+    ) as HTMLElement & {
+      value: string;
+    };
+    const checksSelect = root.querySelector(
+      '[data-testid="github-perm-select-checks"]'
+    ) as HTMLElement & {
+      value: string;
+    };
+    expect(issuesSelect).not.toBeNull();
+    expect(root.querySelector('[data-testid="github-perm-beyond-grant-issues"]')).not.toBeNull();
+
+    // Edit: set pull_requests=none, issues=read, checks=write (exceeds App grant of none).
+    prSelect.value = '';
+    prSelect.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+    issuesSelect.value = 'read';
+    issuesSelect.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+    checksSelect.value = 'write';
+    checksSelect.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+    await el.updateComplete;
+
+    expect(root.querySelector('[data-testid="github-perm-beyond-grant-issues"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="github-perm-beyond-grant-checks"]')?.textContent
+    ).toContain('The App does not grant this; tokens will fail until the App is updated');
+
+    // Save -> PUT /github-permissions.
+    const saveBtn = root.querySelector('[data-testid="github-perm-save-button"]') as HTMLElement;
+    expect(saveBtn).not.toBeNull();
+    saveBtn.click();
+    await vi.waitFor(async () => {
+      await el.updateComplete;
+      expect(putPayloads).toHaveLength(1);
+      expect(root.querySelector('[data-testid="github-perm-mode"]')?.textContent?.trim()).toBe(
+        'Custom'
+      );
+    });
+
+    expect(putPayloads[0]).toEqual({
+      contents: 'write',
+      issues: 'read',
+      checks: 'write',
+      metadata: 'read',
+    });
+
+    // Reset to defaults -> DELETE /github-permissions.
+    const resetBtn = root.querySelector('[data-testid="github-perm-reset-button"]') as HTMLElement;
+    expect(resetBtn).not.toBeNull();
+    resetBtn.click();
+    await vi.waitFor(async () => {
+      await el.updateComplete;
+      expect(deleteCount).toBe(1);
+      expect(root.querySelector('[data-testid="github-perm-mode"]')?.textContent?.trim()).toBe(
+        'Default'
+      );
+    });
+  });
+
+  it('renders triggers missing_permissions hint only when present', async () => {
+    expect(formatMissingTriggerPermissions(['issues:write', 'contents:read'])).toBe(
+      'Issues: write, Contents: read'
+    );
+
+    // Absent triggers_readiness -> no hint.
+    const elWithout = await mountCard(createFetchHandler({ githubInfo: makeProjectGitHub() }));
+    expect(
+      elWithout.shadowRoot!.querySelector('[data-testid="github-triggers-missing-perms"]')
+    ).toBeNull();
+    elWithout.remove();
+
+    // Present with non-empty missing_permissions -> renders hint.
+    const elWith = await mountCard(
+      createFetchHandler({
+        githubInfo: makeProjectGitHub({
+          triggers_readiness: {
+            ready: false,
+            missing_permissions: ['issues:write'],
+          },
+        }),
+      })
+    );
+    const hint = elWith.shadowRoot!.querySelector('[data-testid="github-triggers-missing-perms"]');
+    expect(hint?.textContent?.trim()).toBe('Triggers also need Issues: write');
   });
 });

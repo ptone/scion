@@ -71,6 +71,42 @@ const GITHUB_PERMISSION_ROWS: ReadonlyArray<{ key: string; label: string }> = [
   { key: 'metadata', label: 'Metadata' },
 ];
 
+const GITHUB_PERMISSION_LABELS: Readonly<Record<string, string>> = Object.fromEntries(
+  GITHUB_PERMISSION_ROWS.map((row) => [row.key, row.label])
+);
+
+/**
+ * Numeric rank for comparing GitHub App token permission levels.
+ */
+export function githubPermissionLevelRank(level?: string): number {
+  switch (level) {
+    case 'read':
+      return 1;
+    case 'write':
+    case 'admin':
+      return 2;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Format trigger missing_permissions entries (e.g. "issues:write") into
+ * human-readable labels ("Issues: write").
+ */
+export function formatMissingTriggerPermissions(missing: string[]): string {
+  return missing
+    .map((entry) => {
+      const idx = entry.indexOf(':');
+      if (idx === -1) return entry;
+      const key = entry.slice(0, idx).trim();
+      const level = entry.slice(idx + 1).trim();
+      const label = GITHUB_PERMISSION_LABELS[key] ?? key;
+      return level ? `${label}: ${level}` : label;
+    })
+    .join(', ');
+}
+
 export type ProjectGitHubCardSection = 'all' | 'connection' | 'permissions';
 
 @customElement('scion-project-github-card')
@@ -111,6 +147,21 @@ export class ScionProjectGithubCard extends LitElement {
 
   @state()
   private githubBindCandidates: GitHubInstallation[] = [];
+
+  @state()
+  private permEditMode: 'default' | 'custom' = 'default';
+
+  @state()
+  private permDraft: Record<string, string> = {};
+
+  @state()
+  private permDirty = false;
+
+  @state()
+  private permSaving = false;
+
+  @state()
+  private permError: string | null = null;
 
   private loadedProjectId = '';
 
@@ -291,6 +342,63 @@ export class ScionProjectGithubCard extends LitElement {
       color: var(--scion-warning-text, #92400e);
     }
 
+    .github-perm-warning {
+      font-size: 0.75rem;
+      color: var(--sl-color-danger-700, #b91c1c);
+      display: block;
+    }
+
+    .github-perm-controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .github-perm-mode-group::part(form-control-label) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .github-perm-select {
+      min-width: 7rem;
+    }
+
+    .github-perm-select::part(form-control-label) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .github-perm-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+
+    .github-triggers-hint {
+      font-size: 0.8125rem;
+      color: var(--scion-warning-text, #92400e);
+      margin: 0.75rem 0 0 0;
+    }
+
     .github-bind-picker {
       margin-top: 0.75rem;
       padding: 0.75rem;
@@ -314,16 +422,134 @@ export class ScionProjectGithubCard extends LitElement {
     return this.info ?? this.fetchedInfo;
   }
 
+  override willUpdate(changedProperties: PropertyValues): void {
+    super.willUpdate(changedProperties);
+    if (changedProperties.has('projectId')) {
+      this.permDirty = false;
+      this.permError = null;
+    }
+    if ((changedProperties.has('projectId') || changedProperties.has('info')) && this.info) {
+      this.fetchedInfo = this.info;
+      this.loadedProjectId = this.projectId;
+      if (!this.permDirty) {
+        this.syncPermissionsEditorFromInfo(this.info);
+      }
+    }
+  }
+
   override updated(changedProperties: PropertyValues): void {
     super.updated(changedProperties);
     if (changedProperties.has('projectId') || changedProperties.has('info')) {
-      if (this.info) {
-        this.fetchedInfo = this.info;
-        this.loadedProjectId = this.projectId;
-      } else if (this.projectId && this.projectId !== this.loadedProjectId) {
+      if (!this.info && this.projectId && this.projectId !== this.loadedProjectId) {
         this.loadedProjectId = this.projectId;
         void this.loadProjectGitHub();
       }
+    }
+  }
+
+  private syncPermissionsEditorFromInfo(info: ProjectGitHubInfo): void {
+    const perms = info.permissions;
+    if (!perms) return;
+    this.permEditMode = perms.mode === 'custom' ? 'custom' : 'default';
+    const next: Record<string, string> = {};
+    for (const row of GITHUB_PERMISSION_ROWS) {
+      next[row.key] = perms.requested?.[row.key] || '';
+    }
+    this.permDraft = next;
+    this.permDirty = false;
+  }
+
+  private handlePermissionModeChange(mode: 'default' | 'custom'): void {
+    const info = this.effectiveInfo;
+    this.permError = null;
+    this.permEditMode = mode;
+    if (mode === 'custom') {
+      const next: Record<string, string> = {};
+      for (const row of GITHUB_PERMISSION_ROWS) {
+        next[row.key] = this.permDraft[row.key] || info?.permissions?.requested?.[row.key] || '';
+      }
+      this.permDraft = next;
+      this.permDirty = info?.permissions?.mode !== 'custom';
+    } else {
+      this.permDirty = info?.permissions?.mode === 'custom';
+    }
+  }
+
+  private handlePermissionSelectChange(key: string, value: string): void {
+    this.permError = null;
+    this.permDraft = {
+      ...this.permDraft,
+      [key]: value === 'read' || value === 'write' ? value : '',
+    };
+    this.permDirty = true;
+  }
+
+  private hasAnyDraftPermission(): boolean {
+    return GITHUB_PERMISSION_ROWS.some(
+      (row) => this.permDraft[row.key] === 'read' || this.permDraft[row.key] === 'write'
+    );
+  }
+
+  private async saveCustomPermissions(): Promise<void> {
+    if (!this.projectId) return;
+    if (!this.hasAnyDraftPermission()) {
+      this.permError = 'Select at least one permission (read or write), or reset to defaults.';
+      return;
+    }
+
+    const payload: Record<string, string> = {};
+    for (const row of GITHUB_PERMISSION_ROWS) {
+      const v = this.permDraft[row.key];
+      if (v === 'read' || v === 'write') {
+        payload[row.key] = v;
+      }
+    }
+
+    this.permSaving = true;
+    this.permError = null;
+    try {
+      const res = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/github-permissions`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }
+      );
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { message?: string };
+        throw new Error(data.message || `Failed to save permissions (${res.status})`);
+      }
+      this.permDirty = false;
+      await this.loadProjectGitHub();
+    } catch (err) {
+      this.permError = err instanceof Error ? err.message : 'Failed to save permissions';
+    } finally {
+      this.permSaving = false;
+    }
+  }
+
+  private async resetPermissionsToDefaults(): Promise<void> {
+    if (!this.projectId) return;
+    this.permSaving = true;
+    this.permError = null;
+    try {
+      const res = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/github-permissions`,
+        {
+          method: 'DELETE',
+        }
+      );
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { message?: string };
+        throw new Error(data.message || `Failed to reset permissions (${res.status})`);
+      }
+      this.permDirty = false;
+      await this.loadProjectGitHub();
+    } catch (err) {
+      this.permError = err instanceof Error ? err.message : 'Failed to reset permissions';
+    } finally {
+      this.permSaving = false;
     }
   }
 
@@ -338,6 +564,9 @@ export class ScionProjectGithubCard extends LitElement {
         const data = (await res.json()) as ProjectGitHubInfo;
         if (!this.isConnected) return;
         this.fetchedInfo = data;
+        if (!this.permDirty) {
+          this.syncPermissionsEditorFromInfo(data);
+        }
         this.dispatchEvent(
           new CustomEvent<{ info: ProjectGitHubInfo }>('github-info-changed', {
             detail: { info: data },
@@ -519,14 +748,52 @@ export class ScionProjectGithubCard extends LitElement {
     if (!perms) return nothing;
     const cappedSet = new Set(perms.capped ?? []);
     const appGrantKnown = perms.app_grant_known !== false && perms.app_granted != null;
+    const canEdit = info.can.edit_permissions === true;
+    const activeMode: 'default' | 'custom' = canEdit
+      ? this.permEditMode
+      : perms.mode === 'custom'
+        ? 'custom'
+        : 'default';
+    const isCustomEditing = canEdit && activeMode === 'custom';
+    const missingTriggerPerms = info.triggers_readiness?.missing_permissions ?? [];
+
     return html`
       <div class="github-permissions ${standalone ? 'standalone' : ''}">
-        <div class="github-perm-header">
-          <span class="field-help">Token Permissions</span>
-          <span class="template-badge" data-testid="github-perm-mode">
-            ${perms.mode === 'custom' ? 'Custom' : 'Default'}
-          </span>
+        <div class="github-perm-controls">
+          <div class="github-perm-header" style="margin-bottom: 0;">
+            <span class="field-help">Token Permissions</span>
+            <span class="template-badge" data-testid="github-perm-mode">
+              ${perms.mode === 'custom' ? 'Custom' : 'Default'}
+            </span>
+          </div>
+          ${canEdit
+            ? html`
+                <sl-radio-group
+                  class="github-perm-mode-group"
+                  label="Token permissions mode"
+                  size="small"
+                  value=${activeMode}
+                  data-testid="github-perm-mode-toggle"
+                  @sl-change=${(e: Event) => {
+                    const val = (e.target as HTMLElement & { value?: string }).value;
+                    this.handlePermissionModeChange(val === 'custom' ? 'custom' : 'default');
+                  }}
+                >
+                  <sl-radio-button value="default" data-testid="github-perm-mode-default">
+                    Use defaults (capped to App grant)
+                  </sl-radio-button>
+                  <sl-radio-button value="custom" data-testid="github-perm-mode-custom">
+                    Custom
+                  </sl-radio-button>
+                </sl-radio-group>
+              `
+            : nothing}
         </div>
+        ${this.permError
+          ? html`<div class="status-message error" data-testid="github-perm-error">
+              ${this.permError}
+            </div>`
+          : nothing}
         ${!appGrantKnown
           ? html`<p class="field-help" data-testid="github-app-perms-unloaded">
               App permissions not yet loaded.
@@ -544,15 +811,44 @@ export class ScionProjectGithubCard extends LitElement {
           </thead>
           <tbody>
             ${GITHUB_PERMISSION_ROWS.map((row) => {
-              const requested = perms.requested?.[row.key] || '';
+              const requested = isCustomEditing
+                ? this.permDraft[row.key] || ''
+                : perms.requested?.[row.key] || '';
               const appGrant = appGrantKnown ? perms.app_granted?.[row.key] || '' : '';
               const effective = perms.effective?.[row.key] || '';
               const isCapped = cappedSet.has(row.key);
               const capReason = formatGitHubCapReason(perms.cap_reasons?.[row.key], requested);
+              const exceedsAppGrant =
+                activeMode === 'custom' &&
+                appGrantKnown &&
+                requested !== '' &&
+                githubPermissionLevelRank(requested) > githubPermissionLevelRank(appGrant);
               return html`
                 <tr data-permission=${row.key}>
                   <td>${row.label}</td>
-                  <td>${requested || '—'}</td>
+                  <td>
+                    ${isCustomEditing
+                      ? html`
+                          <sl-select
+                            class="github-perm-select"
+                            size="small"
+                            label=${`${row.label} permission`}
+                            value=${requested}
+                            ?disabled=${this.permSaving}
+                            data-testid=${`github-perm-select-${row.key}`}
+                            @sl-change=${(e: Event) => {
+                              const val =
+                                (e.target as HTMLElement & { value?: string }).value ?? '';
+                              this.handlePermissionSelectChange(row.key, val);
+                            }}
+                          >
+                            <sl-option value="">none</sl-option>
+                            <sl-option value="read">read</sl-option>
+                            <sl-option value="write">write</sl-option>
+                          </sl-select>
+                        `
+                      : requested || '—'}
+                  </td>
                   <td>${appGrant || '—'}</td>
                   <td>
                     ${effective
@@ -563,12 +859,58 @@ export class ScionProjectGithubCard extends LitElement {
                   </td>
                   <td>
                     ${capReason ? html`<span class="github-cap-reason">${capReason}</span>` : ''}
+                    ${exceedsAppGrant
+                      ? html`<span
+                          class="github-perm-warning"
+                          data-testid=${`github-perm-beyond-grant-${row.key}`}
+                          >${'The App does not grant this; tokens will fail until the App is updated.'}</span
+                        >`
+                      : ''}
                   </td>
                 </tr>
               `;
             })}
           </tbody>
         </table>
+        ${missingTriggerPerms.length > 0
+          ? html`<p class="github-triggers-hint" data-testid="github-triggers-missing-perms">
+              Triggers also need ${formatMissingTriggerPermissions(missingTriggerPerms)}
+            </p>`
+          : nothing}
+        ${canEdit
+          ? html`
+              <div class="github-perm-actions" data-testid="github-perm-actions">
+                ${isCustomEditing
+                  ? html`
+                      <sl-button
+                        variant="primary"
+                        size="small"
+                        data-testid="github-perm-save-button"
+                        ?loading=${this.permSaving}
+                        ?disabled=${this.permSaving || !this.hasAnyDraftPermission()}
+                        @click=${(): Promise<void> => this.saveCustomPermissions()}
+                      >
+                        Save permissions
+                      </sl-button>
+                    `
+                  : nothing}
+                ${perms.mode === 'custom'
+                  ? html`
+                      <sl-button
+                        variant=${activeMode === 'default' ? 'primary' : 'default'}
+                        size="small"
+                        data-testid="github-perm-reset-button"
+                        ?loading=${this.permSaving}
+                        ?disabled=${this.permSaving}
+                        @click=${(): Promise<void> => this.resetPermissionsToDefaults()}
+                      >
+                        Reset to defaults
+                      </sl-button>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing}
       </div>
     `;
   }
