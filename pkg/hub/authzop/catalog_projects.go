@@ -2947,6 +2947,8 @@ var projectOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/github-status", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/github-permissions", Method: "PUT"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/github-permissions", Method: "DELETE"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/github-extra-repos", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/github-extra-repos", Method: "DELETE"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/git-identity", Method: "PUT"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/git-identity", Method: "DELETE"},
 		},

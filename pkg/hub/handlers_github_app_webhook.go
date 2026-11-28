@@ -283,7 +283,9 @@ func (s *Server) processInstallationRepositoriesWebhook(ctx context.Context, bod
 	switch event.Action {
 	case "added":
 		// Add new repos to the installation's repo list
+		addedFullNames := make([]string, 0, len(event.RepositoriesAdded))
 		for _, repo := range event.RepositoriesAdded {
+			addedFullNames = append(addedFullNames, repo.FullName)
 			found := false
 			for _, existing := range existing.Repositories {
 				if existing == repo.FullName {
@@ -298,6 +300,9 @@ func (s *Server) processInstallationRepositoriesWebhook(ctx context.Context, bod
 		if err := s.store.UpdateGitHubInstallation(ctx, existing); err != nil {
 			slog.Error("Failed to update installation repos", "error", err)
 		}
+
+		// Clear removed flag on any extra repos that were re-added.
+		s.clearExtraReposForAddedRepos(ctx, installationID, addedFullNames)
 
 		// Check if any existing projects now match newly added repos
 		s.matchProjectsToInstallation(ctx, existing)
@@ -798,6 +803,8 @@ func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationI
 			return
 		}
 
+		s.flagExtraReposForRemovedRepos(ctx, project, installationID, removedRepos)
+
 		if project.GitRemote == "" {
 			return
 		}
@@ -1026,7 +1033,7 @@ func (s *Server) getGitHubAppClient() (*githubapp.Client, error) {
 // intentionally uncached so agent tokens retain their full lifetime and
 // status checks always contact GitHub.
 func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project) (string, string, error) {
-	tok, exp, _, err := s.mintGitHubAppTokenInternal(ctx, project, nil, false)
+	tok, exp, _, err := s.mintGitHubAppTokenInternal(ctx, project, nil, false, nil, false)
 	return tok, exp, err
 }
 
@@ -1041,7 +1048,7 @@ func (s *Server) MintGitHubAppTokenWithPermissions(
 	project *store.Project,
 	requested githubapp.TokenPermissions,
 ) (string, string, error) {
-	tok, exp, _, err := s.mintGitHubAppTokenInternal(ctx, project, &requested, true)
+	tok, exp, _, err := s.mintGitHubAppTokenInternal(ctx, project, &requested, true, nil, false)
 	return tok, exp, err
 }
 
@@ -1050,6 +1057,8 @@ func (s *Server) mintGitHubAppTokenInternal(
 	project *store.Project,
 	requested *githubapp.TokenPermissions,
 	useCache bool,
+	overrideRepos []string,
+	extraRead bool,
 ) (string, string, map[string]string, error) {
 	if project == nil || project.GitHubInstallationID == nil {
 		return "", "", nil, fmt.Errorf("project has no GitHub App installation")
@@ -1057,26 +1066,32 @@ func (s *Server) mintGitHubAppTokenInternal(
 
 	// Single choke for every token delivery leg (hub-host clone and pull,
 	// agent env at create and refresh, the agent token-refresh endpoint,
-	// resource import, skills, the status check, trigger enrichment and
-	// github.comment): the association must be authorized NOW, whatever was
-	// recorded before. See github_app_association_authz.go. A refusal,
-	// definitive or inconclusive, mints nothing and is surfaced on the
-	// project status.
+	// extra-read minting, resource import, skills, the status check, trigger
+	// enrichment and github.comment): the association must be authorized NOW,
+	// whatever was recorded before. See github_app_association_authz.go. A
+	// refusal, definitive or inconclusive, mints nothing and (for primary
+	// mints) is surfaced on the project status.
 	grant, authzErr := s.authorizeGitHubAppAssociation(ctx, project, *project.GitHubInstallationID)
 	if authzErr != nil {
 		if s.githubAssociationRefusalLog.shouldLog(project.ID, *project.GitHubInstallationID, authzErr.Error()) {
 			slog.WarnContext(ctx, "GitHub App token refused: installation association not authorized",
 				"project_id", project.ID, "installation_id", *project.GitHubInstallationID, "error", authzErr)
 		}
-		errCode := githubAssociationErrorCode(authzErr)
-		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
-			errCode, githubAppStatusMessage(errCode))
+		if !extraRead {
+			errCode := githubAssociationErrorCode(authzErr)
+			s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
+				errCode, githubAppStatusMessage(errCode))
+		}
 		return "", "", nil, authzErr
 	}
 	s.githubAssociationRefusalLog.clear(project.ID)
 
 	var perms githubapp.TokenPermissions
-	if requested != nil {
+	if extraRead && requested != nil {
+		// Extra-read mints pass an already App-grant-intersected read-only
+		// permission set ({contents: read, metadata: read}).
+		perms = *requested
+	} else if requested != nil {
 		var reqAppPerms map[string]string
 		if !hasUsableStoredGitHubPermissions(project.GitHubPermissions) {
 			id, hasID := s.GitHubAppIdentity(ctx)
@@ -1136,7 +1151,17 @@ func (s *Server) mintGitHubAppTokenInternal(
 	}
 
 	installationID := *project.GitHubInstallationID
+	repos := []string{grant.Repo}
 	ownerRepo := grant.Owner + "/" + grant.Repo
+	if len(overrideRepos) > 0 {
+		repos = overrideRepos
+		canonical := make([]string, len(overrideRepos))
+		lowerOwner := strings.ToLower(grant.Owner)
+		for i, r := range overrideRepos {
+			canonical[i] = lowerOwner + "/" + strings.ToLower(r)
+		}
+		ownerRepo = strings.Join(canonical, ",")
+	}
 	appID := s.githubAppConfiguredID()
 	apiBase := s.githubAppAPIBase()
 	permKey := canonicalGitHubTokenPermKey(perms)
@@ -1164,16 +1189,15 @@ func (s *Server) mintGitHubAppTokenInternal(
 		// error itself reaches only the log, rendered (ptone/scion#7498).
 		slog.ErrorContext(ctx, "GitHub App client unavailable", "project_id", project.ID,
 			"error_code", errorCode, "error", upstreamText(err.Error()))
-		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
-			errorCode, githubAppStatusMessage(errorCode))
+		if !extraRead {
+			s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
+				errorCode, githubAppStatusMessage(errorCode))
+		}
 		return "", "", nil, err
 	}
 
-	// Always repository-scoped, never installation-wide: the API takes the
-	// bare repo name, and the coverage check above pinned the installation
-	// account to the remote owner.
-	repos := []string{grant.Repo}
-
+	// Always repository-scoped, never installation-wide: the API takes bare
+	// repo names, and the coverage check above pinned the installation account.
 	token, err := client.MintInstallationToken(ctx, installationID, repos, perms)
 	if err != nil {
 		// Classify the error and update project status
@@ -1192,12 +1216,13 @@ func (s *Server) mintGitHubAppTokenInternal(
 		slog.ErrorContext(ctx, "GitHub App token mint failed", "project_id", project.ID,
 			"error_code", errorCode, "error", upstreamText(err.Error()), "upstream", upstreamText(upstream))
 
-		state := store.GitHubAppStateError
-		if errorCode == githubapp.ErrCodePermissionDenied {
-			state = store.GitHubAppStateDegraded
+		if !extraRead {
+			state := store.GitHubAppStateError
+			if errorCode == githubapp.ErrCodePermissionDenied {
+				state = store.GitHubAppStateDegraded
+			}
+			s.updateProjectGitHubAppStatus(ctx, project, state, errorCode, errorMessage)
 		}
-
-		s.updateProjectGitHubAppStatus(ctx, project, state, errorCode, errorMessage)
 		return "", "", nil, err
 	}
 
@@ -1220,20 +1245,20 @@ func (s *Server) mintGitHubAppTokenInternal(
 		s.mu.Unlock()
 	}
 
-	// Success — update project status. When no per-project permissions are
-	// stored, minting already intersected defaults with the App's grant (and
-	// failed closed above if the intersection was empty), so a successful
-	// mint is healthy.
-	now := timeNow()
-	project.GitHubAppStatus = &store.GitHubAppProjectStatus{
-		State:         store.GitHubAppStateOK,
-		LastTokenMint: &now,
-		LastChecked:   now,
-	}
-	if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
-		slog.WarnContext(ctx, "Failed to update project status after successful token mint", "error", err)
-	} else if s.events != nil {
-		s.events.PublishProjectUpdated(ctx, project)
+	// Success — update project status (primary mints only; extra-read mints
+	// never mutate the project's primary GitHubAppStatus).
+	if !extraRead {
+		now := timeNow()
+		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
+			State:         store.GitHubAppStateOK,
+			LastTokenMint: &now,
+			LastChecked:   now,
+		}
+		if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
+			slog.WarnContext(ctx, "Failed to update project status after successful token mint", "error", err)
+		} else if s.events != nil {
+			s.events.PublishProjectUpdated(ctx, project)
+		}
 	}
 
 	return token.Token, token.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z"), grantedPerms, nil

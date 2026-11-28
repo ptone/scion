@@ -57,6 +57,7 @@ type GitHubAppConfigResponse struct {
 	PrivateKeyOverridesSecret bool                     `json:"private_key_overrides_secret,omitempty"`
 	HasWebhookSecret          bool                     `json:"has_webhook_secret"`
 	InstallationURL           string                   `json:"installation_url,omitempty"`
+	ExtraReposPolicy          string                   `json:"extra_repos_policy,omitempty"`
 	RateLimit                 *githubapp.RateLimitInfo `json:"rate_limit,omitempty"`
 	Triggers                  *GitHubTriggersReadiness `json:"triggers,omitempty"`
 }
@@ -96,12 +97,13 @@ func (s *Server) syncGitHubAppHealthCheckSchedule() {
 
 // GitHubAppConfigUpdateRequest is the API request to update GitHub App configuration.
 type GitHubAppConfigUpdateRequest struct {
-	AppID           *int64  `json:"app_id,omitempty"`
-	PrivateKey      *string `json:"private_key,omitempty"`
-	WebhookSecret   *string `json:"webhook_secret,omitempty"`
-	APIBaseURL      *string `json:"api_base_url,omitempty"`
-	WebhooksEnabled *bool   `json:"webhooks_enabled,omitempty"`
-	InstallationURL *string `json:"installation_url,omitempty"`
+	AppID            *int64  `json:"app_id,omitempty"`
+	PrivateKey       *string `json:"private_key,omitempty"`
+	WebhookSecret    *string `json:"webhook_secret,omitempty"`
+	APIBaseURL       *string `json:"api_base_url,omitempty"`
+	WebhooksEnabled  *bool   `json:"webhooks_enabled,omitempty"`
+	InstallationURL  *string `json:"installation_url,omitempty"`
+	ExtraReposPolicy *string `json:"extra_repos_policy,omitempty"`
 }
 
 func (s *Server) handleGetGitHubApp(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +135,7 @@ func (s *Server) handleGetGitHubApp(w http.ResponseWriter, r *http.Request) {
 		PrivateKeyOverridesSecret: keyStatus.overridesSecret,
 		HasWebhookSecret:          hasWebhookSecret,
 		InstallationURL:           cfg.InstallationURL,
+		ExtraReposPolicy:          config.NormalizeGitHubExtraReposPolicy(cfg.ExtraReposPolicy),
 		RateLimit:                 rateLimit,
 		Triggers:                  triggers,
 	})
@@ -142,6 +145,11 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 	var req GitHubAppConfigUpdateRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body", nil)
+		return
+	}
+	if req.ExtraReposPolicy != nil && !config.ValidGitHubExtraReposPolicy(*req.ExtraReposPolicy) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"extra_repos_policy must be one of \"project_admin\", \"hub_admin\", or \"off\"", nil)
 		return
 	}
 
@@ -204,6 +212,9 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 	if req.InstallationURL != nil {
 		s.config.GitHubAppConfig.InstallationURL = *req.InstallationURL
 	}
+	if req.ExtraReposPolicy != nil {
+		s.config.GitHubAppConfig.ExtraReposPolicy = *req.ExtraReposPolicy
+	}
 	if req.AppID != nil || req.APIBaseURL != nil {
 		s.githubAppIdentity.reset()
 	}
@@ -255,6 +266,7 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 		PrivateKeyOverridesSecret: keyStatus.overridesSecret,
 		HasWebhookSecret:          hasWebhookSecret,
 		InstallationURL:           cfg.InstallationURL,
+		ExtraReposPolicy:          config.NormalizeGitHubExtraReposPolicy(cfg.ExtraReposPolicy),
 	})
 }
 
@@ -312,6 +324,10 @@ func (s *Server) persistGitHubAppConfigToDB(ctx context.Context, ops *Operationa
 	if len(aliases) == 0 {
 		aliases = slices.Clone(snap.GitHubCommandMentionAliases)
 	}
+	extraReposPolicy := cfg.ExtraReposPolicy
+	if extraReposPolicy == "" {
+		extraReposPolicy = snap.GitHubExtraReposPolicy
+	}
 
 	doc := &opsettings.GitHubAppSettings{
 		AppID:                 cfg.AppID,
@@ -321,6 +337,7 @@ func (s *Server) persistGitHubAppConfigToDB(ctx context.Context, ops *Operationa
 		PrivateKeyPath:        privateKeyPath,
 		AppSlug:               appSlug,
 		CommandMentionAliases: aliases,
+		ExtraReposPolicy:      extraReposPolicy,
 	}
 
 	docBytes, err := json.Marshal(doc)
@@ -388,6 +405,9 @@ func (s *Server) persistGitHubAppConfig(cfg GitHubAppServerConfig) error {
 	}
 	if len(cfg.CommandMentionAliases) > 0 {
 		ghApp["command_mention_aliases"] = slices.Clone(cfg.CommandMentionAliases)
+	}
+	if cfg.ExtraReposPolicy != "" {
+		ghApp["extra_repos_policy"] = cfg.ExtraReposPolicy
 	}
 
 	if len(ghApp) > 0 {
@@ -633,6 +653,8 @@ func (s *Server) handleProjectGitHubRoutes(w http.ResponseWriter, r *http.Reques
 		s.handleProjectGitHubStatus(w, r, project)
 	case "github-permissions":
 		s.handleProjectGitHubPermissions(w, r, project)
+	case "github-extra-repos":
+		s.handleProjectGitHubExtraRepos(w, r, project)
 	case "git-identity":
 		s.handleProjectGitIdentity(w, r, project)
 	default:

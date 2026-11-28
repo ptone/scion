@@ -217,6 +217,20 @@ func (_c *ProjectCreate) SetNillableGithubAppStatus(v *string) *ProjectCreate {
 	return _c
 }
 
+// SetGithubExtraRepos sets the "github_extra_repos" field.
+func (_c *ProjectCreate) SetGithubExtraRepos(v string) *ProjectCreate {
+	_c.mutation.SetGithubExtraRepos(v)
+	return _c
+}
+
+// SetNillableGithubExtraRepos sets the "github_extra_repos" field if the given value is not nil.
+func (_c *ProjectCreate) SetNillableGithubExtraRepos(v *string) *ProjectCreate {
+	if v != nil {
+		_c.SetGithubExtraRepos(*v)
+	}
+	return _c
+}
+
 // SetGitIdentity sets the "git_identity" field.
 func (_c *ProjectCreate) SetGitIdentity(v string) *ProjectCreate {
 	_c.mutation.SetGitIdentity(v)
@@ -485,6 +499,10 @@ func (_c *ProjectCreate) createSpec() (*Project, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.GithubAppStatus(); ok {
 		_spec.SetField(project.FieldGithubAppStatus, field.TypeString, value)
 		_node.GithubAppStatus = value
+	}
+	if value, ok := _c.mutation.GithubExtraRepos(); ok {
+		_spec.SetField(project.FieldGithubExtraRepos, field.TypeString, value)
+		_node.GithubExtraRepos = value
 	}
 	if value, ok := _c.mutation.GitIdentity(); ok {
 		_spec.SetField(project.FieldGitIdentity, field.TypeString, value)
@@ -771,6 +789,24 @@ func (u *ProjectUpsert) UpdateGithubAppStatus() *ProjectUpsert {
 // ClearGithubAppStatus clears the value of the "github_app_status" field.
 func (u *ProjectUpsert) ClearGithubAppStatus() *ProjectUpsert {
 	u.SetNull(project.FieldGithubAppStatus)
+	return u
+}
+
+// SetGithubExtraRepos sets the "github_extra_repos" field.
+func (u *ProjectUpsert) SetGithubExtraRepos(v string) *ProjectUpsert {
+	u.Set(project.FieldGithubExtraRepos, v)
+	return u
+}
+
+// UpdateGithubExtraRepos sets the "github_extra_repos" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateGithubExtraRepos() *ProjectUpsert {
+	u.SetExcluded(project.FieldGithubExtraRepos)
+	return u
+}
+
+// ClearGithubExtraRepos clears the value of the "github_extra_repos" field.
+func (u *ProjectUpsert) ClearGithubExtraRepos() *ProjectUpsert {
+	u.SetNull(project.FieldGithubExtraRepos)
 	return u
 }
 
@@ -1135,6 +1171,27 @@ func (u *ProjectUpsertOne) UpdateGithubAppStatus() *ProjectUpsertOne {
 func (u *ProjectUpsertOne) ClearGithubAppStatus() *ProjectUpsertOne {
 	return u.Update(func(s *ProjectUpsert) {
 		s.ClearGithubAppStatus()
+	})
+}
+
+// SetGithubExtraRepos sets the "github_extra_repos" field.
+func (u *ProjectUpsertOne) SetGithubExtraRepos(v string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetGithubExtraRepos(v)
+	})
+}
+
+// UpdateGithubExtraRepos sets the "github_extra_repos" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateGithubExtraRepos() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateGithubExtraRepos()
+	})
+}
+
+// ClearGithubExtraRepos clears the value of the "github_extra_repos" field.
+func (u *ProjectUpsertOne) ClearGithubExtraRepos() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearGithubExtraRepos()
 	})
 }
 
@@ -1677,6 +1734,27 @@ func (u *ProjectUpsertBulk) UpdateGithubAppStatus() *ProjectUpsertBulk {
 func (u *ProjectUpsertBulk) ClearGithubAppStatus() *ProjectUpsertBulk {
 	return u.Update(func(s *ProjectUpsert) {
 		s.ClearGithubAppStatus()
+	})
+}
+
+// SetGithubExtraRepos sets the "github_extra_repos" field.
+func (u *ProjectUpsertBulk) SetGithubExtraRepos(v string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetGithubExtraRepos(v)
+	})
+}
+
+// UpdateGithubExtraRepos sets the "github_extra_repos" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateGithubExtraRepos() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateGithubExtraRepos()
+	})
+}
+
+// ClearGithubExtraRepos clears the value of the "github_extra_repos" field.
+func (u *ProjectUpsertBulk) ClearGithubExtraRepos() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearGithubExtraRepos()
 	})
 }
 

@@ -326,6 +326,105 @@ func TestProject_UpdateProjectGitHubAppStatus(t *testing.T) {
 	assert.ErrorIs(t, ps.UpdateProjectGitHubAppStatus(ctx, uuid.NewString(), status), store.ErrNotFound)
 }
 
+// TestProject_GitHubExtraRepos_CASAndUpdateProjectExcludes verifies that:
+//   - UpdateProjectGitHubExtraRepos enforces CAS on the previous list's hash
+//     (returning store.ErrVersionConflict on mismatch);
+//   - UpdateProject never overwrites or clears github_extra_repos (and refreshes
+//     the caller's struct from the stored value);
+//   - MarkProjectGitHubExtraReposRemoved flags matching entries without deleting
+//     them, and ClearProjectGitHubExtraReposRemoved clears the flag.
+func TestProject_GitHubExtraRepos_CASAndUpdateProjectExcludes(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	p := &store.Project{
+		ID:        uuid.NewString(),
+		Name:      "Extra Repos Store Test",
+		Slug:      "extra-repos-store-test",
+		GitRemote: "https://github.com/acme/primary",
+	}
+	require.NoError(t, ps.CreateProject(ctx, p))
+
+	emptyVer := store.HashGitHubExtraRepos(nil)
+	assert.Equal(t, emptyVer, store.HashGitHubExtraRepos([]store.GitHubExtraRepo{}))
+
+	// Wrong expectedVersion is rejected with ErrVersionConflict.
+	_, err := ps.UpdateProjectGitHubExtraRepos(ctx, p.ID, "wrong-hash", []store.GitHubExtraRepo{
+		{Repo: "acme/lib-a", AddedBy: "user-1", AddedAt: time.Now().UTC().Truncate(time.Microsecond)},
+	})
+	assert.ErrorIs(t, err, store.ErrVersionConflict)
+
+	// Matching expectedVersion succeeds and returns the new version hash.
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	initial := []store.GitHubExtraRepo{
+		{Repo: "acme/lib-a", AddedBy: "user-1", AddedAt: now},
+		{Repo: "Acme/Lib-B", AddedBy: "user-1", AddedAt: now},
+	}
+	ver1, err := ps.UpdateProjectGitHubExtraRepos(ctx, p.ID, emptyVer, initial)
+	require.NoError(t, err)
+	assert.Equal(t, store.HashGitHubExtraRepos(initial), ver1)
+
+	// Reusing the stale emptyVer fails with ErrVersionConflict.
+	_, err = ps.UpdateProjectGitHubExtraRepos(ctx, p.ID, emptyVer, nil)
+	assert.ErrorIs(t, err, store.ErrVersionConflict)
+
+	// Generic UpdateProject with a stale snapshot (nil or different GitHubExtraRepos)
+	// must NOT overwrite or clear the column, and refreshes p.GitHubExtraRepos.
+	stale, err := ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	stale.Name = "Renamed Project"
+	stale.GitHubExtraRepos = nil
+	require.NoError(t, ps.UpdateProject(ctx, stale))
+	assert.Len(t, stale.GitHubExtraRepos, 2, "UpdateProject must refresh caller's GitHubExtraRepos from stored row")
+
+	got, err := ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Renamed Project", got.Name)
+	require.Len(t, got.GitHubExtraRepos, 2)
+	assert.Equal(t, "acme/lib-a", got.GitHubExtraRepos[0].Repo)
+	assert.Equal(t, "Acme/Lib-B", got.GitHubExtraRepos[1].Repo)
+
+	// MarkProjectGitHubExtraReposRemoved matches case-insensitively and never deletes.
+	removedAt := now.Add(time.Minute)
+	flagged, err := ps.MarkProjectGitHubExtraReposRemoved(ctx, p.ID, []string{"acme/lib-b"}, removedAt)
+	require.NoError(t, err)
+	assert.Equal(t, 1, flagged)
+
+	// Idempotent on redelivery.
+	flaggedAgain, err := ps.MarkProjectGitHubExtraReposRemoved(ctx, p.ID, []string{"ACME/LIB-B"}, removedAt.Add(time.Minute))
+	require.NoError(t, err)
+	assert.Equal(t, 0, flaggedAgain)
+
+	got, err = ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	require.Len(t, got.GitHubExtraRepos, 2)
+	assert.Nil(t, got.GitHubExtraRepos[0].RemovedFromInstallationAt)
+	require.NotNil(t, got.GitHubExtraRepos[1].RemovedFromInstallationAt)
+	assert.True(t, got.GitHubExtraRepos[1].RemovedFromInstallationAt.Equal(removedAt))
+
+	// ClearProjectGitHubExtraReposRemoved clears the flag when re-added.
+	cleared, err := ps.ClearProjectGitHubExtraReposRemoved(ctx, p.ID, []string{"acme/lib-b"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, cleared)
+
+	got, err = ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Nil(t, got.GitHubExtraRepos[1].RemovedFromInstallationAt)
+
+	// Clearing via UpdateProjectGitHubExtraRepos with current hash empties the list.
+	ver2, err := ps.UpdateProjectGitHubExtraRepos(ctx, p.ID, store.HashGitHubExtraRepos(got.GitHubExtraRepos), nil)
+	require.NoError(t, err)
+	assert.Equal(t, emptyVer, ver2)
+
+	got, err = ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.GitHubExtraRepos)
+
+	// Missing project returns ErrNotFound.
+	_, err = ps.UpdateProjectGitHubExtraRepos(ctx, uuid.NewString(), emptyVer, nil)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
 func TestProject_SharedDirsRoundTrip(t *testing.T) {
 	ps := newTestProjectStore(t)
 	ctx := context.Background()

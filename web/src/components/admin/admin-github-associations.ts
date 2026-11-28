@@ -27,6 +27,7 @@ interface AssociationReportEntry {
   authorized: boolean;
   basis?: string;
   write_allowed: boolean;
+  extra_repos_count?: number;
   error_code?: string;
   reason?: string;
 }
@@ -264,6 +265,7 @@ export class ScionAdminGitHubAssociations extends LitElement {
                           <th>Repository</th>
                           <th>Basis</th>
                           <th>Write</th>
+                          <th>Extra repos</th>
                           <th>Status</th>
                         </tr>
                       </thead>
@@ -283,6 +285,11 @@ export class ScionAdminGitHubAssociations extends LitElement {
                                   ? entry.write_allowed
                                     ? 'yes'
                                     : 'read-only'
+                                  : '—'}
+                              </td>
+                              <td>
+                                ${entry.extra_repos_count && entry.extra_repos_count > 0
+                                  ? entry.extra_repos_count
                                   : '—'}
                               </td>
                               <td>

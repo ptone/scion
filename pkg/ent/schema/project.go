@@ -89,6 +89,8 @@ func (Project) Fields() []ent.Field {
 			Optional(),
 		field.String("github_app_status").
 			Optional(),
+		field.String("github_extra_repos").
+			Optional(),
 		field.String("git_identity").
 			Optional(),
 

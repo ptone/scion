@@ -3505,7 +3505,8 @@
         "webhooks_enabled": { "type": "boolean" },
         "installation_url": { "type": "string" },
         "app_slug": { "type": "string", "description": "Optional override for the GitHub App slug used in @mention command detection when GET /app is unavailable." },
-        "command_mention_aliases": { "type": "array", "items": { "type": "string" }, "description": "Additional @mention handles (without leading @) accepted alongside the GitHub App slug for slash-command detection." }
+        "command_mention_aliases": { "type": "array", "items": { "type": "string" }, "description": "Additional @mention handles (without leading @) accepted alongside the GitHub App slug for slash-command detection." },
+        "extra_repos_policy": { "type": "string", "enum": ["project_admin", "hub_admin", "off"], "description": "Who may configure extra read-only repositories on projects: project_admin (default), hub_admin, or off (disables writes and extra-read minting)." }
       },
       "additionalProperties": false
     },

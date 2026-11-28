@@ -230,6 +230,7 @@ type Layer1Snapshot struct {
 	GitHubPrivateKeyPath        string
 	GitHubAppSlug               string
 	GitHubCommandMentionAliases []string
+	GitHubExtraReposPolicy      string
 
 	// Notifications
 	NotificationChannels []config.V1NotificationChannelConfig
@@ -1541,6 +1542,7 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.GitHubPrivateKeyPath = k.String("server.github_app.private_key_path")
 	snap.GitHubAppSlug = k.String("server.github_app.app_slug")
 	snap.GitHubCommandMentionAliases = k.Strings("server.github_app.command_mention_aliases")
+	snap.GitHubExtraReposPolicy = k.String("server.github_app.extra_repos_policy")
 
 	// Notifications
 	if k.Exists("server.notification_channels") {
@@ -1663,6 +1665,7 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap.GitHubPrivateKeyPath = gc.GitHubApp.PrivateKeyPath
 	snap.GitHubAppSlug = gc.GitHubApp.AppSlug
 	snap.GitHubCommandMentionAliases = slices.Clone(gc.GitHubApp.CommandMentionAliases)
+	snap.GitHubExtraReposPolicy = gc.GitHubApp.ExtraReposPolicy
 
 	// Project defaults — read from settings.yaml project_defaults section
 	snap.DefaultScratchpad = gc.DefaultScratchpad
@@ -2094,12 +2097,16 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		}
 		gh.AppSlug = snap.GitHubAppSlug
 		gh.CommandMentionAliases = slices.Clone(snap.GitHubCommandMentionAliases)
+		gh.ExtraReposPolicy = snap.GitHubExtraReposPolicy
 	} else {
 		if snap.GitHubAppSlug != "" {
 			gh.AppSlug = snap.GitHubAppSlug
 		}
 		if len(snap.GitHubCommandMentionAliases) > 0 {
 			gh.CommandMentionAliases = slices.Clone(snap.GitHubCommandMentionAliases)
+		}
+		if snap.GitHubExtraReposPolicy != "" {
+			gh.ExtraReposPolicy = snap.GitHubExtraReposPolicy
 		}
 	}
 	githubAppChanged := s.setGitHubAppPublicLocked(gh)

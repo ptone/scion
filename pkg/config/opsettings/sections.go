@@ -145,6 +145,7 @@ type GitHubAppSettings struct {
 	PrivateKeyPath        string   `json:"private_key_path,omitempty"`
 	AppSlug               string   `json:"app_slug,omitempty"`
 	CommandMentionAliases []string `json:"command_mention_aliases,omitempty"`
+	ExtraReposPolicy      string   `json:"extra_repos_policy,omitempty"`
 }
 
 // NotificationsSettings holds the Layer-1 notification channel configuration.

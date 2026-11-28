@@ -126,6 +126,11 @@ func GithubAppStatus(v string) predicate.Project {
 	return predicate.Project(sql.FieldEQ(FieldGithubAppStatus, v))
 }
 
+// GithubExtraRepos applies equality check predicate on the "github_extra_repos" field. It's identical to GithubExtraReposEQ.
+func GithubExtraRepos(v string) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldGithubExtraRepos, v))
+}
+
 // GitIdentity applies equality check predicate on the "git_identity" field. It's identical to GitIdentityEQ.
 func GitIdentity(v string) predicate.Project {
 	return predicate.Project(sql.FieldEQ(FieldGitIdentity, v))
@@ -1039,6 +1044,81 @@ func GithubAppStatusEqualFold(v string) predicate.Project {
 // GithubAppStatusContainsFold applies the ContainsFold predicate on the "github_app_status" field.
 func GithubAppStatusContainsFold(v string) predicate.Project {
 	return predicate.Project(sql.FieldContainsFold(FieldGithubAppStatus, v))
+}
+
+// GithubExtraReposEQ applies the EQ predicate on the "github_extra_repos" field.
+func GithubExtraReposEQ(v string) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldGithubExtraRepos, v))
+}
+
+// GithubExtraReposNEQ applies the NEQ predicate on the "github_extra_repos" field.
+func GithubExtraReposNEQ(v string) predicate.Project {
+	return predicate.Project(sql.FieldNEQ(FieldGithubExtraRepos, v))
+}
+
+// GithubExtraReposIn applies the In predicate on the "github_extra_repos" field.
+func GithubExtraReposIn(vs ...string) predicate.Project {
+	return predicate.Project(sql.FieldIn(FieldGithubExtraRepos, vs...))
+}
+
+// GithubExtraReposNotIn applies the NotIn predicate on the "github_extra_repos" field.
+func GithubExtraReposNotIn(vs ...string) predicate.Project {
+	return predicate.Project(sql.FieldNotIn(FieldGithubExtraRepos, vs...))
+}
+
+// GithubExtraReposGT applies the GT predicate on the "github_extra_repos" field.
+func GithubExtraReposGT(v string) predicate.Project {
+	return predicate.Project(sql.FieldGT(FieldGithubExtraRepos, v))
+}
+
+// GithubExtraReposGTE applies the GTE predicate on the "github_extra_repos" field.
+func GithubExtraReposGTE(v string) predicate.Project {
+	return predicate.Project(sql.FieldGTE(FieldGithubExtraRepos, v))
+}
+
+// GithubExtraReposLT applies the LT predicate on the "github_extra_repos" field.
+func GithubExtraReposLT(v string) predicate.Project {
+	return predicate.Project(sql.FieldLT(FieldGithubExtraRepos, v))
+}
+
+// GithubExtraReposLTE applies the LTE predicate on the "github_extra_repos" field.
+func GithubExtraReposLTE(v string) predicate.Project {
+	return predicate.Project(sql.FieldLTE(FieldGithubExtraRepos, v))
+}
+
+// GithubExtraReposContains applies the Contains predicate on the "github_extra_repos" field.
+func GithubExtraReposContains(v string) predicate.Project {
+	return predicate.Project(sql.FieldContains(FieldGithubExtraRepos, v))
+}
+
+// GithubExtraReposHasPrefix applies the HasPrefix predicate on the "github_extra_repos" field.
+func GithubExtraReposHasPrefix(v string) predicate.Project {
+	return predicate.Project(sql.FieldHasPrefix(FieldGithubExtraRepos, v))
+}
+
+// GithubExtraReposHasSuffix applies the HasSuffix predicate on the "github_extra_repos" field.
+func GithubExtraReposHasSuffix(v string) predicate.Project {
+	return predicate.Project(sql.FieldHasSuffix(FieldGithubExtraRepos, v))
+}
+
+// GithubExtraReposIsNil applies the IsNil predicate on the "github_extra_repos" field.
+func GithubExtraReposIsNil() predicate.Project {
+	return predicate.Project(sql.FieldIsNull(FieldGithubExtraRepos))
+}
+
+// GithubExtraReposNotNil applies the NotNil predicate on the "github_extra_repos" field.
+func GithubExtraReposNotNil() predicate.Project {
+	return predicate.Project(sql.FieldNotNull(FieldGithubExtraRepos))
+}
+
+// GithubExtraReposEqualFold applies the EqualFold predicate on the "github_extra_repos" field.
+func GithubExtraReposEqualFold(v string) predicate.Project {
+	return predicate.Project(sql.FieldEqualFold(FieldGithubExtraRepos, v))
+}
+
+// GithubExtraReposContainsFold applies the ContainsFold predicate on the "github_extra_repos" field.
+func GithubExtraReposContainsFold(v string) predicate.Project {
+	return predicate.Project(sql.FieldContainsFold(FieldGithubExtraRepos, v))
 }
 
 // GitIdentityEQ applies the EQ predicate on the "git_identity" field.

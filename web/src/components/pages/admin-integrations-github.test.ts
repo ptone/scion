@@ -20,6 +20,8 @@ import { owningSection } from './__fixtures__/settings-registry.js';
 import type { ScionAdminGitHubAppConfig } from '../admin/admin-github-app-config.js';
 import type { ScionAdminGitHubInstallations } from '../admin/admin-github-installations.js';
 import type { ScionAdminGitHubAssociations } from '../admin/admin-github-associations.js';
+import type { ScionAdminGitHubExtraReposPolicy } from '../admin/admin-github-extra-repos-policy.js';
+import { setFeatureFlag, resetServerFlagStateForTests } from '../../utils/feature-flags.js';
 
 function jsonResponse(body: unknown, status = 200): Promise<Response> {
   return Promise.resolve(
@@ -59,18 +61,20 @@ const LOADED_APP = {
 };
 
 describe('GITHUB_ADMIN_SECTIONS registry', () => {
-  it('registers app, installations, associations, and routing in order', () => {
+  it('registers app, installations, associations, routing, and extra-repos-policy in order', () => {
     expect(GITHUB_ADMIN_SECTIONS.map((s) => s.id)).toEqual([
       'app',
       'installations',
       'associations',
       'routing',
+      'extra-repos-policy',
     ]);
     expect(GITHUB_ADMIN_SECTIONS.map((s) => s.tag)).toEqual([
       'scion-admin-github-app-config',
       'scion-admin-github-installations',
       'scion-admin-github-associations',
       'scion-admin-github-routing',
+      'scion-admin-github-extra-repos-policy',
     ]);
   });
 
@@ -110,6 +114,7 @@ describe('GITHUB_ADMIN_SECTIONS registry', () => {
       'installations',
       'associations',
       'routing',
+      'extra-repos-policy',
     ]);
 
     // Initial mount loads installations once (no duplicate fetch when appConfigured flips true).
@@ -847,6 +852,7 @@ describe('scion-admin-github-associations', () => {
               authorized: true,
               basis: 'admin binding',
               write_allowed: true,
+              extra_repos_count: 3,
             },
             {
               project_id: 'p-2',
@@ -855,6 +861,7 @@ describe('scion-admin-github-associations', () => {
               installation_id: 4412,
               authorized: false,
               write_allowed: false,
+              extra_repos_count: 0,
               reason: 'creator token lacks access',
             },
           ],
@@ -883,8 +890,15 @@ describe('scion-admin-github-associations', () => {
     const text = shadowText(element);
     expect(text).toContain('api');
     expect(text).toContain('admin binding');
+    expect(text).toContain('Extra repos');
+    expect(text).toContain('3');
     expect(text).toContain('authorized');
     expect(text).toContain('creator token lacks access');
+
+    const rows = queryAll(element, 'tbody tr');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].querySelectorAll('td')[4]?.textContent?.trim()).toBe('3');
+    expect(rows[1].querySelectorAll('td')[4]?.textContent?.trim()).toBe('—');
 
     const refreshBtn = queryAll(element, 'sl-button').find((b) =>
       b.textContent?.includes('Refresh')
@@ -893,5 +907,82 @@ describe('scion-admin-github-associations', () => {
     await vi.waitFor(() => {
       expect(urls).toContain('/api/v1/github-app/installations/association-report?refresh=true');
     });
+  });
+});
+
+describe('scion-admin-github-extra-repos-policy', () => {
+  let element: ScionAdminGitHubExtraReposPolicy | null = null;
+
+  beforeAll(async () => {
+    await import('../admin/admin-github-extra-repos-policy.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    resetServerFlagStateForTests();
+    delete window.__SCION_FEATURES__;
+    vi.restoreAllMocks();
+  });
+
+  it('stays hidden when hub.github_extra_repos experiment is off', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    element = document.createElement(
+      'scion-admin-github-extra-repos-policy'
+    ) as ScionAdminGitHubExtraReposPolicy;
+    document.body.appendChild(element);
+    await element.updateComplete;
+
+    expect(element.hidden).toBe(true);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('loads the current policy and saves updates via PUT /api/v1/github-app', async () => {
+    setFeatureFlag('hub.github_extra_repos', true);
+    const putBodies: Array<Record<string, unknown>> = [];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.includes('/api/v1/github-app') && init?.method === 'PUT') {
+          const parsed = JSON.parse(String(init.body ?? '{}')) as Record<string, unknown>;
+          putBodies.push(parsed);
+          return jsonResponse({ extra_repos_policy: parsed.extra_repos_policy });
+        }
+        if (path.includes('/api/v1/github-app')) {
+          return jsonResponse({ extra_repos_policy: 'project_admin' });
+        }
+        return jsonResponse({});
+      })
+    );
+
+    element = document.createElement(
+      'scion-admin-github-extra-repos-policy'
+    ) as ScionAdminGitHubExtraReposPolicy;
+    document.body.appendChild(element);
+
+    await vi.waitFor(() => {
+      expect(element!.hidden).toBe(false);
+      expect(query(element!, 'sl-radio-group')).not.toBeNull();
+    });
+
+    const saveBtn = query(element, 'sl-button[data-action="save-extra-repos-policy"]') as HTMLElement;
+    expect(saveBtn.hasAttribute('disabled')).toBe(true);
+
+    const group = query(element, 'sl-radio-group') as HTMLElement & { value: string };
+    group.value = 'hub_admin';
+    group.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    await element.updateComplete;
+
+    expect(saveBtn.hasAttribute('disabled')).toBe(false);
+    saveBtn.click();
+
+    await vi.waitFor(() => {
+      expect(putBodies).toEqual([{ extra_repos_policy: 'hub_admin' }]);
+    });
+    expect(shadowText(element)).toContain('Extra repositories policy saved.');
   });
 });

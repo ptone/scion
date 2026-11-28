@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -32,6 +34,7 @@ type ProjectGitHubResponse struct {
 	Association ProjectGitHubAssociationInfo  `json:"association"`
 	Status      *store.GitHubAppProjectStatus `json:"status"`
 	Permissions ProjectGitHubPermissionsInfo  `json:"permissions"`
+	ExtraRepos  *ProjectGitHubExtraReposInfo  `json:"extra_repos,omitempty"`
 	Can         ProjectGitHubCapabilities     `json:"can"`
 }
 
@@ -149,6 +152,12 @@ func (s *Server) handleProjectGitHub(w http.ResponseWriter, r *http.Request, pro
 		appInfo.InstallationURL = cfg.InstallationURL
 	}
 
+	var extraRepos *ProjectGitHubExtraReposInfo
+	if s.experimentEnabled(experiments.GitHubExtraRepos) {
+		info := s.buildProjectGitHubExtraReposInfo(ctx, project)
+		extraRepos = &info
+	}
+
 	writeJSON(w, http.StatusOK, ProjectGitHubResponse{
 		ProjectID:   project.ID,
 		App:         appInfo,
@@ -156,6 +165,7 @@ func (s *Server) handleProjectGitHub(w http.ResponseWriter, r *http.Request, pro
 		Association: assoc,
 		Status:      project.GitHubAppStatus,
 		Permissions: perms,
+		ExtraRepos:  extraRepos,
 		Can:         caps,
 	})
 }
@@ -310,12 +320,22 @@ func (s *Server) computeProjectGitHubCapabilities(r *http.Request, project *stor
 	canUpdateProject := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionUpdate).Allowed
 	canHubGitHubAppUpdate := s.routePermissionDecision(r, githubInstallationBindPermission).outcome == routePermissionAllowed
 
+	canEditExtraRepos := false
+	if s.experimentEnabled(experiments.GitHubExtraRepos) {
+		switch s.githubExtraReposPolicy() {
+		case config.GitHubExtraReposPolicyProjectAdmin:
+			canEditExtraRepos = canUpdateProject
+		case config.GitHubExtraReposPolicyHubAdmin:
+			canEditExtraRepos = canUpdateProject && canHubGitHubAppUpdate
+		}
+	}
+
 	return ProjectGitHubCapabilities{
 		Bind:            canUpdateProject && canHubGitHubAppUpdate,
 		Unbind:          canUpdateProject,
 		Check:           canUpdateProject,
 		EditPermissions: canUpdateProject,
-		EditExtraRepos:  canUpdateProject,
+		EditExtraRepos:  canEditExtraRepos,
 		Discover:        canHubGitHubAppUpdate,
 	}
 }

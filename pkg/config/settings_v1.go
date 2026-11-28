@@ -1725,6 +1725,7 @@ type V1GitHubAppConfig struct {
 	InstallationURL       string   `json:"installation_url,omitempty" yaml:"installation_url,omitempty" koanf:"installation_url"`
 	AppSlug               string   `json:"app_slug,omitempty" yaml:"app_slug,omitempty" koanf:"app_slug"`
 	CommandMentionAliases []string `json:"command_mention_aliases,omitempty" yaml:"command_mention_aliases,omitempty" koanf:"command_mention_aliases"`
+	ExtraReposPolicy      string   `json:"extra_repos_policy,omitempty" yaml:"extra_repos_policy,omitempty" koanf:"extra_repos_policy"`
 }
 
 // V1SchedulerConfig holds configuration for the Hub background task scheduler.
@@ -5417,6 +5418,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		gc.GitHubApp.InstallationURL = v1.GitHubApp.InstallationURL
 		gc.GitHubApp.AppSlug = v1.GitHubApp.AppSlug
 		gc.GitHubApp.CommandMentionAliases = append([]string(nil), v1.GitHubApp.CommandMentionAliases...)
+		gc.GitHubApp.ExtraReposPolicy = v1.GitHubApp.ExtraReposPolicy
 	}
 
 	// Scheduler
@@ -5880,7 +5882,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	// GitHub App config
-	if gc.GitHubApp.AppID != 0 || gc.GitHubApp.AppSlug != "" || len(gc.GitHubApp.CommandMentionAliases) > 0 {
+	if gc.GitHubApp.AppID != 0 || gc.GitHubApp.AppSlug != "" || len(gc.GitHubApp.CommandMentionAliases) > 0 || gc.GitHubApp.ExtraReposPolicy != "" {
 		v1.GitHubApp = &V1GitHubAppConfig{
 			AppID:                 gc.GitHubApp.AppID,
 			PrivateKeyPath:        gc.GitHubApp.PrivateKeyPath,
@@ -5891,6 +5893,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			InstallationURL:       gc.GitHubApp.InstallationURL,
 			AppSlug:               gc.GitHubApp.AppSlug,
 			CommandMentionAliases: append([]string(nil), gc.GitHubApp.CommandMentionAliases...),
+			ExtraReposPolicy:      gc.GitHubApp.ExtraReposPolicy,
 		}
 	}
 

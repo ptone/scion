@@ -735,10 +735,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	// Build a combined metrics response
 	type combinedMetrics struct {
-		Broker         *MetricsSnapshot               `json:"broker,omitempty"`
-		GCP            *GCPTokenMetricsSnapshot       `json:"gcp,omitempty"`
-		ExternalBearer *ExternalBearerMetricsSnapshot `json:"externalBearer,omitempty"`
-		Triggers       *TriggerMetricsSnapshot        `json:"triggers,omitempty"`
+		Broker          *MetricsSnapshot                `json:"broker,omitempty"`
+		GCP             *GCPTokenMetricsSnapshot        `json:"gcp,omitempty"`
+		ExternalBearer  *ExternalBearerMetricsSnapshot  `json:"externalBearer,omitempty"`
+		Triggers        *TriggerMetricsSnapshot         `json:"triggers,omitempty"`
+		GitHubExtraRead *GitHubExtraReadMetricsSnapshot `json:"githubExtraRead,omitempty"`
 	}
 
 	var combined combinedMetrics
@@ -760,8 +761,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s.experimentEnabled(experiments.Triggers) && s.triggerMetricsSnapshot != nil {
 		combined.Triggers = s.triggerMetricsSnapshot.GetSnapshot()
 	}
+	if s.githubExtraReadMetrics != nil {
+		combined.GitHubExtraRead = s.githubExtraReadMetrics.GetSnapshot()
+	}
 
-	if combined.Broker == nil && combined.GCP == nil && combined.ExternalBearer == nil && combined.Triggers == nil {
+	if combined.Broker == nil && combined.GCP == nil && combined.ExternalBearer == nil && combined.Triggers == nil && combined.GitHubExtraRead == nil {
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status": "no_metrics",
 			"reason": "metrics not configured",

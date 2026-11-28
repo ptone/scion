@@ -90623,6 +90623,7 @@ type ProjectMutation struct {
 	addgithub_installation_id          *int64
 	github_permissions                 *string
 	github_app_status                  *string
+	github_extra_repos                 *string
 	git_identity                       *string
 	cross_project_inbound              *project.CrossProjectInbound
 	cross_project_inbound_revision     *int64
@@ -91495,6 +91496,55 @@ func (m *ProjectMutation) ResetGithubAppStatus() {
 	delete(m.clearedFields, project.FieldGithubAppStatus)
 }
 
+// SetGithubExtraRepos sets the "github_extra_repos" field.
+func (m *ProjectMutation) SetGithubExtraRepos(s string) {
+	m.github_extra_repos = &s
+}
+
+// GithubExtraRepos returns the value of the "github_extra_repos" field in the mutation.
+func (m *ProjectMutation) GithubExtraRepos() (r string, exists bool) {
+	v := m.github_extra_repos
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGithubExtraRepos returns the old "github_extra_repos" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldGithubExtraRepos(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGithubExtraRepos is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGithubExtraRepos requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGithubExtraRepos: %w", err)
+	}
+	return oldValue.GithubExtraRepos, nil
+}
+
+// ClearGithubExtraRepos clears the value of the "github_extra_repos" field.
+func (m *ProjectMutation) ClearGithubExtraRepos() {
+	m.github_extra_repos = nil
+	m.clearedFields[project.FieldGithubExtraRepos] = struct{}{}
+}
+
+// GithubExtraReposCleared returns if the "github_extra_repos" field was cleared in this mutation.
+func (m *ProjectMutation) GithubExtraReposCleared() bool {
+	_, ok := m.clearedFields[project.FieldGithubExtraRepos]
+	return ok
+}
+
+// ResetGithubExtraRepos resets all changes to the "github_extra_repos" field.
+func (m *ProjectMutation) ResetGithubExtraRepos() {
+	m.github_extra_repos = nil
+	delete(m.clearedFields, project.FieldGithubExtraRepos)
+}
+
 // SetGitIdentity sets the "git_identity" field.
 func (m *ProjectMutation) SetGitIdentity(s string) {
 	m.git_identity = &s
@@ -91789,7 +91839,7 @@ func (m *ProjectMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ProjectMutation) Fields() []string {
-	fields := make([]string, 0, 20)
+	fields := make([]string, 0, 21)
 	if m.fixture_root_id != nil {
 		fields = append(fields, project.FieldFixtureRootID)
 	}
@@ -91837,6 +91887,9 @@ func (m *ProjectMutation) Fields() []string {
 	}
 	if m.github_app_status != nil {
 		fields = append(fields, project.FieldGithubAppStatus)
+	}
+	if m.github_extra_repos != nil {
+		fields = append(fields, project.FieldGithubExtraRepos)
 	}
 	if m.git_identity != nil {
 		fields = append(fields, project.FieldGitIdentity)
@@ -91890,6 +91943,8 @@ func (m *ProjectMutation) Field(name string) (ent.Value, bool) {
 		return m.GithubPermissions()
 	case project.FieldGithubAppStatus:
 		return m.GithubAppStatus()
+	case project.FieldGithubExtraRepos:
+		return m.GithubExtraRepos()
 	case project.FieldGitIdentity:
 		return m.GitIdentity()
 	case project.FieldCrossProjectInbound:
@@ -91939,6 +91994,8 @@ func (m *ProjectMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldGithubPermissions(ctx)
 	case project.FieldGithubAppStatus:
 		return m.OldGithubAppStatus(ctx)
+	case project.FieldGithubExtraRepos:
+		return m.OldGithubExtraRepos(ctx)
 	case project.FieldGitIdentity:
 		return m.OldGitIdentity(ctx)
 	case project.FieldCrossProjectInbound:
@@ -92068,6 +92125,13 @@ func (m *ProjectMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetGithubAppStatus(v)
 		return nil
+	case project.FieldGithubExtraRepos:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGithubExtraRepos(v)
+		return nil
 	case project.FieldGitIdentity:
 		v, ok := value.(string)
 		if !ok {
@@ -92189,6 +92253,9 @@ func (m *ProjectMutation) ClearedFields() []string {
 	if m.FieldCleared(project.FieldGithubAppStatus) {
 		fields = append(fields, project.FieldGithubAppStatus)
 	}
+	if m.FieldCleared(project.FieldGithubExtraRepos) {
+		fields = append(fields, project.FieldGithubExtraRepos)
+	}
 	if m.FieldCleared(project.FieldGitIdentity) {
 		fields = append(fields, project.FieldGitIdentity)
 	}
@@ -92244,6 +92311,9 @@ func (m *ProjectMutation) ClearField(name string) error {
 		return nil
 	case project.FieldGithubAppStatus:
 		m.ClearGithubAppStatus()
+		return nil
+	case project.FieldGithubExtraRepos:
+		m.ClearGithubExtraRepos()
 		return nil
 	case project.FieldGitIdentity:
 		m.ClearGitIdentity()
@@ -92306,6 +92376,9 @@ func (m *ProjectMutation) ResetField(name string) error {
 		return nil
 	case project.FieldGithubAppStatus:
 		m.ResetGithubAppStatus()
+		return nil
+	case project.FieldGithubExtraRepos:
+		m.ResetGithubExtraRepos()
 		return nil
 	case project.FieldGitIdentity:
 		m.ResetGitIdentity()

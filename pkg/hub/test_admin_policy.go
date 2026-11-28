@@ -709,6 +709,7 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"server.github_app.private_key_path":               testAdminPolicyDeny,
 	"server.github_app.app_slug":                       testAdminPolicyDeny,
 	"server.github_app.command_mention_aliases":        testAdminPolicyDeny,
+	"server.github_app.extra_repos_policy":             testAdminPolicyDeny,
 	"server.notification_channels":                     testAdminPolicyDeny,
 	"project_defaults.default_scratchpad":              testAdminPolicyDeny,
 	"server.federation.enabled":                        testAdminPolicyDeny,
@@ -808,7 +809,8 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.LargeUploads:                    testAdminPolicyDeny,
 	// All experiments are deny for test identities (admin tier design §3.6.1);
 	// a human admin enables hub.mcp_server for live E2E.
-	experiments.MCPServer: testAdminPolicyDeny,
+	experiments.MCPServer:        testAdminPolicyDeny,
+	experiments.GitHubExtraRepos: testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

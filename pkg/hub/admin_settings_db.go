@@ -457,6 +457,7 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.Server.GitHubApp.PrivateKeyPath = snap.GitHubPrivateKeyPath
 	resp.Server.GitHubApp.AppSlug = snap.GitHubAppSlug
 	resp.Server.GitHubApp.CommandMentionAliases = slices.Clone(snap.GitHubCommandMentionAliases)
+	resp.Server.GitHubApp.ExtraReposPolicy = snap.GitHubExtraReposPolicy
 
 	// Notifications — always set from snapshot so an explicit empty DB
 	// value overrides file-loaded channels.
@@ -3325,6 +3326,7 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			if len(ga.CommandMentionAliases) > 0 {
 				d.CommandMentionAliases = slices.Clone(ga.CommandMentionAliases)
 			}
+			d.ExtraReposPolicy = ga.ExtraReposPolicy
 		}
 		doc = d
 
