@@ -351,14 +351,11 @@ func TestSystemOneRules_DefaultDenyNoConsumerAdmitted(t *testing.T) {
 		assert.Equal(t, ruleengine.ReasonEmptyConsumer, unsup.Reason)
 	}
 
-	// 2. No consumer is admitted to system_one by default: ungranted consumers fail
-	// with consumer_not_registered, and "trigger" (registered with pure Grant("cel")
-	// only) fails with dialect_not_allowed.
-	for _, consumer := range []string{"trigger", "message", "probe", "admin-probe", "system_one", testSystemOneConsumer} {
+	// 2. Ungranted consumers are denied system_one by default with
+	// consumer_not_registered ("trigger" and "message_policy" are explicitly
+	// granted GrantIO("system_one") during Hub registration).
+	for _, consumer := range []string{"message", "probe", "admin-probe", "system_one", testSystemOneConsumer} {
 		wantReason := ruleengine.ReasonConsumerNotRegistered
-		if consumer == "trigger" {
-			wantReason = ruleengine.ReasonDialectNotAllowed
-		}
 		assert.False(t, re.Supports(consumer, systemone.DialectName), "consumer %q must not be admitted to system_one by default", consumer)
 		_, err := re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.KindFilter, ruleengine.EnvironmentRef{
 			Consumer: consumer,

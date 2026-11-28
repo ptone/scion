@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
@@ -77,18 +78,30 @@ func TestRuleEngine_NewRuleEngineAndPureRegistration(t *testing.T) {
 	require.NotNil(t, srv.TriggerRules())
 	assert.Equal(t, []string{ruleengine.DialectCEL, systemone.DialectName}, eng.Dialects())
 
-	// Consumer "trigger" is registered once on the shared engine with pure Grant("cel")
-	// and its Stage 1 CEL environment, while denied "system_one" (dialect_not_allowed).
+	// Consumer "trigger" is registered once on the shared engine with Grant("cel")
+	// and GrantIO("system_one"), its Stage 1 CEL environment, and its v1 System One
+	// content environment (T2, ptone/scion#8051).
 	trigCEL, hasTrigEnv := cel.CELEngine(triggerrule.EnvironmentName)
 	require.True(t, hasTrigEnv)
 	require.NotNil(t, trigCEL)
 	assert.True(t, eng.Supports(triggerrule.ConsumerName, ruleengine.DialectCEL))
-	assert.False(t, eng.Supports(triggerrule.ConsumerName, systemone.DialectName))
+	assert.True(t, eng.Supports(triggerrule.ConsumerName, systemone.DialectName))
 	{
 		d, dErr := eng.DialectFor(triggerrule.ConsumerName, systemone.DialectName)
-		assert.Nil(t, d)
+		require.NoError(t, dErr)
+		require.NotNil(t, d)
+		assert.True(t, d.Declares().PerformsIO)
+		soDial, ok := d.(*systemone.Dialect)
+		require.True(t, ok)
+		trigEnv, hasEnv := soDial.Environment(triggerrule.EnvironmentName)
+		require.True(t, hasEnv)
+		assert.Equal(t, trigger.SystemOneContentEnv(), trigEnv,
+			"registered trigger System One content environment must match trigger.SystemOneContentEnv() exactly (R1)")
+		// Unregistered/ungranted dialect on "trigger" is still refused.
+		otherD, otherErr := eng.DialectFor(triggerrule.ConsumerName, "rego")
+		assert.Nil(t, otherD)
 		var unsup *ruleengine.UnsupportedDialectError
-		require.ErrorAs(t, dErr, &unsup)
+		require.ErrorAs(t, otherErr, &unsup)
 		assert.Equal(t, ruleengine.ReasonDialectNotAllowed, unsup.Reason)
 	}
 	// Duplicate trigger registration is rejected (single registration on Server).

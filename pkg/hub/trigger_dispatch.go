@@ -124,16 +124,28 @@ type serverTriggerCore struct {
 }
 
 var (
-	_ trigger.Core                 = serverTriggerCore{}
-	_ trigger.FireAdmitter         = serverTriggerCore{}
-	_ trigger.SourceAuthorizer     = serverTriggerCore{}
-	_ trigger.SourceEnricher       = serverTriggerCore{}
-	_ trigger.PostEvaluationHook   = serverTriggerCore{}
-	_ trigger.ReuseMessageRenderer = serverTriggerCore{}
-	_ trigger.PreFireRefuser       = serverTriggerCore{}
-	_ trigger.RetryTargetChecker   = serverTriggerCore{}
-	_ trigger.FireOutcomeNotifier  = serverTriggerCore{}
+	_ trigger.Core                     = serverTriggerCore{}
+	_ trigger.FireAdmitter             = serverTriggerCore{}
+	_ trigger.SourceAuthorizer         = serverTriggerCore{}
+	_ trigger.RecordedAuthorityChecker = serverTriggerCore{}
+	_ trigger.SourceEnricher           = serverTriggerCore{}
+	_ trigger.PostEvaluationHook       = serverTriggerCore{}
+	_ trigger.ReuseMessageRenderer     = serverTriggerCore{}
+	_ trigger.PreFireRefuser           = serverTriggerCore{}
+	_ trigger.RetryTargetChecker       = serverTriggerCore{}
+	_ trigger.FireOutcomeNotifier      = serverTriggerCore{}
 )
+
+// CheckRecordedAuthority implements trigger.RecordedAuthorityChecker for System
+// One-bearing triggers before any model evaluation or egress (T2 M1). Delegates
+// to Server.checkTriggerRecordedAuthority in firecore_authority.go so
+// resolveRecordedAuthority remains contained in firecore_*.go.
+func (c serverTriggerCore) CheckRecordedAuthority(ctx context.Context, tr *store.Trigger) (string, error) {
+	if c.srv == nil {
+		return "", errors.New("trigger recorded authority checker unavailable")
+	}
+	return c.srv.checkTriggerRecordedAuthority(ctx, tr)
+}
 
 func (c serverTriggerCore) NotifyFireOutcome(ctx context.Context, tr *store.Trigger, fire *store.TriggerFire, outcome hubfire.FireOutcome) {
 	if c.srv == nil {

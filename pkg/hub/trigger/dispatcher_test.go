@@ -46,11 +46,12 @@ import (
 )
 
 type fakeCore struct {
-	enabled           atomic.Bool
-	githubDisabled    atomic.Bool
-	admitFn           func(ctx, itemCtx context.Context) (context.Context, context.Context, func(), bool)
-	fireFn            func(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome
-	authorizeSourceFn func(ctx context.Context, ev *store.TriggerEvent) (bool, error)
+	enabled                  atomic.Bool
+	githubDisabled           atomic.Bool
+	admitFn                  func(ctx, itemCtx context.Context) (context.Context, context.Context, func(), bool)
+	fireFn                   func(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome
+	authorizeSourceFn        func(ctx context.Context, ev *store.TriggerEvent) (bool, error)
+	checkRecordedAuthorityFn func(ctx context.Context, tr *store.Trigger) (string, error)
 }
 
 func (c *fakeCore) Fire(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
@@ -83,6 +84,13 @@ func (c *fakeCore) AuthorizeEventSource(ctx context.Context, ev *store.TriggerEv
 		return c.authorizeSourceFn(ctx, ev)
 	}
 	return true, nil
+}
+
+func (c *fakeCore) CheckRecordedAuthority(ctx context.Context, tr *store.Trigger) (string, error) {
+	if c.checkRecordedAuthorityFn != nil {
+		return c.checkRecordedAuthorityFn(ctx, tr)
+	}
+	return "", nil
 }
 
 type nopLease struct{}

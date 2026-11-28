@@ -185,6 +185,26 @@ CEL expressions are compiled at authoring time against:
 
 Guard optional fields with `has(...)` (for example `has(event.payload) && has(event.payload.env) && event.payload.env == "prod"`) so absent keys evaluate cleanly instead of skipping as `missing_input`. `matches()` accepts literal RE2 patterns only; run it on `event.attributes.<k>` or a single `event.payload.<field>`, not the entire payload.
 
+### System One elements
+
+When the `hub.system_one` [experiment](/scion/reference/experiments/) is enabled and the project has allowlisted at least one System One provider instance (`scion project system-one add <name>`), human project members can include `system_one` rule elements alongside CEL guards in `match.rules`. Agent callers are refused at authoring (`agent_not_allowed`), and the authoring user's recorded authority is checked before any model egress (revoked, de-roled, removed, or deleted authors record a `refused` fire with zero provider calls).
+
+A `system_one` element selects inputs strictly from the **trigger content environment v1** (32 KiB combined total; `on_oversize: reject`; `payload_paths` supports up to 8 dotted paths on `event.payload`, for example `pull_request.title`):
+
+| Input field | Kind | Max bytes | Trust grade | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `event.type` | `text` | 128 B | `untrusted` | Event type string (for example `webhook.received`) |
+| `event.source_kind` | `text` | 32 B | `trusted` | Hub-set source kind (`webhook`, `github`) |
+| `event.subject` | `text` | 256 B | `untrusted` | Event subject string |
+| `event.attributes` | `json` | 8,192 B | `untrusted` | Flat transport metadata map; includes the hub-set client IP (`remote_ip`) and sender metadata (for example `sender: agent:<id>` on `hub_token` endpoints). **When this field is selected, these values are sent to the external model provider.** |
+| `event.payload` | `json` | 24,576 B | `untrusted` | Inline JSON payload (use `payload_paths` to send only the needed subtrees) |
+
+:::caution[External egress of `event.attributes`]
+`event.attributes` includes the hub-set client IP (`remote_ip`) and sender metadata (for example `sender: agent:<id>`). Only select `event.attributes` in a `system_one` element's `inputs` when sending those values to the external model provider is acceptable.
+:::
+
+- **Evaluation budget:** Events whose matching candidate triggers include at least one `system_one` element receive a **+2 s** System One allowance on top of the 1 s base per-event rule budget (3 s total; capped at +5 s, with a Hub-configurable setting deferred). CEL-only events keep the 1 s budget.
+
 ### Concurrency subjects and subject claims
 
 Every event carries a subject (from `X-Scion-Subject`, `--subject-path`, or derived via a scalar CEL `--subject` expression up to 1,024 bytes, producing a non-empty printable string up to 256 bytes). `--on-subject` controls how concurrent work on the same subject is handled:

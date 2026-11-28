@@ -31,6 +31,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
+	systemonespec "github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 )
 
@@ -105,8 +107,16 @@ func (s *Server) registerTriggerRules() error {
 	if err := s.rules.AllowConsumerDialects(
 		triggerrule.ConsumerName,
 		ruleengine.Grant(ruleengine.DialectCEL),
+		ruleengine.GrantIO(systemone.DialectName),
 	); err != nil {
-		return fmt.Errorf("grant trigger CEL dialect: %w", err)
+		return fmt.Errorf("grant trigger rule dialects: %w", err)
+	}
+	if err := systemone.RegisterConsumerEnvironment(
+		s.rules,
+		triggerrule.ConsumerName,
+		trigger.SystemOneContentEnv(),
+	); err != nil {
+		return fmt.Errorf("register trigger system_one content environment: %w", err)
 	}
 	trRules, err := triggerrule.New(s.rules)
 	if err != nil {
@@ -322,9 +332,15 @@ func writeTriggerMatchElementErrors(w http.ResponseWriter, failures []triggerEle
 func (s *Server) writeAndValidateTriggerMatch(
 	w http.ResponseWriter,
 	ctx context.Context,
+	projectID string,
 	spec *TriggerMatchSpec,
 	defaultTypes, explicitScalarDialect bool,
 ) ([]string, []store.TriggerMatchRule, bool) {
+	compileCtx := ctx
+	if strings.TrimSpace(projectID) != "" {
+		compileCtx = systemone.WithProjectID(ctx, projectID)
+	}
+	isAgentCaller := GetAgentIdentityFromContext(ctx) != nil
 	var types []string
 	if spec != nil {
 		types = spec.Types
@@ -370,7 +386,19 @@ func (s *Server) writeAndValidateTriggerMatch(
 					}})
 					return nil, nil, false
 				}
-				if err := s.compileTriggerMatchRule(ctx, scalarDialect, ""); err != nil {
+				if scalarDialect == systemone.DialectName && isAgentCaller {
+					writeTriggerMatchElementErrors(w, []triggerElementFailure{{
+						entry: map[string]any{
+							"element": 1,
+							"dialect": scalarDialect,
+							"reason":  trigger.AuditReasonAgentNotAllowed,
+						},
+						summary:  fmt.Sprintf("agent principals may not author %q match rules [element 1]", scalarDialect),
+						consumer: triggerrule.ConsumerName,
+					}})
+					return nil, nil, false
+				}
+				if err := s.compileTriggerMatchRule(compileCtx, scalarDialect, ""); err != nil {
 					var unsup *ruleengine.UnsupportedDialectError
 					if errors.As(err, &unsup) {
 						msg := fmt.Sprintf("unsupported match dialect %q [element 1]", unsup.Dialect)
@@ -408,7 +436,7 @@ func (s *Server) writeAndValidateTriggerMatch(
 
 	if len(rawRules) == 0 {
 		// Verify the trigger rule engine is initialized and consumer "trigger" is admitted.
-		if err := s.compileTriggerMatchRule(ctx, ruleengine.DialectCEL, ""); err != nil {
+		if err := s.compileTriggerMatchRule(compileCtx, ruleengine.DialectCEL, ""); err != nil {
 			writeTriggerRuleError(w, "match", err)
 			return nil, nil, false
 		}
@@ -497,10 +525,24 @@ func (s *Server) writeAndValidateTriggerMatch(
 			continue
 		}
 
+		// D2: no agent-authored System One elements in v1 (users only).
+		if d == systemone.DialectName && isAgentCaller {
+			failures = append(failures, triggerElementFailure{
+				entry: map[string]any{
+					"element": elemNum,
+					"dialect": d,
+					"reason":  trigger.AuditReasonAgentNotAllowed,
+				},
+				summary:  fmt.Sprintf("agent principals may not author %q match rules [element %d]", d, elemNum),
+				consumer: triggerrule.ConsumerName,
+			})
+			continue
+		}
+
 		// Check dialect admission and engine initialization first so ungranted
 		// dialects surface dialect_not_allowed even when expr is empty or oversize,
 		// and an uninitialized engine returns HTTP 500 without leaking details.
-		if err := s.compileTriggerMatchRule(ctx, d, ""); err != nil {
+		if err := s.compileTriggerMatchRule(compileCtx, d, ""); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				writeErrorFromErr(w, err, "")
 				return nil, nil, false
@@ -557,7 +599,7 @@ func (s *Server) writeAndValidateTriggerMatch(
 			continue
 		}
 
-		if err := s.compileTriggerMatchRule(ctx, d, elem.Expr); err != nil {
+		if err := s.compileTriggerMatchRule(compileCtx, d, elem.Expr); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				writeErrorFromErr(w, err, "")
 				return nil, nil, false
@@ -575,6 +617,26 @@ func (s *Server) writeAndValidateTriggerMatch(
 					summary: fmt.Sprintf("invalid match rule [element %d] at line %d, column %d (%s): %s",
 						elemNum, ce.Line, ce.Column, ce.Category, ce.Message),
 					kind: ruleengine.Kind(ce.Kind),
+				})
+				continue
+			}
+			var soCE *systemonespec.CompileError
+			if errors.As(err, &soCE) {
+				entry := map[string]any{
+					"element":  elemNum,
+					"dialect":  d,
+					"category": string(soCE.Category),
+					"message":  soCE.Message,
+					"line":     1,
+					"column":   1,
+				}
+				if soCE.Path != "" {
+					entry["path"] = soCE.Path
+				}
+				failures = append(failures, triggerElementFailure{
+					entry:   entry,
+					summary: fmt.Sprintf("invalid match rule [element %d] (%s): %s", elemNum, soCE.Category, soCE.Message),
+					kind:    ruleengine.KindFilter,
 				})
 				continue
 			}
@@ -704,6 +766,21 @@ func writeTriggerRuleError(w http.ResponseWriter, slot string, err error) {
 			"message":  ce.Message,
 			"line":     ce.Line,
 			"column":   ce.Column,
+		}
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRule, msg, details)
+		return
+	}
+
+	var soCE *systemonespec.CompileError
+	if errors.As(err, &soCE) {
+		msg := fmt.Sprintf("invalid %s rule (%s): %s", slot, soCE.Category, soCE.Message)
+		details := map[string]any{
+			"field":    slot,
+			"category": string(soCE.Category),
+			"message":  soCE.Message,
+		}
+		if soCE.Path != "" {
+			details["path"] = soCE.Path
 		}
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRule, msg, details)
 		return

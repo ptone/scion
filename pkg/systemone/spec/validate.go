@@ -115,11 +115,12 @@ func Compile(raw []byte, opts CompileOptions) (*Compiled, error) {
 	}
 
 	var (
-		sp         Spec
-		inputs     []string
-		params     map[string]string
-		onOversize string
-		timeout    time.Duration
+		sp           Spec
+		inputs       []string
+		payloadPaths []string
+		params       map[string]string
+		onOversize   string
+		timeout      time.Duration
 	)
 
 	contentEnv := ProbeEnvironment()
@@ -144,6 +145,7 @@ func Compile(raw []byte, opts CompileOptions) (*Compiled, error) {
 		if opts.Inputs != nil {
 			inputs = opts.Inputs
 		}
+		payloadPaths = env.PayloadPaths
 		params = env.Params
 		if opts.Params != nil {
 			params = opts.Params
@@ -197,6 +199,9 @@ func Compile(raw []byte, opts CompileOptions) (*Compiled, error) {
 	}
 
 	if err := ValidateInputs(inputs, contentEnv); err != nil {
+		return nil, err
+	}
+	if err := validatePayloadPaths(payloadPaths, inputs, contentEnv); err != nil {
 		return nil, err
 	}
 	if onOversize == OversizeTruncate {
@@ -278,16 +283,21 @@ func Compile(raw []byte, opts CompileOptions) (*Compiled, error) {
 		reqSet[id] = struct{}{}
 	}
 
-	contentHash, err := computeCompiledHash(&sp, opts.Kind, inputs, contentEnv, onOversize, qHashes)
+	contentHash, err := computeCompiledHash(&sp, opts.Kind, inputs, payloadPaths, contentEnv, onOversize, qHashes)
 	if err != nil {
 		return nil, err
 	}
 
 	inCopy := append([]string(nil), inputs...)
+	var ppCopy []string
+	if len(payloadPaths) > 0 {
+		ppCopy = append([]string(nil), payloadPaths...)
+	}
 	return &Compiled{
 		Spec:           sp,
 		Kind:           opts.Kind,
 		Inputs:         inCopy,
+		PayloadPaths:   ppCopy,
 		Environment:    contentEnv,
 		OnOversize:     onOversize,
 		Timeout:        timeout,
@@ -826,7 +836,105 @@ func ValidateProjection(s *Spec, kind Kind) error {
 	return nil
 }
 
-func computeCompiledHash(s *Spec, kind Kind, inputs []string, env ContentEnvironment, onOversize string, qHashes map[string]string) (string, error) {
+func validatePayloadPaths(paths []string, inputs []string, env ContentEnvironment) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	if len(paths) > MaxPayloadPaths {
+		return &CompileError{
+			Path:     "payload_paths",
+			Category: CategoryLimit,
+			Message:  fmt.Sprintf("payload_paths exceeds maximum of %d paths (got %d)", MaxPayloadPaths, len(paths)),
+		}
+	}
+	hasEventPayload := false
+	for _, in := range inputs {
+		if in == "event.payload" {
+			hasEventPayload = true
+			break
+		}
+	}
+	if !hasEventPayload {
+		return &CompileError{
+			Path:     "payload_paths",
+			Category: CategoryInput,
+			Message:  "payload_paths requires \"event.payload\" in inputs",
+		}
+	}
+	if decl, ok := env.Field("event.payload"); !ok || decl.Kind != FieldKindJSON {
+		return &CompileError{
+			Path:     "payload_paths",
+			Category: CategoryInput,
+			Message:  "payload_paths requires \"event.payload\" to be a JSON field in the content environment",
+		}
+	}
+	seen := make(map[string]struct{}, len(paths))
+	for i, p := range paths {
+		pPath := fmt.Sprintf("payload_paths[%d]", i)
+		if p == "" {
+			return &CompileError{
+				Path:     pPath,
+				Category: CategoryInput,
+				Message:  "payload path must not be empty",
+			}
+		}
+		if len(p) > MaxPayloadPathBytes {
+			return &CompileError{
+				Path:     pPath,
+				Category: CategoryLimit,
+				Message:  fmt.Sprintf("payload path exceeds maximum length of %d bytes", MaxPayloadPathBytes),
+			}
+		}
+		if !utf8.ValidString(p) || strings.TrimSpace(p) != p {
+			return &CompileError{
+				Path:     pPath,
+				Category: CategoryInput,
+				Message:  "payload path must be valid UTF-8 without leading or trailing whitespace",
+			}
+		}
+		if _, dup := seen[p]; dup {
+			return &CompileError{
+				Path:     pPath,
+				Category: CategoryInput,
+				Message:  fmt.Sprintf("duplicate payload path %q", p),
+			}
+		}
+		seen[p] = struct{}{}
+		segs := strings.Split(p, ".")
+		if len(segs) > MaxPayloadPathSegments {
+			return &CompileError{
+				Path:     pPath,
+				Category: CategoryLimit,
+				Message:  fmt.Sprintf("payload path exceeds maximum depth of %d segments", MaxPayloadPathSegments),
+			}
+		}
+		for _, seg := range segs {
+			if seg == "" || strings.TrimSpace(seg) != seg || strings.ContainsAny(seg, "/[]$") {
+				return &CompileError{
+					Path:     pPath,
+					Category: CategoryInput,
+					Message:  fmt.Sprintf("invalid dotted payload path %q (use dot-separated keys, e.g. \"pull_request.title\")", p),
+				}
+			}
+			for _, r := range seg {
+				if r < 0x20 || r == 0x7f {
+					return &CompileError{
+						Path:     pPath,
+						Category: CategoryInput,
+						Message:  fmt.Sprintf("payload path %q contains control characters", p),
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func computeCompiledHash(s *Spec, kind Kind, inputs []string, payloadPaths []string, env ContentEnvironment, onOversize string, qHashes map[string]string) (string, error) {
+	var canonicalPaths []string
+	if len(payloadPaths) > 0 {
+		canonicalPaths = canonicalizeStringSet(payloadPaths)
+	}
 	payload := struct {
 		Binding        Binding              `json:"binding"`
 		Environment    canonicalEnvironment `json:"environment"`
@@ -835,6 +943,7 @@ func computeCompiledHash(s *Spec, kind Kind, inputs []string, env ContentEnviron
 		Kind           Kind                 `json:"kind"`
 		OnOversize     string               `json:"on_oversize"`
 		Output         *Output              `json:"output,omitempty"`
+		PayloadPaths   []string             `json:"payload_paths,omitempty"`
 		QuestionHashes map[string]string    `json:"question_hashes"`
 		QuestionOrder  []string             `json:"question_order"`
 		Required       []string             `json:"required"`
@@ -850,6 +959,7 @@ func computeCompiledHash(s *Spec, kind Kind, inputs []string, env ContentEnviron
 		Kind:           kind,
 		OnOversize:     onOversize,
 		Output:         s.Output,
+		PayloadPaths:   canonicalPaths,
 		QuestionHashes: qHashes,
 		QuestionOrder:  make([]string, len(s.Questions)),
 		Required:       s.EffectiveRequired(),

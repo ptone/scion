@@ -869,7 +869,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 
 	defaultTypes := sourceKind == store.TriggerSourceKindWebhook
 	explicitMatchDialect := req.Match != nil && req.Match.Rules == nil && strings.TrimSpace(req.Match.Dialect) != ""
-	matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, req.Match, defaultTypes, explicitMatchDialect)
+	matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, projectID, req.Match, defaultTypes, explicitMatchDialect)
 	if !ok {
 		return
 	}
@@ -1301,7 +1301,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			}
 			merged.Rules = triggerRulesToSpecs(existingRules)
 		}
-		matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, &merged, false, explicitMatchDialect)
+		matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, projectID, &merged, false, explicitMatchDialect)
 		if !ok {
 			return
 		}
@@ -1486,7 +1486,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 				writeCorruptTriggerMatchRulesError(w)
 				return
 			}
-			if _, _, ok := s.writeAndValidateTriggerMatch(w, ctx, &TriggerMatchSpec{
+			if _, _, ok := s.writeAndValidateTriggerMatch(w, ctx, projectID, &TriggerMatchSpec{
 				Types: tr.MatchTypes,
 				Rules: triggerRulesToSpecs(existingRules),
 			}, false, false); !ok {
@@ -1771,7 +1771,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		writeCorruptTriggerMatchRulesError(w)
 		return
 	}
-	if _, _, ok := s.writeAndValidateTriggerMatch(w, ctx, &TriggerMatchSpec{
+	if _, _, ok := s.writeAndValidateTriggerMatch(w, ctx, projectID, &TriggerMatchSpec{
 		Types: tr.MatchTypes,
 		Rules: triggerRulesToSpecs(existingRules),
 	}, false, false); !ok {
