@@ -55,8 +55,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1146,12 +1144,7 @@ func analyticsIndexName(namespace, sourceKind, sourceEventID string) string {
 // its decimal length and a colon, so no concatenation of different parts
 // can collide.
 func lengthPrefixedHash(parts ...string) string {
-	h := sha256.New()
-	for _, p := range parts {
-		_, _ = fmt.Fprintf(h, "%d:", len(p))
-		h.Write([]byte(p))
-	}
-	return hex.EncodeToString(h.Sum(nil))
+	return telemetrycontract.LengthPrefixedHash(parts...)
 }
 
 // appendLine durably appends line plus a newline to name. If the file does

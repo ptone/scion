@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 )
 
@@ -59,26 +60,29 @@ type HarnessSpec struct {
 // ClaudeHarnessSpec returns the built-in discovery specification for Claude
 // Code session and subagent JSONL transcripts.
 func ClaudeHarnessSpec() HarnessSpec {
-	return HarnessSpec{
-		Name: "claude",
-		Rules: []ArtifactRule{
-			{
-				Root:   ".claude/projects",
-				Suffix: ".jsonl",
-				Kind:   ArtifactKindJSONLAppend,
-			},
-		},
-	}
+	spec, _ := HarnessSpecFor("claude")
+	return spec
 }
 
-// HarnessSpecFor returns the built-in HarnessSpec for the named harness.
+// HarnessSpecFor returns the built-in HarnessSpec for the named harness,
+// sourced from the shared telemetrycontract harness trajectory registry.
 func HarnessSpecFor(name string) (HarnessSpec, bool) {
-	switch name {
-	case "claude":
-		return ClaudeHarnessSpec(), true
-	default:
+	reg, ok := telemetrycontract.HarnessTrajectorySpecFor(name)
+	if !ok {
 		return HarnessSpec{}, false
 	}
+	rules := make([]ArtifactRule, len(reg.Rules))
+	for i, r := range reg.Rules {
+		rules[i] = ArtifactRule{
+			Root:   r.Root,
+			Suffix: r.Suffix,
+			Kind:   ArtifactKind(r.Kind),
+		}
+	}
+	return HarnessSpec{
+		Name:  reg.Harness,
+		Rules: rules,
+	}, true
 }
 
 // DiscoveredArtifact is a validated artifact file located under an agent home.
