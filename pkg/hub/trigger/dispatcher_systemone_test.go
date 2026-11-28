@@ -131,25 +131,26 @@ func (a *recordingSystemOneAdapter) reset() {
 }
 
 type systemOneTestHarness struct {
-	t           *testing.T
-	adapter     *recordingSystemOneAdapter
-	httpSrv     *httptest.Server
-	secretReads atomic.Int32
-	tokenMints  atomic.Int32
-	httpReqs    atomic.Int32
-	secretMu    sync.Mutex
-	secretProjs []string
-	enabled     atomic.Bool
-	allowlist   map[string][]string
-	allowMu     sync.RWMutex
-	instances   []soruntime.Instance
-	instMu      sync.RWMutex
-	engine      *ruleengine.Engine
-	rules       *triggerrule.Rules
-	rt          *soruntime.Runtime
-	st          *memTriggerStore
-	core        *fakeCore
-	disp        *trigger.Dispatcher
+	t              *testing.T
+	adapter        *recordingSystemOneAdapter
+	httpSrv        *httptest.Server
+	secretReads    atomic.Int32
+	tokenMints     atomic.Int32
+	httpReqs       atomic.Int32
+	secretMu       sync.Mutex
+	secretProjs    []string
+	lastAuthHeader string
+	enabled        atomic.Bool
+	allowlist      map[string][]string
+	allowMu        sync.RWMutex
+	instances      []soruntime.Instance
+	instMu         sync.RWMutex
+	engine         *ruleengine.Engine
+	rules          *triggerrule.Rules
+	rt             *soruntime.Runtime
+	st             *memTriggerStore
+	core           *fakeCore
+	disp           *trigger.Dispatcher
 }
 
 func (h *systemOneTestHarness) AllowedInstances(_ context.Context, projectID string) ([]string, error) {
@@ -219,6 +220,9 @@ func newSystemOneTestHarness(t *testing.T, dispCfgMod func(*trigger.DispatcherCo
 
 	h.httpSrv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.httpReqs.Add(1)
+		h.secretMu.Lock()
+		h.lastAuthHeader = r.Header.Get("Authorization")
+		h.secretMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
@@ -538,11 +542,14 @@ func TestDispatcherSystemOne_AuthorizedProjectIDAndPayloadPaths(t *testing.T) {
 	res := dispatchOneEvent(t, context.Background(), h, ev)
 	require.True(t, res.Done)
 
-	// Authorized ProjectID was passed to CredentialSource (never attackerProj).
+	// Authorized ProjectID was passed to CredentialSource (never attackerProj),
+	// and the project-scoped secret for trigProj reached the provider transport.
 	h.secretMu.Lock()
 	projs := append([]string(nil), h.secretProjs...)
+	authHdr := h.lastAuthHeader
 	h.secretMu.Unlock()
 	require.Equal(t, []string{trigProj}, projs)
+	assert.Equal(t, "Bearer test-secret-for-"+trigProj, authHdr)
 
 	// Only narrowed payload_paths reached the provider; secret_leak and body were stripped.
 	calls, _ := h.adapter.snapshotCalls()
