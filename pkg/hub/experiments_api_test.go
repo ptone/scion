@@ -231,6 +231,26 @@ func TestHandleExperiments_FullChain(t *testing.T) {
 		if v, ok := body.Experiments[fixtureWebDefaultOn]; !ok || !v {
 			t.Errorf("expected web.fixture_default_on=true, got %v (present=%v)", v, ok)
 		}
+		if _, present := body.Experiments[experiments.MCPServer]; present {
+			t.Errorf("default GET /api/v1/experiments must omit server-only %s", experiments.MCPServer)
+		}
+	})
+
+	t.Run("include=server returns server-only experiments from one snapshot", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/experiments?include=server", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var body experimentsResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if v, ok := body.Experiments[experiments.MCPServer]; !ok || v {
+			t.Errorf("expected %s=false (present=true), got %v (present=%v)", experiments.MCPServer, v, ok)
+		}
+		if v, ok := body.Experiments[fixtureWebDefaultOn]; !ok || !v {
+			t.Errorf("expected web.fixture_default_on=true alongside server flags, got %v (present=%v)", v, ok)
+		}
 	})
 
 	t.Run("no credential is unauthorized", func(t *testing.T) {

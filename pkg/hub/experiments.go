@@ -192,6 +192,19 @@ func (s *Server) resolvedExperiments() map[string]bool {
 	return out
 }
 
+// resolvedExperimentsAll returns the effective value of every registered
+// experiment (both web-layer and server-layer), resolved from a single
+// snapshot. Used by GET /api/v1/experiments?include=server (e.g. standalone
+// MCP servers probing server-only flags like hub.mcp_server).
+func (s *Server) resolvedExperimentsAll() map[string]bool {
+	snap := s.experimentsSnapshot()
+	out := make(map[string]bool)
+	for _, exp := range s.experimentRegistry().All() {
+		out[exp.Name] = s.experimentEnabledIn(snap, exp.Name)
+	}
+	return out
+}
+
 // requireExperiment wraps next with a request-time gate for a server-layer
 // experiment. Routes stay registered so toggling needs no restart.
 //

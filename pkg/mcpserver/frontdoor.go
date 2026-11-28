@@ -55,27 +55,17 @@ func requestAuthFromContext(ctx context.Context) (requestAuth, bool) {
 
 // frontDoor enforces the MCP HTTP front-door policies (§4.2, §4.5):
 //  1. Shutdown refusal (503)
-//  2. Per-request hub.mcp_server experiment check (404 when off)
-//  3. Origin allowlist (403 on disallowed Origin; absent Origin is allowed)
-//  4. Credential extraction (Authorization: Bearer xor X-Scion-Federation-Token;
+//  2. Origin allowlist (403 on disallowed Origin; absent Origin is allowed)
+//  3. Credential extraction (Authorization: Bearer xor X-Scion-Federation-Token;
 //     401 + WWW-Authenticate for none/both; 401 unsupported_credential for
 //     agent JWT, scion_adt_, and scion_dev_)
+//  4. Per-request hub.mcp_server experiment check using the caller's credential
+//     (404 when off; 401/403 propagated from Hub when standalone probes fail auth)
 //  5. Principal resolution via GET /api/v1/auth/me (cached <= 60s)
 func (s *Server) frontDoor(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.shuttingDown.Load() {
 			writeJSONError(w, http.StatusServiceUnavailable, "service_unavailable", "MCP server is shutting down")
-			return
-		}
-
-		enabled, err := s.backend.ExperimentEnabled(r.Context(), Credential{}, experiments.MCPServer)
-		if err != nil {
-			s.logger.Warn("MCP experiment check failed", "error", err)
-			writeJSONError(w, http.StatusServiceUnavailable, "experiment_check_failed", "unable to check MCP experiment status")
-			return
-		}
-		if !enabled {
-			writeJSONError(w, http.StatusNotFound, "not_found", "MCP server experiment is not enabled")
 			return
 		}
 
@@ -98,6 +88,29 @@ func (s *Server) frontDoor(next http.Handler) http.Handler {
 			RemoteAddr: r.RemoteAddr,
 			ClientName: ua,
 		})
+
+		enabled, err := s.backend.ExperimentEnabled(ctx, cred, experiments.MCPServer)
+		if err != nil {
+			var apiErr *apiclient.APIError
+			if errors.As(err, &apiErr) {
+				if apiErr.StatusCode == http.StatusUnauthorized {
+					w.Header().Set("WWW-Authenticate", wwwAuthenticateHeader)
+					writeJSONError(w, http.StatusUnauthorized, "unauthorized", apiErr.Message)
+					return
+				}
+				if apiErr.StatusCode == http.StatusForbidden {
+					writeJSONError(w, http.StatusForbidden, "forbidden", apiErr.Message)
+					return
+				}
+			}
+			s.logger.Warn("MCP experiment check failed", "error", err)
+			writeJSONError(w, http.StatusServiceUnavailable, "experiment_check_failed", "unable to check MCP experiment status")
+			return
+		}
+		if !enabled {
+			writeJSONError(w, http.StatusNotFound, "not_found", "MCP server experiment is not enabled")
+			return
+		}
 
 		principal, err := s.resolvePrincipal(ctx, cred)
 		if err != nil {

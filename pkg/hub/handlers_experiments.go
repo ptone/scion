@@ -28,14 +28,21 @@ type experimentsResponse struct {
 // classified RouteAuthenticated: any signed-in identity (user, agent, or
 // broker token) receives the map; there is no per-experiment authorization.
 //
-// The response holds every registered web-layer experiment, resolved from
-// one snapshot so it never mixes two refreshes, and matches the value every
-// other reader (experimentEnabled, the admin endpoints) would report right
-// now.
+// The response holds every registered web-layer experiment by default,
+// resolved from one snapshot so it never mixes two refreshes, and matches the
+// value every other reader (experimentEnabled, the admin endpoints) would
+// report right now. Passing ?include=server includes server-layer experiments
+// as well (used by standalone MCP servers probing hub.mcp_server).
 func (s *Server) handleExperiments(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	writeJSON(w, http.StatusOK, experimentsResponse{Experiments: s.resolvedExperiments()})
+	var resolved map[string]bool
+	if r.URL.Query().Get("include") == "server" {
+		resolved = s.resolvedExperimentsAll()
+	} else {
+		resolved = s.resolvedExperiments()
+	}
+	writeJSON(w, http.StatusOK, experimentsResponse{Experiments: resolved})
 }

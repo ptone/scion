@@ -338,7 +338,7 @@ Both routes answer `404` unless the `hub.triggers` and `hub.github_triggers` [ex
 - `POST /compile`: Compile a preset from form inputs, `{"preset": "<id>", "fields": {...}}` (body at most 64 KiB, `413` above; unknown fields refused). Returns `match` (`types` and ordered `rules`), `subject`, `form`, and an optional `suggested_action`, ready to send in `POST /api/v1/projects/:id/triggers`; invalid inputs return `400 validation_error`. CLI: [`scion trigger preset`](/scion/reference/cli/#scion-trigger).
 
 #### Experiments (`/api/v1/experiments`)
-- `GET /`: Return the resolved hub-wide experiment map, `{"experiments": {"<name>": true|false}}`. Available to any authenticated identity (user, agent, or Runtime Broker token). The web client fetches it at boot. Admins change values through [`/api/v1/admin/experiments`](#admin-apiv1admin).
+- `GET /`: Return the resolved hub-wide experiment map, `{"experiments": {"<name>": true|false}}`. By default returns web-layer experiments (fetched by the web client at boot); pass `?include=server` to include server-layer experiments as well (used by standalone MCP servers probing `hub.mcp_server`). Available to any authenticated identity (user, agent, or Runtime Broker token). Admins change values through [`/api/v1/admin/experiments`](#admin-apiv1admin).
 
 #### Profiling (`/api/v1/profiling`)
 - `GET /`: Return the profiling switches the web client acts on, `{"readinessMarks": true|false}`, and nothing else. Available to any authenticated identity; a request without credentials gets `401`. Admins change the value through [`/api/v1/admin/profiling`](#admin-apiv1admin). See [Profiling](/scion/reference/admin-settings/#profiling).

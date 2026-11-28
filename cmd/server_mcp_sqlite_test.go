@@ -23,6 +23,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -187,4 +188,103 @@ func TestStartEmbeddedMCPServer_ExperimentWiringAndBindGuard(t *testing.T) {
 		default:
 		}
 	})
+}
+
+// TestStartStandaloneMCPServer_ExperimentWiringAndReadyz exercises the real
+// production startStandaloneMCPServer entry point against an httptest.Server
+// running the real SQLite-backed hub.Server handler.
+func TestStartStandaloneMCPServer_ExperimentWiringAndReadyz(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	hubSrv, err := hub.New(hub.ServerConfig{}, st)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = hubSrv.Shutdown(context.Background()) })
+
+	ops := hub.NewOperationalSettings(st, koanf.New("."), koanf.New("."))
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	hubSrv.SetOperationalSettings(ops)
+
+	// Enable hub.mcp_server on the remote Hub.
+	_, err = st.UpsertHubSetting(ctx, "experiments", json.RawMessage(`{"overrides":{"hub.mcp_server":true}}`), "test", -1, "seeded")
+	require.NoError(t, err)
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+
+	user := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "mcp-standalone-cmd@example.com",
+		DisplayName: "MCP Standalone Cmd Test",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, st.CreateUser(ctx, user))
+	userJWT, _, err := hubSrv.GetUserTokenService().MintAccessToken(hub.UserTokenSubject{
+		UserID:      user.ID,
+		Email:       user.Email,
+		DisplayName: user.DisplayName,
+		Role:        user.Role,
+		ClientType:  hub.ClientTypeCLI,
+	})
+	require.NoError(t, err)
+
+	hubTS := httptest.NewServer(hubSrv.Handler())
+	t.Cleanup(hubTS.Close)
+
+	port := freeMCPTestPort(t)
+	cfg := config.DefaultGlobalConfig()
+	cfg.MCP.Enabled = true
+	cfg.MCP.Host = "127.0.0.1"
+	cfg.MCP.Port = port
+	cfg.MCP.Path = "/mcp"
+	cfg.MCP.HubEndpoint = hubTS.URL
+
+	srvCtx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	errCh := make(chan error, 1)
+	shutdownSeq := newServerShutdownSequence(cancel, nil)
+
+	require.NoError(t, startStandaloneMCPServer(srvCtx, shutdownSeq, &cfg, &wg, errCh))
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	deadline := time.Now().Add(3 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(baseURL + "/readyz")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				ready = true
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.True(t, ready, "standalone MCP server did not become ready on %s", baseURL)
+
+	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"standalone-cmd-test","version":"0.1"}}}`
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/mcp", strings.NewReader(initBody))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+userJWT)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	b, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", string(b))
+	assert.Contains(t, string(b), `"protocolVersion"`)
+
+	cancel()
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		t.Fatalf("unexpected error on standalone MCP server shutdown: %v", err)
+	default:
+	}
 }

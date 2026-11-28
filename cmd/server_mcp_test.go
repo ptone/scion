@@ -36,7 +36,13 @@ func TestValidateMCPStartup(t *testing.T) {
 		t.Fatalf("enabled MCP with hub should succeed, got: %v", err)
 	}
 	if err := validateMCPStartup(&config.GlobalConfig{MCP: config.MCPServerConfig{Enabled: true}}, false); err == nil {
-		t.Fatal("expected error when MCP is enabled without hub in P1")
+		t.Fatal("expected error when MCP is enabled without hub and hub_endpoint is empty")
+	}
+	if err := validateMCPStartup(&config.GlobalConfig{MCP: config.MCPServerConfig{Enabled: true, HubEndpoint: "ftp://hub.example.com"}}, false); err == nil {
+		t.Fatal("expected error when MCP standalone hub_endpoint has non-http(s) scheme")
+	}
+	if err := validateMCPStartup(&config.GlobalConfig{MCP: config.MCPServerConfig{Enabled: true, HubEndpoint: "https://hub.example.com"}}, false); err != nil {
+		t.Fatalf("enabled MCP without hub and valid hub_endpoint should succeed, got: %v", err)
 	}
 }
 

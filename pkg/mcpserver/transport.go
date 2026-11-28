@@ -201,6 +201,12 @@ func (w *pipeResponseWriter) abort(err error) {
 type AllowlistTransport struct {
 	Base    http.RoundTripper
 	Version string
+	// AllowTransportAuthHeaders permits transport-layer auth headers
+	// (Proxy-Authorization for IAP, X-Serverless-Authorization for Cloud Run
+	// invoker) that hubclient's transportauth wrapper injects on outbound Hub
+	// requests in standalone mode. Inbound MCP client headers never reach
+	// AllowlistTransport because hubclient builds fresh outbound requests.
+	AllowTransportAuthHeaders bool
 }
 
 // RoundTrip rebuilds the outbound header map from the strict allowlist and
@@ -219,6 +225,14 @@ func (t *AllowlistTransport) RoundTrip(req *http.Request) (*http.Response, error
 	}
 	if fed := req.Header.Get(HeaderFederationToken); fed != "" {
 		h.Set(HeaderFederationToken, fed)
+	}
+	if t.AllowTransportAuthHeaders {
+		if pa := req.Header.Get("Proxy-Authorization"); pa != "" {
+			h.Set("Proxy-Authorization", pa)
+		}
+		if sa := req.Header.Get("X-Serverless-Authorization"); sa != "" {
+			h.Set("X-Serverless-Authorization", sa)
+		}
 	}
 	if ct := req.Header.Get("Content-Type"); ct != "" {
 		h.Set("Content-Type", ct)

@@ -233,6 +233,11 @@ func hideNeverShownServerKeys(srv *config.V1ServerConfig) {
 		}
 		srv.Hub = &hubCopy
 	}
+	if srv.MCP != nil {
+		mcpCopy := *srv.MCP
+		mcpCopy.HubEndpoint = ""
+		srv.MCP = &mcpCopy
+	}
 	hideNeverAPIWritableProxyKeys(srv)
 	srv.KeyringFile = ""
 	srv.KeyringFileAllowWorldReadable = false

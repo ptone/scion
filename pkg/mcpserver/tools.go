@@ -17,12 +17,14 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -146,6 +148,9 @@ func (s *Server) handleReadMessages(ctx context.Context, req *mcp.CallToolReques
 	if err != nil {
 		status := hubStatusCode(err)
 		s.auditToolCall(req, auth, "read_messages", in.ConversationID, "error", status, time.Since(start))
+		if watchOpts.Start == "tail" && isUnsupportedTailError(err) {
+			return toolErrorResult("this Hub does not support tail reads (start=tail returned 400); pass from_start=true or a cursor to read messages"), ReadMessagesOutput{}, nil
+		}
 		return toolErrorResult(formatHubToolError(err)), ReadMessagesOutput{}, nil
 	}
 
@@ -208,6 +213,15 @@ func withClientNameFromRequest(ctx context.Context, req *mcp.CallToolRequest, fa
 		meta.ClientName = label
 	}
 	return withTransportMeta(ctx, meta)
+}
+
+func isUnsupportedTailError(err error) bool {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	msg := strings.ToLower(apiErr.Message)
+	return strings.Contains(msg, "start") || strings.Contains(msg, "tail")
 }
 
 func toolErrorResult(msg string) *mcp.CallToolResult {

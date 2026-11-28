@@ -47,6 +47,9 @@ var neverAPIWritableSettingsKeys = []string{
 	// The URL hub-managed broker plugins send HMAC-signed Hub API calls
 	// to (ptone/scion#555): a web session must not redirect it.
 	config.HubInternalURLKey,
+	// The Hub URL a standalone MCP server forwards caller credentials and
+	// transport auth to (ptone/scion#9666): a web session must not redirect it.
+	config.MCPHubEndpointKey,
 	// The sources a hosted Hub fetches templates and harness-configs from on
 	// its own host: a web session must not widen them.
 	config.AllowedImportSourcesKey,

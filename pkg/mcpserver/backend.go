@@ -43,6 +43,10 @@ type HubBackend interface {
 // mode (P4) it queries GET /api/v1/experiments with caching.
 type ExperimentChecker func(ctx context.Context, c Credential, name string) (bool, error)
 
+// DefaultExperimentCacheTTL is the maximum duration standalone mode caches
+// resolved experiment values fetched from GET /api/v1/experiments (§4.5).
+const DefaultExperimentCacheTTL = 30 * time.Second
+
 // BackendOptions configures NewBackend.
 type BackendOptions struct {
 	// HubBaseURL is the base URL passed to hubclient.New (e.g., "http://in-process"
@@ -53,10 +57,17 @@ type BackendOptions struct {
 	Transport http.RoundTripper
 	// Version is the server version stamped into User-Agent: scion-mcp/<ver>.
 	Version string
-	// ExperimentChecker resolves hub experiments per request.
+	// ExperimentChecker resolves hub experiments per request. When nil, the
+	// backend queries GET /api/v1/experiments?include=server using the caller's
+	// credential and caches the result for ExperimentCacheTTL (default 30s).
 	ExperimentChecker ExperimentChecker
+	// ExperimentCacheTTL overrides the 30s cache TTL for standalone experiment
+	// probing when ExperimentChecker is nil.
+	ExperimentCacheTTL time.Duration
+	// Now overrides the clock used by the standalone experiment cache (for tests).
+	Now func() time.Time
 	// DisableTransportAuth suppresses hubclient's automatic SCION_TRANSPORT_MODE
-	// wrapping. Set true for embedded mode; P4 leaves it false for standalone.
+	// wrapping. Set true for embedded mode; leave false for standalone mode.
 	DisableTransportAuth bool
 }
 
@@ -64,6 +75,7 @@ type hubBackend struct {
 	baseURL              string
 	transport            http.RoundTripper
 	expCheck             ExperimentChecker
+	expCache             *experimentCache
 	disableTransportAuth bool
 }
 
@@ -76,13 +88,15 @@ func NewBackend(opts BackendOptions) HubBackend {
 		baseURL = "http://in-process"
 	}
 	rt := &AllowlistTransport{
-		Base:    opts.Transport,
-		Version: opts.Version,
+		Base:                      opts.Transport,
+		Version:                   opts.Version,
+		AllowTransportAuthHeaders: !opts.DisableTransportAuth,
 	}
 	return &hubBackend{
 		baseURL:              baseURL,
 		transport:            rt,
 		expCheck:             opts.ExperimentChecker,
+		expCache:             newExperimentCache(opts.ExperimentCacheTTL, opts.Now),
 		disableTransportAuth: opts.DisableTransportAuth,
 	}
 }
@@ -185,10 +199,67 @@ func (b *hubBackend) Watch(ctx context.Context, c Credential, convID string, o h
 }
 
 func (b *hubBackend) ExperimentEnabled(ctx context.Context, c Credential, name string) (bool, error) {
-	if b.expCheck == nil {
-		return false, nil
+	if b.expCheck != nil {
+		return b.expCheck(ctx, c, name)
 	}
-	return b.expCheck(ctx, c, name)
+	if val, ok := b.expCache.get(name); ok {
+		return val, nil
+	}
+	cl, err := b.clientFor(c)
+	if err != nil {
+		return false, err
+	}
+	exps, err := hubclient.FetchServerExperiments(ctx, cl)
+	if err != nil {
+		return false, err
+	}
+	b.expCache.set(exps)
+	return exps[name], nil
+}
+
+// experimentCache caches resolved hub-wide experiment flags for at most ttl
+// (default 30s) per Hub in standalone mode (§4.5). Errors are never cached.
+type experimentCache struct {
+	mu        sync.RWMutex
+	ttl       time.Duration
+	now       func() time.Time
+	fetchedAt time.Time
+	values    map[string]bool
+	hasValues bool
+}
+
+func newExperimentCache(ttl time.Duration, now func() time.Time) *experimentCache {
+	if ttl <= 0 {
+		ttl = DefaultExperimentCacheTTL
+	}
+	if now == nil {
+		now = time.Now
+	}
+	return &experimentCache{
+		ttl: ttl,
+		now: now,
+	}
+}
+
+func (c *experimentCache) get(name string) (bool, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.hasValues || c.now().Sub(c.fetchedAt) >= c.ttl {
+		return false, false
+	}
+	return c.values[name], true
+}
+
+func (c *experimentCache) set(values map[string]bool) {
+	copied := make(map[string]bool, len(values))
+	for k, v := range values {
+		copied[k] = v
+	}
+	c.mu.Lock()
+	c.values = copied
+	c.fetchedAt = c.now()
+	c.hasValues = true
+	c.mu.Unlock()
 }
 
 // credentialAuthenticator applies a Credential to outbound Hub requests.

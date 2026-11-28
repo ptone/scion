@@ -780,6 +780,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				return shutdownSeq.startupErr(ctx, err)
 			}
 		}
+	} else if cfg.MCP.Enabled {
+		// 11c. Start standalone MCP server listener against server.mcp.hub_endpoint.
+		if err := startStandaloneMCPServer(ctx, shutdownSeq, cfg, &wg, errCh); err != nil {
+			return shutdownSeq.startupErr(ctx, err)
+		}
 	}
 
 	// 12. Start Web
@@ -2133,14 +2138,23 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 	return nil
 }
 
-// validateMCPStartup rejects standalone MCP mode in P1 (standalone mode against
-// a remote hub_endpoint is implemented in P4).
+// validateMCPStartup validates MCP listener configuration at startup.
+// In embedded mode (--enable-hub), server.mcp.hub_endpoint is ignored.
+// In standalone mode (without --enable-hub), server.mcp.hub_endpoint is
+// required and must be a valid http(s) origin URL.
 func validateMCPStartup(cfg *config.GlobalConfig, hubEnabled bool) error {
 	if cfg == nil || !cfg.MCP.Enabled {
 		return nil
 	}
-	if !hubEnabled {
-		return fmt.Errorf("--enable-mcp (server.mcp.enabled) requires --enable-hub in this phase; standalone MCP mode is not yet implemented")
+	if hubEnabled {
+		return nil
+	}
+	rawEndpoint := strings.TrimSpace(cfg.MCP.HubEndpoint)
+	if rawEndpoint == "" {
+		return fmt.Errorf("--enable-mcp (server.mcp.enabled) without --enable-hub requires %s", config.MCPHubEndpointKey)
+	}
+	if _, err := config.ValidateMCPHubEndpoint(rawEndpoint); err != nil {
+		return err
 	}
 	return nil
 }
@@ -2205,6 +2219,81 @@ func startEmbeddedMCPServer(
 		log.Printf("Starting MCP server on %s:%d (path=%s, public_url=%s)", mcpHost, mcpPort, mcpPath, cfg.MCP.PublicURL)
 	} else {
 		log.Printf("Starting MCP server on %s:%d (path=%s)", mcpHost, mcpPort, mcpPath)
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := mcpSrv.Start(ctx); err != nil {
+			errCh <- fmt.Errorf("mcp server error: %w", err)
+		}
+	}()
+	return nil
+}
+
+// startStandaloneMCPServer builds and starts the standalone MCP HTTP listener
+// backed by a network RoundTripper pointing at server.mcp.hub_endpoint, with
+// hubclient's automatic SCION_TRANSPORT_MODE transportauth layering, cached
+// remote experiment probing, and Hub /healthz readiness monitoring.
+func startStandaloneMCPServer(
+	ctx context.Context,
+	shutdownSeq *serverShutdownSequence,
+	cfg *config.GlobalConfig,
+	wg *sync.WaitGroup,
+	errCh chan<- error,
+) error {
+	if cfg == nil || !cfg.MCP.Enabled {
+		return nil
+	}
+	hubEndpoint, err := config.ValidateMCPHubEndpoint(strings.TrimSpace(cfg.MCP.HubEndpoint))
+	if err != nil {
+		return err
+	}
+	if hubEndpoint == "" {
+		return fmt.Errorf("--enable-mcp (server.mcp.enabled) without --enable-hub requires %s", config.MCPHubEndpointKey)
+	}
+
+	mcpHost := cfg.MCP.Host
+	if mcpHost == "" {
+		mcpHost = cfg.Hub.Host
+	}
+	mcpPort := cfg.MCP.Port
+	if mcpPort == 0 {
+		mcpPort = mcpserver.DefaultPort
+	}
+	mcpPath := cfg.MCP.Path
+	if mcpPath == "" {
+		mcpPath = mcpserver.DefaultPath
+	}
+
+	ver := version.Short()
+	backendOpts := mcpserver.BackendOptions{
+		HubBaseURL:           hubEndpoint,
+		Version:              ver,
+		DisableTransportAuth: false,
+	}
+
+	mcpSrv, err := mcpserver.New(mcpserver.Options{
+		Host:           mcpHost,
+		Port:           mcpPort,
+		Path:           mcpPath,
+		PublicURL:      cfg.MCP.PublicURL,
+		AllowedOrigins: cfg.MCP.AllowedOrigins,
+		Version:        ver,
+		Backend:        mcpserver.NewBackend(backendOpts),
+		HubHealthProbe: mcpserver.NewHubHealthProbe(backendOpts),
+		Logger:         slog.Default().With("component", "mcp"),
+	})
+	if err != nil {
+		return fmt.Errorf("initializing standalone MCP server: %w", err)
+	}
+
+	shutdownSeq.addStep(shutdownPhaseMark, mcpSrv.BeginShutdown)
+
+	if cfg.MCP.PublicURL != "" {
+		log.Printf("Starting standalone MCP server on %s:%d (path=%s, hub_endpoint=%s, public_url=%s)", mcpHost, mcpPort, mcpPath, hubEndpoint, cfg.MCP.PublicURL)
+	} else {
+		log.Printf("Starting standalone MCP server on %s:%d (path=%s, hub_endpoint=%s)", mcpHost, mcpPort, mcpPath, hubEndpoint)
 	}
 
 	wg.Add(1)
