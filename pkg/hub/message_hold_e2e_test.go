@@ -2509,10 +2509,54 @@ func TestHoldA2_Round1_OPT1_DecisionResponsePreservesAgentLineAndMetadata(t *tes
 	require.NoError(t, json.Unmarshal(setBytes, &setAnsOut))
 	f.waitMessageState(t, setAnsOut.ResponseMessageID, store.MessageDispatchAwaitingSession)
 
-	// Connect Conduit session and verify both re-driven decision-response envelopes.
+	// 3. Single decision interpreted as "no" (choice 2), then confirmed WITH a
+	//    comment while f.launched is held in awaiting_session (ptone/scion#9834).
+	confirmOut := sendDecisionPromptFromLaunched(`[{"id":"D11","question":"Keep staging warm?","choices":["yes","no"]}]`)
+	require.Len(t, confirmOut.Decisions, 1)
+	confirmRowID := confirmOut.Decisions[0].RowID
+	confirmInterpResp := &store.Message{
+		ID: uuid.NewString(), ProjectID: f.launched.ProjectID, AgentID: f.launched.ID,
+		Sender: "agent:" + f.launched.Slug, SenderID: f.launched.ID,
+		Recipient: "user:" + owner.Email, RecipientID: owner.ID,
+		Msg: "recorded interpreted no for D11", Type: messages.TypeDecisionResponse,
+		DispatchState: store.MessageDispatchDelivered, CreatedAt: time.Now().UTC(),
+	}
+	_, _, err = f.store.RecordAnswer(ctx, &store.RecordAnswerInput{
+		DecisionRowID:        confirmRowID,
+		ChoiceID:             "2",
+		AnsweredByUserID:     owner.ID,
+		AnsweredByName:       owner.DisplayName,
+		AnsweredByEmail:      owner.Email,
+		Provenance:           store.DecisionProvenanceAgentInterpreted,
+		InterpretedByAgentID: f.launched.ID,
+		SourceMessageID:      srcMsg.ID,
+		Surface:              store.DecisionSurfaceNative,
+		ResponseMessage:      confirmInterpResp,
+	})
+	require.NoError(t, err)
+
+	confirmBody, _ := json.Marshal(map[string]any{
+		"choice_id": "2",
+		"comment":   "Page me when staging is green.",
+	})
+	confirmReq, err := http.NewRequest(http.MethodPost, f.public.URL+"/api/v1/decisions/"+confirmRowID+"/answer", bytes.NewReader(confirmBody))
+	require.NoError(t, err)
+	confirmReq.Header.Set("Authorization", "Bearer "+f.userToken)
+	confirmReq.Header.Set("Content-Type", "application/json")
+	confirmResp, err := http.DefaultClient.Do(confirmReq)
+	require.NoError(t, err)
+	confirmBytes, _ := io.ReadAll(confirmResp.Body)
+	_ = confirmResp.Body.Close()
+	require.Equal(t, http.StatusOK, confirmResp.StatusCode, string(confirmBytes))
+	var confirmAnsOut DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(confirmBytes, &confirmAnsOut))
+	f.waitMessageState(t, confirmAnsOut.ResponseMessageID, store.MessageDispatchAwaitingSession)
+
+	// Connect Conduit session and verify all three re-driven decision-response envelopes.
 	ca := f.connectDeliverSession(t, f.public.URL, true, nil)
 	f.waitMessageState(t, singleAnsOut.ResponseMessageID, store.MessageDispatchDelivered)
 	f.waitMessageState(t, setAnsOut.ResponseMessageID, store.MessageDispatchDelivered)
+	f.waitMessageState(t, confirmAnsOut.ResponseMessageID, store.MessageDispatchDelivered)
 
 	// Note: realBrokerDispatcher coalesces rapid re-driven messages in MessageBuffer,
 	// so extract all ---BEGIN SCION MESSAGE--- envelopes across pasted chunks.
@@ -2520,7 +2564,7 @@ func TestHoldA2_Round1_OPT1_DecisionResponsePreservesAgentLineAndMetadata(t *tes
 	for _, chunk := range ca.tmux.pastedTexts() {
 		pastedEnvs = append(pastedEnvs, decodeAllHoldTestEnvelopes(t, chunk)...)
 	}
-	require.Len(t, pastedEnvs, 2)
+	require.Len(t, pastedEnvs, 3)
 
 	assert.Equal(t, singleAnsOut.ResponseMessageID, pastedEnvs[0]["message_id"])
 	singleMsgText, _ := pastedEnvs[0]["msg"].(string)
@@ -2531,6 +2575,7 @@ func TestHoldA2_Round1_OPT1_DecisionResponsePreservesAgentLineAndMetadata(t *tes
 	assert.Equal(t, "1", singleMeta[messages.MetadataDecisionVersion])
 	assert.Equal(t, "1", singleMeta[messages.MetadataChoiceID])
 	assert.Equal(t, store.DecisionProvenanceDirect, singleMeta[messages.MetadataDecisionProvenance])
+	assert.NotContains(t, singleMeta, messages.MetadataDecisionComment)
 
 	assert.Equal(t, setAnsOut.ResponseMessageID, pastedEnvs[1]["message_id"])
 	setMsgText, _ := pastedEnvs[1]["msg"].(string)
@@ -2543,6 +2588,19 @@ func TestHoldA2_Round1_OPT1_DecisionResponsePreservesAgentLineAndMetadata(t *tes
 	assert.Equal(t, setAnsOut.BatchID, setMeta[messages.MetadataDecisionBatch])
 	assert.Equal(t, "D234@1=1,1@1=a,ship-now@1=1", setMeta[messages.MetadataDecisionAnswers])
 	assert.Empty(t, setMeta[messages.MetadataDecisionKey])
+
+	assert.Equal(t, confirmAnsOut.ResponseMessageID, pastedEnvs[2]["message_id"])
+	confirmMsgText, _ := pastedEnvs[2]["msg"].(string)
+	assert.Equal(t,
+		`[decision-response] D11 v1 ("Keep staging warm?") answer=no (choice 2, confirmed) by `+owner.Email+"\n"+`comment="Page me when staging is green."`,
+		confirmMsgText)
+	confirmMeta, _ := pastedEnvs[2]["metadata"].(map[string]any)
+	require.NotNil(t, confirmMeta)
+	assert.Equal(t, "D11", confirmMeta[messages.MetadataDecisionKey])
+	assert.Equal(t, "1", confirmMeta[messages.MetadataDecisionVersion])
+	assert.Equal(t, "2", confirmMeta[messages.MetadataChoiceID])
+	assert.Equal(t, store.DecisionProvenanceDirect, confirmMeta[messages.MetadataDecisionProvenance])
+	assert.Equal(t, "Page me when staging is green.", confirmMeta[messages.MetadataDecisionComment])
 }
 
 // TestHoldDecisionDismissResponseRedriveRebuildsAgentLineAndMetadata pins the

@@ -1844,9 +1844,9 @@ func TestDecisionResponse_DeliveryStateUpdatesCarryDecisionViews(t *testing.T) {
 }
 
 func TestDecisions_Comment_NoCommentGoldenEquality(t *testing.T) {
-	// Golden check (ptone/scion#9834, design §7 P1 & §9 item 1): absent, empty,
-	// and whitespace-only comment must produce byte-identical stored row, stored
-	// chat body, delivered agent text, metadata, and view JSON to today's main.
+	// Golden check (ptone/scion#9834): absent, empty, and whitespace-only
+	// comment must produce byte-identical stored row, stored chat body,
+	// delivered agent text, metadata, and view JSON to today's main.
 	for _, tc := range []struct {
 		name string
 		body map[string]interface{}

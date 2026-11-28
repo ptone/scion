@@ -2922,7 +2922,7 @@ export class ScionChatDecisions extends LitElement {
     if (this.isSet) return nothing;
     if (this.answerBlocked || !this.rowActionable(d)) return nothing;
     if (d.status !== 'pending' && !this.isActionableInterpreted(d)) return nothing;
-    if (!this.commentOpen) {
+    if (!this.commentOpen && !this.commentDraft) {
       return html`<button
         type="button"
         class="addc"
