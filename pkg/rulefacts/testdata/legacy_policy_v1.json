@@ -1,0 +1,71 @@
+{
+  "activation": {
+    "conversation": {
+      "agent_participant_ids": [
+        "agent-uuid-1"
+      ],
+      "kind": "direct",
+      "user_participant_ids": [
+        "user-uuid-1"
+      ]
+    },
+    "mentioned_agent_ids": [
+      "agent-uuid-2"
+    ],
+    "mentioned_user_ids": [
+      "user-uuid-1"
+    ],
+    "message": {
+      "attachment_count": 1,
+      "body": "Please pick A or B.",
+      "body_truncated": false,
+      "bytes": 19,
+      "has_choices": false,
+      "type": "instruction",
+      "urgent": true
+    },
+    "recipient": {
+      "id": "user-uuid-1",
+      "kind": "user",
+      "slug": "alice"
+    },
+    "sender": {
+      "id": "agent-uuid-1",
+      "kind": "agent",
+      "project_id": "proj-uuid-1",
+      "slug": "dev-worker"
+    },
+    "surface": "agent_to_user"
+  },
+  "declarations": [
+    {
+      "name": "surface",
+      "type": "string"
+    },
+    {
+      "name": "sender",
+      "type": "map(string, string)"
+    },
+    {
+      "name": "recipient",
+      "type": "map(string, string)"
+    },
+    {
+      "name": "message",
+      "type": "map(string, dyn)"
+    },
+    {
+      "name": "mentioned_agent_ids",
+      "type": "list(string)"
+    },
+    {
+      "name": "mentioned_user_ids",
+      "type": "list(string)"
+    },
+    {
+      "name": "conversation",
+      "type": "map(string, dyn)"
+    }
+  ],
+  "name": "legacy_policy_v1"
+}
