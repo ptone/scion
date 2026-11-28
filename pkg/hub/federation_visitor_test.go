@@ -266,6 +266,7 @@ var expectedVisitorRouteMethods = []visitorRouteMethod{
 	{"/api/v1/agents/", http.MethodPost},                // send a message to an agent
 	{"/api/v1/chat/conversations/", http.MethodGet},     // own DM history and read marker
 	{"/api/v1/chat/conversations/", http.MethodPost},    // own DM read marker
+	{"/api/v1/conversations/", http.MethodGet},          // own DM messages and watch (when hub.mcp_server is on)
 }
 
 // visitorRefusedProfileRoutes are the profile write routes reachable by a

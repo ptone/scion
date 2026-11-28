@@ -168,7 +168,37 @@ func (s *Server) authorizeConversationReadByID(ctx context.Context, r *http.Requ
 	}
 	cls, token := inboxCredentialOf(ctx)
 	if cls == inboxCredentialRefused {
-		return nil, &convReadDenial{status: http.StatusForbidden}
+		// Defense-in-depth for project visitors admitted by routeGuard on
+		// GET /api/v1/conversations/{id}/{messages,watch} while both
+		// federation.project_visitors and hub.mcp_server are enabled.
+		visitor, isVisitor := identity.(*VisitorIdentity)
+		if !isVisitor || visitor == nil {
+			return nil, &convReadDenial{status: http.StatusForbidden}
+		}
+		if !s.experimentEnabled(experiments.FederationProjectVisitors) || !s.experimentEnabled(experiments.MCPServer) {
+			return nil, &convReadDenial{status: http.StatusForbidden}
+		}
+		cred := GetCredentialContextFromContext(ctx)
+		if cred.Kind == "" {
+			cred = credentialContextForIdentity(identity)
+		}
+		if cred.Kind != CredentialKindFederation {
+			return nil, &convReadDenial{status: http.StatusForbidden}
+		}
+		conv, agent, err := s.matchVisitorOwnDMConversation(ctx, visitor, id)
+		if errors.Is(err, errVisitorTargetRefused) {
+			return nil, &convReadDenial{status: http.StatusForbidden}
+		}
+		if err != nil {
+			return nil, &convReadDenial{storeErr: err}
+		}
+		if allowed, _, _ := s.authorizeAgentMessage(ctx, visitor, agent, false); !allowed {
+			return nil, &convReadDenial{status: http.StatusForbidden}
+		}
+		if !authorizeDMRead(conv, identity.Type(), identity.ID()) {
+			return nil, &convReadDenial{status: http.StatusForbidden}
+		}
+		return conv, nil
 	}
 	conv, err := s.store.GetConversation(ctx, id)
 	if err != nil {
@@ -337,11 +367,14 @@ func (s *Server) writeConvReadError(w http.ResponseWriter, r *http.Request, err 
 
 // normalizeFeedPrincipalKind maps Hub identity types to the canonical message
 // principal kind ("user" or "agent"), matching messageability.go:getSenderMode.
-// Dev-token ("dev") and federated user ("federated_user") callers stamp rows as
-// "user:..." and addressees as principal_kind="user".
+// Dev-token ("dev"), federated user ("federated_user"), and project visitor
+// ("visitor") callers stamp rows as "user:..." and addressees as
+// principal_kind="user". Federated workload types ("federated_agent",
+// "federated_service") are intentionally left unmapped because their IDs are
+// not local agent IDs.
 func normalizeFeedPrincipalKind(identityType string) string {
 	switch identityType {
-	case "user", "dev", "federated_user":
+	case "user", "dev", "federated_user", "visitor":
 		return "user"
 	default:
 		return identityType

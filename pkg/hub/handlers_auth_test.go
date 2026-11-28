@@ -206,6 +206,9 @@ func TestAuthMe(t *testing.T) {
 	if resp.Email != user.Email {
 		t.Errorf("expected email %q, got %q", user.Email, resp.Email)
 	}
+	if resp.PrincipalKind != "user" {
+		t.Errorf("expected principalKind %q, got %q", "user", resp.PrincipalKind)
+	}
 }
 
 // TestAuthRefreshRoleReevaluation covers the role re-evaluation that happens on

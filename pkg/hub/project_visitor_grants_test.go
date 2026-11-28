@@ -841,6 +841,7 @@ func TestVisitorRoute_AuthMeReturnsVisitorOwnProfile(t *testing.T) {
 	assert.Equal(t, v.ID, me.ID, "the visitor's own federated account")
 	assert.Equal(t, "ada@corp.example", me.Email)
 	assert.Equal(t, "viewer", me.Role)
+	assert.Equal(t, "visitor", me.PrincipalKind)
 
 	rec = f.federatedGet(t, "/api/v1/users/me/groups", token)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())

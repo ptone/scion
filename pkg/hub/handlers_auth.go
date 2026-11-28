@@ -51,12 +51,13 @@ type AuthLoginResponse struct {
 
 // UserResponse is the user info returned in auth responses.
 type UserResponse struct {
-	ID           string `json:"id"`
-	Email        string `json:"email"`
-	DisplayName  string `json:"displayName"`
-	Role         string `json:"role"`
-	AvatarURL    string `json:"avatarUrl,omitempty"`
-	ViewAsMember bool   `json:"viewAsMember,omitempty"`
+	ID            string `json:"id"`
+	Email         string `json:"email"`
+	DisplayName   string `json:"displayName"`
+	Role          string `json:"role"`
+	AvatarURL     string `json:"avatarUrl,omitempty"`
+	ViewAsMember  bool   `json:"viewAsMember,omitempty"`
+	PrincipalKind string `json:"principalKind,omitempty"`
 
 	// Preferences is populated only by handleAuthMe, from a live store read.
 	Preferences *store.UserPreferences `json:"preferences,omitempty"`
@@ -824,9 +825,10 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	// but should still be recognized as authenticated callers.
 	if agentIdent := GetAgentIdentityFromContext(r.Context()); agentIdent != nil {
 		writeJSON(w, http.StatusOK, UserResponse{
-			ID:          agentIdent.ID(),
-			DisplayName: "agent:" + agentIdent.ID(),
-			Role:        "agent",
+			ID:            agentIdent.ID(),
+			DisplayName:   "agent:" + agentIdent.ID(),
+			Role:          "agent",
+			PrincipalKind: identity.Type(),
 		})
 		return
 	}
@@ -838,12 +840,13 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, UserResponse{
-		ID:           user.ID(),
-		Email:        user.Email(),
-		DisplayName:  user.DisplayName(),
-		Role:         user.Role(),
-		ViewAsMember: authUserViewAsMember(user),
-		Preferences:  loadUserPreferences(r.Context(), s.store, user.ID()),
+		ID:            user.ID(),
+		Email:         user.Email(),
+		DisplayName:   user.DisplayName(),
+		Role:          user.Role(),
+		ViewAsMember:  authUserViewAsMember(user),
+		PrincipalKind: identity.Type(),
+		Preferences:   loadUserPreferences(r.Context(), s.store, user.ID()),
 	})
 }
 
