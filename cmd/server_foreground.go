@@ -2186,14 +2186,16 @@ func startEmbeddedMCPServer(
 	})
 
 	mcpSrv, err := mcpserver.New(mcpserver.Options{
-		Host:           mcpHost,
-		Port:           mcpPort,
-		Path:           mcpPath,
-		PublicURL:      cfg.MCP.PublicURL,
-		AllowedOrigins: cfg.MCP.AllowedOrigins,
-		Version:        ver,
-		Backend:        backend,
-		Logger:         slog.Default().With("component", "mcp"),
+		Host:                   mcpHost,
+		Port:                   mcpPort,
+		Path:                   mcpPath,
+		PublicURL:              cfg.MCP.PublicURL,
+		AllowedOrigins:         cfg.MCP.AllowedOrigins,
+		Version:                ver,
+		Backend:                backend,
+		Logger:                 slog.Default().With("component", "mcp"),
+		MaxStreamsPerPrincipal: cfg.MCP.MaxStreamsPerPrincipal,
+		StreamWait:             cfg.MCP.StreamWait,
 	})
 	if err != nil {
 		return fmt.Errorf("initializing MCP server: %w", err)

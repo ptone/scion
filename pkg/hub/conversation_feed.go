@@ -16,12 +16,15 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -36,7 +39,13 @@ const (
 	// shutdown-drain and membership-revocation early returns so streaming
 	// clients do not tight-loop re-polls.
 	watchEarlyReturnRetryAfter = time.Second
+	// watchSSEMaxDuration caps the lifetime of a single /watch SSE stream so
+	// idle connections do not accumulate indefinitely; clients reconnect with
+	// their last cursor.
+	watchSSEMaxDuration = 10 * time.Minute
 )
+
+var errStreamCredentialEnded = errors.New("stream credential no longer valid")
 
 // conversationMessageWakeEvent is the slim payload published on
 // conversation.<id>.message by feedNotifier. The database is the authoritative
@@ -408,6 +417,20 @@ func (s *Server) handleConvWatch(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
+	var principal eventfeed.Principal
+	if identity := GetIdentityFromContext(ctx); identity != nil {
+		principal = eventfeed.Principal{Kind: normalizeFeedPrincipalKind(identity.Type()), ID: identity.ID()}
+	}
+
+	// SSE streaming mode (design §12.2(1)): when the caller requests
+	// Accept: text/event-stream and hub.mcp_server is enabled, stream
+	// Feed.Watch over SSE with id: = cursor and Last-Event-ID resume.
+	// When hub.mcp_server is off, fall back to the JSON long-poll below.
+	if acceptsEventStream(r) && s.experimentEnabled(experiments.MCPServer) {
+		s.handleConvWatchSSE(w, r, id, principal, eventfeed.Cursor(q.Get("cursor")), q.Get("after_message"), start, filter, limit, wait)
+		return
+	}
+
 	// Extend the per-request write deadline before blocking so waits longer
 	// than Server.WriteTimeout still complete with 200 OK (design §3.6).
 	rc := http.NewResponseController(w)
@@ -415,11 +438,6 @@ func (s *Server) handleConvWatch(w http.ResponseWriter, r *http.Request, id stri
 
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
-
-	var principal eventfeed.Principal
-	if identity := GetIdentityFromContext(ctx); identity != nil {
-		principal = eventfeed.Principal{Kind: normalizeFeedPrincipalKind(identity.Type()), ID: identity.ID()}
-	}
 
 	// Subscribe to membership changes BEFORE authorizing so a revocation
 	// published during setup is queued and immediately ends the poll early
@@ -506,27 +524,7 @@ func (s *Server) handleConvWatch(w http.ResponseWriter, r *http.Request, id stri
 
 	// Apply the exact same message post-processing as handleConvListMessages
 	// so event.data is byte-identical to GET .../messages items (design §3.4).
-	if len(res.Events) > 0 {
-		if authorizedConv != nil && GetAgentIdentityFromContext(ctx) != nil {
-			for i := range res.Events {
-				if res.Events[i].Data != nil {
-					scopeProvenanceToDMParties(authorizedConv, res.Events[i].Data)
-				}
-			}
-		}
-		msgs := make([]store.Message, len(res.Events))
-		for i := range res.Events {
-			if res.Events[i].Data != nil {
-				msgs[i] = *res.Events[i].Data
-			}
-		}
-		s.noteDeferredAttachments(ctx, msgs)
-		for i := range res.Events {
-			if res.Events[i].Data != nil {
-				res.Events[i].Data.DeferredAttachments = msgs[i].DeferredAttachments
-			}
-		}
-	}
+	s.postProcessWatchEvents(ctx, authorizedConv, res.Events)
 
 	events := res.Events
 	if events == nil {
@@ -541,6 +539,266 @@ func (s *Server) handleConvWatch(w http.ResponseWriter, r *http.Request, id stri
 		TimedOut:     res.TimedOut,
 		RetryAfterMs: res.RetryAfter.Milliseconds(),
 	})
+}
+
+// acceptsEventStream reports whether r's Accept header lists text/event-stream.
+func acceptsEventStream(r *http.Request) bool {
+	for _, headerVal := range r.Header.Values("Accept") {
+		for _, part := range strings.Split(headerVal, ",") {
+			mediaType, _, _ := strings.Cut(part, ";")
+			if strings.EqualFold(strings.TrimSpace(mediaType), "text/event-stream") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// postProcessWatchEvents applies the same message provenance scoping and
+// deferred-attachment annotation as handleConvListMessages so event.data is
+// byte-identical to GET .../messages items.
+func (s *Server) postProcessWatchEvents(ctx context.Context, authorizedConv *store.Conversation, events []eventfeed.Event) {
+	if len(events) == 0 {
+		return
+	}
+	if authorizedConv != nil && GetAgentIdentityFromContext(ctx) != nil {
+		for i := range events {
+			if events[i].Data != nil {
+				scopeProvenanceToDMParties(authorizedConv, events[i].Data)
+			}
+		}
+	}
+	msgs := make([]store.Message, len(events))
+	for i := range events {
+		if events[i].Data != nil {
+			msgs[i] = *events[i].Data
+		}
+	}
+	s.noteDeferredAttachments(ctx, msgs)
+	for i := range events {
+		if events[i].Data != nil {
+			events[i].Data.DeferredAttachments = msgs[i].DeferredAttachments
+		}
+	}
+}
+
+// handleConvWatchSSE serves GET /api/v1/conversations/{id}/watch as an SSE
+// stream backed by eventfeed.Feed.Watch (design §12.2(1)).
+//
+// Wire frames:
+//   - event: active    (id: <cursor>, data: {"cursor":"...","truncated":bool})
+//   - event: message   (id: <event.cursor>, data: <JSON eventfeed.Event>)
+//   - event: heartbeat (id: <cursor>, data: {"cursor":"..."})
+//   - event: error     (written by endStreamForCredential if a UAT is revoked)
+func (s *Server) handleConvWatchSSE(
+	w http.ResponseWriter,
+	r *http.Request,
+	id string,
+	principal eventfeed.Principal,
+	cursor eventfeed.Cursor,
+	afterMessageID string,
+	start eventfeed.Start,
+	filter eventfeed.Filter,
+	limit int,
+	wait time.Duration,
+) {
+	ctx := r.Context()
+
+	// Last-Event-ID provides standard SSE cursor resume when no explicit
+	// cursor query parameter is supplied.
+	if cursor == "" {
+		if lastID := strings.TrimSpace(r.Header.Get("Last-Event-ID")); lastID != "" {
+			cursor = eventfeed.Cursor(lastID)
+		}
+	}
+
+	// Subscribe to membership changes BEFORE authorizing so a revocation
+	// published during setup immediately ends the stream.
+	var (
+		membershipCh     <-chan Event
+		membershipUserID string
+	)
+	if user := GetUserIdentityFromContext(ctx); user != nil {
+		membershipUserID = user.ID()
+		var unsubscribeMembership func()
+		membershipCh, unsubscribeMembership = subscribeMembershipChanged(s.getEventPublisher(), membershipUserID)
+		defer unsubscribeMembership()
+	}
+
+	streamCtx, endStream := s.shutdownMark.streamContext(r)
+	defer endStream()
+
+	var authorizedConv *store.Conversation
+	authorizer := func(authCtx context.Context, convID string) (*store.Conversation, error) {
+		conv, authErr := s.authorizeConversationReadByID(authCtx, r, convID)
+		if authErr != nil {
+			return nil, authErr
+		}
+		authorizedConv = conv
+		return conv, nil
+	}
+
+	// Run an initial immediate poll BEFORE flushing SSE headers so 400
+	// (invalid cursor), 410 (cursor expired), 403, and 404 still return
+	// standard HTTP JSON error responses.
+	initialRes, err := s.conversationFeed.Poll(ctx, principal, authorizer, eventfeed.PollRequest{
+		ConversationID: id,
+		Cursor:         cursor,
+		AfterMessageID: afterMessageID,
+		Start:          start,
+		Filter:         filter,
+		Limit:          limit,
+		Wait:           0,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, eventfeed.ErrInvalidCursor):
+			writeError(w, http.StatusBadRequest, "invalid_cursor", err.Error(), nil)
+		case errors.Is(err, eventfeed.ErrCursorExpired):
+			writeError(w, http.StatusGone, "cursor_expired", err.Error(), nil)
+		case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+			return
+		default:
+			s.writeConvReadError(w, r, err)
+		}
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	writeSSEFrame := func(eventName string, eventID eventfeed.Cursor, payload any) error {
+		b, mErr := json.Marshal(payload)
+		if mErr != nil {
+			return mErr
+		}
+		if eventID != "" {
+			if _, wErr := fmt.Fprintf(w, "id: %s\n", eventID); wErr != nil {
+				return wErr
+			}
+		}
+		if _, wErr := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventName, b); wErr != nil {
+			return wErr
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	// Emit initial active frame. If initial events are about to be streamed,
+	// carry the pre-batch cursor (if any) so a disconnect before event #1
+	// does not skip those events.
+	activeCursor := initialRes.NextCursor
+	if len(initialRes.Events) > 0 {
+		activeCursor = cursor
+	}
+	if err := writeSSEFrame("active", activeCursor, map[string]any{
+		"cursor":    string(activeCursor),
+		"truncated": initialRes.Truncated,
+	}); err != nil {
+		return
+	}
+
+	if len(initialRes.Events) > 0 {
+		s.postProcessWatchEvents(ctx, authorizedConv, initialRes.Events)
+		for _, evt := range initialRes.Events {
+			if err := writeSSEFrame("message", evt.Cursor, evt); err != nil {
+				return
+			}
+		}
+	}
+
+	// Stop the stream early on Hub shutdown, membership change, UAT
+	// revocation, or max stream duration.
+	stopCh := make(chan struct{})
+	watchDone := make(chan struct{})
+	var credEnded atomic.Bool
+
+	recheck, stopRecheck := streamTokenRecheck(ctx)
+	defer stopRecheck()
+
+	maxTimer := time.NewTimer(watchSSEMaxDuration)
+	defer maxTimer.Stop()
+
+	go func() {
+		defer close(stopCh)
+		for {
+			select {
+			case <-watchDone:
+				return
+			case <-streamCtx.Done():
+				return
+			case <-maxTimer.C:
+				return
+			case evt, ok := <-membershipCh:
+				if !ok {
+					membershipCh = nil
+					continue
+				}
+				if membershipChangedNames(evt, membershipUserID) {
+					return
+				}
+			case <-recheck:
+				if requestCredentialIsUAT(ctx) && !s.bearerStillValid(ctx) {
+					credEnded.Store(true)
+					return
+				}
+			}
+		}
+	}()
+	defer close(watchDone)
+
+	sseAuthorizer := func(authCtx context.Context, convID string) (*store.Conversation, error) {
+		if requestCredentialIsUAT(authCtx) && !s.bearerStillValid(authCtx) {
+			credEnded.Store(true)
+			return nil, errStreamCredentialEnded
+		}
+		return authorizer(authCtx, convID)
+	}
+
+	watchWait := wait
+	if watchWait <= 0 {
+		watchWait = defaultConversationWatchWait
+	}
+
+	watchErr := s.conversationFeed.Watch(ctx, principal, sseAuthorizer, eventfeed.PollRequest{
+		ConversationID: id,
+		Cursor:         initialRes.NextCursor,
+		Filter:         filter,
+		Limit:          limit,
+		Wait:           watchWait,
+		StopCh:         stopCh,
+		StopRetryAfter: watchEarlyReturnRetryAfter,
+		OnIdle: func(nextCursor eventfeed.Cursor, _ bool) error {
+			if requestCredentialIsUAT(ctx) && !s.bearerStillValid(ctx) {
+				credEnded.Store(true)
+				return errStreamCredentialEnded
+			}
+			return writeSSEFrame("heartbeat", nextCursor, map[string]any{
+				"cursor": string(nextCursor),
+			})
+		},
+	}, func(evt eventfeed.Event) error {
+		batch := []eventfeed.Event{evt}
+		s.postProcessWatchEvents(ctx, authorizedConv, batch)
+		return writeSSEFrame("message", batch[0].Cursor, batch[0])
+	})
+
+	if credEnded.Load() || errors.Is(watchErr, errStreamCredentialEnded) {
+		endStreamForCredential(ctx, w, flusher)
+	}
 }
 
 // parseWatchWait parses the wait query parameter as either seconds (number) or

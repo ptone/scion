@@ -15,13 +15,16 @@
 package hubclient
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -35,6 +38,10 @@ var (
 	// ErrInvalidCursor is returned by ConversationService.Watch when the Hub
 	// responds with 400 Bad Request (invalid_cursor).
 	ErrInvalidCursor = errors.New("hubclient: invalid cursor")
+	// ErrWatchStreamUnsupported is returned by ConversationService.WatchStream
+	// when the Hub responds with a non-SSE content type (e.g. application/json
+	// because SSE mode is disabled), signaling callers to fall back to Watch.
+	ErrWatchStreamUnsupported = errors.New("hubclient: watch SSE stream not supported")
 )
 
 // ConversationService provides operations on conversations.
@@ -71,6 +78,11 @@ type ConversationService interface {
 
 	// Watch performs one long-poll request against GET /api/v1/conversations/{id}/watch.
 	Watch(ctx context.Context, conversationID string, opts WatchOptions) (*WatchResult, error)
+
+	// WatchStream opens an SSE stream against GET /api/v1/conversations/{id}/watch
+	// with Accept: text/event-stream. Returns ErrWatchStreamUnsupported if the
+	// Hub answers with a non-SSE content type.
+	WatchStream(ctx context.Context, conversationID string, opts WatchOptions) (*WatchStream, error)
 }
 
 // conversationService is the implementation of ConversationService.
@@ -449,4 +461,193 @@ func (s *conversationService) Watch(ctx context.Context, conversationID string, 
 	}
 	result.RetryAfter = time.Duration(result.RetryAfterMs) * time.Millisecond
 	return result, nil
+}
+
+const (
+	watchStreamTimeout      = 15 * time.Minute
+	watchStreamMaxFrameSize = 4 * 1024 * 1024
+)
+
+// WatchStreamEvent represents a single parsed SSE event from WatchStream.
+type WatchStreamEvent struct {
+	// Kind is one of "active", "message", "heartbeat", or "error".
+	Kind      string
+	Cursor    string
+	Truncated bool
+	Event     *WatchEvent
+	ErrorMsg  string
+}
+
+// WatchStream reads Server-Sent Events from GET /api/v1/conversations/{id}/watch.
+type WatchStream struct {
+	resp    *http.Response
+	scanner *bufio.Scanner
+}
+
+// Close closes the underlying HTTP response body.
+func (ws *WatchStream) Close() error {
+	if ws == nil || ws.resp == nil || ws.resp.Body == nil {
+		return nil
+	}
+	return ws.resp.Body.Close()
+}
+
+// Next reads the next SSE event frame from the stream. Returns io.EOF when
+// the server closes the stream cleanly.
+func (ws *WatchStream) Next() (*WatchStreamEvent, error) {
+	if ws == nil || ws.scanner == nil {
+		return nil, io.EOF
+	}
+	var (
+		eventType string
+		eventID   string
+		dataLines []string
+	)
+	for ws.scanner.Scan() {
+		line := ws.scanner.Text()
+		if line == "" {
+			if eventType == "" && len(dataLines) == 0 {
+				continue
+			}
+			return parseWatchSSEFrame(eventType, eventID, strings.Join(dataLines, "\n"))
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		field, val, _ := strings.Cut(line, ":")
+		val = strings.TrimPrefix(val, " ")
+		switch field {
+		case "event":
+			eventType = val
+		case "id":
+			eventID = val
+		case "data":
+			dataLines = append(dataLines, val)
+		}
+	}
+	if err := ws.scanner.Err(); err != nil {
+		return nil, err
+	}
+	if eventType != "" || len(dataLines) > 0 {
+		return parseWatchSSEFrame(eventType, eventID, strings.Join(dataLines, "\n"))
+	}
+	return nil, io.EOF
+}
+
+func parseWatchSSEFrame(eventType, eventID, data string) (*WatchStreamEvent, error) {
+	if eventType == "" {
+		eventType = "message"
+	}
+	frame := &WatchStreamEvent{
+		Kind:   eventType,
+		Cursor: eventID,
+	}
+	switch eventType {
+	case "active":
+		var payload struct {
+			Cursor    string `json:"cursor"`
+			Truncated bool   `json:"truncated"`
+		}
+		if data != "" {
+			if err := json.Unmarshal([]byte(data), &payload); err != nil {
+				return nil, fmt.Errorf("hubclient: decode watch SSE active frame: %w", err)
+			}
+			if payload.Cursor != "" {
+				frame.Cursor = payload.Cursor
+			}
+			frame.Truncated = payload.Truncated
+		}
+	case "heartbeat":
+		var payload struct {
+			Cursor string `json:"cursor"`
+		}
+		if data != "" {
+			if err := json.Unmarshal([]byte(data), &payload); err != nil {
+				return nil, fmt.Errorf("hubclient: decode watch SSE heartbeat frame: %w", err)
+			}
+			if payload.Cursor != "" {
+				frame.Cursor = payload.Cursor
+			}
+		}
+	case "message":
+		var ev WatchEvent
+		if err := json.Unmarshal([]byte(data), &ev); err != nil {
+			return nil, fmt.Errorf("hubclient: decode watch SSE message frame: %w", err)
+		}
+		if ev.Cursor != "" {
+			frame.Cursor = ev.Cursor
+		}
+		frame.Event = &ev
+	case "error":
+		var payload struct {
+			Message string `json:"message"`
+		}
+		if data != "" && json.Unmarshal([]byte(data), &payload) == nil && payload.Message != "" {
+			frame.ErrorMsg = payload.Message
+		} else {
+			frame.ErrorMsg = data
+		}
+	}
+	return frame, nil
+}
+
+// WatchStream opens an SSE stream against GET /api/v1/conversations/{id}/watch.
+func (s *conversationService) WatchStream(ctx context.Context, conversationID string, opts WatchOptions) (*WatchStream, error) {
+	query := url.Values{}
+	if opts.Cursor != "" {
+		query.Set("cursor", opts.Cursor)
+	}
+	if opts.AfterMessage != "" {
+		query.Set("after_message", opts.AfterMessage)
+	}
+	if opts.Start != "" {
+		query.Set("start", opts.Start)
+	}
+	if opts.Filter != "" {
+		query.Set("filter", opts.Filter)
+	}
+	if opts.Limit > 0 {
+		query.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.Wait > 0 {
+		query.Set("wait", opts.Wait.String())
+	}
+
+	headers := make(http.Header)
+	headers.Set("Accept", "text/event-stream")
+	if opts.Cursor != "" {
+		headers.Set("Last-Event-ID", opts.Cursor)
+	}
+
+	reqCtx := apiclient.WithRequestTimeout(ctx, watchStreamTimeout)
+	resp, err := s.c.getWithQuery(reqCtx, "/api/v1/conversations/"+url.PathEscape(conversationID)+"/watch", query, headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		err := apiclient.CheckResponse(resp)
+		var apiErr *apiclient.APIError
+		if errors.As(err, &apiErr) {
+			if apiErr.StatusCode == http.StatusGone {
+				return nil, fmt.Errorf("%w: %w", ErrCursorExpired, err)
+			}
+			if apiErr.StatusCode == http.StatusBadRequest && apiErr.Code == "invalid_cursor" {
+				return nil, fmt.Errorf("%w: %w", ErrInvalidCursor, err)
+			}
+		}
+		return nil, err
+	}
+
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	if !strings.HasPrefix(ct, "text/event-stream") {
+		_ = resp.Body.Close()
+		return nil, ErrWatchStreamUnsupported
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), watchStreamMaxFrameSize)
+	return &WatchStream{
+		resp:    resp,
+		scanner: scanner,
+	}, nil
 }

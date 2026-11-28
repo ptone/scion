@@ -699,3 +699,67 @@ func TestPoll_StartTail(t *testing.T) {
 		})
 	}
 }
+
+func TestFeed_Watch_StopChAndOnIdle(t *testing.T) {
+	t.Run("OnIdle fires only on empty timeout and propagates error", func(t *testing.T) {
+		st := newFakeStore()
+		waker := newFakeWaker()
+		feed := NewFeed(st, waker)
+		convID := "conv-watch-idle"
+		st.append(convID, store.Message{ID: "m1", Sender: "agent:a1", SenderID: "a1", Msg: "first"})
+
+		var emitted []string
+		var idleCursors []Cursor
+		stopErr := errors.New("stop-after-idle")
+
+		err := feed.Watch(context.Background(), Principal{Kind: "user", ID: "u1"}, allowAuthz, PollRequest{
+			ConversationID: convID,
+			Start:          StartBeginning,
+			Filter:         FilterOthers,
+			Wait:           40 * time.Millisecond,
+			OnIdle: func(nextCursor Cursor, _ bool) error {
+				idleCursors = append(idleCursors, nextCursor)
+				return stopErr
+			},
+		}, func(ev Event) error {
+			emitted = append(emitted, ev.EventID)
+			return nil
+		})
+
+		require.ErrorIs(t, err, stopErr)
+		assert.Equal(t, []string{"msg:m1"}, emitted)
+		// First iteration delivered m1 (no OnIdle); second iteration timed out empty (1 OnIdle).
+		assert.Equal(t, []Cursor{EncodeCursor(convID, 1)}, idleCursors)
+	})
+
+	t.Run("closed StopCh ends Watch with nil without calling OnIdle", func(t *testing.T) {
+		st := newFakeStore()
+		waker := newFakeWaker()
+		feed := NewFeed(st, waker)
+		convID := "conv-watch-stop"
+
+		stopCh := make(chan struct{})
+		go func() {
+			time.Sleep(30 * time.Millisecond)
+			close(stopCh)
+		}()
+
+		idleCalled := false
+		err := feed.Watch(context.Background(), Principal{Kind: "user", ID: "u1"}, allowAuthz, PollRequest{
+			ConversationID: convID,
+			Start:          StartHead,
+			Filter:         FilterOthers,
+			Wait:           5 * time.Second,
+			StopCh:         stopCh,
+			OnIdle: func(Cursor, bool) error {
+				idleCalled = true
+				return nil
+			},
+		}, func(Event) error {
+			return nil
+		})
+
+		require.NoError(t, err)
+		assert.False(t, idleCalled)
+	})
+}

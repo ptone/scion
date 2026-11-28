@@ -41,16 +41,18 @@ const (
 
 // Options configures a Scion MCP server.
 type Options struct {
-	Host            string
-	Port            int
-	Path            string
-	PublicURL       string
-	AllowedOrigins  []string
-	Version         string
-	Backend         HubBackend
-	Logger          *slog.Logger
-	PrincipalTTL    time.Duration
-	ShutdownTimeout time.Duration
+	Host                   string
+	Port                   int
+	Path                   string
+	PublicURL              string
+	AllowedOrigins         []string
+	Version                string
+	Backend                HubBackend
+	Logger                 *slog.Logger
+	PrincipalTTL           time.Duration
+	ShutdownTimeout        time.Duration
+	MaxStreamsPerPrincipal int
+	StreamWait             time.Duration
 	// ExtraTools is an optional extension hook allowing callers (e.g. custom
 	// wrappers) to register additional tools on the underlying *mcp.Server.
 	ExtraTools func(*mcp.Server)
@@ -64,10 +66,14 @@ type Server struct {
 	logger         *slog.Logger
 	allowedOrigins map[string]struct{}
 	principalCache *principalCache
+	streamLimiter  *streamLimiter
+	streamWait     time.Duration
 	mcpServer      *mcp.Server
 	handler        http.Handler
 
 	shuttingDown atomic.Bool
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
 
 	mu       sync.Mutex
 	httpSrv  *http.Server
@@ -98,6 +104,13 @@ func New(opts Options) (*Server, error) {
 	if opts.ShutdownTimeout <= 0 {
 		opts.ShutdownTimeout = 10 * time.Second
 	}
+	streamWait := opts.StreamWait
+	if streamWait <= 0 {
+		streamWait = DefaultStreamWait
+	}
+	if streamWait > MaxStreamWait {
+		streamWait = MaxStreamWait
+	}
 
 	origins := make(map[string]struct{}, len(opts.AllowedOrigins))
 	for _, o := range opts.AllowedOrigins {
@@ -112,15 +125,25 @@ func New(opts Options) (*Server, error) {
 		logger:         opts.Logger,
 		allowedOrigins: origins,
 		principalCache: newPrincipalCache(opts.PrincipalTTL),
+		streamLimiter:  newStreamLimiter(opts.MaxStreamsPerPrincipal),
+		streamWait:     streamWait,
+		shutdownCh:     make(chan struct{}),
 	}
+
+	caps := &mcp.ServerCapabilities{}
+	caps.AddExtension(EventsExtensionID, map[string]any{})
 
 	mcpSrv := mcp.NewServer(&mcp.Implementation{
 		Name:    "scion-mcp",
 		Version: opts.Version,
 	}, &mcp.ServerOptions{
-		Logger: opts.Logger,
+		Logger:       opts.Logger,
+		Capabilities: caps,
 	})
 	s.registerTools(mcpSrv)
+	if err := s.registerEvents(mcpSrv); err != nil {
+		return nil, err
+	}
 	if opts.ExtraTools != nil {
 		opts.ExtraTools(mcpSrv)
 	}
@@ -139,7 +162,7 @@ func New(opts Options) (*Server, error) {
 	)
 
 	mux := http.NewServeMux()
-	mux.Handle(opts.Path, s.frontDoor(streamable))
+	mux.Handle(opts.Path, s.frontDoor(s.dispatchMCP(streamable)))
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/readyz", s.handleReadyz)
 	s.handler = mux
@@ -153,10 +176,14 @@ func (s *Server) Handler() http.Handler {
 }
 
 // BeginShutdown marks the MCP server as shutting down so /readyz and new /mcp
-// requests immediately answer 503 Service Unavailable. Safe to call multiple
-// times and suitable for shutdownSeq.addStep(shutdownPhaseMark, ...).
+// requests immediately answer 503 Service Unavailable and active events/stream
+// loops drain cleanly. Safe to call multiple times and suitable for
+// shutdownSeq.addStep(shutdownPhaseMark, ...).
 func (s *Server) BeginShutdown() {
 	s.shuttingDown.Store(true)
+	s.shutdownOnce.Do(func() {
+		close(s.shutdownCh)
+	})
 }
 
 // Start binds Host:Port and serves until ctx is cancelled or the listener fails.

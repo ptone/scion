@@ -745,9 +745,11 @@ const TokenomicsTrajectoryCapture = "tokenomics.trajectory_capture"
 const AccessConstraints = "hub.access_constraints"
 
 // MCPServer gates serving the MCP endpoint (messaging tools and MCP Events
-// push) on the listener configured by server.mcp (ptone/scion#8137). While
-// off, /mcp answers 404 and visitors are not admitted to conversation
-// messages and watch. The listener binds only when server.mcp.enabled is set.
+// push) on the listener configured by server.mcp (ptone/scion#8137) and
+// enables Accept: text/event-stream SSE mode on GET /api/v1/conversations/{id}/watch.
+// While off, /mcp answers 404, /watch falls back to JSON long-poll, and
+// visitors are not admitted to conversation messages and watch. The listener
+// binds only when server.mcp.enabled is set.
 const MCPServer = "hub.mcp_server"
 
 // compiled is the production experiment list. It is reachable only through
@@ -757,7 +759,7 @@ var compiled = []Experiment{
 	{
 		Name:        MCPServer,
 		Title:       "MCP server",
-		Description: "Serves the MCP endpoint (messaging tools and MCP Events push) on the listener configured by `server.mcp`. While off, `/mcp` answers 404 and visitors are not admitted to conversation messages and watch. The listener binds only when `server.mcp.enabled` is set.",
+		Description: "Serves the MCP endpoint (messaging tools and MCP Events push) on the listener configured by `server.mcp`, and enables `Accept: text/event-stream` SSE mode on `GET /api/v1/conversations/{id}/watch`. While off, `/mcp` answers 404, `/watch` falls back to JSON long-poll, and visitors are not admitted to conversation messages and watch. The listener binds only when `server.mcp.enabled` is set.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

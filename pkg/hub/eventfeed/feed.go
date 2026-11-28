@@ -209,6 +209,11 @@ func (f *Feed) Watch(ctx context.Context, p Principal, authz Authorizer, req Pol
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		select {
+		case <-cur.StopCh:
+			return nil
+		default:
+		}
 		res, err := f.Poll(ctx, p, authz, cur)
 		if err != nil {
 			return err
@@ -225,6 +230,16 @@ func (f *Feed) Watch(ctx context.Context, p Principal, authz Authorizer, req Pol
 			cur.Cursor = res.NextCursor
 			cur.AfterMessageID = ""
 			cur.Start = ""
+		}
+		select {
+		case <-cur.StopCh:
+			return nil
+		default:
+		}
+		if len(res.Events) == 0 && res.TimedOut && cur.OnIdle != nil {
+			if err := cur.OnIdle(res.NextCursor, res.Truncated); err != nil {
+				return err
+			}
 		}
 	}
 }
