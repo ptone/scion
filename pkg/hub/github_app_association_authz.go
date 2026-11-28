@@ -102,7 +102,19 @@ var (
 	// errGitHubAssociationCheckFailed is an inconclusive check; it refuses
 	// too (fail closed).
 	errGitHubAssociationCheckFailed = errors.New("github app installation association check failed")
+	// errGitHubCreatorTokenMissing tags an unauthorized error caused solely by
+	// the absence of a creator GitHub token (or creator identity / secret
+	// backend). Minting still treats it as errGitHubAssociationUnauthorized;
+	// the project GitHub read model maps it to association_unverified.
+	errGitHubCreatorTokenMissing = errors.New("creator github token missing")
 )
+
+type githubCreatorTokenMissingErr struct {
+	err error
+}
+
+func (e githubCreatorTokenMissingErr) Error() string   { return e.err.Error() }
+func (e githubCreatorTokenMissingErr) Unwrap() []error { return []error{e.err, errGitHubCreatorTokenMissing} }
 
 // githubAssociationGrant is the result of an authorized association check.
 type githubAssociationGrant struct {
@@ -181,6 +193,12 @@ func (s *Server) authorizeGitHubAppAssociation(ctx context.Context, project *sto
 	}
 	if inst.AccountLogin == "" || !strings.EqualFold(inst.AccountLogin, owner) {
 		return githubAssociationGrant{}, fmt.Errorf("%w: installation %d belongs to account %q, not the remote owner %q", errGitHubAssociationUnauthorized, installationID, inst.AccountLogin, owner)
+	}
+
+	if s.githubAssociationExtraCheck != nil {
+		if err := s.githubAssociationExtraCheck(ctx, project, installationID); err != nil {
+			return githubAssociationGrant{}, err
+		}
 	}
 
 	// 3a. Admin binding.
@@ -293,14 +311,18 @@ func (s *Server) lookupCreatorGitHubToken(ctx context.Context, project *store.Pr
 // lookup error or an inconclusive GitHub answer is a failed check.
 func (s *Server) githubCreatorRepoAccess(ctx context.Context, project *store.Project, installationID int64, owner, repo string) (githubapp.RepoAccess, error) {
 	if project.CreatedBy == "" || s.secretBackend == nil {
-		return githubapp.RepoAccess{}, fmt.Errorf("%w: no admin binding and no creator GitHub identity to verify", errGitHubAssociationUnauthorized)
+		return githubapp.RepoAccess{}, githubCreatorTokenMissingErr{
+			err: fmt.Errorf("%w: no admin binding and no creator GitHub identity to verify", errGitHubAssociationUnauthorized),
+		}
 	}
 	creatorToken, hasToken, err := s.lookupCreatorGitHubToken(ctx, project)
 	if err != nil {
 		return githubapp.RepoAccess{}, fmt.Errorf("%w: creator GitHub token lookup: %w", errGitHubAssociationCheckFailed, err)
 	}
 	if !hasToken {
-		return githubapp.RepoAccess{}, fmt.Errorf("%w: no admin binding and the project creator has no GitHub token to verify repository access", errGitHubAssociationUnauthorized)
+		return githubapp.RepoAccess{}, githubCreatorTokenMissingErr{
+			err: fmt.Errorf("%w: no admin binding and the project creator has no GitHub token to verify repository access", errGitHubAssociationUnauthorized),
+		}
 	}
 
 	apiBase := s.githubAppAPIBase()
@@ -1052,8 +1074,11 @@ func (s *Server) evaluateGitHubAssociationCached(
 		}
 	}
 
-	if !allowCreatorCheck &&
-		project.GitHubAppStatus != nil &&
+	if allowCreatorCheck {
+		return s.evaluateGitHubAssociationReadModel(ctx, project, instID, eval)
+	}
+
+	if project.GitHubAppStatus != nil &&
 		project.GitHubAppStatus.State == store.GitHubAppStateError &&
 		project.GitHubAppStatus.ErrorCode == githubAppErrAssociationUnauthorized {
 		eval.Verified = true
@@ -1135,71 +1160,6 @@ func (s *Server) evaluateGitHubAssociationCached(
 		return eval, nil
 	}
 
-	if allowCreatorCheck {
-		key := githubAccessCacheKey(project.ID, instID, s.githubAppAPIBase(), owner, repo, project.CreatedBy, creatorToken)
-		if s.githubReadModelInconclusive.recent(key) {
-			eval.Verified = false
-			eval.ErrorCode = githubAppErrAssociationUnverified
-			eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
-			return eval, nil
-		}
-		ch := s.githubReadModelSF.DoChan(key, func() (any, error) {
-			if s.githubReadModelInconclusive.recent(key) {
-				return githubapp.RepoAccess{}, errGitHubAssociationCheckFailed
-			}
-			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), githubReadModelCreatorCheckTimeout)
-			defer cancel()
-			access, err := s.githubCreatorRepoAccess(cctx, project, instID, owner, repo)
-			if errors.Is(err, errGitHubAssociationCheckFailed) {
-				s.githubReadModelInconclusive.put(key, project.ID)
-			}
-			return access, err
-		})
-		var (
-			v         any
-			accessErr error
-		)
-		select {
-		case res := <-ch:
-			v, accessErr = res.Val, res.Err
-		case <-ctx.Done():
-			eval.Verified = false
-			eval.ErrorCode = githubAppErrAssociationUnverified
-			eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
-			return eval, nil
-		}
-		if accessErr != nil {
-			if errors.Is(accessErr, errGitHubAssociationCheckFailed) {
-				eval.Verified = false
-				eval.ErrorCode = githubAppErrAssociationUnverified
-				eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
-				return eval, nil
-			}
-			eval.Verified = true
-			eval.ErrorCode = githubAppErrAssociationUnauthorized
-			eval.Reason = fmt.Sprintf("the project creator's GitHub identity has no access to %s/%s", owner, repo)
-			return eval, nil
-		}
-		access, _ := v.(githubapp.RepoAccess)
-		switch {
-		case access.Push:
-			eval.Authorized = true
-			eval.Verified = true
-			eval.Basis = githubAssociationBasisCreatorPush
-			eval.WriteAllowed = true
-		case access.Pull:
-			eval.Authorized = true
-			eval.Verified = true
-			eval.Basis = githubAssociationBasisCreatorPull
-			eval.WriteAllowed = false
-		default:
-			eval.Verified = true
-			eval.ErrorCode = githubAppErrAssociationUnauthorized
-			eval.Reason = fmt.Sprintf("the project creator's GitHub identity has no access to %s/%s", owner, repo)
-		}
-		return eval, nil
-	}
-
 	key := githubAccessCacheKey(project.ID, instID, s.githubAppAPIBase(), owner, repo, project.CreatedBy, creatorToken)
 	if access, denied, cached := s.githubAccessCache.get(key); cached {
 		if denied || (!access.Push && !access.Pull) {
@@ -1225,6 +1185,83 @@ func (s *Server) evaluateGitHubAssociationCached(
 	eval.Verified = false
 	eval.CreatorAccessUncached = true
 	eval.ErrorCode = githubAppErrAssociationUnverified
+	return eval, nil
+}
+
+// evaluateGitHubAssociationReadModel evaluates a project's GitHub App
+// association for GET /api/v1/projects/{id}/github by running
+// authorizeGitHubAppAssociation itself inside the read-model singleflight,
+// detached-context, and inconclusive negative-cache wrapper. Running the
+// authoritative check avoids duplicating association steps while keeping
+// read-model requests bounded and non-blocking on caller cancellation.
+func (s *Server) evaluateGitHubAssociationReadModel(
+	ctx context.Context,
+	project *store.Project,
+	instID int64,
+	eval githubAssociationCachedEval,
+) (githubAssociationCachedEval, error) {
+	// Pre-check creator token so the singleflight / negative-cache key tracks
+	// token changes (rotating a token bypasses any stale negative-cache entry).
+	creatorToken, _, _ := s.lookupCreatorGitHubToken(ctx, project)
+	owner, repo, _ := githubapp.RemoteOwnerRepo(project.GitRemote, s.githubAppWebHost())
+	if owner == "" && repo == "" {
+		owner = project.GitRemote
+	}
+	key := githubAccessCacheKey(project.ID, instID, s.githubAppAPIBase(), owner, repo, project.CreatedBy, creatorToken)
+	if s.githubReadModelInconclusive.recent(key) {
+		eval.Verified = false
+		eval.ErrorCode = githubAppErrAssociationUnverified
+		eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
+		return eval, nil
+	}
+	ch := s.githubReadModelSF.DoChan(key, func() (any, error) {
+		if s.githubReadModelInconclusive.recent(key) {
+			return githubAssociationGrant{}, errGitHubAssociationCheckFailed
+		}
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), githubReadModelCreatorCheckTimeout)
+		defer cancel()
+		grant, err := s.authorizeGitHubAppAssociation(cctx, project, instID)
+		if errors.Is(err, errGitHubAssociationCheckFailed) {
+			s.githubReadModelInconclusive.put(key, project.ID)
+		}
+		return grant, err
+	})
+	var (
+		v        any
+		authzErr error
+	)
+	select {
+	case res := <-ch:
+		v, authzErr = res.Val, res.Err
+	case <-ctx.Done():
+		eval.Verified = false
+		eval.ErrorCode = githubAppErrAssociationUnverified
+		eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
+		return eval, nil
+	}
+	if authzErr != nil {
+		if errors.Is(authzErr, errGitHubAssociationCheckFailed) {
+			eval.Verified = false
+			eval.ErrorCode = githubAppErrAssociationUnverified
+			eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
+			return eval, nil
+		}
+		if errors.Is(authzErr, errGitHubCreatorTokenMissing) {
+			eval.Verified = false
+			eval.ErrorCode = githubAppErrAssociationUnverified
+			eval.Reason = "No admin binding and the project creator has no stored GitHub token to verify repository access."
+			return eval, nil
+		}
+		eval.Verified = true
+		eval.ErrorCode = githubAppErrAssociationUnauthorized
+		eval.Reason = strings.TrimPrefix(authzErr.Error(), errGitHubAssociationUnauthorized.Error()+": ")
+		return eval, nil
+	}
+	grant, _ := v.(githubAssociationGrant)
+	eval.Authorized = true
+	eval.Verified = true
+	eval.Basis = grant.Basis
+	eval.WriteAllowed = grant.WriteAllowed
 	return eval, nil
 }
 

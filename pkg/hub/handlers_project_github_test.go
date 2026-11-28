@@ -1309,3 +1309,69 @@ func TestProjectGitHub_CreatorCheckCancelledRequestReturnsEarly(t *testing.T) {
 	assert.Equal(t, githubAppErrAssociationUnverified, resp.Association.ErrorCode)
 	assert.Equal(t, int32(1), calls.Load(), "detached inconclusive check must populate negative cache")
 }
+
+func TestProjectGitHub_RefusalStepInAuthorizeReflectedByReadModel(t *testing.T) {
+	fakeAPI := newProjectGitHubFakeAPI(t, "step-app", map[string]string{
+		"contents":      "write",
+		"pull_requests": "write",
+		"issues":        "write",
+		"metadata":      "read",
+	})
+	srv, st, admin := setupProjectGitHubTestHub(t, fakeAPI)
+	ctx := context.Background()
+
+	require.NoError(t, st.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: 8303,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          1,
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+	proj := &store.Project{
+		ID:        tid("pg-step-proj"),
+		Name:      "pg-step-proj",
+		Slug:      tid("pg-step-proj"),
+		GitRemote: fakeAPI.srv.URL + "/acme/step-repo",
+		CreatedBy: admin.ID, // no creator token stored
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, st.CreateProject(ctx, proj))
+	bindRec := doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/projects/"+proj.ID+"/github-installation", map[string]int64{"installation_id": 8303})
+	require.Equal(t, http.StatusOK, bindRec.Code, bindRec.Body.String())
+
+	origExtra := srv.githubAssociationExtraCheck
+	t.Cleanup(func() { srv.githubAssociationExtraCheck = origExtra })
+
+	// 1. Definitive refusal added only inside authorizeGitHubAppAssociation must
+	// be reflected by GET /projects/{id}/github as unauthorized (not unverified
+	// even when the creator has no token, and even with a valid admin binding).
+	srv.githubAssociationExtraCheck = func(_ context.Context, _ *store.Project, _ int64) error {
+		return fmt.Errorf("%w: org policy blocks installation", errGitHubAssociationUnauthorized)
+	}
+	recRefused := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+	require.Equal(t, http.StatusOK, recRefused.Code, recRefused.Body.String())
+	var refusedResp ProjectGitHubResponse
+	require.NoError(t, json.Unmarshal(recRefused.Body.Bytes(), &refusedResp))
+	assert.False(t, refusedResp.Association.Authorized)
+	assert.True(t, refusedResp.Association.Verified)
+	assert.Equal(t, githubAppErrAssociationUnauthorized, refusedResp.Association.ErrorCode)
+	assert.Equal(t, "org policy blocks installation", refusedResp.Association.Reason)
+	assert.Empty(t, refusedResp.Permissions.Effective)
+
+	// 2. Inconclusive error added inside authorizeGitHubAppAssociation must map
+	// to unverified with fixed safe text (no internal error leakage).
+	srv.invalidateGitHubAssociation(proj.ID)
+	srv.githubAssociationExtraCheck = func(_ context.Context, _ *store.Project, _ int64) error {
+		return fmt.Errorf("%w: sensitive backend timeout detail", errGitHubAssociationCheckFailed)
+	}
+	recInconclusive := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+	require.Equal(t, http.StatusOK, recInconclusive.Code, recInconclusive.Body.String())
+	var incResp ProjectGitHubResponse
+	require.NoError(t, json.Unmarshal(recInconclusive.Body.Bytes(), &incResp))
+	assert.False(t, incResp.Association.Authorized)
+	assert.False(t, incResp.Association.Verified)
+	assert.Equal(t, githubAppErrAssociationUnverified, incResp.Association.ErrorCode)
+	assert.NotContains(t, incResp.Association.Reason, "sensitive backend timeout detail")
+	assert.Equal(t, githubAppStatusMessage(githubAppErrAssociationCheckFailed), incResp.Association.Reason)
+}

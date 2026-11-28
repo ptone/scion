@@ -3137,6 +3137,10 @@ type Server struct {
 	// githubRepoAccessCheck performs that check; nil selects
 	// githubapp.CheckUserRepoAccess. Tests replace it at the GitHub boundary.
 	githubRepoAccessCheck func(ctx context.Context, apiBaseURL, userToken, owner, repo string) (githubapp.RepoAccess, error)
+	// githubAssociationExtraCheck is an optional test-only step invoked inside
+	// authorizeGitHubAppAssociation to verify that refusal steps added there
+	// propagate to the project GitHub read model.
+	githubAssociationExtraCheck func(ctx context.Context, project *store.Project, installationID int64) error
 	// githubTokenCache caches hub-internal Stage 3 installation tokens minted
 	// via MintGitHubAppTokenWithPermissions in memory keyed by
 	// (project_id, permission_set) until expires_at - 5m
