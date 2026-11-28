@@ -2178,7 +2178,7 @@ func TestDecisions_Comment_ConfirmWithAndWithoutComment(t *testing.T) {
 
 	// 3. Confirm WITH comment when user may not message agent -> 403 message_denied before recording.
 	rowDenied := makeInterpreted("confirm-denied-cmt")
-	f.agent.MessageMode = store.MessageModeDisabled
+	f.agent.MessageMode = store.MessageModeNone
 	require.NoError(t, f.store.UpdateAgent(ctx, f.agent))
 	rrDenied := f.answer(t, f.bob, rowDenied, map[string]interface{}{
 		"choice_id": "staging",
