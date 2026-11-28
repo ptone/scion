@@ -1886,8 +1886,9 @@ func TestDecisions_Comment_NoCommentGoldenEquality(t *testing.T) {
 			// Stored chat message body is byte-identical to main.
 			storedMsg, err := f.store.GetMessage(ctx, ans.ResponseMessageID)
 			require.NoError(t, err)
+			who := userDisplay(authUser(f.bob))
 			assert.Equal(t,
-				`Bob chose "Staging" for deploy-target "Where should the release candidate go first?"`,
+				fmt.Sprintf(`%s chose "Staging" for deploy-target "Where should the release candidate go first?"`, who),
 				storedMsg.Msg)
 
 			// Stored DecisionAnswer has empty Comment.
@@ -1908,15 +1909,16 @@ func TestDecisions_Comment_NoCommentGoldenEquality(t *testing.T) {
 			// Delivered agent text and metadata are byte-identical to main.
 			dispatched := f.dispatcher.getMessages()[before:]
 			require.Len(t, dispatched, 1)
+			require.NotNil(t, dispatched[0].structured)
 			assert.Equal(t,
-				`[decision-response] deploy-target v1 ("Where should the release candidate go first?") answer=Staging (choice staging) by bob@example.com`,
-				dispatched[0].Msg)
+				fmt.Sprintf(`[decision-response] deploy-target v1 ("Where should the release candidate go first?") answer=Staging (choice staging) by %s`, f.bob.Email),
+				dispatched[0].structured.Msg)
 			assert.Equal(t, map[string]string{
 				messages.MetadataDecisionKey:        "deploy-target",
 				messages.MetadataDecisionVersion:    "1",
 				messages.MetadataChoiceID:           "staging",
 				messages.MetadataDecisionProvenance: store.DecisionProvenanceDirect,
-			}, dispatched[0].Structured.Metadata)
+			}, dispatched[0].structured.Metadata)
 		})
 	}
 }
@@ -2014,18 +2016,20 @@ func TestDecisions_Comment_SingleDeliveredOtherAndReplay(t *testing.T) {
 	// Stored chat copy escapes Markdown and neutralizes @mentions.
 	storedMsg, err := f.store.GetMessage(ctx, ans.ResponseMessageID)
 	require.NoError(t, err)
+	who := userDisplay(authUser(f.bob))
 	assert.Equal(t,
-		`Bob chose "Staging" for deploy-target "Where should the release candidate go first?" — comment: "`+messages.EscapeMarkdownPlain(trimmedComment)+`"`,
+		fmt.Sprintf(`%s chose "Staging" for deploy-target "Where should the release candidate go first?" — comment: "%s"`, who, messages.EscapeMarkdownPlain(trimmedComment)),
 		storedMsg.Msg)
 
 	// Delivered only to the asking agent, with trailing comment= line and decision_comment metadata.
 	dispatched := f.dispatcher.getMessages()[before:]
 	require.Len(t, dispatched, 1)
-	assert.Equal(t, f.agent.ID, dispatched[0].AgentID)
+	assert.Equal(t, f.agent.Slug, dispatched[0].agentSlug)
+	require.NotNil(t, dispatched[0].structured)
 	assert.Equal(t,
-		`[decision-response] deploy-target v1 ("Where should the release candidate go first?") answer=Staging (choice staging) by bob@example.com`+"\ncomment="+strconv.Quote(trimmedComment),
-		dispatched[0].Msg)
-	assert.Equal(t, trimmedComment, dispatched[0].Structured.Metadata[messages.MetadataDecisionComment])
+		fmt.Sprintf(`[decision-response] deploy-target v1 ("Where should the release candidate go first?") answer=Staging (choice staging) by %s`, f.bob.Email)+"\ncomment="+strconv.Quote(trimmedComment),
+		dispatched[0].structured.Msg)
+	assert.Equal(t, trimmedComment, dispatched[0].structured.Metadata[messages.MetadataDecisionComment])
 
 	// Replay with same key + same comment -> 200 replayed.
 	rrReplay := f.answer(t, f.bob, row1, map[string]interface{}{
@@ -2071,16 +2075,17 @@ func TestDecisions_Comment_SingleDeliveredOtherAndReplay(t *testing.T) {
 	storedOther, err := f.store.GetMessage(ctx, otherAns.ResponseMessageID)
 	require.NoError(t, err)
 	assert.Equal(t,
-		`Bob answered "europe-west4" (Other) for region "Which region?" — comment: "lowest latency for EU users"`,
+		fmt.Sprintf(`%s answered "europe-west4" (Other) for region "Which region?" — comment: "lowest latency for EU users"`, who),
 		storedOther.Msg)
 
 	dispatched = f.dispatcher.getMessages()[before:]
 	require.Len(t, dispatched, 1)
+	require.NotNil(t, dispatched[0].structured)
 	assert.Equal(t,
-		`[decision-response] region v1 ("Which region?") answer=Other (choice $other) text="europe-west4" by bob@example.com`+"\n"+`comment="lowest latency for EU users"`,
-		dispatched[0].Msg)
-	assert.Equal(t, "europe-west4", dispatched[0].Structured.Metadata[messages.MetadataDecisionOtherText])
-	assert.Equal(t, "lowest latency for EU users", dispatched[0].Structured.Metadata[messages.MetadataDecisionComment])
+		fmt.Sprintf(`[decision-response] region v1 ("Which region?") answer=Other (choice $other) text="europe-west4" by %s`, f.bob.Email)+"\n"+`comment="lowest latency for EU users"`,
+		dispatched[0].structured.Msg)
+	assert.Equal(t, "europe-west4", dispatched[0].structured.Metadata[messages.MetadataDecisionOtherText])
+	assert.Equal(t, "lowest latency for EU users", dispatched[0].structured.Metadata[messages.MetadataDecisionComment])
 }
 
 func TestDecisions_Comment_ConfirmWithAndWithoutComment(t *testing.T) {
@@ -2090,7 +2095,7 @@ func TestDecisions_Comment_ConfirmWithAndWithoutComment(t *testing.T) {
 	// Helper to create a prompt with an interpreted answer recorded for f.bob.
 	makeInterpreted := func(key string) string {
 		t.Helper()
-		_, p := f.topicPrompt(t, fmt.Sprintf(`[{
+		promptMsg, p := f.topicPrompt(t, fmt.Sprintf(`[{
 			"id": %q,
 			"question": "Where should the release candidate go first?",
 			"choices": [{"id":"staging","label":"Staging"},{"id":"canary","label":"Canary"}]
@@ -2099,23 +2104,23 @@ func TestDecisions_Comment_ConfirmWithAndWithoutComment(t *testing.T) {
 		srcMsg := &store.Message{
 			ID:             api.NewUUID(),
 			ProjectID:      f.project.ID,
-			ConversationID: f.convID,
-			Sender:         "user:bob@example.com",
-			SenderID:       f.bob.ID(),
+			ConversationID: promptMsg.ConversationID,
+			Sender:         "user:" + f.bob.Email,
+			SenderID:       f.bob.ID,
 			Recipient:      "agent:" + f.agent.Slug,
 			RecipientID:    f.agent.ID,
 			Msg:            "go with staging",
-			Type:           messages.TypeMessage,
-			ThreadID:       f.chatKey,
+			Type:           messages.TypeInstruction,
+			ThreadID:       f.topicID,
 			DispatchState:  store.MessageDispatchDispatched,
 		}
 		require.NoError(t, f.store.CreateMessage(ctx, srcMsg))
 		_, _, err := f.store.RecordAnswer(ctx, &store.RecordAnswerInput{
 			DecisionRowID:        rowID,
 			ChoiceID:             "staging",
-			AnsweredByUserID:     f.bob.ID(),
-			AnsweredByName:       f.bob.DisplayName(),
-			AnsweredByEmail:      f.bob.Email(),
+			AnsweredByUserID:     f.bob.ID,
+			AnsweredByName:       f.bob.DisplayName,
+			AnsweredByEmail:      f.bob.Email,
 			Provenance:           store.DecisionProvenanceAgentInterpreted,
 			Outcome:              store.DecisionOutcomeAnswer,
 			InterpretedByAgentID: f.agent.ID,
@@ -2124,14 +2129,14 @@ func TestDecisions_Comment_ConfirmWithAndWithoutComment(t *testing.T) {
 			ResponseMessage: &store.Message{
 				ID:             api.NewUUID(),
 				ProjectID:      f.project.ID,
-				ConversationID: f.convID,
+				ConversationID: promptMsg.ConversationID,
 				Sender:         "agent:" + f.agent.Slug,
 				SenderID:       f.agent.ID,
-				Recipient:      "user:bob@example.com",
-				RecipientID:    f.bob.ID(),
+				Recipient:      "user:" + f.bob.Email,
+				RecipientID:    f.bob.ID,
 				Msg:            "recorded staging",
 				Type:           messages.TypeDecisionResponse,
-				ThreadID:       f.chatKey,
+				ThreadID:       f.topicID,
 				DispatchState:  store.MessageDispatchDispatched,
 			},
 		})
@@ -2165,10 +2170,11 @@ func TestDecisions_Comment_ConfirmWithAndWithoutComment(t *testing.T) {
 
 	dispatched := f.dispatcher.getMessages()[before:]
 	require.Len(t, dispatched, 1, "confirm with comment must deliver")
+	require.NotNil(t, dispatched[0].structured)
 	assert.Equal(t,
-		`[decision-response] confirm-with-cmt v1 ("Where should the release candidate go first?") answer=Staging (choice staging, confirmed) by bob@example.com`+"\n"+`comment="Yes, and page me when staging is green."`,
-		dispatched[0].Msg)
-	assert.Equal(t, "Yes, and page me when staging is green.", dispatched[0].Structured.Metadata[messages.MetadataDecisionComment])
+		fmt.Sprintf(`[decision-response] confirm-with-cmt v1 ("Where should the release candidate go first?") answer=Staging (choice staging, confirmed) by %s`, f.bob.Email)+"\n"+`comment="Yes, and page me when staging is green."`,
+		dispatched[0].structured.Msg)
+	assert.Equal(t, "Yes, and page me when staging is green.", dispatched[0].structured.Metadata[messages.MetadataDecisionComment])
 
 	// 3. Confirm WITH comment when user may not message agent -> 403 message_denied before recording.
 	rowDenied := makeInterpreted("confirm-denied-cmt")
