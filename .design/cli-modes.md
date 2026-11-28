@@ -232,6 +232,8 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `tunnel` | Y | - |
 | `tunnel status` | Y | - |
 | `usage` | Y | Y (defaults to the agent's own project; `--user` and `--all` are human-mode only; Hub enforces project/agent scope) |
+| `usage budgets` | Y | Y (defaults to the agent's own project; `--user` and `--group` are human-mode only; Hub enforces project scope, ptone/scion#9240) |
+| `usage budgets override` | Y | - (project/hub admin operation; Hub rejects agent identities, ptone/scion#9240) |
 | `version` | Y | Y |
 | `vscode` | Y | - |
 | `help` | Y | Y |
