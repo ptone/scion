@@ -1999,6 +1999,87 @@ func TestDispatcher_UngrantedStoredDialectAtEval_SkipsFailClosed(t *testing.T) {
 	assert.Equal(t, "temp_dialect", firesRes.Items[0].DecidedDialect)
 }
 
+func TestDispatcher_UngrantedSystemOneAtEval_SkipsFailClosedZeroProviderCalls(t *testing.T) {
+	ctx := context.Background()
+	ms := newMemTriggerStore()
+	core := &fakeCore{}
+	core.enabled.Store(true)
+
+	s1Dialect := &testDispatchDialect{name: "system_one"}
+	re, rules := newTestTriggerEngineWithDialects(t, s1Dialect)
+
+	// Consumer "trigger" holds only Grant("cel"); system_one is NOT granted (J16c / ptone/scion#9916).
+	require.NoError(t, re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)))
+
+	projID := uuid.NewString()
+	epID := uuid.NewString()
+	trID := uuid.NewString()
+	evID := uuid.NewString()
+	t0 := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+
+	require.NoError(t, ms.CreateTrigger(ctx, &store.Trigger{
+		ID:         trID,
+		ProjectID:  projID,
+		Name:       "ungranted-s1-tr",
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epID,
+		MatchTypes: []string{"webhook.received"},
+		MatchRules: []store.TriggerMatchRule{
+			{Dialect: "cel", Expr: "true"},
+			{Dialect: "system_one", Expr: "Does this PR touch authentication?"},
+		},
+		ActionType: store.TriggerActionMessage,
+		Status:     store.TriggerStatusActive,
+	}))
+	require.NoError(t, ms.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epID,
+		Type:       "webhook.received",
+		Subject:    "webhook:" + epID,
+		DedupKey:   "d-ungranted-s1",
+		OccurredAt: t0,
+		ReceivedAt: t0,
+		Payload:    `{}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	var fired bool
+	core.fireFn = func(_ context.Context, _ hubfire.FireRequest) hubfire.FireOutcome {
+		fired = true
+		return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+	}
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: ms,
+		Rules: rules,
+		Now:   func() time.Time { return t0 },
+	})
+	require.NoError(t, err)
+
+	raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+	res := disp.HandleItem(ctx, durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: evID,
+		Payload:  raw,
+	}, nopLease{})
+	require.NoError(t, res.Err)
+	assert.True(t, res.Done)
+	assert.False(t, fired, "un-granted system_one at evaluation must never fire")
+	assert.Empty(t, s1Dialect.evalCalls, "0 provider/dialect calls when system_one is not granted")
+
+	firesRes, err := ms.ListTriggerFires(ctx, store.TriggerFireFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, firesRes.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusSkipped, firesRes.Items[0].Status)
+	assert.Equal(t, triggerrule.SkipReasonEvalFailed, firesRes.Items[0].Error)
+	assert.Equal(t, "2/2", firesRes.Items[0].MatchedThrough)
+	assert.Equal(t, "system_one", firesRes.Items[0].DecidedDialect)
+	assert.Contains(t, firesRes.Items[0].RuleTrace, `"reason":"dialect_not_allowed"`)
+}
+
 func TestDispatcher_SubjectRuleDerivationAndFallbacks(t *testing.T) {
 	ctx := context.Background()
 	ms := newMemTriggerStore()

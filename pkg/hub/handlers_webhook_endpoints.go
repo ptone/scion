@@ -574,7 +574,9 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 			actionSpec.AgentName = dtAgentName
 		}
 
-		matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, nil, true, false)
+		matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, nil, triggerMatchValidationOpts{
+			defaultTypes: true,
+		})
 		if !ok {
 			return
 		}

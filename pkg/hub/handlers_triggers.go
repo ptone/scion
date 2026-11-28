@@ -869,7 +869,10 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 
 	defaultTypes := sourceKind == store.TriggerSourceKindWebhook
 	explicitMatchDialect := req.Match != nil && req.Match.Rules == nil && strings.TrimSpace(req.Match.Dialect) != ""
-	matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, req.Match, defaultTypes, explicitMatchDialect)
+	matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, req.Match, triggerMatchValidationOpts{
+		defaultTypes:          defaultTypes,
+		explicitScalarDialect: explicitMatchDialect,
+	})
 	if !ok {
 		return
 	}
@@ -1301,7 +1304,11 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			}
 			merged.Rules = triggerRulesToSpecs(existingRules)
 		}
-		matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, &merged, false, explicitMatchDialect)
+		matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, &merged, triggerMatchValidationOpts{
+			explicitScalarDialect:    explicitMatchDialect,
+			allowStoredAdmissionSkip: true,
+			storedRules:              existingRules,
+		})
 		if !ok {
 			return
 		}
@@ -1489,7 +1496,10 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			if _, _, ok := s.writeAndValidateTriggerMatch(w, ctx, &TriggerMatchSpec{
 				Types: tr.MatchTypes,
 				Rules: triggerRulesToSpecs(existingRules),
-			}, false, false); !ok {
+			}, triggerMatchValidationOpts{
+				allowStoredAdmissionSkip: true,
+				storedRules:              existingRules,
+			}); !ok {
 				return
 			}
 		}
@@ -1610,10 +1620,16 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			tr.Notify = normalizedNotify
 			fields.Notify = true
 		}
-		attr := reattributeInitiator(ctx, tr.InitiatorAttribution)
+		resultingMatchRules, rErr := triggerMatchRules(*tr)
+		if rErr != nil {
+			writeCorruptTriggerMatchRulesError(w)
+			return
+		}
+		attr, ok := s.reattributeTriggerRevision(w, ctx, projectID, tr, resultingMatchRules, ceiling)
+		if !ok {
+			return
+		}
 		newAttr = &attr
-		tr.InitiatorAttribution = attr
-		tr.AuthorityCeiling = ceiling
 	}
 
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
@@ -1774,7 +1790,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	if _, _, ok := s.writeAndValidateTriggerMatch(w, ctx, &TriggerMatchSpec{
 		Types: tr.MatchTypes,
 		Rules: triggerRulesToSpecs(existingRules),
-	}, false, false); !ok {
+	}, triggerMatchValidationOpts{}); !ok {
 		return
 	}
 	if _, _, _, _, ok := s.writeAndValidateTriggerSubject(w, ctx, &TriggerSubjectSpec{
@@ -1825,9 +1841,10 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	tr.ActionsCorrupt = false
 	tr.ActionType = ""
 	tr.ActionPayload = ""
-	newAttr := reattributeInitiator(ctx, tr.InitiatorAttribution)
-	tr.InitiatorAttribution = newAttr
-	tr.AuthorityCeiling = ceiling
+	newAttr, ok := s.reattributeTriggerRevision(w, ctx, projectID, tr, existingRules, ceiling)
+	if !ok {
+		return
+	}
 
 	fields := resumeFields
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
