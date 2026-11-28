@@ -24,13 +24,14 @@ import (
 
 // ProjectGitHub is the client representation of GET /api/v1/projects/{id}/github.
 type ProjectGitHub struct {
-	ProjectID   string                    `json:"project_id"`
-	App         ProjectGitHubApp          `json:"app"`
-	Remote      ProjectGitHubRemote       `json:"remote"`
-	Association ProjectGitHubAssociation  `json:"association"`
-	Status      *GitHubAppProjectStatus   `json:"status"`
-	Permissions ProjectGitHubPermissions  `json:"permissions"`
-	Can         ProjectGitHubCapabilities `json:"can"`
+	ProjectID         string                          `json:"project_id"`
+	App               ProjectGitHubApp                `json:"app"`
+	Remote            ProjectGitHubRemote             `json:"remote"`
+	Association       ProjectGitHubAssociation        `json:"association"`
+	Status            *GitHubAppProjectStatus         `json:"status"`
+	Permissions       ProjectGitHubPermissions        `json:"permissions"`
+	TriggersReadiness *GitHubTriggersProjectReadiness `json:"triggers_readiness,omitempty"`
+	Can               ProjectGitHubCapabilities       `json:"can"`
 }
 
 // ProjectGitHubApp describes non-sensitive GitHub App configuration.

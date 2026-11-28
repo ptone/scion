@@ -26,13 +26,14 @@ import (
 
 // ProjectGitHubResponse is the read model for GET /api/v1/projects/{id}/github.
 type ProjectGitHubResponse struct {
-	ProjectID   string                        `json:"project_id"`
-	App         ProjectGitHubAppInfo          `json:"app"`
-	Remote      ProjectGitHubRemoteInfo       `json:"remote"`
-	Association ProjectGitHubAssociationInfo  `json:"association"`
-	Status      *store.GitHubAppProjectStatus `json:"status"`
-	Permissions ProjectGitHubPermissionsInfo  `json:"permissions"`
-	Can         ProjectGitHubCapabilities     `json:"can"`
+	ProjectID         string                          `json:"project_id"`
+	App               ProjectGitHubAppInfo            `json:"app"`
+	Remote            ProjectGitHubRemoteInfo         `json:"remote"`
+	Association       ProjectGitHubAssociationInfo    `json:"association"`
+	Status            *store.GitHubAppProjectStatus   `json:"status"`
+	Permissions       ProjectGitHubPermissionsInfo    `json:"permissions"`
+	TriggersReadiness *GitHubTriggersProjectReadiness `json:"triggers_readiness,omitempty"`
+	Can               ProjectGitHubCapabilities       `json:"can"`
 }
 
 // ProjectGitHubAppInfo reports non-sensitive GitHub App configuration state.
@@ -149,14 +150,21 @@ func (s *Server) handleProjectGitHub(w http.ResponseWriter, r *http.Request, pro
 		appInfo.InstallationURL = cfg.InstallationURL
 	}
 
+	var triggersReadiness *GitHubTriggersProjectReadiness
+	if s.githubTriggersEnabled() {
+		readiness := s.GitHubTriggersProjectReadiness(ctx)
+		triggersReadiness = &readiness
+	}
+
 	writeJSON(w, http.StatusOK, ProjectGitHubResponse{
-		ProjectID:   project.ID,
-		App:         appInfo,
-		Remote:      ProjectGitHubRemoteInfo{Owner: owner, Repo: repo, OnAppHost: onAppHost},
-		Association: assoc,
-		Status:      project.GitHubAppStatus,
-		Permissions: perms,
-		Can:         caps,
+		ProjectID:         project.ID,
+		App:               appInfo,
+		Remote:            ProjectGitHubRemoteInfo{Owner: owner, Repo: repo, OnAppHost: onAppHost},
+		Association:       assoc,
+		Status:            project.GitHubAppStatus,
+		Permissions:       perms,
+		TriggersReadiness: triggersReadiness,
+		Can:               caps,
 	})
 }
 

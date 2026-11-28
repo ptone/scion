@@ -292,6 +292,14 @@ export interface ProjectGitHubInfo {
     capped: string[];
     cap_reasons: Record<string, string>;
   };
+  triggers_readiness?: {
+    ready: boolean;
+    missing_events: string[];
+    missing_permissions: string[];
+    app_slug?: string;
+    checked_at?: string;
+    error?: string;
+  };
   can: {
     bind: boolean;
     unbind: boolean;
