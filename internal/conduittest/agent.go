@@ -16,6 +16,8 @@ package conduittest
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -98,16 +100,29 @@ func (r *RecordingTmuxRunner) Flushes() int {
 	return r.flushes
 }
 
+// DeliverTiming captures agent-side receipt and paste timing for one
+// /v1/control/deliver-message RPC.
+type DeliverTiming struct {
+	AgentID        string
+	DeliveryID     string
+	TextBytes      int
+	NotAfterUnixMS int64
+	ReceiptAt      time.Time
+	PasteDuration  time.Duration
+	Status         int32
+}
+
 // AgentOptions configures a fake Conduit agent.
 type AgentOptions struct {
-	HubURL     string
-	AgentID    string
-	ProjectID  string
-	LaunchID   string
-	Token      func() string
-	HTTPClient *http.Client
-	DialLocal  func(ctx context.Context, network, addr string) (net.Conn, error)
-	Policy     conduit.Policy
+	HubURL          string
+	AgentID         string
+	ProjectID       string
+	LaunchID        string
+	Token           func() string
+	HTTPClient      *http.Client
+	TLSClientConfig *tls.Config
+	DialLocal       func(ctx context.Context, network, addr string) (net.Conn, error)
+	Policy          conduit.Policy
 	// EnablePTY installs a FakePTYSpawner (exposed on Agent.PTYs) when
 	// SpawnPTY is nil. When both EnablePTY is false and SpawnPTY is nil,
 	// the agent sets NoPTY: true and does not advertise pty.
@@ -120,9 +135,10 @@ type AgentOptions struct {
 	// KickCount). Setting Session.RPCHandler replaces the control handler, so
 	// deliver-message, rotate-token, and RPCCount/RPCPaths/KickCount stop
 	// working.
-	Session   conduit.Config
-	Clock     clock.Clock
-	OnSession func(*conduitv1.Welcome)
+	Session         conduit.Config
+	Clock           clock.Clock
+	OnSession       func(*conduitv1.Welcome)
+	OnDeliverTiming func(DeliverTiming)
 }
 
 // Agent is a fake agent wired with the real pkg/sciontool/conduit session
@@ -152,6 +168,9 @@ type Agent struct {
 func StartAgent(opts AgentOptions) (*Agent, error) {
 	runner := &RecordingTmuxRunner{}
 	wsDialer := NewFaultWSDialer()
+	if opts.TLSClientConfig != nil {
+		wsDialer.Dialer().TLSClientConfig = opts.TLSClientConfig
+	}
 	fa := &Agent{
 		AgentID:   opts.AgentID,
 		ProjectID: opts.ProjectID,
@@ -173,6 +192,31 @@ func StartAgent(opts AgentOptions) (*Agent, error) {
 		fa.mu.Lock()
 		fa.rpcPaths = append(fa.rpcPaths, req.GetPath())
 		fa.mu.Unlock()
+		if opts.OnDeliverTiming != nil && req.GetPath() == "/v1/control/"+control.RouteDeliverMessage {
+			receiptAt := time.Now()
+			resp := baseRPC.HandleRPC(ctx, req)
+			pasteDur := time.Since(receiptAt)
+			var meta struct {
+				DeliveryID     string  `json:"delivery_id"`
+				NotAfterUnixMS int64   `json:"not_after_unix_ms"`
+				Text           *string `json:"text"`
+			}
+			_ = json.Unmarshal(req.GetBody(), &meta)
+			textBytes := 0
+			if meta.Text != nil {
+				textBytes = len(*meta.Text)
+			}
+			opts.OnDeliverTiming(DeliverTiming{
+				AgentID:        opts.AgentID,
+				DeliveryID:     meta.DeliveryID,
+				TextBytes:      textBytes,
+				NotAfterUnixMS: meta.NotAfterUnixMS,
+				ReceiptAt:      receiptAt,
+				PasteDuration:  pasteDur,
+				Status:         resp.GetStatus(),
+			})
+			return resp
+		}
 		return baseRPC.HandleRPC(ctx, req)
 	})
 

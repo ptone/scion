@@ -17,9 +17,16 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,6 +36,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/hack/conduit-c19/c19cli"
 	"github.com/GoogleCloudPlatform/scion/hack/conduit-c19/c19driver"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
@@ -243,4 +251,207 @@ func TestConduitHA_C19_FunctionalSmoke(t *testing.T) {
 		require.NoError(t, err, "message %s", id)
 		assert.Equal(t, store.MessageDispatchDelivered, m.DispatchState, "message %s must reach terminal delivered state", id)
 	}
+}
+
+// TestConduitHA_C19_LiveCLI exercises the actual built hack/conduit-c19 CLI
+// binary against a real 2-node Postgres HA Hub (newConduitHAEnv with production
+// CreateAuthenticatedDispatcher wired on both hubs) in all three modes:
+//   - phase2: PTY + stalled bulk TCP tunnel + agent-session control probe
+//   - broker-rpc: concurrent /logs broker RPCs + stalled tunnel + control probe
+//   - deliver: real Hub POST /message -> broker control channel -> broker /deliver
+//     with 512 KiB (33-row) and regular messages, asserting 100% of created
+//     Postgres message rows reach terminal delivered state and the stalled
+//     tunnel fills >= DefaultStreamWindow.
+func TestConduitHA_C19_LiveCLI(t *testing.T) {
+	env := newConduitHAEnv(t)
+	ctx := context.Background()
+	guardSciontoolLog()
+
+	// Wire the production dispatcher (HybridBrokerClient with conduit routing
+	// and control channel) on both hubs, matching cmd/server_foreground.go.
+	env.HubA.EnableBrokerRouting(t)
+	env.HubB.EnableBrokerRouting(t)
+	haSetBrokerAttach(t, env, false)
+
+	// Seed 6 agents split across Hub A (odd) and Hub B (even); agent 0 is on
+	// Hub B with port 8080 exposed so the stalled TCP tunnel from Hub A crosses
+	// the internal relay hop.
+	const numAgents = 6
+	targets := make([]c19driver.AgentTarget, numAgents)
+	for i := 0; i < numAgents; i++ {
+		slug := fmt.Sprintf("c19-live-agent-%02d", i)
+		ag := &store.Agent{
+			ID:              tid(slug),
+			Slug:            slug,
+			Name:            fmt.Sprintf("C19 Live Agent %02d", i),
+			ProjectID:       env.Project.ID,
+			OwnerID:         env.Owner.ID(),
+			Ancestry:        []string{env.Owner.ID()},
+			RuntimeBrokerID: env.BrokerID,
+			Phase:           string(state.PhaseRunning),
+		}
+		require.NoError(t, env.HubA.Store.CreateAgent(ctx, ag))
+		runID := uuid.NewString()
+		_, err := env.HubA.Store.SetAgentRunID(ctx, ag.ID, runID, nil)
+		require.NoError(t, err)
+		if i == 0 {
+			require.NoError(t, env.HubA.Store.UpdateAgentExposedPorts(ctx, ag.ID, []store.ExposedPort{
+				{Port: 8080, Host: "127.0.0.1", Mode: "rw"},
+			}))
+		}
+		node := env.HubA
+		if i%2 == 0 {
+			node = env.HubB
+		}
+		tok, err := node.Server.GenerateAgentToken(ag.ID, env.Project.ID, nil, AgentRoleFull, nil)
+		require.NoError(t, err)
+		targets[i] = c19driver.AgentTarget{
+			AgentID:   ag.ID,
+			ProjectID: env.Project.ID,
+			LaunchID:  runID,
+			Token:     tok,
+			HubURL:    node.Public.URL,
+		}
+	}
+
+	agentsFile := filepath.Join(t.TempDir(), "agents.json")
+	agentsRaw, err := json.Marshal(targets)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(agentsFile, agentsRaw, 0o600))
+
+	ownerTok := haUserToken(t, env.HubA, env.Owner)
+	brokerSecretB64 := base64.StdEncoding.EncodeToString(env.BrokerSecret)
+
+	runCLI := func(t *testing.T, extraArgs ...string) (c19driver.Report, string, error) {
+		t.Helper()
+		outFile := filepath.Join(t.TempDir(), "report.json")
+		args := append([]string{
+			"--hub-url=" + env.HubA.Public.URL,
+			"--agents-file=" + agentsFile,
+			"--duration=2500ms",
+			"--baseline-samples=6",
+			"--control-probe-rate=8",
+			"--hub-rss-pids=" + strconv.Itoa(os.Getpid()),
+			"--memory-budget-mb=8192",
+			"--output=" + outFile,
+		}, extraArgs...)
+		envMap := map[string]string{
+			"C19_USER_TOKEN":        ownerTok,
+			"C19_BROKER_ID":         env.BrokerID,
+			"C19_BROKER_SECRET_B64": brokerSecretB64,
+		}
+		getenv := func(k string) string { return envMap[k] }
+		var buf bytes.Buffer
+		rep, runErr := c19cli.RunArgs(ctx, args, getenv, &buf, &buf)
+		return rep, buf.String(), runErr
+	}
+
+	t.Run("phase2", func(t *testing.T) {
+		rep, out, err := runCLI(t,
+			"--mode=phase2",
+			"--pty-count=2",
+			"--allow-unevaluated=planned_drain_4503,planned_drain_refuses_new_streams",
+		)
+		require.NoError(t, err, "phase2 CLI failed:\n%s", out)
+		assert.Equal(t, c19driver.VerdictPass, rep.Verdict, "output:\n%s", out)
+		assert.GreaterOrEqual(t, rep.Counts.StalledBulkBytesAtStart, int64(conduit.DefaultStreamWindow),
+			"stalled tunnel must fill >= DefaultStreamWindow")
+		assert.Equal(t, rep.Counts.StalledBulkBytesAtStart, rep.Counts.StalledBulkBytesWritten,
+			"stalled tunnel must stay backpressured")
+		assert.Greater(t, rep.Counts.PTYEchoSucceeded, int64(0))
+		assert.Equal(t, int64(0), rep.Counts.PTYEchoErrors)
+		assert.Equal(t, int64(0), rep.Counts.ControlProbeErrors)
+		assert.Greater(t, rep.Latencies.ControlBaseline.Count, 0)
+		assert.Greater(t, rep.Latencies.ControlLoad.Count, 0)
+	})
+
+	t.Run("broker-rpc", func(t *testing.T) {
+		rep, out, err := runCLI(t,
+			"--mode=broker-rpc",
+			"--duration=5s",
+			"--rpc-concurrency=128",
+			"--rpc-pacing=1200ms",
+			"--broker-rpc-latency=2500ms",
+			"--allow-unevaluated=planned_drain_4503,planned_drain_refuses_new_streams",
+		)
+		require.NoError(t, err, "broker-rpc CLI failed:\n%s", out)
+		assert.Equal(t, c19driver.VerdictPass, rep.Verdict, "output:\n%s", out)
+		assert.GreaterOrEqual(t, rep.Counts.StalledBulkBytesAtStart, int64(conduit.DefaultStreamWindow))
+		assert.GreaterOrEqual(t, rep.Counts.BrokerRPCSucceeded, int64(128))
+		assert.Equal(t, int64(0), rep.Counts.BrokerRPCErrors)
+		assert.Equal(t, int64(0), rep.Counts.Total429s)
+		assert.GreaterOrEqual(t, rep.Counts.MaxConcurrentBrokerSessionRPCs, int64(116))
+	})
+
+	t.Run("deliver", func(t *testing.T) {
+		idsFile := filepath.Join(t.TempDir(), "msg-ids.txt")
+		// Exercises default large-body pacing with count=4 (R3), default
+		// MaxConcurrentRPCs=128 overlap (O1), and direct PG row verification
+		// via --pg-dsn (R2a).
+		rep, out, err := runCLI(t,
+			"--mode=deliver",
+			"--duration=12s",
+			"--deliver-interval=2s",
+			"--large-body-count=4",
+			"--rpc-concurrency=128",
+			"--rpc-pacing=1200ms",
+			"--broker-rpc-latency=2500ms",
+			"--broker-debounce=400ms",
+			"--extra-submits=2",
+			"--extra-submit-delay=50ms",
+			"--message-ids-file="+idsFile,
+			"--pg-dsn="+env.DSN,
+			"--allow-unevaluated=planned_drain_4503,planned_drain_refuses_new_streams,rotate_token_mix",
+		)
+		require.NoError(t, err, "deliver CLI failed:\n%s", out)
+		assert.Equal(t, c19driver.VerdictPass, rep.Verdict, "output:\n%s", out)
+		assert.GreaterOrEqual(t, rep.Counts.StalledBulkBytesAtStart, int64(conduit.DefaultStreamWindow))
+		assert.GreaterOrEqual(t, rep.Counts.DeliverSucceeded, int64(numAgents))
+		assert.Equal(t, int64(4), rep.Counts.LargeBodySucceeded)
+		assert.GreaterOrEqual(t, rep.Latencies.DeliverPaste512KMinBytes, c19driver.LargeBodyMinBytes)
+		assert.GreaterOrEqual(t, rep.Counts.MaxConcurrentBrokerSessionRPCs, int64(116))
+		assert.Equal(t, int64(0), rep.Counts.DeliverErrors)
+		assert.Equal(t, int64(0), rep.Counts.Total429s)
+		assert.Equal(t, 4, rep.Latencies.DeliverPaste512K.Count)
+		assert.True(t, rep.PGCheck.Checked)
+		assert.Equal(t, rep.Counts.MessageRowsCreated, rep.PGCheck.Delivered)
+		assert.Greater(t, rep.Counts.MessageRowsCreated, int64(4*33))
+
+		// Verify 100% of created message rows reached terminal delivered state in real Postgres.
+		rawIDs, rerr := os.ReadFile(idsFile)
+		require.NoError(t, rerr)
+		idLines := strings.Split(strings.TrimSpace(string(rawIDs)), "\n")
+		require.NotEmpty(t, idLines)
+		for _, id := range idLines {
+			m, gerr := env.HubB.Store.GetMessage(ctx, id)
+			require.NoError(t, gerr, "message %s", id)
+			assert.Equal(t, store.MessageDispatchDelivered, m.DispatchState, "message %s must reach delivered in Postgres", id)
+		}
+	})
+
+	// r1-R4: In deliver mode against the real Hub, a broker-session 429 on /logs
+	// churn (surfaced by Hub handleAgentLogs as HTTP 502) must be detected,
+	// counted in http_429_count, and FAIL the run.
+	t.Run("deliver_broker_session_429", func(t *testing.T) {
+		idsFile := filepath.Join(t.TempDir(), "msg-ids-429.txt")
+		rep, out, err := runCLI(t,
+			"--mode=deliver",
+			"--duration=1500ms",
+			"--deliver-interval=1s",
+			"--large-body-count=0",
+			"--rpc-concurrency=12",
+			"--broker-rpc-latency=80ms",
+			"--broker-max-concurrent-rpcs=2",
+			"--broker-debounce=200ms",
+			"--extra-submits=0",
+			"--stalled-tunnel=false",
+			"--message-ids-file="+idsFile,
+			"--allow-unevaluated=planned_drain_4503,planned_drain_refuses_new_streams,rotate_token_mix,pg_rows_delivered",
+		)
+		require.NoError(t, err, "deliver_broker_session_429 returned runtime err:\n%s", out)
+		assert.Equal(t, c19driver.VerdictFail, rep.Verdict, "broker-session 429 in deliver mode must FAIL:\n%s", out)
+		assert.False(t, rep.Pass)
+		assert.Greater(t, rep.Counts.BrokerRPC429s, int64(0), "real Hub 502-mapped broker-session 429 must be counted")
+		assert.Greater(t, rep.Counts.Total429s, int64(0))
+	})
 }

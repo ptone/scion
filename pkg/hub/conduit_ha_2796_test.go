@@ -462,9 +462,13 @@ func (m *haAuthzMetrics) waitCount(t *testing.T, key string, want int, timeout t
 //     and advancing AuthzClock by one recheckInterval (200ms, far below
 //     authzMax) closes u2's PTY on Hub A with 4401 authz_expired and records
 //     sweep/closed/pty.
-//
-// Clause not covered here: interval-deny (closing with 4401 authz_expired when
-// permission no longer holds at the authorization interval).
+//   - Interval-deny revocation (subtest interval_deny): with AuthzRecheckInterval
+//     far larger than UserStreamAuthzMax (so periodic sweep cannot fire) and
+//     Hub A's Postgres LISTEN blocked via BlockLISTEN, revoking permission
+//     through Hub B leaves the PTY open before the authorization interval
+//     (non-vacuous echo check) and closes it with 4401 authz_expired once
+//     AuthzClock reaches UserStreamAuthzMax, recording interval/closed/pty
+//     with zero notify/sweep closes.
 func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 	const (
 		recheckInterval = 200 * time.Millisecond
@@ -595,6 +599,123 @@ func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 	assert.Equal(t, conduitReasonAuthzExpired, ce2.Text)
 	metrics.waitCount(t, conduitAuthzTriggerSweep+"/"+conduitAuthzOutcomeClosed+"/pty", 1, 10*time.Second)
 	haWaitFakePTYClosed(t, pty2)
+
+	// 4. Interval-deny: with periodic sweep disabled relative to authzMax
+	//    (AuthzRecheckInterval=10m >> UserStreamAuthzMax=5s) and Hub A's
+	//    Postgres LISTEN blocked, revoking permission through Hub B must NOT
+	//    close the PTY before the authorization interval, and MUST close it
+	//    with 4401 authz_expired (trigger=interval) once AuthzClock reaches
+	//    authzMax.
+	t.Run("interval_deny", func(t *testing.T) {
+		const (
+			intervalRecheck = 10 * time.Minute
+			intervalMax     = 5 * time.Second
+		)
+		clk := clock.NewFake(time.Now().UTC().Truncate(time.Second))
+		ienv := newConduitHAEnvWith(t, conduitHAOptions{
+			AuthzRecheckInterval: intervalRecheck,
+			UserStreamAuthzMax:   intervalMax,
+			AuthzClock:           clk,
+		})
+		haSetBrokerAttach(t, ienv, false)
+		ictx := context.Background()
+
+		imetrics := newHAAuthzMetrics()
+		var imetricsIface conduitStreamAuthzMetrics = imetrics
+		ienv.HubA.Server.conduitAuthzMetrics.Store(&imetricsIface)
+
+		iAdminID := tid("c16b-id-admin")
+		iAdminTok := ienv.HubB.Server.config.DevAuthToken
+		ird, err := ienv.HubA.Store.CreateRoleDefinition(ictx, &store.RoleDefinition{
+			Name:        "c16b-interval-deny-" + tid("rd"),
+			ScopeType:   store.RoleScopeProject,
+			Permissions: []string{"agent.attach"},
+		})
+		require.NoError(t, err)
+
+		uid := tid("c16b-u3")
+		email := "u3@c16b.test"
+		createTestUserWithProjectRole(t, ienv.HubA.Store, uid, email, ienv.Project.ID, store.ProjectRoleMember)
+		ensureHubMembership(ictx, ienv.HubA.Store, uid)
+		binding, err := ienv.HubA.Store.CreateRoleBinding(ictx, &store.RoleBinding{
+			RoleDefinitionID: ird.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      uid,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          ienv.Project.ID,
+			CreatedBy:        iAdminID,
+		})
+		require.NoError(t, err)
+		u3 := NewAuthenticatedUser(uid, email, "u3", store.UserRoleMember, "api")
+		u3Tok := haUserToken(t, ienv.HubA, u3)
+
+		iagent := ienv.StartAgentFor(t, ienv.HubB, ienv.Agent, conduittest.AgentOptions{EnablePTY: true})
+		c3, _, err := haDialPTY(t, ienv.HubA, ienv.Agent.ID, u3Tok, "")
+		require.NoError(t, err)
+		pty3 := haWaitFakePTY(t, iagent.PTYs.Spawned)
+		haPTYEcho(t, c3, "u3-initial")
+
+		// Wait until Hub A's Postgres LISTEN connection is actively listening
+		// before blocking it (avoids racing initial LISTEN setup). Keep the
+		// probe subscription open until after BlockLISTEN so UNLISTEN does not
+		// become the backend's most recent query.
+		iListenCh, iUnsubListen := ienv.HubA.Events.Subscribe(conduitAuthzChangedSubject)
+		defer iUnsubListen()
+		iProbe := conduitAuthzMatch{AgentID: "listen-probe-" + uuid.NewString()}
+		require.NoError(t, pollUntil(10*time.Second, func() error {
+			ienv.HubB.Events.PublishRaw(conduitAuthzChangedSubject, iProbe)
+			select {
+			case evt := <-iListenCh:
+				if strings.Contains(string(evt.Data), iProbe.AgentID) {
+					return nil
+				}
+				return errors.New("waiting for matching LISTEN probe")
+			case <-time.After(100 * time.Millisecond):
+				return errors.New("Hub A LISTEN not yet receiving Hub B conduitAuthzChangedSubject")
+			}
+		}))
+
+		// Block Hub A's Postgres LISTEN so NOTIFY cannot close the stream, then
+		// revoke u3's role binding via Hub B's API.
+		iUnblock := ienv.BlockLISTEN(t, ienv.HubA)
+		defer iUnblock()
+
+		req, err := http.NewRequest(http.MethodDelete, ienv.HubB.Public.URL+"/api/v1/admin/role-bindings/"+binding.ID, nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer "+iAdminTok)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+		// Allow real-time settle so any unblocked PG NOTIFY would arrive before
+		// the non-vacuous before-interval echo check.
+		time.Sleep(500 * time.Millisecond)
+
+		// Non-vacuous check: just before the authorization interval, the stream
+		// must remain open and echo normally (neither NOTIFY nor sweep fired).
+		clk.Advance(intervalMax - time.Millisecond)
+		haPTYEcho(t, c3, "u3-before-interval")
+		imetrics.mu.Lock()
+		assert.Zero(t, imetrics.counts[conduitAuthzTriggerNotify+"/"+conduitAuthzOutcomeClosed+"/pty"], "notify must not fire while LISTEN is blocked")
+		assert.Zero(t, imetrics.counts[conduitAuthzTriggerSweep+"/"+conduitAuthzOutcomeClosed+"/pty"], "sweep must not fire before AuthzRecheckInterval")
+		assert.Zero(t, imetrics.counts[conduitAuthzTriggerInterval+"/"+conduitAuthzOutcomeClosed+"/pty"], "interval-deny must not fire before UserStreamAuthzMax")
+		imetrics.mu.Unlock()
+
+		// Advance past UserStreamAuthzMax: interval-deny must close the stream
+		// with 4401 authz_expired and record trigger=interval.
+		clk.Advance(time.Millisecond)
+		ce3 := haPTYReadClose(t, c3, closeBound)
+		assert.Equal(t, wsprotocol.ClosePTYAuthRequired, ce3.Code)
+		assert.Equal(t, conduitReasonAuthzExpired, ce3.Text)
+		imetrics.waitCount(t, conduitAuthzTriggerInterval+"/"+conduitAuthzOutcomeClosed+"/pty", 1, 10*time.Second)
+		haWaitFakePTYClosed(t, pty3)
+
+		imetrics.mu.Lock()
+		assert.Zero(t, imetrics.counts[conduitAuthzTriggerNotify+"/"+conduitAuthzOutcomeClosed+"/pty"])
+		assert.Zero(t, imetrics.counts[conduitAuthzTriggerSweep+"/"+conduitAuthzOutcomeClosed+"/pty"])
+		imetrics.mu.Unlock()
+	})
 }
 
 // TestConduitHA_2796_C5_SlowReaderIsolationCrossNode validates ptone/scion#2796
