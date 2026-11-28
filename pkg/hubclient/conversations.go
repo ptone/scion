@@ -127,10 +127,11 @@ type ConversationDetail struct {
 	store.Conversation
 	Participants []ConversationParticipantDetail `json:"participants,omitempty"`
 	// DMPeer is the other party of a direct conversation, relative to the
-	// caller. Set by the hub on list responses only.
+	// caller. Set by the hub on both list and single-conversation GET responses.
 	DMPeer *ConversationPeer `json:"dmPeer,omitempty"`
 	// ThreadName is the linked webchat topic name of a native group
-	// conversation without a display name. Set on list responses only.
+	// conversation without a display name. Set on both list and
+	// single-conversation GET responses.
 	ThreadName string `json:"threadName,omitempty"`
 }
 

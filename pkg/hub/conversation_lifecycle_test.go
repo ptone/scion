@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -27,7 +28,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -318,46 +319,15 @@ func TestConversationLifecycle_DeleteDM_FreshConversationAndSideEffects(t *testi
 	assert.Equal(t, oldConv.ID, evts[0].conversationID)
 	assert.Equal(t, []string{"user." + alice.ID + ".chat.dm.lifecycle"}, evts[0].subjects)
 
-	// Send a new message from user to agent -> mints a fresh conversation ID!
-	newConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
-		Kind:        "direct",
-		Surface:     "native",
-		ExternalRef: dmKey,
+	// Send a new message from user to agent through the real chat send route -> mints a fresh conversation ID!
+	rec = doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages", map[string]string{
+		"content": "fresh hello after delete",
 	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	newConv, err := s.GetConversationByExternalRef(ctx, "native", dmKey)
 	require.NoError(t, err)
 	assert.NotEqual(t, oldConv.ID, newConv.ID, "new message after delete must mint a fresh conversation ID")
-
-	newMsg := &store.Message{
-		ID:             api.NewUUID(),
-		ProjectID:      project.ID,
-		Sender:         "user:" + alice.Email,
-		SenderID:       alice.ID,
-		Recipient:      "agent:" + agent.Slug,
-		RecipientID:    agent.ID,
-		Msg:            "fresh hello after delete",
-		Type:           "chat",
-		Channel:        "web",
-		ThreadID:       dmKey,
-		ConversationID: newConv.ID,
-		DispatchState:  store.MessageDispatchDispatched,
-	}
-	require.NoError(t, s.CreateMessage(ctx, newMsg))
-	require.NoError(t, wcs.UpsertDM(ctx, WebChatDM{
-		ConversationKey: dmKey,
-		ParticipantID:   alice.ID,
-		PeerID:          agent.ID,
-		PeerKind:        "agent",
-		LastMessageID:   newMsg.ID,
-		LastActivityAt:  time.Now().UTC(),
-	}))
-	require.NoError(t, wcs.UpsertDM(ctx, WebChatDM{
-		ConversationKey: dmKey,
-		ParticipantID:   agent.ID,
-		PeerID:          alice.ID,
-		PeerKind:        "user",
-		LastMessageID:   newMsg.ID,
-		LastActivityAt:  time.Now().UTC(),
-	}))
 
 	// History of the new conversation shows ONLY the new message.
 	rec = doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/conversations/"+newConv.ID+"/messages", nil)
@@ -367,7 +337,7 @@ func TestConversationLifecycle_DeleteDM_FreshConversationAndSideEffects(t *testi
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &msgList))
 	require.Len(t, msgList.Items, 1)
-	assert.Equal(t, newMsg.ID, msgList.Items[0].ID)
+	assert.Equal(t, "fresh hello after delete", msgList.Items[0].Msg)
 
 	// Both participants' DM lists show the DM again, and pin/mute are reset.
 	dms, err = wcs.ListDMs(ctx, alice.ID)
@@ -379,7 +349,10 @@ func TestConversationLifecycle_DeleteDM_FreshConversationAndSideEffects(t *testi
 
 	rs, err := wcs.GetReadState(ctx, alice.ID, dmKey)
 	require.NoError(t, err)
-	assert.Nil(t, rs, "pin/mute read state must be reset after delete")
+	if rs != nil {
+		assert.False(t, rs.Pinned, "pinned state must be reset after delete")
+		assert.False(t, rs.Muted, "muted state must be reset after delete")
+	}
 
 	// Part B: User <-> User DM publishes lifecycle event to BOTH user participants.
 	u1, u2 := alice.ID, bob.ID
@@ -492,5 +465,106 @@ func TestConversationLifecycle_ChatRetentionPhaseBPurgesDeletedDM(t *testing.T) 
 	var remaining int
 	require.NoError(t, p.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE id = ?`, msg.ID).Scan(&remaining))
 	assert.Zero(t, remaining)
-	_ = uuid.Nil
+}
+
+// TestConversationLifecycle_GetDirectConversationIncludesDMPeer verifies that
+// single-conversation GET populates dmPeer with the peer agent's name so CLI
+// prompts can name the peer without an extra list call.
+func TestConversationLifecycle_GetDirectConversationIncludesDMPeer(t *testing.T) {
+	ctx := context.Background()
+	srv, s, wcs, _, alice, _, _, agent, _ := setupLifecycleHub(t)
+
+	dmKey := makeDMKey(agent.ID, alice.ID)
+	conv := seedLifecycleDirectConversation(t, ctx, s, wcs, "native", dmKey, "user", alice.ID, "agent", agent.ID)
+
+	rec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/conversations/"+conv.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var got struct {
+		ID     string            `json:"id"`
+		DMPeer *conversationPeer `json:"dmPeer"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, conv.ID, got.ID)
+	require.NotNil(t, got.DMPeer, "GET /api/v1/conversations/{id} must populate dmPeer")
+	assert.Equal(t, "agent", got.DMPeer.Kind)
+	assert.Equal(t, agent.ID, got.DMPeer.ID)
+	assert.Equal(t, agent.Name, got.DMPeer.Name)
+}
+
+// TestConversationLifecycle_DeleteDM_AgentMessageMintsFreshConversation covers
+// design §9 criterion 2 ("from either side"): after a user deletes a DM, an
+// agent-originated outbound message to that user through handleAgentOutboundMessage
+// mints a fresh conversation ID, shows only the new message in history, and
+// re-registers webchat_dm for the user.
+func TestConversationLifecycle_DeleteDM_AgentMessageMintsFreshConversation(t *testing.T) {
+	ctx := context.Background()
+	srv, s, wcs, _, alice, _, project, agent, _ := setupLifecycleHub(t)
+	enableConversationLifecycleExperiment(t, srv, true)
+
+	dmKey := makeDMKey(agent.ID, alice.ID)
+	oldConv := seedLifecycleDirectConversation(t, ctx, s, wcs, "native", dmKey, "user", alice.ID, "agent", agent.ID)
+
+	oldMsg := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      project.ID,
+		Sender:         "agent:" + agent.Slug,
+		SenderID:       agent.ID,
+		Recipient:      "user:" + alice.Email,
+		RecipientID:    alice.ID,
+		Msg:            "old agent message before delete",
+		Type:           "chat",
+		Channel:        "web",
+		ThreadID:       dmKey,
+		ConversationID: oldConv.ID,
+		DispatchState:  store.MessageDispatchDispatched,
+	}
+	require.NoError(t, s.CreateMessage(ctx, oldMsg))
+
+	// User deletes the DM.
+	rec := doRequestAsUser(t, srv, alice, http.MethodDelete, "/api/v1/conversations/"+oldConv.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	// Agent sends a fresh outbound DM to alice via the real handleAgentOutboundMessage route.
+	body, err := json.Marshal(OutboundMessageRequest{
+		Recipient:   "user:" + alice.Email,
+		RecipientID: alice.ID,
+		Msg:         "fresh agent message after delete",
+		Type:        "instruction",
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+agent.ProjectID+"/agents/"+agent.ID+"/outbound-message",
+		bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: agent.ProjectID,
+		Ancestry:  agent.Ancestry,
+	}}))
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	// A new conversation ID must be minted for the DM key.
+	newConv, err := s.GetConversationByExternalRef(ctx, "native", dmKey)
+	require.NoError(t, err)
+	assert.NotEqual(t, oldConv.ID, newConv.ID, "agent message after delete must mint a fresh conversation ID")
+
+	// History of the new conversation shows ONLY the new agent message.
+	rec = doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/conversations/"+newConv.ID+"/messages", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var msgList struct {
+		Items []store.Message `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &msgList))
+	require.Len(t, msgList.Items, 1)
+	assert.Equal(t, "fresh agent message after delete", msgList.Items[0].Msg)
+
+	// User's DM list shows the DM again.
+	dms, err := wcs.ListDMs(ctx, alice.ID)
+	require.NoError(t, err)
+	require.Len(t, dms, 1)
+	assert.Equal(t, dmKey, dms[0].ConversationKey)
 }

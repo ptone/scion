@@ -525,9 +525,14 @@ func (s *Server) handleGetConversation(w http.ResponseWriter, r *http.Request, i
 		participants = canonical
 	}
 
+	labeled := []conversationResponse{{Conversation: *conv}}
+	s.labelListedConversations(ctx, labeled, identity.Type(), identity.ID())
+
 	writeJSON(w, http.StatusOK, conversationGetResponse{
 		Conversation: *conv,
 		Participants: s.conversationParticipantViews(ctx, conv, participants),
+		DMPeer:       labeled[0].DMPeer,
+		ThreadName:   labeled[0].ThreadName,
 	})
 }
 

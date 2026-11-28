@@ -37,10 +37,6 @@ func (s *Server) lifecycle() *conversationLifecycle {
 
 // handleDeleteConversation handles DELETE /api/v1/conversations/{id}.
 func (s *Server) handleDeleteConversation(w http.ResponseWriter, r *http.Request, id string) {
-	if r.Method != http.MethodDelete {
-		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
-		return
-	}
 	s.lifecycle().Delete(w, r, id)
 }
 

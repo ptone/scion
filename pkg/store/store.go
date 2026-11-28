@@ -4680,8 +4680,13 @@ type ConversationStore interface {
 	// Returns ErrNotFound if the conversation doesn't exist.
 	GetConversation(ctx context.Context, id string) (*Conversation, error)
 
-	// UpdateConversation updates an existing conversation.
+	// UpdateConversation updates an existing conversation's mutable metadata.
 	// Returns ErrNotFound if the conversation doesn't exist.
+	//
+	// Lifecycle timestamps (ArchivedAt and DeletedAt) are ignored by
+	// UpdateConversation: they are owned solely by dedicated lifecycle methods
+	// (such as DeleteConversation) so a caller with a stale Conversation
+	// snapshot cannot clear or resurrect a concurrent archive or delete.
 	//
 	// A conversation keeps the project it was created with. The row is
 	// written only when the requested ProjectID equals the stored one; a nil

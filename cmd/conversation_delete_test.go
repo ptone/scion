@@ -34,19 +34,26 @@ import (
 func newConversationDeleteTestHub(t *testing.T, convID, dmPeer string, deleteStatus int) (*httptest.Server, *[]string) {
 	t.Helper()
 	var deletedIDs []string
+	peerID := uuid.NewString()
+	userID := uuid.NewString()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/conversations/"+convID:
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(hubclient.ConversationDetail{
 				Conversation: store.Conversation{
-					ID:      convID,
-					Kind:    "direct",
-					Surface: "native",
+					ID:          convID,
+					Kind:        "direct",
+					Surface:     "native",
+					ExternalRef: "dm:agent:" + peerID + ":user:" + userID,
+				},
+				Participants: []hubclient.ConversationParticipantDetail{
+					{ConversationParticipant: store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: userID, Role: "member"}},
+					{ConversationParticipant: store.ConversationParticipant{ConversationID: convID, PrincipalKind: "agent", PrincipalID: peerID, Role: "member"}},
 				},
 				DMPeer: &hubclient.ConversationPeer{
 					Kind: "agent",
-					ID:   uuid.NewString(),
+					ID:   peerID,
 					Name: dmPeer,
 				},
 			})
@@ -82,7 +89,7 @@ func TestConversationDelete_NonTTYRequiresYes(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	err = executeConversationDelete(context.Background(), cmd, client, []string{"conv:" + convID}, false)
+	err = executeConversationDelete(context.Background(), cmd, client, "", []string{"conv:" + convID}, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--yes")
 	assert.Empty(t, *deletedIDs, "non-TTY without --yes must not delete")
@@ -105,7 +112,7 @@ func TestConversationDelete_TTYPromptCancelAndConfirm(t *testing.T) {
 	cmd.SetErr(&errOut)
 	cmd.SetIn(strings.NewReader("n\n"))
 
-	require.NoError(t, executeConversationDelete(context.Background(), cmd, client, []string{convID}, false))
+	require.NoError(t, executeConversationDelete(context.Background(), cmd, client, "", []string{convID}, false))
 	assert.Contains(t, errOut.String(), "DM with my-agent")
 	assert.Contains(t, errOut.String(), "for both participants")
 	assert.Contains(t, errOut.String(), "Cancelled.")
@@ -116,7 +123,7 @@ func TestConversationDelete_TTYPromptCancelAndConfirm(t *testing.T) {
 	errOut.Reset()
 	cmd.SetIn(strings.NewReader("y\n"))
 
-	require.NoError(t, executeConversationDelete(context.Background(), cmd, client, []string{convID}, false))
+	require.NoError(t, executeConversationDelete(context.Background(), cmd, client, "", []string{convID}, false))
 	assert.Equal(t, []string{convID}, *deletedIDs)
 	assert.Contains(t, out.String(), "Deleted conversation "+convID)
 }
@@ -140,7 +147,7 @@ func TestConversationDelete_YesFlagAndJSON(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	require.NoError(t, executeConversationDelete(context.Background(), cmd, client, []string{"conv:" + convID}, true))
+	require.NoError(t, executeConversationDelete(context.Background(), cmd, client, "", []string{"conv:" + convID}, true))
 	assert.Equal(t, []string{convID}, *deletedIDs)
 
 	var res conversationDeleteJSONResult
@@ -159,9 +166,63 @@ func TestConversationDelete_ExperimentOffMessage(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	err = executeConversationDelete(context.Background(), cmd, client, []string{convID}, true)
+	err = executeConversationDelete(context.Background(), cmd, client, "", []string{convID}, true)
 	require.Error(t, err)
-	assert.Equal(t, "conversation lifecycle is not enabled on this hub (experiment hub.conversation_lifecycle)", err.Error())
+	assert.Contains(t, err.Error(), "not found, or conversation lifecycle is not enabled on this hub (experiment hub.conversation_lifecycle)")
+}
+
+func TestConversationDelete_DeduplicatesRepeatedRefs(t *testing.T) {
+	convID := uuid.NewString()
+	srv, deletedIDs := newConversationDeleteTestHub(t, convID, "my-agent", http.StatusNoContent)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	require.NoError(t, executeConversationDelete(context.Background(), cmd, client, "", []string{convID, "conv:" + convID}, true))
+	assert.Equal(t, []string{convID}, *deletedIDs, "duplicate refs must only delete once")
+}
+
+func TestConversationDelete_PartialMultiRefFailureEmitsDeletedIDs(t *testing.T) {
+	conv1 := uuid.NewString()
+	conv2 := uuid.NewString()
+	var deletedIDs []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/conversations/"+conv1 || r.URL.Path == "/api/v1/conversations/"+conv2):
+			id := strings.TrimPrefix(r.URL.Path, "/api/v1/conversations/")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(hubclient.ConversationDetail{
+				Conversation: store.Conversation{ID: id, Kind: "direct", Surface: "native"},
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/conversations/"+conv1:
+			deletedIDs = append(deletedIDs, conv1)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/conversations/"+conv2:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":{"code":"unsupported_surface","message":"non-native"}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	cmd := &cobra.Command{}
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	err = executeConversationDelete(context.Background(), cmd, client, "", []string{conv1, conv2}, true)
+	require.Error(t, err)
+	assert.Equal(t, []string{conv1}, deletedIDs)
+	assert.Contains(t, out.String(), "Deleted conversation "+conv1, "already-deleted IDs must be printed before returning the error")
 }
 
 func TestConversationDelete_Gates(t *testing.T) {

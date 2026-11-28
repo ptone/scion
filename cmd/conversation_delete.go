@@ -49,14 +49,13 @@ var conversationDeleteCmd = &cobra.Command{
 Conversation references:
   conv:<uuid>     Direct conversation ID (full 36-character UUID)
   <uuid>          Bare 36-character conversation ID
-  @<agent-name>   Agent DM conversation
 
 Requires confirmation on an interactive terminal unless --yes is passed.
 Running non-interactively without --yes returns an error.
 
 Examples:
   scion conversation delete conv:a1b2c3d4-...
-  scion conversation delete @my-agent --yes
+  scion conversation delete a1b2c3d4-... --yes
   scion conversation delete conv:a1b2c3d4-... --yes --json`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runConversationDelete,
@@ -83,7 +82,7 @@ func runConversationDelete(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	_, client, err := requireHubClient()
+	hubCtx, client, err := requireHubClient()
 	if err != nil {
 		return err
 	}
@@ -91,16 +90,25 @@ func runConversationDelete(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmdContext(cmd), 30*time.Second)
 	defer cancel()
 
-	return executeConversationDelete(ctx, cmd, client, args, convDeleteYes)
+	projectID := ""
+	if hubCtx != nil {
+		projectID = hubCtx.ProjectID
+	}
+	return executeConversationDelete(ctx, cmd, client, projectID, args, convDeleteYes)
 }
 
-func executeConversationDelete(ctx context.Context, cmd *cobra.Command, client hubclient.Client, refs []string, yes bool) error {
+func executeConversationDelete(ctx context.Context, cmd *cobra.Command, client hubclient.Client, projectID string, refs []string, yes bool) error {
 	targets := make([]deleteTarget, 0, len(refs))
+	seen := make(map[string]struct{}, len(refs))
 	for _, ref := range refs {
-		id, err := resolveConversationRef(ctx, client, ref)
+		id, err := resolveConversationRef(ctx, client, projectID, ref)
 		if err != nil {
 			return err
 		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
 		detail, err := client.Conversations().Get(ctx, id)
 		if err != nil {
 			return fmt.Errorf("failed to get conversation %s: %w", ref, err)
@@ -147,27 +155,34 @@ func executeConversationDelete(ctx context.Context, cmd *cobra.Command, client h
 	}
 
 	deleted := make([]string, 0, len(targets))
+	var deleteErr error
 	for _, t := range targets {
 		if err := client.Conversations().Delete(ctx, t.id); err != nil {
 			if apiclient.IsNotFoundError(err) {
-				return errors.New("conversation lifecycle is not enabled on this hub (experiment hub.conversation_lifecycle)")
+				deleteErr = fmt.Errorf("conversation %s not found, or conversation lifecycle is not enabled on this hub (experiment hub.conversation_lifecycle)", t.id)
+			} else {
+				deleteErr = fmt.Errorf("failed to delete conversation %s: %w", t.id, err)
 			}
-			return fmt.Errorf("failed to delete conversation %s: %w", t.id, err)
+			break
 		}
 		deleted = append(deleted, t.id)
 	}
 
-	if isJSONOutput() {
-		enc := json.NewEncoder(cmd.OutOrStdout())
-		enc.SetIndent("", "  ")
-		return enc.Encode(conversationDeleteJSONResult{Deleted: deleted})
+	if len(deleted) > 0 {
+		if isJSONOutput() {
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(conversationDeleteJSONResult{Deleted: deleted}); err != nil {
+				return err
+			}
+		} else {
+			out := cmd.OutOrStdout()
+			for _, id := range deleted {
+				_, _ = fmt.Fprintf(out, "Deleted conversation %s\n", id)
+			}
+		}
 	}
-
-	out := cmd.OutOrStdout()
-	for _, id := range deleted {
-		_, _ = fmt.Fprintf(out, "Deleted conversation %s\n", id)
-	}
-	return nil
+	return deleteErr
 }
 
 func conversationDeleteLabel(detail *hubclient.ConversationDetail) string {

@@ -42,6 +42,8 @@ type conversationParticipantView struct {
 type conversationGetResponse struct {
 	store.Conversation
 	Participants []conversationParticipantView `json:"participants,omitempty"`
+	DMPeer       *conversationPeer             `json:"dmPeer,omitempty"`
+	ThreadName   string                        `json:"threadName,omitempty"`
 }
 
 // conversationModeProject returns the project whose agents' message modes
