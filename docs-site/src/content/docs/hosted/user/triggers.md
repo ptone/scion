@@ -189,7 +189,7 @@ Guard optional fields with `has(...)` (for example `has(event.payload) && has(ev
 
 When the `hub.system_one` [experiment](/scion/reference/experiments/) is enabled and the project has allowlisted at least one System One provider instance (`scion project system-one add <name>`), human project members can include `system_one` rule elements alongside CEL guards in `match.rules`. Agent callers are refused at authoring (`agent_not_allowed`), and the authoring user's recorded authority is checked before any model egress (revoked, de-roled, removed, or deleted authors record a `refused` fire with zero provider calls).
 
-A `system_one` element selects inputs strictly from the **trigger content environment v1** (32 KiB combined total; `on_oversize: reject`; `payload_paths` supports up to 8 RFC 6901 paths on `event.payload`):
+A `system_one` element selects inputs strictly from the **trigger content environment v1** (32 KiB combined total; `on_oversize: reject`; `payload_paths` supports up to 8 dotted paths on `event.payload`, for example `pull_request.title`):
 
 | Input field | Kind | Max bytes | Trust grade | Notes |
 | :--- | :--- | :--- | :--- | :--- |

@@ -909,11 +909,11 @@ func validatePayloadPaths(paths []string, inputs []string, env ContentEnvironmen
 			}
 		}
 		for _, seg := range segs {
-			if seg == "" || strings.TrimSpace(seg) != seg {
+			if seg == "" || strings.TrimSpace(seg) != seg || strings.ContainsAny(seg, "/[]$") {
 				return &CompileError{
 					Path:     pPath,
 					Category: CategoryInput,
-					Message:  fmt.Sprintf("invalid dotted payload path %q", p),
+					Message:  fmt.Sprintf("invalid dotted payload path %q (use dot-separated keys, e.g. \"pull_request.title\")", p),
 				}
 			}
 			for _, r := range seg {

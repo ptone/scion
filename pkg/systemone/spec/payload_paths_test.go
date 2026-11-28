@@ -101,7 +101,12 @@ func TestCompile_PayloadPaths(t *testing.T) {
 		{"empty_path", `["event.payload"]`, `[""]`, CategoryInput},
 		{"duplicate_path", `["event.payload"]`, `["a.b","a.b"]`, CategoryInput},
 		{"leading_dot", `["event.payload"]`, `[".a"]`, CategoryInput},
+		{"trailing_dot", `["event.payload"]`, `["a."]`, CategoryInput},
 		{"consecutive_dots", `["event.payload"]`, `["a..b"]`, CategoryInput},
+		{"rfc6901_leading_slash", `["event.payload"]`, `["/pull_request/title"]`, CategoryInput},
+		{"slash_in_segment", `["event.payload"]`, `["pull_request/title"]`, CategoryInput},
+		{"bracket_syntax", `["event.payload"]`, `["items[0].name"]`, CategoryInput},
+		{"jsonpath_dollar", `["event.payload"]`, `["$.action"]`, CategoryInput},
 		{"control_char", `["event.payload"]`, `["a.\u0001b"]`, CategoryInput},
 		{"too_deep", `["event.payload"]`, deepPath, CategoryLimit},
 	}

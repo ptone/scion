@@ -165,6 +165,25 @@ func TestTriggerAuthoring_SystemOneD1AllowlistAndD2AgentExclusion(t *testing.T) 
 	})
 	require.Equal(t, http.StatusCreated, recOK.Code, recOK.Body.String())
 
+	// 4b. R4: Malformed / non-dotted payload_paths (e.g. RFC 6901 "/pull_request/title")
+	// are refused at authoring (400 invalid_rule, category: input) so they never silently
+	// narrow to "{}".
+	badPathExpr := `{"inputs":["event.payload"],"payload_paths":["/pull_request/title"],"spec":{"version":1,"binding":{"instance":"hub-judge"},"questions":[{"id":"q1","type":"binary","instructions":"Is this urgent?"}],"output":{"question":"q1"}}}`
+	recBadPath := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "so-bad-payload-path",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: "system_one", Expr: badPathExpr},
+			},
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, recBadPath.Code, recBadPath.Body.String())
+	ebBadPath := decodeTriggerRuleError(t, recBadPath)
+	assert.Equal(t, ErrCodeInvalidRule, ebBadPath.Code)
+	assert.Equal(t, "input", ebBadPath.Details["category"])
+
 	// 5. Removing the instance from the project allowlist refuses subsequent resume (400 invalid_rule).
 	var created TriggerResponse
 	require.NoError(t, json.Unmarshal(recOK.Body.Bytes(), &created))
@@ -191,9 +210,13 @@ func (c *m1CountingSecretBackend) Get(ctx context.Context, name, scope, scopeID 
 }
 
 // TestTriggerDispatcher_M1RecordedAuthorityPreEgressProductionWiring proves M1
-// through the real production serverTriggerCore / resolveRecordedAuthority /
-// SystemOneRuntime / SecretBackend wiring:
-//   - authorized author (project-member): secret read + provider call occur;
+// and DA-1/R3 through the real production serverTriggerCore /
+// checkTriggerRecordedAuthority / resolveRecordedAuthority / SystemOneRuntime /
+// SecretBackend wiring:
+//   - authorized project-member author: secret read + provider call occur;
+//   - authorized trigger:create-only UAT (bounded ceiling, no trigger:update):
+//     secret read + provider call occur;
+//   - authorized project-admin author: secret read + provider call occur;
 //   - de-roled author (downgraded to project-viewer): 0 secret reads, 0 provider
 //     calls, terminal refused fire with ErrFireRecordedAuthorityRefused;
 //   - removed author (project role binding deleted): 0 secret reads, 0 provider
@@ -256,23 +279,19 @@ func TestTriggerDispatcher_M1RecordedAuthorityPreEgressProductionWiring(t *testi
 	var ep WebhookEndpointCreatedResponse
 	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
 
-	soExpr := `{"inputs":["event.subject"],"spec":{"version":1,"binding":{"instance":"hub-judge-m1"},"questions":[{"id":"q1","type":"binary","instructions":"Is this urgent?"}],"output":{"question":"q1"}}}`
+	// Create a member-owned target agent so f.member (project-member, which holds
+	// trigger.create but NOT trigger.update) can author a message trigger.
+	memberAgent := &store.Agent{
+		ID:        tid("m1-member-agent"),
+		Slug:      "m1-member-agent",
+		Name:      "m1-member-agent",
+		ProjectID: f.projectID,
+		OwnerID:   f.member.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, memberAgent))
 
-	// Trigger 1 authored by f.admin (project-admin, holds trigger.create/update and agent.message).
-	tr1Rec := f.doTrigger(t, f.adminAuth, "", http.MethodPost, CreateTriggerRequest{
-		Name:   "m1-admin-trig",
-		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
-		Match: &TriggerMatchSpec{
-			Rules: []TriggerMatchRuleSpec{
-				{Dialect: "cel", Expr: `event.type == "webhook.received"`},
-				{Dialect: "system_one", Expr: soExpr},
-			},
-		},
-		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "alert"},
-	})
-	require.Equal(t, http.StatusCreated, tr1Rec.Code, tr1Rec.Body.String())
-	var tr1 TriggerResponse
-	require.NoError(t, json.Unmarshal(tr1Rec.Body.Bytes(), &tr1))
+	soExpr := `{"inputs":["event.subject"],"spec":{"version":1,"binding":{"instance":"hub-judge-m1"},"questions":[{"id":"q1","type":"binary","instructions":"Is this urgent?"}],"output":{"question":"q1"}}}`
 
 	// Construct the real production dispatcher wired to serverTriggerCore.
 	disp, err := f.srv.newTriggerDispatcher(nil)
@@ -317,16 +336,99 @@ func TestTriggerDispatcher_M1RecordedAuthorityPreEgressProductionWiring(t *testi
 		return nil
 	}
 
-	// 1. Authorized positive control: f.admin has project-admin -> secret read & provider call occur.
+	// 1a. Positive control (DA-1/R3): project-member author (holds trigger.create, NOT trigger.update).
+	trMemberRec := f.doTrigger(t, f.memberAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "m1-member-trig",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: "cel", Expr: `event.type == "webhook.received"`},
+				{Dialect: "system_one", Expr: soExpr},
+			},
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: memberAgent.ID, Message: "alert"},
+	})
+	require.Equal(t, http.StatusCreated, trMemberRec.Code, trMemberRec.Body.String())
+	var trMember TriggerResponse
+	require.NoError(t, json.Unmarshal(trMemberRec.Body.Bytes(), &trMember))
+
 	secretReads.Store(0)
 	providerCalls.Store(0)
-	fireOK := dispatchAndLoadFire("authorized", tr1.ID)
-	assert.Equal(t, int32(1), providerCalls.Load(), "authorized author must reach System One provider")
-	assert.GreaterOrEqual(t, secretReads.Load(), int32(1), "authorized author must read provider secret")
-	assert.NotEqual(t, store.TriggerFireStatusRefused, fireOK.Status, "authorized positive control must not be refused (err=%q)", fireOK.Error)
-	assert.NotEqual(t, trigger.ErrFireRecordedAuthorityRefused, fireOK.Error)
+	fireMember := dispatchAndLoadFire("authorized-member", trMember.ID)
+	assert.Equal(t, int32(1), providerCalls.Load(), "project-member author must reach System One provider")
+	assert.GreaterOrEqual(t, secretReads.Load(), int32(1), "project-member author must read provider secret")
+	assert.NotEqual(t, trigger.ErrFireRecordedAuthorityRefused, fireMember.Error)
+	assert.Equal(t, "2/2", fireMember.MatchedThrough)
 
-	// 2. De-roled author: downgrade f.admin from project-admin to project-viewer.
+	pauseMemberRec := f.doTrigger(t, f.ownerAuth, trMember.ID+"/pause", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, pauseMemberRec.Code, pauseMemberRec.Body.String())
+
+	// 1b. Positive control (DA-1/R3): trigger:create-only UAT (bounded ceiling, NO trigger:update).
+	_, uatTok, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(f.owner.ID), CreateTokenParams{
+		UserID:   f.owner.ID,
+		Name:     "m1-create-only-uat",
+		Boundary: TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.projectID},
+		Scopes:   []string{"trigger:create", "webhook_endpoint:read", "agent:message"},
+	})
+	require.NoError(t, err)
+	uatCreateOnly := NewScopedUserIdentityWithBoundary(
+		f.ownerAuth,
+		TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.projectID},
+		uatTok.Scopes,
+		uatTok.ID,
+		uatTok.NormalizedCeiling(),
+	)
+	trUATRec := f.doTrigger(t, uatCreateOnly, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "m1-uat-create-only-trig",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: "cel", Expr: `event.type == "webhook.received"`},
+				{Dialect: "system_one", Expr: soExpr},
+			},
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "alert"},
+	})
+	require.Equal(t, http.StatusCreated, trUATRec.Code, trUATRec.Body.String())
+	var trUAT TriggerResponse
+	require.NoError(t, json.Unmarshal(trUATRec.Body.Bytes(), &trUAT))
+
+	secretReads.Store(0)
+	providerCalls.Store(0)
+	fireUAT := dispatchAndLoadFire("authorized-uat-create-only", trUAT.ID)
+	assert.Equal(t, int32(1), providerCalls.Load(), "trigger:create-only UAT author must reach System One provider")
+	assert.GreaterOrEqual(t, secretReads.Load(), int32(1), "trigger:create-only UAT author must read provider secret")
+	assert.NotEqual(t, trigger.ErrFireRecordedAuthorityRefused, fireUAT.Error)
+	assert.Equal(t, "2/2", fireUAT.MatchedThrough)
+
+	pauseUATRec := f.doTrigger(t, f.ownerAuth, trUAT.ID+"/pause", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, pauseUATRec.Code, pauseUATRec.Body.String())
+
+	// 1c. Positive control: project-admin author.
+	tr1Rec := f.doTrigger(t, f.adminAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "m1-admin-trig",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: "cel", Expr: `event.type == "webhook.received"`},
+				{Dialect: "system_one", Expr: soExpr},
+			},
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "alert"},
+	})
+	require.Equal(t, http.StatusCreated, tr1Rec.Code, tr1Rec.Body.String())
+	var tr1 TriggerResponse
+	require.NoError(t, json.Unmarshal(tr1Rec.Body.Bytes(), &tr1))
+
+	secretReads.Store(0)
+	providerCalls.Store(0)
+	fireOK := dispatchAndLoadFire("authorized-admin", tr1.ID)
+	assert.Equal(t, int32(1), providerCalls.Load(), "project-admin author must reach System One provider")
+	assert.GreaterOrEqual(t, secretReads.Load(), int32(1), "project-admin author must read provider secret")
+	assert.NotEqual(t, trigger.ErrFireRecordedAuthorityRefused, fireOK.Error)
+	assert.Equal(t, "2/2", fireOK.MatchedThrough)
+
+	// 2. De-roled author: downgrade f.admin from project-admin to project-viewer (lacks trigger.create).
 	_, err = f.store.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.admin.ID)
 	require.NoError(t, err)
 	viewerRD, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)

@@ -77,7 +77,7 @@ const (
 	ErrFireRuleUncertain                 = "rule uncertain"
 	ErrFireRuleNoLongerCompiles          = "rule no longer compiles"
 	ErrFireGitHubAssociationUnauthorized = "github association not authorized"
-	ErrFireRecordedAuthorityRefused      = "recorded authority refused"
+	ErrFireRecordedAuthorityRefused      = "author lacks trigger.create"
 	AuditReasonInitiatorNotAuthorized    = "initiator_not_authorized"
 	ErrFireSubjectBusy                   = "subject busy"
 	ErrFireSubjectDispatchInProgress     = "subject dispatch in progress"
@@ -934,24 +934,29 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			// refusal or transient lookup error). CEL-only triggers bypass this
 			// check and keep Stage 1 fire-time timing unchanged.
 			if hasSystemOne {
-				if ra, ok := d.core.(RecordedAuthorityChecker); ok {
-					refusal, authErr := ra.CheckRecordedAuthority(ctx, tr)
-					if authErr != nil {
-						d.logger.Warn("trigger: recorded authority check failed",
-							"eventID", ev.ID, "projectID", ev.ProjectID, "triggerID", tr.ID, "error", authErr)
-						return durablequeue.Result{Err: errors.New("trigger: authority check failed")}
+				ra, ok := d.core.(RecordedAuthorityChecker)
+				if !ok {
+					d.logger.Warn("trigger: recorded authority checker unavailable",
+						"eventID", ev.ID, "projectID", ev.ProjectID, "triggerID", tr.ID)
+					return durablequeue.Result{Err: errors.New("trigger: recorded authority checker unavailable")}
+				}
+				refusal, authErr := ra.CheckRecordedAuthority(ctx, tr)
+				if authErr != nil {
+					d.logger.Warn("trigger: recorded authority check failed",
+						"eventID", ev.ID, "projectID", ev.ProjectID, "triggerID", tr.ID, "error", authErr)
+					return durablequeue.Result{Err: errors.New("trigger: authority check failed")}
+				}
+				if refusal != "" {
+					matchCount++
+					hadAnyFire = true
+					if rErr := d.recordDirectFire(
+						ctx, tr, ev, deriveFireSubject(ev.Subject),
+						store.TriggerFireStatusRefused, refusal,
+						"0/0", systemone.DialectName, "", AuditReasonInitiatorNotAuthorized,
+					); rErr != nil {
+						return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
 					}
-					if refusal != "" {
-						hadAnyFire = true
-						if rErr := d.recordDirectFire(
-							ctx, tr, ev, deriveFireSubject(ev.Subject),
-							store.TriggerFireStatusRefused, refusal,
-							"0/0", systemone.DialectName, "", AuditReasonInitiatorNotAuthorized,
-						); rErr != nil {
-							return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
-						}
-						continue
-					}
+					continue
 				}
 			}
 

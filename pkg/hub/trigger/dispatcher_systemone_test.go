@@ -1275,4 +1275,26 @@ func TestDispatcherSystemOne_RecordedAuthorityCheckerSeam(t *testing.T) {
 	assert.Equal(t, store.TriggerFireStatusRefused, f4.Status)
 	assert.Equal(t, trigger.ErrFireRecordedAuthorityRefused, f4.Error)
 	assert.Equal(t, 0, f4.ActionIndex)
+
+	// 5. Core NOT implementing RecordedAuthorityChecker -> fails closed with queue retry and 0 provider calls.
+	hNoChecker := newSystemOneTestHarness(t, func(cfg *trigger.DispatcherConfig) {
+		cfg.Core = bareCoreOnly{inner: cfg.Core}
+	})
+	hNoChecker.setAllowed(projID, "primary")
+	hNoChecker.st.triggers = []*store.Trigger{trSO}
+	ev5 := newEv()
+	res5 := dispatchOneEvent(t, context.Background(), hNoChecker, ev5)
+	assert.False(t, res5.Done, "missing RecordedAuthorityChecker must fail closed with retry")
+	assert.Error(t, res5.Err)
+	assert.Equal(t, int32(0), hNoChecker.secretReads.Load())
+	assert.Equal(t, int32(0), hNoChecker.httpReqs.Load())
 }
+
+// bareCoreOnly implements only trigger.Core (not RecordedAuthorityChecker) to
+// prove the dispatcher fails closed when the checker is unavailable.
+type bareCoreOnly struct{ inner trigger.Core }
+
+func (b bareCoreOnly) Fire(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+	return b.inner.Fire(ctx, req)
+}
+func (b bareCoreOnly) Experiment(name string) bool { return b.inner.Experiment(name) }

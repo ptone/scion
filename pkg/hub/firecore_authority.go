@@ -401,7 +401,9 @@ func (s *Server) checkTriggerRecordedAuthority(ctx context.Context, tr *store.Tr
 	if s == nil || tr == nil {
 		return "", errors.New("trigger recorded authority checker unavailable")
 	}
-	const permID = "trigger.update"
+	// Use trigger.create (not trigger.update): project members and trigger:create-only
+	// UATs hold create as their authoring authority; composes with D2 and runtime D1.
+	const permID = "trigger.create"
 	rec := hubfire.RecordedAuthority{
 		DefinitionKind: hubfire.DefinitionKindTrigger,
 		DefinitionID:   tr.ID,
@@ -430,7 +432,7 @@ func (s *Server) checkTriggerRecordedAuthority(ctx context.Context, tr *store.Tr
 			Principal:  principalContextForIdentity(userIdent),
 			Credential: credentialContextForIdentity(userIdent),
 			Resource:   triggerResource(tr.ProjectID),
-			Action:     ActionUpdate,
+			Action:     ActionCreate,
 			Permission: permID,
 		})
 		if !decision.Allowed {
