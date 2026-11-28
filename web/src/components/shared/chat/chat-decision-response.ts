@@ -147,6 +147,17 @@ export class ScionChatDecisionResponse extends LitElement {
       overflow-wrap: anywhere;
     }
 
+    .rc {
+      color: var(--scion-text-secondary, #475569);
+      font-style: italic;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      overflow-wrap: anywhere;
+      max-width: 34rem;
+    }
+
     time,
     .sep,
     .muted {
@@ -255,6 +266,12 @@ export class ScionChatDecisionResponse extends LitElement {
       <span class="failed" data-state="not-delivered">not delivered (agent gone)</span>`;
   }
 
+  private renderComment(comment: string | undefined): TemplateResult | typeof nothing {
+    const text = comment?.trim();
+    if (!text) return nothing;
+    return html`<span class="rc" data-decision-comment>— “${text}”</span>`;
+  }
+
   private renderJumpButton(messageId: string | undefined): TemplateResult | typeof nothing {
     if (!messageId) return nothing;
     return html`<span class="sep" aria-hidden="true">·</span>
@@ -302,14 +319,18 @@ export class ScionChatDecisionResponse extends LitElement {
     }
 
     if (outcome === 'confirm') {
+      const hasComment = Boolean(r.comment?.trim());
       return html`<div class="line" data-kind="single" data-outcome="confirm">
         <sl-icon class="ok" name="patch-check" aria-hidden="true"></sl-icon>
         <b>${this.who}</b> confirmed <b>${r.label}</b>${otherText
           ? html` — <span class="other-text">“${otherText}”</span>`
           : nothing}
-        ${r.key ? html`for <span class="key">${r.key}</span>` : nothing} ${this.renderTime()}
-        <span class="sep" aria-hidden="true">·</span>
-        <span class="muted" data-state="not-sent">not sent to the agent</span>
+        ${r.key ? html`for <span class="key">${r.key}</span>` : nothing}
+        ${this.renderComment(r.comment)} ${this.renderTime()}
+        ${hasComment
+          ? this.renderNotDelivered()
+          : html`<span class="sep" aria-hidden="true">·</span>
+              <span class="muted" data-state="not-sent">not sent to the agent</span>`}
         ${this.renderJumpButton(r.promptMessageId)}
       </div>`;
     }
@@ -329,7 +350,7 @@ export class ScionChatDecisionResponse extends LitElement {
                 : ''})</span
             >`
           : nothing}
-        ${this.renderTime()} ${this.renderNotDelivered()}
+        ${this.renderComment(r.comment)} ${this.renderTime()} ${this.renderNotDelivered()}
         ${this.renderJumpButton(r.promptMessageId)}
       </div>`;
     }
@@ -341,8 +362,9 @@ export class ScionChatDecisionResponse extends LitElement {
         ? html` — <span class="other-text">“${otherText}”</span>`
         : nothing}
       for ${r.key ? html`<span class="key">${r.key}</span>` : nothing}
-      ${question ? html`<span class="q">${question}</span>` : nothing} ${this.renderTime()}
-      ${this.renderNotDelivered()} ${this.renderJumpButton(r.promptMessageId)}
+      ${question ? html`<span class="q">${question}</span>` : nothing}
+      ${this.renderComment(r.comment)} ${this.renderTime()} ${this.renderNotDelivered()}
+      ${this.renderJumpButton(r.promptMessageId)}
     </div>`;
   }
 

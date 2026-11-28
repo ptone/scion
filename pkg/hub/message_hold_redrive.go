@@ -1210,6 +1210,9 @@ func (s *Server) enrichHeldDecisionResponse(
 		if a.ChoiceID == messages.ChoiceIDOther && a.OtherText != "" {
 			sm.Metadata[messages.MetadataDecisionOtherText] = a.OtherText
 		}
+		if a.Comment != "" {
+			sm.Metadata[messages.MetadataDecisionComment] = a.Comment
+		}
 		return "", nil
 	}
 

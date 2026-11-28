@@ -85,6 +85,7 @@ var reservedMetadataKeys = map[string]bool{
 	messages.MetadataChoiceID:              true,
 	messages.MetadataDecisionProvenance:    true,
 	messages.MetadataDecisionOtherText:     true,
+	messages.MetadataDecisionComment:       true,
 	messages.MetadataDecisionBatch:         true,
 	messages.MetadataDecisionAnswers:       true,
 	messages.MetadataDecisionDismissReason: true,

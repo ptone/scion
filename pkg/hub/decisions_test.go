@@ -1842,3 +1842,347 @@ func TestDecisionResponse_DeliveryStateUpdatesCarryDecisionViews(t *testing.T) {
 	assert.Nil(t, offSet.DecisionResponse)
 	assert.Nil(t, offSet.DecisionResponseSet)
 }
+
+func TestDecisions_Comment_NoCommentGoldenEquality(t *testing.T) {
+	// Golden check (ptone/scion#9834, design §7 P1 & §9 item 1): absent, empty,
+	// and whitespace-only comment must produce byte-identical stored row, stored
+	// chat body, delivered agent text, metadata, and view JSON to today's main.
+	for _, tc := range []struct {
+		name string
+		body map[string]interface{}
+	}{
+		{"absent", map[string]interface{}{"choice_id": "staging"}},
+		{"empty", map[string]interface{}{"choice_id": "staging", "comment": ""}},
+		{"whitespace", map[string]interface{}{"choice_id": "staging", "comment": "   "}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDecisionsFixture(t)
+			ctx := context.Background()
+			_, promptRes := f.topicPrompt(t, `[{
+				"id": "deploy-target",
+				"question": "Where should the release candidate go first?",
+				"choices": [{"id":"staging","label":"Staging"},{"id":"canary","label":"Canary"}],
+				"default": "staging"
+			}]`, false)
+			rowID := promptRes.Decisions[0].RowID
+
+			before := len(f.dispatcher.getMessages())
+			rr := f.answer(t, f.bob, rowID, tc.body)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+			// View JSON must omit "comment" key entirely.
+			var raw map[string]interface{}
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+			decMap, ok := raw["decision"].(map[string]interface{})
+			require.True(t, ok)
+			ansMap, ok := decMap["decision"].(map[string]interface{})
+			require.True(t, ok)
+			_, hasCommentKey := ansMap["comment"]
+			assert.False(t, hasCommentKey, "AnswerView JSON must omit comment when empty")
+
+			var ans DecisionAnswerResponse
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &ans))
+
+			// Stored chat message body is byte-identical to main.
+			storedMsg, err := f.store.GetMessage(ctx, ans.ResponseMessageID)
+			require.NoError(t, err)
+			assert.Equal(t,
+				`Bob chose "Staging" for deploy-target "Where should the release candidate go first?"`,
+				storedMsg.Msg)
+
+			// Stored DecisionAnswer has empty Comment.
+			d, err := f.store.GetDecision(ctx, rowID)
+			require.NoError(t, err)
+			require.NotNil(t, d.EffectiveAnswer())
+			assert.Empty(t, d.EffectiveAnswer().Comment)
+
+			// DecisionResponseView JSON omits "comment".
+			respView := decisionResponseViewOf(d.EffectiveAnswer(), d)
+			respJSON, err := json.Marshal(respView)
+			require.NoError(t, err)
+			var respMap map[string]interface{}
+			require.NoError(t, json.Unmarshal(respJSON, &respMap))
+			_, hasRespComment := respMap["comment"]
+			assert.False(t, hasRespComment, "DecisionResponseView JSON must omit comment when empty")
+
+			// Delivered agent text and metadata are byte-identical to main.
+			dispatched := f.dispatcher.getMessages()[before:]
+			require.Len(t, dispatched, 1)
+			assert.Equal(t,
+				`[decision-response] deploy-target v1 ("Where should the release candidate go first?") answer=Staging (choice staging) by bob@example.com`,
+				dispatched[0].Msg)
+			assert.Equal(t, map[string]string{
+				messages.MetadataDecisionKey:        "deploy-target",
+				messages.MetadataDecisionVersion:    "1",
+				messages.MetadataChoiceID:           "staging",
+				messages.MetadataDecisionProvenance: store.DecisionProvenanceDirect,
+			}, dispatched[0].Structured.Metadata)
+		})
+	}
+}
+
+func TestDecisions_Comment_Validation400BeforeStateRead(t *testing.T) {
+	f := newDecisionsFixture(t)
+	ctx := context.Background()
+	_, promptRes := f.topicPrompt(t, `[{"id":"d1","question":"Pick one","choices":["yes","no"]}]`, false)
+	realRowID := promptRes.Decisions[0].RowID
+	missingRowID := api.NewUUID()
+
+	cases := []struct {
+		name     string
+		comment  string
+		wantCode string
+	}{
+		{"too long", strings.Repeat("é", messages.MaxDecisionCommentLen+1), messages.DecisionErrTooLong},
+		{"newline", "line1\nline2", messages.DecisionErrInvalid},
+		{"tab", "col1\tcol2", messages.DecisionErrInvalid},
+		{"control NUL", "hi\x00there", messages.DecisionErrInvalid},
+		{"bidi override", "hi\u202ethere", messages.DecisionErrInvalid},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/missing-row-proves-before-state-read", func(t *testing.T) {
+			rr := f.answer(t, f.bob, missingRowID, map[string]interface{}{
+				"choice_id": "1",
+				"comment":   tc.comment,
+			})
+			require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+			errCode, det := errorCodeAndDetails(t, rr)
+			assert.Equal(t, ErrCodeValidationError, errCode)
+			assert.Equal(t, "comment", det["field"])
+			assert.Equal(t, tc.wantCode, det["code"])
+		})
+		t.Run(tc.name+"/real-row-nothing-recorded", func(t *testing.T) {
+			rr := f.answer(t, f.bob, realRowID, map[string]interface{}{
+				"choice_id": "1",
+				"comment":   tc.comment,
+			})
+			require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+			errCode, det := errorCodeAndDetails(t, rr)
+			assert.Equal(t, ErrCodeValidationError, errCode)
+			assert.Equal(t, "comment", det["field"])
+			assert.Equal(t, tc.wantCode, det["code"])
+		})
+	}
+
+	d, err := f.store.GetDecision(ctx, realRowID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusPending, d.Status)
+	assert.Empty(t, d.Answers)
+}
+
+func TestDecisions_Comment_SingleDeliveredOtherAndReplay(t *testing.T) {
+	f := newDecisionsFixture(t)
+	ctx := context.Background()
+
+	// Bystander agent to verify @mentions in comments never fan out.
+	bystander := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            "bystander-bot",
+		Name:            "Bystander Bot",
+		ProjectID:       f.project.ID,
+		RuntimeBrokerID: f.agent.RuntimeBrokerID,
+		OwnerID:         f.agent.OwnerID,
+		Phase:           "running",
+		Activity:        "idle",
+		MessageMode:     f.agent.MessageMode,
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, bystander))
+
+	// 1. Fixed choice + comment.
+	_, p1 := f.topicPrompt(t, `[{
+		"id": "deploy-target",
+		"question": "Where should the release candidate go first?",
+		"choices": [{"id":"staging","label":"Staging"},{"id":"canary","label":"Canary"}],
+		"default": "staging"
+	}]`, false)
+	row1 := p1.Decisions[0].RowID
+	rawComment := `  Staging, skip "load" *test* <b>now</b> @bystander-bot  `
+	trimmedComment := strings.TrimSpace(rawComment)
+
+	before := len(f.dispatcher.getMessages())
+	rr := f.answer(t, f.bob, row1, map[string]interface{}{
+		"choice_id":       "staging",
+		"comment":         rawComment,
+		"idempotency_key": "idem-single-cmt",
+	})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var ans DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &ans))
+	require.NotNil(t, ans.Decision.Decision)
+	assert.Equal(t, trimmedComment, ans.Decision.Decision.Comment)
+
+	// Stored chat copy escapes Markdown and neutralizes @mentions.
+	storedMsg, err := f.store.GetMessage(ctx, ans.ResponseMessageID)
+	require.NoError(t, err)
+	assert.Equal(t,
+		`Bob chose "Staging" for deploy-target "Where should the release candidate go first?" — comment: "`+messages.EscapeMarkdownPlain(trimmedComment)+`"`,
+		storedMsg.Msg)
+
+	// Delivered only to the asking agent, with trailing comment= line and decision_comment metadata.
+	dispatched := f.dispatcher.getMessages()[before:]
+	require.Len(t, dispatched, 1)
+	assert.Equal(t, f.agent.ID, dispatched[0].AgentID)
+	assert.Equal(t,
+		`[decision-response] deploy-target v1 ("Where should the release candidate go first?") answer=Staging (choice staging) by bob@example.com`+"\ncomment="+strconv.Quote(trimmedComment),
+		dispatched[0].Msg)
+	assert.Equal(t, trimmedComment, dispatched[0].Structured.Metadata[messages.MetadataDecisionComment])
+
+	// Replay with same key + same comment -> 200 replayed.
+	rrReplay := f.answer(t, f.bob, row1, map[string]interface{}{
+		"choice_id":       "staging",
+		"comment":         trimmedComment,
+		"idempotency_key": "idem-single-cmt",
+	})
+	require.Equal(t, http.StatusOK, rrReplay.Code, rrReplay.Body.String())
+	var replayOut DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(rrReplay.Body.Bytes(), &replayOut))
+	assert.True(t, replayOut.Replayed)
+	assert.Equal(t, ans.ResponseMessageID, replayOut.ResponseMessageID)
+
+	// Replay with same key + different comment -> 409 already_answered.
+	rrDiff := f.answer(t, f.bob, row1, map[string]interface{}{
+		"choice_id":       "staging",
+		"comment":         "changed my mind",
+		"idempotency_key": "idem-single-cmt",
+	})
+	require.Equal(t, http.StatusConflict, rrDiff.Code, rrDiff.Body.String())
+	errCode, _ := errorCodeAndDetails(t, rrDiff)
+	assert.Equal(t, ErrCodeDecisionAnswered, errCode)
+
+	// 2. Other choice + comment.
+	_, p2 := f.topicPrompt(t, `[{
+		"id": "region",
+		"question": "Which region?",
+		"choices": ["us-central1"],
+		"allow_other": true
+	}]`, false)
+	row2 := p2.Decisions[0].RowID
+	before = len(f.dispatcher.getMessages())
+	rrOther := f.answer(t, f.bob, row2, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "europe-west4",
+		"comment":    "lowest latency for EU users",
+	})
+	require.Equal(t, http.StatusOK, rrOther.Code, rrOther.Body.String())
+	var otherAns DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(rrOther.Body.Bytes(), &otherAns))
+	assert.Equal(t, "lowest latency for EU users", otherAns.Decision.Decision.Comment)
+
+	storedOther, err := f.store.GetMessage(ctx, otherAns.ResponseMessageID)
+	require.NoError(t, err)
+	assert.Equal(t,
+		`Bob answered "europe-west4" (Other) for region "Which region?" — comment: "lowest latency for EU users"`,
+		storedOther.Msg)
+
+	dispatched = f.dispatcher.getMessages()[before:]
+	require.Len(t, dispatched, 1)
+	assert.Equal(t,
+		`[decision-response] region v1 ("Which region?") answer=Other (choice $other) text="europe-west4" by bob@example.com`+"\n"+`comment="lowest latency for EU users"`,
+		dispatched[0].Msg)
+	assert.Equal(t, "europe-west4", dispatched[0].Structured.Metadata[messages.MetadataDecisionOtherText])
+	assert.Equal(t, "lowest latency for EU users", dispatched[0].Structured.Metadata[messages.MetadataDecisionComment])
+}
+
+func TestDecisions_Comment_ConfirmWithAndWithoutComment(t *testing.T) {
+	f := newDecisionsFixture(t)
+	ctx := context.Background()
+
+	// Helper to create a prompt with an interpreted answer recorded for f.bob.
+	makeInterpreted := func(key string) string {
+		t.Helper()
+		_, p := f.topicPrompt(t, fmt.Sprintf(`[{
+			"id": %q,
+			"question": "Where should the release candidate go first?",
+			"choices": [{"id":"staging","label":"Staging"},{"id":"canary","label":"Canary"}]
+		}]`, key), false)
+		rowID := p.Decisions[0].RowID
+		srcMsg := &store.Message{
+			ID:             api.NewUUID(),
+			ProjectID:      f.project.ID,
+			ConversationID: f.convID,
+			Sender:         "user:bob@example.com",
+			SenderID:       f.bob.ID(),
+			Recipient:      "agent:" + f.agent.Slug,
+			RecipientID:    f.agent.ID,
+			Msg:            "go with staging",
+			Type:           messages.TypeMessage,
+			ThreadID:       f.chatKey,
+			DispatchState:  store.MessageDispatchDispatched,
+		}
+		require.NoError(t, f.store.CreateMessage(ctx, srcMsg))
+		_, _, err := f.store.RecordAnswer(ctx, &store.RecordAnswerInput{
+			DecisionRowID:        rowID,
+			ChoiceID:             "staging",
+			AnsweredByUserID:     f.bob.ID(),
+			AnsweredByName:       f.bob.DisplayName(),
+			AnsweredByEmail:      f.bob.Email(),
+			Provenance:           store.DecisionProvenanceAgentInterpreted,
+			Outcome:              store.DecisionOutcomeAnswer,
+			InterpretedByAgentID: f.agent.ID,
+			SourceMessageID:      srcMsg.ID,
+			Surface:              store.DecisionSurfaceNative,
+			ResponseMessage: &store.Message{
+				ID:             api.NewUUID(),
+				ProjectID:      f.project.ID,
+				ConversationID: f.convID,
+				Sender:         "agent:" + f.agent.Slug,
+				SenderID:       f.agent.ID,
+				Recipient:      "user:bob@example.com",
+				RecipientID:    f.bob.ID(),
+				Msg:            "recorded staging",
+				Type:           messages.TypeDecisionResponse,
+				ThreadID:       f.chatKey,
+				DispatchState:  store.MessageDispatchDispatched,
+			},
+		})
+		require.NoError(t, err)
+		return rowID
+	}
+
+	// 1. Confirm WITHOUT comment -> outcome=confirm, NOT delivered.
+	rowNoCmt := makeInterpreted("confirm-no-cmt")
+	before := len(f.dispatcher.getMessages())
+	rr := f.answer(t, f.bob, rowNoCmt, map[string]interface{}{"choice_id": "staging"})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var outNoCmt DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &outNoCmt))
+	assert.Equal(t, store.DecisionOutcomeConfirm, outNoCmt.Decision.Decision.Outcome)
+	assert.Empty(t, outNoCmt.Decision.Decision.Comment)
+	assert.Empty(t, f.dispatcher.getMessages()[before:], "confirm without comment must not deliver")
+
+	// 2. Confirm WITH comment -> outcome=confirm (not override), DELIVERED with confirmed note + comment.
+	rowWithCmt := makeInterpreted("confirm-with-cmt")
+	before = len(f.dispatcher.getMessages())
+	rr = f.answer(t, f.bob, rowWithCmt, map[string]interface{}{
+		"choice_id": "staging",
+		"comment":   "Yes, and page me when staging is green.",
+	})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var outWithCmt DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &outWithCmt))
+	assert.Equal(t, store.DecisionOutcomeConfirm, outWithCmt.Decision.Decision.Outcome)
+	assert.Equal(t, "Yes, and page me when staging is green.", outWithCmt.Decision.Decision.Comment)
+
+	dispatched := f.dispatcher.getMessages()[before:]
+	require.Len(t, dispatched, 1, "confirm with comment must deliver")
+	assert.Equal(t,
+		`[decision-response] confirm-with-cmt v1 ("Where should the release candidate go first?") answer=Staging (choice staging, confirmed) by bob@example.com`+"\n"+`comment="Yes, and page me when staging is green."`,
+		dispatched[0].Msg)
+	assert.Equal(t, "Yes, and page me when staging is green.", dispatched[0].Structured.Metadata[messages.MetadataDecisionComment])
+
+	// 3. Confirm WITH comment when user may not message agent -> 403 message_denied before recording.
+	rowDenied := makeInterpreted("confirm-denied-cmt")
+	f.agent.MessageMode = store.MessageModeDisabled
+	require.NoError(t, f.store.UpdateAgent(ctx, f.agent))
+	rrDenied := f.answer(t, f.bob, rowDenied, map[string]interface{}{
+		"choice_id": "staging",
+		"comment":   "blocked comment",
+	})
+	require.Equal(t, http.StatusForbidden, rrDenied.Code, rrDenied.Body.String())
+	errCode, _ := errorCodeAndDetails(t, rrDenied)
+	assert.Equal(t, ErrCodeMessageDenied, errCode)
+	// Still interpreted, no direct answer recorded.
+	dDenied, err := f.store.GetDecision(ctx, rowDenied)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, dDenied.EffectiveAnswer().Provenance)
+}

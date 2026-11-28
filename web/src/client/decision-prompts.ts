@@ -282,7 +282,8 @@ export async function answerDecision(
   choiceId: string,
   idempotencyKey: string,
   surface?: DecisionAnswerSurface,
-  otherText?: string
+  otherText?: string,
+  comment?: string
 ): Promise<AnswerDecisionResult> {
   let res: Response;
   try {
@@ -294,6 +295,7 @@ export async function answerDecision(
         idempotency_key: idempotencyKey,
         ...(surface && surface !== 'native' ? { surface } : {}),
         ...(otherText !== undefined ? { other_text: otherText } : {}),
+        ...(comment ? { comment } : {}),
       }),
     });
   } catch {

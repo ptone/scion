@@ -74,6 +74,13 @@ func (DecisionAnswer) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			Immutable(),
+		// comment is optional single-line plain text (<= 200 runes) attached
+		// to a user's decision answer (ptone/scion#9834). NULL when absent;
+		// kept on user deletion.
+		field.Text("comment").
+			Optional().
+			Nillable().
+			Immutable(),
 		// answered_by_user_id is cleared when the user is deleted; the name
 		// and email snapshots stay.
 		field.String("answered_by_user_id").
