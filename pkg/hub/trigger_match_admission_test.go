@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -371,10 +372,12 @@ func TestTriggersAuthoring_AgentD2SystemOnePositionInvariance(t *testing.T) {
 	agentCtx := contextWithIdentity(context.Background(), f.agentAAuth)
 
 	cases := []struct {
-		name      string
-		stored    []triggerrule.Rule
-		submitted []TriggerMatchRuleSpec
-		wantOK    bool
+		name         string
+		stored       []triggerrule.Rule
+		submitted    []TriggerMatchRuleSpec
+		wantOK       bool
+		wantDialect  string
+		wantCategory string
 	}{
 		{
 			name: "pinned: agent [CEL(false), S1] -> [CEL(true), S1] -> 400 D2",
@@ -386,7 +389,9 @@ func TestTriggersAuthoring_AgentD2SystemOnePositionInvariance(t *testing.T) {
 				{Dialect: "cel", Expr: "true"},
 				{Dialect: "system_one", Expr: s1A},
 			},
-			wantOK: false,
+			wantOK:       false,
+			wantDialect:  "cel",
+			wantCategory: triggerCategoryAgentSystemOnePrefixChanged,
 		},
 		{
 			name: "pinned: agent [S1a, CEL(x), S1b] -> [S1a, CEL(y), S1b] -> 400 D2",
@@ -400,7 +405,9 @@ func TestTriggersAuthoring_AgentD2SystemOnePositionInvariance(t *testing.T) {
 				{Dialect: "cel", Expr: celB},
 				{Dialect: "system_one", Expr: s1B},
 			},
-			wantOK: false,
+			wantOK:       false,
+			wantDialect:  "cel",
+			wantCategory: triggerCategoryAgentSystemOnePrefixChanged,
 		},
 		{
 			name: "pinned: [CEL, S1] -> [S1, CEL] by agent -> 400 D2",
@@ -412,7 +419,9 @@ func TestTriggersAuthoring_AgentD2SystemOnePositionInvariance(t *testing.T) {
 				{Dialect: "system_one", Expr: s1A},
 				{Dialect: "cel", Expr: celA},
 			},
-			wantOK: false,
+			wantOK:       false,
+			wantDialect:  "system_one",
+			wantCategory: triggerReasonAgentNotAllowed,
 		},
 		{
 			name: "pinned: agent removing one of two identical S1 -> 400 D2",
@@ -423,7 +432,9 @@ func TestTriggersAuthoring_AgentD2SystemOnePositionInvariance(t *testing.T) {
 			submitted: []TriggerMatchRuleSpec{
 				{Dialect: "system_one", Expr: s1A},
 			},
-			wantOK: false,
+			wantOK:       false,
+			wantDialect:  "system_one",
+			wantCategory: triggerReasonAgentNotAllowed,
 		},
 		{
 			name: "pinned: agent swapping two identical S1 -> 200 byte-identical",
@@ -488,7 +499,9 @@ func TestTriggersAuthoring_AgentD2SystemOnePositionInvariance(t *testing.T) {
 				{Dialect: "cel", Expr: celA},
 				{Dialect: "system_one", Expr: s1A},
 			},
-			wantOK: false,
+			wantOK:       false,
+			wantDialect:  "system_one",
+			wantCategory: triggerReasonAgentNotAllowed,
 		},
 		{
 			name: "remove CEL before S1 -> 400 D2",
@@ -499,7 +512,9 @@ func TestTriggersAuthoring_AgentD2SystemOnePositionInvariance(t *testing.T) {
 			submitted: []TriggerMatchRuleSpec{
 				{Dialect: "system_one", Expr: s1A},
 			},
-			wantOK: false,
+			wantOK:       false,
+			wantDialect:  "system_one",
+			wantCategory: triggerReasonAgentNotAllowed,
 		},
 		{
 			name: "agent editing S1 expr -> 400 D2",
@@ -511,7 +526,9 @@ func TestTriggersAuthoring_AgentD2SystemOnePositionInvariance(t *testing.T) {
 				{Dialect: "cel", Expr: celA},
 				{Dialect: "system_one", Expr: s1B},
 			},
-			wantOK: false,
+			wantOK:       false,
+			wantDialect:  "system_one",
+			wantCategory: triggerReasonAgentNotAllowed,
 		},
 		{
 			name: "agent removing S1 -> 400 D2",
@@ -522,15 +539,19 @@ func TestTriggersAuthoring_AgentD2SystemOnePositionInvariance(t *testing.T) {
 			submitted: []TriggerMatchRuleSpec{
 				{Dialect: "cel", Expr: celA},
 			},
-			wantOK: false,
+			wantOK:       false,
+			wantDialect:  "system_one",
+			wantCategory: triggerReasonAgentNotAllowed,
 		},
 		{
 			name: "agent clearing rules removes S1 -> 400 D2",
 			stored: []triggerrule.Rule{
 				{Dialect: "system_one", Expr: s1A},
 			},
-			submitted: []TriggerMatchRuleSpec{},
-			wantOK:    false,
+			submitted:    []TriggerMatchRuleSpec{},
+			wantOK:       false,
+			wantDialect:  "system_one",
+			wantCategory: triggerReasonAgentNotAllowed,
 		},
 		{
 			name: "agent adding S1 -> 400 D2",
@@ -541,7 +562,9 @@ func TestTriggersAuthoring_AgentD2SystemOnePositionInvariance(t *testing.T) {
 				{Dialect: "cel", Expr: celA},
 				{Dialect: "system_one", Expr: s1A},
 			},
-			wantOK: false,
+			wantOK:       false,
+			wantDialect:  "system_one",
+			wantCategory: triggerReasonAgentNotAllowed,
 		},
 	}
 
@@ -562,12 +585,188 @@ func TestTriggersAuthoring_AgentD2SystemOnePositionInvariance(t *testing.T) {
 				require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 				eb := decodeTriggerRuleError(t, rec)
 				assert.Equal(t, ErrCodeInvalidRule, eb.Code)
-				assert.Equal(t, "system_one", eb.Details["dialect"])
+				assert.Equal(t, tc.wantDialect, eb.Details["dialect"])
 				assert.Equal(t, triggerReasonAgentNotAllowed, eb.Details["reason"])
-				assert.Equal(t, triggerReasonAgentNotAllowed, eb.Details["category"])
+				assert.Equal(t, tc.wantCategory, eb.Details["category"])
 			}
 		})
 	}
+}
+
+type countingSystemOneDialect struct {
+	compileCalls atomic.Int32
+}
+
+func (d *countingSystemOneDialect) Name() string { return "system_one" }
+
+func (d *countingSystemOneDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	d.compileCalls.Add(1)
+	return ruleengine.NewCompiled(env.Name, "system_one", kind, rule), nil
+}
+
+func (d *countingSystemOneDialect) Evaluate(_ context.Context, _ ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+	return ruleengine.Decision{Kind: ruleengine.KindFilter, Bool: true}, nil
+}
+
+func (d *countingSystemOneDialect) Declares() ruleengine.Capabilities {
+	return ruleengine.Capabilities{MaxEvalTime: time.Second}
+}
+
+func installGrantedCountingSystemOneDialect(t *testing.T, f *triggersTestFixture) *countingSystemOneDialect {
+	t.Helper()
+	fakeS1 := &countingSystemOneDialect{}
+	eng := ruleengine.NewEngine()
+	require.NoError(t, eng.Register(f.srv.celDialect))
+	require.NoError(t, eng.Register(fakeS1))
+	require.NoError(t, eng.AllowConsumerDialects(
+		triggerrule.ConsumerName,
+		ruleengine.Grant(ruleengine.DialectCEL),
+		ruleengine.Grant("system_one"),
+	))
+	trRules, err := triggerrule.New(eng)
+	require.NoError(t, err)
+
+	origRules, origTriggerRules := f.srv.rules, f.srv.triggerRules
+	f.srv.rules = eng
+	f.srv.triggerRules = trRules
+	t.Cleanup(func() {
+		f.srv.rules = origRules
+		f.srv.triggerRules = origTriggerRules
+	})
+	return fakeS1
+}
+
+// TestTriggersAuthoring_GrantedSystemOneHookRunsOnCreateAndResume verifies O1:
+// authorizeNewOrChangedTriggerMatchElement runs on create and resume (not only
+// PATCH), so even when system_one is granted, an agent POST create or resume
+// with system_one returns 400 agent_not_allowed while user create/resume passes.
+func TestTriggersAuthoring_GrantedSystemOneHookRunsOnCreateAndResume(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	fakeS1 := installGrantedCountingSystemOneDialect(t, f)
+
+	agentEpRec := f.doWebhookEndpoint(t, f.agentAAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "o1-agent-ep"})
+	require.Equal(t, http.StatusCreated, agentEpRec.Code, agentEpRec.Body.String())
+	var agentEp WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(agentEpRec.Body.Bytes(), &agentEp))
+
+	ownerEpRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "o1-owner-ep"})
+	require.Equal(t, http.StatusCreated, ownerEpRec.Code, ownerEpRec.Body.String())
+	var ownerEp WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(ownerEpRec.Body.Bytes(), &ownerEp))
+
+	// 1. Agent POST create with system_one -> 400 agent_not_allowed, 0 compile calls.
+	agentCreateRec := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "o1-agent-create-s1",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: agentEp.ID},
+		Match: &TriggerMatchSpec{Rules: []TriggerMatchRuleSpec{
+			{Dialect: "cel", Expr: "true"},
+			{Dialect: "system_one", Expr: "Does this PR touch authentication?"},
+		}},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, agentCreateRec.Code, agentCreateRec.Body.String())
+	agentCreateErr := decodeTriggerRuleError(t, agentCreateRec)
+	assert.Equal(t, ErrCodeInvalidRule, agentCreateErr.Code)
+	assert.Equal(t, float64(2), agentCreateErr.Details["element"])
+	assert.Equal(t, "system_one", agentCreateErr.Details["dialect"])
+	assert.Equal(t, triggerReasonAgentNotAllowed, agentCreateErr.Details["reason"])
+	assert.Equal(t, triggerReasonAgentNotAllowed, agentCreateErr.Details["category"])
+	assert.Equal(t, int32(0), fakeS1.compileCalls.Load())
+
+	// 2. User POST create with system_one -> 201 Created, passes hook and compiles once.
+	userCreateRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "o1-owner-create-s1",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ownerEp.ID},
+		Match: &TriggerMatchSpec{Rules: []TriggerMatchRuleSpec{
+			{Dialect: "cel", Expr: "true"},
+			{Dialect: "system_one", Expr: "Does this PR touch authentication?"},
+		}},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, userCreateRec.Code, userCreateRec.Body.String())
+	assert.Equal(t, int32(1), fakeS1.compileCalls.Load())
+
+	// 3. Agent POST resume on a paused agent-held trigger with stored system_one -> 400 agent_not_allowed.
+	pausedAgentTr := seedStoredTriggerWithRules(t, f, agentEp.ID, "o1-agent-paused-s1", store.TriggerStatusPaused, []store.TriggerMatchRule{
+		{Dialect: "cel", Expr: "true"},
+		{Dialect: "system_one", Expr: "Does this PR touch authentication?"},
+	}, f.agentA.ID, "agent", f.agentA.ID)
+	agentResumeRec := f.doTrigger(t, f.agentAAuth, pausedAgentTr.ID+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusBadRequest, agentResumeRec.Code, agentResumeRec.Body.String())
+	agentResumeErr := decodeTriggerRuleError(t, agentResumeRec)
+	assert.Equal(t, ErrCodeInvalidRule, agentResumeErr.Code)
+	assert.Equal(t, triggerReasonAgentNotAllowed, agentResumeErr.Details["reason"])
+	assert.Equal(t, int32(1), fakeS1.compileCalls.Load(), "agent resume refused before compiling system_one")
+
+	// 4. User POST resume on a paused user trigger with stored system_one -> 200 OK, compiles element.
+	pausedOwnerTr := seedStoredTriggerWithRules(t, f, ownerEp.ID, "o1-owner-paused-s1", store.TriggerStatusPaused, []store.TriggerMatchRule{
+		{Dialect: "cel", Expr: "true"},
+		{Dialect: "system_one", Expr: "Does this PR touch authentication?"},
+	}, f.owner.ID, "user", f.owner.ID)
+	ownerResumeRec := f.doTrigger(t, f.ownerAuth, pausedOwnerTr.ID+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, ownerResumeRec.Code, ownerResumeRec.Body.String())
+	assert.Equal(t, int32(2), fakeS1.compileCalls.Load())
+}
+
+// TestTriggersAuthoring_GrantedSystemOneZeroCompileCallsOnUnchangedPatch
+// verifies N3: with a granted system_one dialect counting compile calls,
+// patching description, action, or only the CEL row of a stored [cel, system_one]
+// trigger returns 200 with 0 compile calls for the unchanged system_one element,
+// while editing the system_one element does invoke Compile.
+func TestTriggersAuthoring_GrantedSystemOneZeroCompileCallsOnUnchangedPatch(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	fakeS1 := installGrantedCountingSystemOneDialect(t, f)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "n3-counting-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	const (
+		celA = `event.attributes["branch"] == "main"`
+		celB = `event.attributes["branch"] == "release"`
+		s1A  = `Does this PR touch authentication?`
+		s1B  = `Does this PR touch billing?`
+	)
+
+	tr := seedStoredTriggerWithRules(t, f, ep.ID, "n3-mixed-s1", store.TriggerStatusActive, []store.TriggerMatchRule{
+		{Dialect: "cel", Expr: celA},
+		{Dialect: "system_one", Expr: s1A},
+	}, f.owner.ID, "user", f.owner.ID)
+	require.Equal(t, int32(0), fakeS1.compileCalls.Load())
+
+	// 1. PATCH description only -> 200, 0 compile calls.
+	newDesc := "n3-updated-desc"
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, tr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Description: &newDesc,
+	}).Code)
+	assert.Equal(t, int32(0), fakeS1.compileCalls.Load())
+
+	// 2. PATCH action only (changesFutureDispatch=true, req.Match=nil) -> 200, 0 compile calls.
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, tr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Action: &TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "n3-msg"},
+	}).Code)
+	assert.Equal(t, int32(0), fakeS1.compileCalls.Load())
+
+	// 3. PATCH match editing CEL only, system_one unchanged -> 200, 0 compile calls for element 2.
+	editCEL := []TriggerMatchRuleSpec{
+		{Dialect: "cel", Expr: celB},
+		{Dialect: "system_one", Expr: s1A},
+	}
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, tr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &editCEL},
+	}).Code)
+	assert.Equal(t, int32(0), fakeS1.compileCalls.Load())
+
+	// 4. Positive control: PATCH editing system_one expr -> 200, 1 compile call.
+	editS1 := []TriggerMatchRuleSpec{
+		{Dialect: "cel", Expr: celB},
+		{Dialect: "system_one", Expr: s1B},
+	}
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, tr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &editS1},
+	}).Code)
+	assert.Equal(t, int32(1), fakeS1.compileCalls.Load())
 }
 
 func TestTriggersAuthoring_PatchUnchangedNonAdmitted_PerPrincipalMatrix(t *testing.T) {
@@ -587,14 +786,16 @@ func TestTriggersAuthoring_PatchUnchangedNonAdmitted_PerPrincipalMatrix(t *testi
 
 	projBoundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.projectID}
 	wrongProjBoundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.otherProjID}
-	uatFull := scheduleTestUAT(t, f.ownerAuth, projBoundary, "trigger:update", "webhook_endpoint:read", "agent:message")
+	uatFull := scheduleTestUAT(t, f.ownerAuth, projBoundary, "trigger:update", "trigger:create", "webhook_endpoint:read", "agent:message")
+	uatUpdateOnly := scheduleTestUAT(t, f.ownerAuth, projBoundary, "trigger:update", "webhook_endpoint:read", "agent:message")
 	uatNoUpdate := scheduleTestUAT(t, f.ownerAuth, projBoundary, "trigger:read", "webhook_endpoint:read", "agent:message")
-	uatWrongProj := scheduleTestUAT(t, f.ownerAuth, wrongProjBoundary, "trigger:update", "webhook_endpoint:read", "agent:message")
+	uatWrongProj := scheduleTestUAT(t, f.ownerAuth, wrongProjBoundary, "trigger:update", "trigger:create", "webhook_endpoint:read", "agent:message")
 
 	principals := []struct {
 		name               string
 		auth               Identity
 		wantKeepS1Status   int
+		wantKeepS1Category string
 		wantMutateS1Status int
 	}{
 		{name: "owner", auth: f.ownerAuth, wantKeepS1Status: http.StatusOK, wantMutateS1Status: http.StatusBadRequest},
@@ -602,7 +803,8 @@ func TestTriggersAuthoring_PatchUnchangedNonAdmitted_PerPrincipalMatrix(t *testi
 		{name: "member", auth: f.memberAuth, wantKeepS1Status: http.StatusForbidden, wantMutateS1Status: http.StatusForbidden},
 		{name: "viewer", auth: f.viewerAuth, wantKeepS1Status: http.StatusForbidden, wantMutateS1Status: http.StatusForbidden},
 		{name: "agent_a", auth: f.agentAAuth, wantKeepS1Status: http.StatusForbidden, wantMutateS1Status: http.StatusForbidden},
-		{name: "uat_full", auth: uatFull, wantKeepS1Status: http.StatusOK, wantMutateS1Status: http.StatusBadRequest},
+		{name: "uat_update_and_create", auth: uatFull, wantKeepS1Status: http.StatusOK, wantMutateS1Status: http.StatusBadRequest},
+		{name: "uat_update_only", auth: uatUpdateOnly, wantKeepS1Status: http.StatusBadRequest, wantKeepS1Category: triggerCategorySystemOneAuthority, wantMutateS1Status: http.StatusBadRequest},
 		{name: "uat_no_update", auth: uatNoUpdate, wantKeepS1Status: http.StatusForbidden, wantMutateS1Status: http.StatusForbidden},
 		{name: "uat_wrong_proj", auth: uatWrongProj, wantKeepS1Status: http.StatusForbidden, wantMutateS1Status: http.StatusForbidden},
 	}
@@ -622,6 +824,11 @@ func TestTriggersAuthoring_PatchUnchangedNonAdmitted_PerPrincipalMatrix(t *testi
 				Match: &TriggerMatchPatchSpec{Rules: &keepS1},
 			})
 			assert.Equal(t, p.wantKeepS1Status, keepRec.Code, "keep S1 body=%s", keepRec.Body.String())
+			if p.wantKeepS1Category != "" {
+				eb := decodeTriggerRuleError(t, keepRec)
+				assert.Equal(t, ErrCodeInvalidRule, eb.Code)
+				assert.Equal(t, p.wantKeepS1Category, eb.Details["category"])
+			}
 
 			mutateS1 := []TriggerMatchRuleSpec{
 				{Dialect: "cel", Expr: celB},
@@ -636,4 +843,111 @@ func TestTriggersAuthoring_PatchUnchangedNonAdmitted_PerPrincipalMatrix(t *testi
 			}
 		})
 	}
+}
+
+// TestTriggersAuthoring_SystemOneReattributionAuthority verifies
+// mixed-rule-arrays-design.md §11.6:
+//   - a trigger:update-only UAT re-attributing an S1-bearing trigger -> 400 system_one_authority;
+//   - a non-re-attributing description PATCH by that UAT -> 200;
+//   - owner/admin (holding trigger.create) -> 200;
+//   - an agent re-attribution -> 400 agent_not_allowed (via direct helper, since HTTP refuses agents today);
+//   - re-attribution of a CEL-only trigger -> unchanged (200).
+func TestTriggersAuthoring_SystemOneReattributionAuthority(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "s116-reattrib-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	const (
+		celA = `event.attributes["branch"] == "main"`
+		celB = `event.attributes["branch"] == "release"`
+		s1A  = `Does this PR touch authentication?`
+	)
+
+	projBoundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.projectID}
+	uatUpdateOnly := scheduleTestUAT(t, f.ownerAuth, projBoundary, "trigger:update", "webhook_endpoint:read", "agent:message")
+	uatUpdateAndCreate := scheduleTestUAT(t, f.ownerAuth, projBoundary, "trigger:update", "trigger:create", "webhook_endpoint:read", "agent:message")
+
+	s1Tr := seedStoredTriggerWithRules(t, f, ep.ID, "s116-s1-tr", store.TriggerStatusActive, []store.TriggerMatchRule{
+		{Dialect: "cel", Expr: celA},
+		{Dialect: "system_one", Expr: s1A},
+	}, f.owner.ID, "user", f.owner.ID)
+
+	// 1. trigger:update-only UAT re-attributing via match edit -> 400 system_one_authority, stored trigger unchanged.
+	editCEL := []TriggerMatchRuleSpec{
+		{Dialect: "cel", Expr: celB},
+		{Dialect: "system_one", Expr: s1A},
+	}
+	recMatch := f.doTrigger(t, uatUpdateOnly, s1Tr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &editCEL},
+	})
+	require.Equal(t, http.StatusBadRequest, recMatch.Code, recMatch.Body.String())
+	eb := decodeTriggerRuleError(t, recMatch)
+	assert.Equal(t, ErrCodeInvalidRule, eb.Code)
+	assert.Equal(t, triggerCategorySystemOneAuthority, eb.Details["category"])
+	assert.Equal(t, triggerMsgSystemOneReattributionRequires, eb.Details["message"])
+	assert.Equal(t, float64(2), eb.Details["element"])
+	assert.Equal(t, "system_one", eb.Details["dialect"])
+
+	// 2. trigger:update-only UAT re-attributing via action edit (req.Match == nil) -> 400 system_one_authority.
+	recAction := f.doTrigger(t, uatUpdateOnly, s1Tr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Action: &TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "new-msg"},
+	})
+	require.Equal(t, http.StatusBadRequest, recAction.Code, recAction.Body.String())
+	assert.Equal(t, triggerCategorySystemOneAuthority, decodeTriggerRuleError(t, recAction).Details["category"])
+
+	storedAfterRefusal, err := f.store.GetTrigger(ctx, s1Tr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, storedAfterRefusal.AuthorizationRevision, "refused re-attribution must not mutate stored trigger")
+
+	// 3. Non-re-attributing description PATCH by trigger:update-only UAT -> 200 (no re-attribution).
+	newDesc := "desc-without-reattrib"
+	recDesc := f.doTrigger(t, uatUpdateOnly, s1Tr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Description: &newDesc,
+	})
+	require.Equal(t, http.StatusOK, recDesc.Code, recDesc.Body.String())
+
+	// 4. Owner, admin, and trigger:update+trigger:create UAT -> 200.
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, s1Tr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &editCEL},
+	}).Code)
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.adminAuth, s1Tr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Action: &TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "admin-msg"},
+	}).Code)
+	require.Equal(t, http.StatusOK, f.doTrigger(t, uatUpdateAndCreate, s1Tr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Action: &TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "uat-msg"},
+	}).Code)
+
+	// 5. Agent re-attribution on S1-bearing trigger -> 400 D2 (agent_not_allowed), via direct helper.
+	agentCtx := contextWithIdentity(ctx, f.agentAAuth)
+	agentRec := httptest.NewRecorder()
+	ok := f.srv.authorizeTriggerSystemOneReattribution(agentRec, agentCtx, f.projectID, []triggerrule.Rule{
+		{Dialect: "cel", Expr: celA},
+		{Dialect: "system_one", Expr: s1A},
+	})
+	assert.False(t, ok)
+	require.Equal(t, http.StatusBadRequest, agentRec.Code, agentRec.Body.String())
+	agentErr := decodeTriggerRuleError(t, agentRec)
+	assert.Equal(t, ErrCodeInvalidRule, agentErr.Code)
+	assert.Equal(t, triggerReasonAgentNotAllowed, agentErr.Details["reason"])
+	assert.Equal(t, triggerReasonAgentNotAllowed, agentErr.Details["category"])
+	assert.Equal(t, "system_one", agentErr.Details["dialect"])
+
+	// 6. Re-attribution of a CEL-only trigger -> unchanged behavior (200 for trigger:update-only UAT, allowed for agent helper).
+	celTr := seedStoredTriggerWithRules(t, f, ep.ID, "s116-cel-only", store.TriggerStatusActive, []store.TriggerMatchRule{
+		{Dialect: "cel", Expr: celA},
+	}, f.owner.ID, "user", f.owner.ID)
+	editCELOnly := []TriggerMatchRuleSpec{{Dialect: "cel", Expr: celB}}
+	recCEL := f.doTrigger(t, uatUpdateOnly, celTr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &editCELOnly},
+	})
+	require.Equal(t, http.StatusOK, recCEL.Code, recCEL.Body.String())
+
+	agentCELRec := httptest.NewRecorder()
+	assert.True(t, f.srv.authorizeTriggerSystemOneReattribution(agentCELRec, agentCtx, f.projectID, []triggerrule.Rule{
+		{Dialect: "cel", Expr: celB},
+	}))
 }

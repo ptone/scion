@@ -40,9 +40,12 @@ var (
 )
 
 const (
-	maxTriggerMatchFormBytes     = 16 * 1024
-	triggerDialectSystemOne      = "system_one"
-	triggerReasonAgentNotAllowed = "agent_not_allowed"
+	maxTriggerMatchFormBytes                   = 16 * 1024
+	triggerDialectSystemOne                    = "system_one"
+	triggerReasonAgentNotAllowed               = "agent_not_allowed"
+	triggerCategoryAgentSystemOnePrefixChanged = "agent_system_one_prefix_changed"
+	triggerCategorySystemOneAuthority          = "system_one_authority"
+	triggerMsgSystemOneReattributionRequires   = "re-attributing this trigger requires trigger.create (System One elements present)"
 )
 
 type triggerMatchRuleKey struct {
@@ -376,6 +379,19 @@ func makeAgentSystemOneNotAllowedFailure(elemNum int) triggerElementFailure {
 	}
 }
 
+func makeAgentSystemOnePrefixChangedFailure(elemNum int, dialect string) triggerElementFailure {
+	return triggerElementFailure{
+		entry: map[string]any{
+			"element":  elemNum,
+			"dialect":  dialect,
+			"reason":   triggerReasonAgentNotAllowed,
+			"category": triggerCategoryAgentSystemOnePrefixChanged,
+		},
+		summary:  fmt.Sprintf("invalid match rule [element %d]: agents cannot modify rules in the prefix through the last system_one element", elemNum),
+		consumer: triggerrule.ConsumerName,
+	}
+}
+
 // isTriggerAgentCaller reports whether ctx carries an agent identity.
 func isTriggerAgentCaller(ctx context.Context) bool {
 	identity := GetIdentityFromContext(ctx)
@@ -473,22 +489,73 @@ func validateAgentSystemOnePrefix(normalized []store.TriggerMatchRule, stored []
 		if i < len(normalized) && normalized[i].Dialect == sd && normalized[i].Expr == stored[i].Expr {
 			continue
 		}
-		failures = append(failures, makeAgentSystemOneNotAllowedFailure(elemNum))
+		if sd == triggerDialectSystemOne {
+			failures = append(failures, makeAgentSystemOneNotAllowedFailure(elemNum))
+			continue
+		}
+		actualDialect := sd
+		if i < len(normalized) && normalized[i].Dialect != "" {
+			actualDialect = normalized[i].Dialect
+		}
+		failures = append(failures, makeAgentSystemOnePrefixChangedFailure(elemNum, actualDialect))
 	}
 	return failures
 }
 
+// authorizeTriggerSystemOneReattribution enforces mixed-rule-arrays-design.md
+// §11.6 on any PATCH that would re-attribute a trigger's revision
+// (changesFutureDispatch == true) when the resulting match rules contain any
+// system_one element:
+//   - Agent callers are refused with 400 invalid_rule (agent_not_allowed, D2).
+//   - Non-agent callers whose effective ceiling lacks trigger.create in
+//     projectID (e.g., a trigger:update-only UAT) are refused with 400
+//     invalid_rule {category: "system_one_authority"}.
+//   - CEL-only / Types-only triggers (no system_one elements) are unaffected.
+//
+// Called in updateTrigger before WithTx (no I/O inside a transaction).
+func (s *Server) authorizeTriggerSystemOneReattribution(
+	w http.ResponseWriter,
+	ctx context.Context,
+	projectID string,
+	resultingRules []triggerrule.Rule,
+) bool {
+	firstS1Elem := 0
+	for i, r := range resultingRules {
+		if normalizedTriggerRuleDialect(r.Dialect) == triggerDialectSystemOne {
+			firstS1Elem = i + 1
+			break
+		}
+	}
+	if firstS1Elem == 0 {
+		return true
+	}
+	if isTriggerAgentCaller(ctx) {
+		writeTriggerMatchElementErrors(w, []triggerElementFailure{makeAgentSystemOneNotAllowedFailure(firstS1Elem)})
+		return false
+	}
+	if !s.triggerAccessDecision(ctx, projectID, ActionCreate, nil).allowed {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRule, triggerMsgSystemOneReattributionRequires, map[string]any{
+			"field":    "match",
+			"category": triggerCategorySystemOneAuthority,
+			"message":  triggerMsgSystemOneReattributionRequires,
+			"element":  firstS1Elem,
+			"dialect":  triggerDialectSystemOne,
+		})
+		return false
+	}
+	return true
+}
+
 // authorizeNewOrChangedTriggerMatchElement is the authoring authorization hook
 // for NEW or CHANGED match elements only (never called for unchanged stored
-// elements carried through a PATCH).
+// elements carried through a PATCH). Runs on create, PATCH (new/changed), and
+// resume (full re-admission).
 //
 // T2 hook (ptone/scion#8051 / #8045): when System One trigger authoring lands,
 // T2's D1 per-project instance allowlist check and D2 user-only authoring check
 // plug in here so they automatically apply only to new or changed elements and
 // never re-check unchanged byte-identical elements on PATCH.
-func (s *Server) authorizeNewOrChangedTriggerMatchElement(ctx context.Context, elemNum int, elem store.TriggerMatchRule, isAgent bool) *triggerElementFailure {
-	_ = s
-	_ = ctx
+func (*Server) authorizeNewOrChangedTriggerMatchElement(_ context.Context, elemNum int, elem store.TriggerMatchRule, isAgent bool) *triggerElementFailure {
 	if isAgent && elem.Dialect == triggerDialectSystemOne {
 		f := makeAgentSystemOneNotAllowedFailure(elemNum)
 		return &f
@@ -702,9 +769,10 @@ func (s *Server) writeAndValidateTriggerMatch(
 			continue
 		}
 
-		// For new or changed elements, enforce T2 authoring hooks (D2 agent
+		// For new or changed elements (including all elements on create and
+		// resume, where unchanged is nil), enforce T2 authoring hooks (D2 agent
 		// carve-out on system_one, and D1 allowlist once T2 lands).
-		if !isUnchanged && opts.allowStoredAdmissionSkip {
+		if !isUnchanged {
 			if authzFailure := s.authorizeNewOrChangedTriggerMatchElement(ctx, elemNum, elem, isAgent); authzFailure != nil {
 				failures = append(failures, *authzFailure)
 				agentFailedElems[elemNum] = true

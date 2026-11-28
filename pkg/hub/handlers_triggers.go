@@ -1520,6 +1520,14 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if !authorizeTriggerReuseSubject(w, tr.SubjectMode, ceiling, prov) {
 			return
 		}
+		resultingMatchRules, rErr := triggerMatchRules(*tr)
+		if rErr != nil {
+			writeCorruptTriggerMatchRulesError(w)
+			return
+		}
+		if !s.authorizeTriggerSystemOneReattribution(w, ctx, projectID, resultingMatchRules) {
+			return
+		}
 		if oldSourceKind != store.TriggerSourceKindGitHub &&
 			tr.SourceKind == store.TriggerSourceKindGitHub &&
 			!updatingActions &&
