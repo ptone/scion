@@ -133,20 +133,56 @@ func runProjectGitHubStatus(ctx context.Context, projects hubclient.ProjectServi
 		_, _ = fmt.Fprintln(out)
 	}
 
-	_, _ = fmt.Fprintf(out, "\nToken Permissions (mode: %s)\n", info.Permissions.Mode)
-	if !info.Permissions.AppGrantKnown && info.Permissions.AppGranted == nil {
+	_, _ = fmt.Fprintln(out)
+	return renderProjectGitHubPermissionsTable(out, info.Permissions)
+}
+
+func renderProjectGitHubPermissionsTable(out io.Writer, perms hubclient.ProjectGitHubPermissions) error {
+	_, _ = fmt.Fprintf(out, "Token Permissions (mode: %s)\n", perms.Mode)
+	appGrantKnown := perms.AppGrantKnown || perms.AppGranted != nil
+	if !perms.AppGrantKnown && perms.AppGranted == nil {
 		_, _ = fmt.Fprintln(out, "Note: App permissions not yet loaded.")
 	}
 	tw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "PERMISSION\tREQUESTED\tAPP GRANT\tEFFECTIVE\tNOTE")
 	for _, row := range projectGitHubPermRows {
-		req := dashIfEmpty(info.Permissions.Requested[row.key])
-		appGrant := dashIfEmpty(info.Permissions.AppGranted[row.key])
-		eff := dashIfEmpty(info.Permissions.Effective[row.key])
-		note := formatCapReason(info.Permissions.CapReasons[row.key], info.Permissions.Requested[row.key])
+		reqRaw := perms.Requested[row.key]
+		appRaw := perms.AppGranted[row.key]
+		effRaw := perms.Effective[row.key]
+		req := dashIfEmpty(reqRaw)
+		appGrant := dashIfEmpty(appRaw)
+		eff := dashIfEmpty(effRaw)
+		note := formatProjectGitHubPermNote(perms, row.key, reqRaw, appRaw, appGrantKnown)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", row.label, req, appGrant, eff, note)
 	}
 	return tw.Flush()
+}
+
+func permLevelRank(level string) int {
+	switch level {
+	case "read":
+		return 1
+	case "write", "admin":
+		return 2
+	default:
+		return 0
+	}
+}
+
+func formatProjectGitHubPermNote(perms hubclient.ProjectGitHubPermissions, key, requested, appGranted string, appGrantKnown bool) string {
+	capNote := formatCapReason(perms.CapReasons[key], requested)
+	beyondNote := ""
+	if perms.Mode == "custom" && appGrantKnown && requested != "" && permLevelRank(requested) > permLevelRank(appGranted) {
+		beyondNote = "warning: the App does not grant this; tokens will fail until the App is updated"
+	}
+	switch {
+	case capNote != "" && beyondNote != "":
+		return capNote + "; " + beyondNote
+	case capNote != "":
+		return capNote
+	default:
+		return beyondNote
+	}
 }
 
 func dashIfEmpty(v string) string {

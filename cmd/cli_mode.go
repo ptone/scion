@@ -169,8 +169,9 @@ var agentAllowed = map[string]bool{
 	// Read-only GitHub App status for the project (ptone/scion#9327).
 	// project.github.bind and project.github.unbind are deliberately absent:
 	// binding and unbinding are human/admin operations.
-	"project.github":            true,
-	"project.github.status":     true,
+	"project.github":             true,
+	"project.github.status":      true,
+	"project.github.permissions": true,
 	"set-message-mode":          true,
 	"conversation":              true,
 	"conversation.list":         true,

@@ -93,6 +93,17 @@ type BindGitHubInstallationResponse struct {
 	Status         string `json:"status"`
 }
 
+// GitHubTokenPermissions configures the custom GitHub App installation token
+// permissions for a project (PUT /api/v1/projects/{id}/github-permissions).
+type GitHubTokenPermissions struct {
+	Contents     string `json:"contents,omitempty"`
+	PullRequests string `json:"pull_requests,omitempty"`
+	Issues       string `json:"issues,omitempty"`
+	Metadata     string `json:"metadata,omitempty"`
+	Checks       string `json:"checks,omitempty"`
+	Actions      string `json:"actions,omitempty"`
+}
+
 func (s *projectService) GetGitHub(ctx context.Context, projectID string) (*ProjectGitHub, error) {
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -128,6 +139,30 @@ func (s *projectService) UnbindGitHubInstallation(ctx context.Context, projectID
 		return errors.New("project ID is required")
 	}
 	path := "/api/v1/projects/" + url.PathEscape(projectID) + "/github-installation"
+	resp, err := s.c.delete(ctx, path, nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+func (s *projectService) SetGitHubPermissions(ctx context.Context, projectID string, perms GitHubTokenPermissions) (*GitHubTokenPermissions, error) {
+	if projectID == "" {
+		return nil, errors.New("project ID is required")
+	}
+	path := "/api/v1/projects/" + url.PathEscape(projectID) + "/github-permissions"
+	resp, err := s.c.put(ctx, path, perms, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[GitHubTokenPermissions](resp)
+}
+
+func (s *projectService) ResetGitHubPermissions(ctx context.Context, projectID string) error {
+	if projectID == "" {
+		return errors.New("project ID is required")
+	}
+	path := "/api/v1/projects/" + url.PathEscape(projectID) + "/github-permissions"
 	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {
 		return err

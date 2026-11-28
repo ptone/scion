@@ -35,7 +35,10 @@ Examples:
   scion project github status
   scion project github bind
   scion project github bind --installation 12345
-  scion project github unbind`,
+  scion project github unbind
+  scion project github permissions
+  scion project github permissions set contents=write pull_requests=write issues=read metadata=read
+  scion project github permissions reset`,
 }
 
 // filterMatchingActiveInstallations returns active GitHub App installations
@@ -58,4 +61,5 @@ func init() {
 	projectGitHubCmd.AddCommand(projectGitHubStatusCmd)
 	projectGitHubCmd.AddCommand(projectGitHubBindCmd)
 	projectGitHubCmd.AddCommand(projectGitHubUnbindCmd)
+	projectGitHubCmd.AddCommand(projectGitHubPermissionsCmd)
 }

@@ -128,6 +128,14 @@ type ProjectService interface {
 	// UnbindGitHubInstallation removes the GitHub App installation association
 	// from a project (DELETE /api/v1/projects/{id}/github-installation).
 	UnbindGitHubInstallation(ctx context.Context, projectID string) error
+
+	// SetGitHubPermissions replaces the project's custom GitHub App token
+	// permissions (PUT /api/v1/projects/{id}/github-permissions).
+	SetGitHubPermissions(ctx context.Context, projectID string, perms GitHubTokenPermissions) (*GitHubTokenPermissions, error)
+
+	// ResetGitHubPermissions resets the project's GitHub App token permissions
+	// back to defaults (DELETE /api/v1/projects/{id}/github-permissions).
+	ResetGitHubPermissions(ctx context.Context, projectID string) error
 }
 
 // projectService is the implementation of ProjectService.

@@ -182,6 +182,9 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `project github status` | Y | Y |
 | `project github bind` | Y | - (hub-admin binding operation, ptone/scion#9327) |
 | `project github unbind` | Y | - (human/admin operation, ptone/scion#9327) |
+| `project github permissions` | Y | Y |
+| `project github permissions set` | Y | - (project update operation, ptone/scion#9328) |
+| `project github permissions reset` | Y | - (project update operation, ptone/scion#9328) |
 | `project leave` | Y | - (an agent must not drop its user's membership; the hub also refuses agent credentials, ptone/scion#7494) |
 | `harness-config` (all) | Y | - |
 | `hub status` | Y | Y (runtime: only with a target-hub profile for another hub, ptone/scion#4240) |

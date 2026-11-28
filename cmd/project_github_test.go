@@ -27,13 +27,17 @@ import (
 
 type fakeProjectGitHubProjects struct {
 	hubclient.ProjectService
-	info      *hubclient.ProjectGitHub
-	getErr    error
-	bindCalls []int64
-	bindResp  *hubclient.BindGitHubInstallationResponse
-	bindErr   error
-	unbindHit bool
-	unbindErr error
+	info          *hubclient.ProjectGitHub
+	getErr        error
+	bindCalls     []int64
+	bindResp      *hubclient.BindGitHubInstallationResponse
+	bindErr       error
+	unbindHit     bool
+	unbindErr     error
+	setPermsCalls []hubclient.GitHubTokenPermissions
+	setPermsErr   error
+	resetPermsHit bool
+	resetPermsErr error
 }
 
 func (f *fakeProjectGitHubProjects) GetGitHub(_ context.Context, _ string) (*hubclient.ProjectGitHub, error) {
@@ -61,6 +65,19 @@ func (f *fakeProjectGitHubProjects) BindGitHubInstallation(_ context.Context, pr
 func (f *fakeProjectGitHubProjects) UnbindGitHubInstallation(_ context.Context, _ string) error {
 	f.unbindHit = true
 	return f.unbindErr
+}
+
+func (f *fakeProjectGitHubProjects) SetGitHubPermissions(_ context.Context, _ string, perms hubclient.GitHubTokenPermissions) (*hubclient.GitHubTokenPermissions, error) {
+	f.setPermsCalls = append(f.setPermsCalls, perms)
+	if f.setPermsErr != nil {
+		return nil, f.setPermsErr
+	}
+	return &perms, nil
+}
+
+func (f *fakeProjectGitHubProjects) ResetGitHubPermissions(_ context.Context, _ string) error {
+	f.resetPermsHit = true
+	return f.resetPermsErr
 }
 
 type fakeProjectGitHubApp struct {
@@ -342,20 +359,160 @@ func TestProjectGitHubUnbind(t *testing.T) {
 	assert.Contains(t, buf.String(), "Removed GitHub App installation from project proj-1.")
 }
 
+func TestProjectGitHubPermissions_ShowAndWarnings(t *testing.T) {
+	prevFmt := outputFormat
+	outputFormat = ""
+	t.Cleanup(func() { outputFormat = prevFmt })
+
+	projects := &fakeProjectGitHubProjects{
+		info: &hubclient.ProjectGitHub{
+			ProjectID: "proj-1",
+			Permissions: hubclient.ProjectGitHubPermissions{
+				Mode:          "custom",
+				AppGrantKnown: true,
+				Requested: map[string]string{
+					"contents": "write",
+					"issues":   "write",
+					"checks":   "read",
+					"metadata": "read",
+				},
+				AppGranted: map[string]string{
+					"contents": "write",
+					"issues":   "read",
+					"metadata": "read",
+				},
+				Effective: map[string]string{
+					"contents": "read",
+					"issues":   "read",
+					"checks":   "read",
+					"metadata": "read",
+				},
+				Capped: []string{"contents", "issues"},
+				CapReasons: map[string]string{
+					"contents": "association_read_only",
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	require.NoError(t, runProjectGitHubPermissionsShow(context.Background(), projects, "proj-1", &buf))
+	out := buf.String()
+	assert.Contains(t, out, "Token Permissions (mode: custom)")
+	assert.Contains(t, out, "association is read-only")
+	// Issues (write > read) and Checks (read > none) exceed App grant in custom mode.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Issues") || strings.HasPrefix(line, "Checks") {
+			assert.Contains(t, line, "the App does not grant this; tokens will fail until the App is updated", "line: %s", line)
+		}
+		if strings.HasPrefix(line, "Contents") || strings.HasPrefix(line, "Metadata") {
+			assert.NotContains(t, line, "the App does not grant this", "line: %s", line)
+		}
+	}
+
+	// When AppGrantKnown is false and AppGranted is nil, do not emit false beyond-grant warnings.
+	projects.info.Permissions.AppGrantKnown = false
+	projects.info.Permissions.AppGranted = nil
+	buf.Reset()
+	require.NoError(t, runProjectGitHubPermissionsShow(context.Background(), projects, "proj-1", &buf))
+	assert.Contains(t, buf.String(), "App permissions not yet loaded.")
+	assert.NotContains(t, buf.String(), "the App does not grant this")
+}
+
+func TestParseGitHubTokenPermissionsArgs(t *testing.T) {
+	t.Run("parses valid permissions including none", func(t *testing.T) {
+		got, err := parseGitHubTokenPermissionsArgs([]string{
+			"contents=write",
+			"pull_requests=read",
+			"issues=none",
+			"metadata=read",
+			"checks=write",
+			"actions=none",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, hubclient.GitHubTokenPermissions{
+			Contents:     "write",
+			PullRequests: "read",
+			Issues:       "",
+			Metadata:     "read",
+			Checks:       "write",
+			Actions:      "",
+		}, got)
+	})
+
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{"empty args", nil, "at least one permission"},
+		{"missing equals", []string{"contents"}, "expected key=level"},
+		{"unknown key", []string{"deployments=write"}, "unknown permission"},
+		{"invalid level", []string{"contents=admin"}, "invalid level"},
+		{"duplicate key", []string{"contents=read", "contents=write"}, "duplicate permission"},
+		{"all none", []string{"contents=none", "issues=none"}, "at least one permission must be set"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseGitHubTokenPermissionsArgs(tc.args)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+func TestProjectGitHubPermissions_SetAndReset(t *testing.T) {
+	prevFmt := outputFormat
+	outputFormat = ""
+	t.Cleanup(func() { outputFormat = prevFmt })
+
+	projects := &fakeProjectGitHubProjects{
+		info: &hubclient.ProjectGitHub{
+			ProjectID: "proj-1",
+			Permissions: hubclient.ProjectGitHubPermissions{
+				Mode:          "custom",
+				AppGrantKnown: true,
+				Requested:     map[string]string{"contents": "read", "metadata": "read"},
+				AppGranted:    map[string]string{"contents": "write", "metadata": "read"},
+				Effective:     map[string]string{"contents": "read", "metadata": "read"},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	perms := hubclient.GitHubTokenPermissions{Contents: "read", Metadata: "read"}
+	require.NoError(t, runProjectGitHubPermissionsSet(context.Background(), projects, "proj-1", perms, &buf))
+	assert.Equal(t, []hubclient.GitHubTokenPermissions{perms}, projects.setPermsCalls)
+	assert.Contains(t, buf.String(), "Updated custom GitHub token permissions for project proj-1.")
+	assert.Contains(t, buf.String(), "Token Permissions (mode: custom)")
+
+	projects.info.Permissions.Mode = "default"
+	buf.Reset()
+	require.NoError(t, runProjectGitHubPermissionsReset(context.Background(), projects, "proj-1", &buf))
+	assert.True(t, projects.resetPermsHit)
+	assert.Contains(t, buf.String(), "Reset GitHub token permissions to defaults for project proj-1.")
+	assert.Contains(t, buf.String(), "Token Permissions (mode: default)")
+}
+
 func TestProjectGitHub_AgentModeAndWindowsGates(t *testing.T) {
-	// Agent mode: status allowed, bind and unbind NOT allowed.
+	// Agent mode: status and permissions (read) allowed; bind, unbind, set, reset NOT allowed.
 	assert.True(t, agentAllowed["project.github"], "project.github must be allowed in agent mode")
 	assert.True(t, agentAllowed["project.github.status"], "project.github.status must be allowed in agent mode")
+	assert.True(t, agentAllowed["project.github.permissions"], "project.github.permissions must be allowed in agent mode")
 	assert.False(t, agentAllowed["project.github.bind"], "project.github.bind must NOT be allowed in agent mode")
 	assert.False(t, agentAllowed["project.github.unbind"], "project.github.unbind must NOT be allowed in agent mode")
+	assert.False(t, agentAllowed["project.github.permissions.set"], "project.github.permissions.set must NOT be allowed in agent mode")
+	assert.False(t, agentAllowed["project.github.permissions.reset"], "project.github.permissions.reset must NOT be allowed in agent mode")
 
-	// Windows gate: all three subcommands + parent allowed.
+	// Windows gate: all subcommands + parents allowed.
 	root, ran := gateTestTree(t)
 	applyPlatformRestrictions(root, "windows")
 	for _, args := range [][]string{
 		{"project", "github", "status"},
 		{"project", "github", "bind"},
 		{"project", "github", "unbind"},
+		{"project", "github", "permissions"},
+		{"project", "github", "permissions", "set"},
+		{"project", "github", "permissions", "reset"},
 	} {
 		*ran = nil
 		root.SetArgs(args)
