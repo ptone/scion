@@ -948,7 +948,10 @@ describe('scion-admin-github-extra-repos-policy', () => {
       vi.fn((url: string | URL | Request, init?: RequestInit) => {
         const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
         if (path.includes('/api/v1/github-app') && init?.method === 'PUT') {
-          const parsed = JSON.parse(String(init.body ?? '{}')) as Record<string, unknown>;
+          const parsed = JSON.parse(typeof init.body === 'string' ? init.body : '{}') as Record<
+            string,
+            unknown
+          >;
           putBodies.push(parsed);
           return jsonResponse({ extra_repos_policy: parsed.extra_repos_policy });
         }
@@ -969,7 +972,10 @@ describe('scion-admin-github-extra-repos-policy', () => {
       expect(query(element!, 'sl-radio-group')).not.toBeNull();
     });
 
-    const saveBtn = query(element, 'sl-button[data-action="save-extra-repos-policy"]') as HTMLElement;
+    const saveBtn = query(
+      element,
+      'sl-button[data-action="save-extra-repos-policy"]'
+    ) as HTMLElement;
     expect(saveBtn.hasAttribute('disabled')).toBe(true);
 
     const group = query(element, 'sl-radio-group') as HTMLElement & { value: string };

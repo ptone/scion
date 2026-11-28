@@ -45,5 +45,9 @@ export const GITHUB_ADMIN_SECTIONS: readonly GitHubAdminSection[] = [
     tag: 'scion-admin-github-routing',
     load: () => import('../admin/admin-github-routing.js'),
   },
-  { id: 'extra-repos-policy', tag: 'scion-admin-github-extra-repos-policy', load: () => import('../admin/admin-github-extra-repos-policy.js') },
+  {
+    id: 'extra-repos-policy',
+    tag: 'scion-admin-github-extra-repos-policy',
+    load: () => import('../admin/admin-github-extra-repos-policy.js'),
+  },
 ];
