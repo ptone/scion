@@ -988,7 +988,7 @@ describe('scion-admin-github-extra-repos-policy', () => {
 
     await vi.waitFor(() => {
       expect(putBodies).toEqual([{ extra_repos_policy: 'hub_admin' }]);
+      expect(shadowText(element!)).toContain('Extra repositories policy saved.');
     });
-    expect(shadowText(element)).toContain('Extra repositories policy saved.');
   });
 });
