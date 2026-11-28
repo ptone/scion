@@ -35,6 +35,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -197,16 +198,16 @@ func TestSkillsResolve_GHCacheKeyedByURI(t *testing.T) {
 	require.Equal(t, int64(2), afterFirst)
 
 	resolve(t, "gh://"+owner+"/"+repo+"/second")
-	require.Equal(t, int64(4), gh.calls.Load(),
-		"a different skill path must miss the cache and hit GitHub")
+	require.Equal(t, int64(3), gh.calls.Load(),
+		"a different skill path must miss the tree cache (reusing the cached ref) and hit GitHub")
 
 	// Re-resolve the first URI. Without this the test is vacuous: two distinct
-	// uncached resolves also cost 2 then 4 calls, so the assertions above hold
+	// uncached resolves also cost extra calls, so the assertions above hold
 	// even with caching disabled. A cache hit here pins both halves of the
 	// claim — caching is active, and the second URI's entry neither evicted the
 	// first nor aliased onto it.
 	resolve(t, uriA)
-	assert.Equal(t, int64(4), gh.calls.Load(),
+	assert.Equal(t, int64(3), gh.calls.Load(),
 		"re-resolving the first URI must hit its own cache entry and make no further GitHub calls")
 }
 
@@ -1294,7 +1295,7 @@ func TestSkillsResolve_GHCacheEntryExpiryIsJittered(t *testing.T) {
 	type window struct{ before, after time.Time }
 	windows := map[string]window{}
 	for _, name := range []string{"one", "two", "three", "four", "five"} {
-		uri := "gh://" + owner + "/" + repo + "/" + name + "@main"
+		uri := "gh://" + owner + "/" + repo + "/" + name + "@main-" + name
 		before := time.Now()
 		rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
 			ResolveSkillsRequest{Skills: []ResolveSkillRef{{URI: uri}}, ProjectID: project.ID})
@@ -1306,12 +1307,18 @@ func TestSkillsResolve_GHCacheEntryExpiryIsJittered(t *testing.T) {
 		windows[uri] = window{before, after}
 	}
 
-	rows, err := client.GitHubResolutionCache.Query().All(context.Background())
+	allRows, err := client.GitHubResolutionCache.Query().All(context.Background())
 	require.NoError(t, err)
-	require.Len(t, rows, len(windows))
+	var refRows []*ent.GitHubResolutionCache
+	for _, row := range allRows {
+		if strings.HasPrefix(row.CacheKey, "ref:") {
+			refRows = append(refRows, row)
+		}
+	}
+	require.Len(t, refRows, len(windows))
 
 	jittered := 0
-	for _, row := range rows {
+	for _, row := range refRows {
 		w, ok := windows[row.OriginalURI]
 		require.True(t, ok, "unexpected cache row for %s", row.OriginalURI)
 		lo := w.before.Add(ttl - band - slack)

@@ -363,7 +363,10 @@ func TestResolveGitHubSkill_StaleEntryWinsOverRememberedFailure(t *testing.T) {
 	require.NoError(t, err, "the anon stale entry must be served immediately via SWR")
 	assert.Equal(t, safeShortSHA(staleSHA), resp.ResolvedVersion)
 
-	// Wait for the background refresh to complete; its 404 must delete the cached rows.
+	// Wait for the background refresh goroutine to reach GitHub and finish its
+	// flight; its 404 must delete the cached rows.
+	require.Eventually(t, func() bool { return gh.commitCalls.Load() >= 1 }, 5*time.Second, 10*time.Millisecond,
+		"background refresh must reach GitHub")
 	_, _, _ = srv.ghResolveFlight.Do(flightKey, func() (interface{}, error) { return nil, nil })
 	_, ok, err := srv.ghResolutionStore.GetStale(ctx, refKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
 	require.NoError(t, err)
