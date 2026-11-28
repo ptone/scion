@@ -1579,7 +1579,7 @@ func TestV2_Publish_ReplyToMessageID(t *testing.T) {
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
 	assert.Equal(t, int64(-200), sent[0].ChatID)
-	assert.Equal(t, int64(42), sent[0].ReplyToMessageID)
+	assert.Equal(t, int64(0), sent[0].ReplyToMessageID, "metadata telegram_message_id must not set reply_to_message_id")
 }
 
 // --- handleCallbackQuery tests ---

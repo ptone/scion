@@ -1229,26 +1229,11 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		return nil
 	}
 
-	// Determine reply-to if available.
-	var replyToMsgID int64
-	if msg != nil && msg.Metadata != nil {
-		if v, ok := msg.Metadata["telegram_message_id"]; ok {
-			replyToMsgID, _ = strconv.ParseInt(v, 10, 64)
-		}
-	}
-
 	var errs []error
 	for _, chatID := range chatIDs {
 		var err error
 		if sq != nil {
-			var keyboard *InlineKeyboardMarkup
-			if replyToMsgID > 0 {
-				_, err = sq.Send(ctx, chatID, text, "", keyboard, replyToMsgID, threadOpts...)
-			} else {
-				_, err = sq.Send(ctx, chatID, text, "", nil, 0, threadOpts...)
-			}
-		} else if replyToMsgID > 0 {
-			_, err = api.SendMessageWithKeyboard(ctx, chatID, text, "", nil, replyToMsgID, threadOpts...)
+			_, err = sq.Send(ctx, chatID, text, "", nil, 0, threadOpts...)
 		} else {
 			_, err = api.SendMessage(ctx, chatID, text, "", threadOpts...)
 		}
@@ -1272,14 +1257,7 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 				}
 				// Retry send with the new chat_id.
 				if sq != nil {
-					var keyboard *InlineKeyboardMarkup
-					if replyToMsgID > 0 {
-						_, err = sq.Send(ctx, newChatID, text, "", keyboard, replyToMsgID, threadOpts...)
-					} else {
-						_, err = sq.Send(ctx, newChatID, text, "", nil, 0, threadOpts...)
-					}
-				} else if replyToMsgID > 0 {
-					_, err = api.SendMessageWithKeyboard(ctx, newChatID, text, "", nil, replyToMsgID, threadOpts...)
+					_, err = sq.Send(ctx, newChatID, text, "", nil, 0, threadOpts...)
 				} else {
 					_, err = api.SendMessage(ctx, newChatID, text, "", threadOpts...)
 				}
