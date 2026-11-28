@@ -16,10 +16,14 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -104,4 +108,120 @@ func TestUsageService_GetAgent(t *testing.T) {
 	require.Len(t, resp.ByModel, 1)
 	assert.Equal(t, "claude-sonnet-4-6", resp.ByModel[0].Model)
 	assert.JSONEq(t, rawBody, string(resp.Raw))
+}
+
+func TestUsageService_BudgetsEndpoints(t *testing.T) {
+	var gotPath string
+	var gotQuery string
+	rawBudgets := `{"scope":{"kind":"project","id":"proj-1"},"as_of":"2026-11-28T12:00:00Z","budgets":[{"id":"b-1","limit_definition_id":"ld-1","limit_name":"llm_tokens_per_project_day","scope_kind":"project","scope_id":"proj-1","window_start_utc":"2026-11-28T00:00:00Z","window_end_utc":"2026-11-29T00:00:00Z","cap":500000,"token_action":"pause_new","consumed":125000,"state":"ok","thresholds_notified":0,"override_until":null,"state_version":3,"as_of":"2026-11-28T12:00:00Z"}]}`
+	rawGroup := `{"scope":{"kind":"group","id":"grp-1"},"group_name":"platform","non_additive":true,"as_of":"2026-11-28T12:00:00Z","budgets":[{"id":"gb-1","limit_definition_id":"ld-g","limit_name":"llm_tokens_per_group_month","scope_kind":"group","scope_id":"grp-1","window_start_utc":"2026-11-01T00:00:00Z","window_end_utc":"2026-12-01T00:00:00Z","cap":null,"token_action":"notify_only","consumed":9000,"state":"ok","thresholds_notified":0,"override_until":null,"state_version":1,"as_of":"2026-11-28T12:00:00Z","non_additive":true,"members":[{"user_id":"u-1","email":"alice@example.com","display_name":"Alice","tokens_summable":9000,"calls":4,"events":4}]}]}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/groups/platform/usage/budgets" {
+			_, _ = w.Write([]byte(rawGroup))
+			return
+		}
+		_, _ = w.Write([]byte(rawBudgets))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+
+	projResp, err := c.Usage().GetProjectBudgets(context.Background(), "proj-1")
+	require.NoError(t, err)
+	assert.Equal(t, "/api/v1/projects/proj-1/usage/budgets", gotPath)
+	require.Len(t, projResp.Budgets, 1)
+	assert.Equal(t, "b-1", projResp.Budgets[0].ID)
+	require.NotNil(t, projResp.Budgets[0].Cap)
+	assert.Equal(t, int64(500000), *projResp.Budgets[0].Cap)
+	assert.Equal(t, int64(3), projResp.Budgets[0].StateVersion)
+	assert.JSONEq(t, rawBudgets, string(projResp.Raw))
+
+	_, err = c.Usage().GetMeBudgets(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "/api/v1/me/usage/budgets", gotPath)
+
+	_, err = c.Usage().GetUserBudgets(context.Background(), "user-42")
+	require.NoError(t, err)
+	assert.Equal(t, "/api/v1/users/user-42/usage/budgets", gotPath)
+
+	grpResp, err := c.Usage().GetGroupBudgets(context.Background(), "platform", &GroupBudgetsQueryOptions{ProjectID: "proj-1"})
+	require.NoError(t, err)
+	assert.Equal(t, "/api/v1/groups/platform/usage/budgets", gotPath)
+	assert.Equal(t, "project_id=proj-1", gotQuery)
+	assert.True(t, grpResp.NonAdditive)
+	assert.Equal(t, "platform", grpResp.GroupName)
+	require.Len(t, grpResp.Budgets, 1)
+	assert.Nil(t, grpResp.Budgets[0].Cap)
+	require.Len(t, grpResp.Budgets[0].Members, 1)
+	assert.Equal(t, "alice@example.com", grpResp.Budgets[0].Members[0].Email)
+	assert.JSONEq(t, rawGroup, string(grpResp.Raw))
+}
+
+func TestUsageService_OverrideBudgets(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody []byte
+	statusToReturn := http.StatusOK
+	respBody := `{"id":"b-1","limit_definition_id":"ld-1","limit_name":"llm_tokens_per_project_day","scope_kind":"project","scope_id":"proj-1","window_start_utc":"2026-11-28T00:00:00Z","window_end_utc":"2026-11-29T00:00:00Z","cap":500000,"token_action":"pause_new","consumed":510000,"state":"ok","thresholds_notified":3,"override_until":"2026-11-28T23:00:00Z","state_version":4,"as_of":"2026-11-28T12:00:00Z"}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusToReturn)
+		_, _ = w.Write([]byte(respBody))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+
+	ver := int64(3)
+	until := time.Date(2026, 11, 28, 23, 0, 0, 0, time.UTC)
+	entry, err := c.Usage().OverrideProjectBudget(context.Background(), "proj-1", "b-1", &OverrideUsageBudgetRequest{
+		OverrideUntil: &until,
+		StateVersion:  &ver,
+		Reason:        "release crunch",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, gotMethod)
+	assert.Equal(t, "/api/v1/projects/proj-1/usage/budgets/b-1:override", gotPath)
+	assert.Equal(t, int64(4), entry.StateVersion)
+	assert.JSONEq(t, respBody, string(entry.Raw))
+
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal(gotBody, &sent))
+	assert.Equal(t, "2026-11-28T23:00:00Z", sent["override_until"])
+	assert.Equal(t, float64(3), sent["state_version"])
+	assert.Equal(t, "release crunch", sent["reason"])
+
+	// Clear override must explicitly send "override_until": null.
+	_, err = c.Usage().OverrideUserBudget(context.Background(), "user-42", "b-2", &OverrideUsageBudgetRequest{
+		OverrideUntil: nil,
+		StateVersion:  &ver,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/api/v1/users/user-42/usage/budgets/b-2:override", gotPath)
+	var clearSent map[string]any
+	require.NoError(t, json.Unmarshal(gotBody, &clearSent))
+	val, hasKey := clearSent["override_until"]
+	assert.True(t, hasKey, "override_until key must be present when clearing")
+	assert.Nil(t, val, "override_until must be JSON null when clearing")
+
+	// Propagates 412 as apiclient.APIError.
+	statusToReturn = http.StatusPreconditionFailed
+	respBody = `{"error":{"code":"revision_conflict","message":"budget state_version mismatch"}}`
+	_, err = c.Usage().OverrideProjectBudget(context.Background(), "proj-1", "b-1", &OverrideUsageBudgetRequest{
+		OverrideUntil: &until,
+		StateVersion:  &ver,
+	})
+	require.Error(t, err)
+	var apiErr *apiclient.APIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusPreconditionFailed, apiErr.StatusCode)
 }

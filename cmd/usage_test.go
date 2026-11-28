@@ -53,6 +53,23 @@ type stubUsageService struct {
 	summaryResp *hubclient.UsageSummaryResponse
 	agentResp   *hubclient.AgentUsageResponse
 	err         error
+
+	budgetsResp      *hubclient.UsageBudgetsResponse
+	budgetsQueue     []*hubclient.UsageBudgetsResponse
+	groupBudgetsResp *hubclient.GroupUsageBudgetsResponse
+	overrideResp     *hubclient.UsageBudgetEntry
+	overrideErrQueue []error
+
+	budgetGetCalls int
+	overrideCalls  []stubOverrideCall
+	lastGroupOpts  *hubclient.GroupBudgetsQueryOptions
+}
+
+type stubOverrideCall struct {
+	scope    string
+	scopeID  string
+	budgetID string
+	req      *hubclient.OverrideUsageBudgetRequest
 }
 
 func (s *stubUsageService) GetProject(_ context.Context, projectID string, opts *hubclient.UsageQueryOptions) (*hubclient.UsageSummaryResponse, error) {
@@ -88,6 +105,76 @@ func (s *stubUsageService) GetAgent(_ context.Context, agentID string, opts *hub
 	s.lastID = agentID
 	s.lastOpts = opts
 	return s.agentResp, s.err
+}
+
+func (s *stubUsageService) nextBudgetsResp() *hubclient.UsageBudgetsResponse {
+	idx := s.budgetGetCalls - 1
+	if idx >= 0 && idx < len(s.budgetsQueue) {
+		return s.budgetsQueue[idx]
+	}
+	return s.budgetsResp
+}
+
+func (s *stubUsageService) GetProjectBudgets(_ context.Context, projectID string) (*hubclient.UsageBudgetsResponse, error) {
+	s.lastMethod = "project_budgets"
+	s.lastID = projectID
+	s.budgetGetCalls++
+	return s.nextBudgetsResp(), s.err
+}
+
+func (s *stubUsageService) GetMeBudgets(_ context.Context) (*hubclient.UsageBudgetsResponse, error) {
+	s.lastMethod = "me_budgets"
+	s.lastID = ""
+	s.budgetGetCalls++
+	return s.nextBudgetsResp(), s.err
+}
+
+func (s *stubUsageService) GetUserBudgets(_ context.Context, userID string) (*hubclient.UsageBudgetsResponse, error) {
+	s.lastMethod = "user_budgets"
+	s.lastID = userID
+	s.budgetGetCalls++
+	return s.nextBudgetsResp(), s.err
+}
+
+func (s *stubUsageService) GetGroupBudgets(_ context.Context, groupIDOrSlug string, opts *hubclient.GroupBudgetsQueryOptions) (*hubclient.GroupUsageBudgetsResponse, error) {
+	s.lastMethod = "group_budgets"
+	s.lastID = groupIDOrSlug
+	s.lastGroupOpts = opts
+	return s.groupBudgetsResp, s.err
+}
+
+func (s *stubUsageService) recordOverride(scope, scopeID, budgetID string, req *hubclient.OverrideUsageBudgetRequest) (*hubclient.UsageBudgetEntry, error) {
+	var copyReq *hubclient.OverrideUsageBudgetRequest
+	if req != nil {
+		c := *req
+		copyReq = &c
+	}
+	s.overrideCalls = append(s.overrideCalls, stubOverrideCall{
+		scope:    scope,
+		scopeID:  scopeID,
+		budgetID: budgetID,
+		req:      copyReq,
+	})
+	idx := len(s.overrideCalls) - 1
+	if idx < len(s.overrideErrQueue) {
+		if s.overrideErrQueue[idx] != nil {
+			return nil, s.overrideErrQueue[idx]
+		}
+		return s.overrideResp, nil
+	}
+	return s.overrideResp, s.err
+}
+
+func (s *stubUsageService) OverrideProjectBudget(_ context.Context, projectID, budgetID string, req *hubclient.OverrideUsageBudgetRequest) (*hubclient.UsageBudgetEntry, error) {
+	s.lastMethod = "override_project_budget"
+	s.lastID = projectID
+	return s.recordOverride("project", projectID, budgetID, req)
+}
+
+func (s *stubUsageService) OverrideUserBudget(_ context.Context, userID, budgetID string, req *hubclient.OverrideUsageBudgetRequest) (*hubclient.UsageBudgetEntry, error) {
+	s.lastMethod = "override_user_budget"
+	s.lastID = userID
+	return s.recordOverride("user", userID, budgetID, req)
 }
 
 func int64Ptr(v int64) *int64 { return &v }

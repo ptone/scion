@@ -105,6 +105,7 @@ Examples:
 	cmd.Flags().BoolVar(&f.json, "json", false, "Output raw JSON response from the Hub")
 
 	markFlagsForMode(cmd, ModeHuman, "user", "all")
+	cmd.AddCommand(newUsageBudgetsCmd())
 	return cmd
 }
 
