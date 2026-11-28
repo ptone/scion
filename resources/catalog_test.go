@@ -370,7 +370,7 @@ func TestPlatformSkillsFS_GitOperationsCoversShallowClones(t *testing.T) {
 		"SCION_GIT_DEPTH",
 		"git rev-parse --is-shallow-repository",
 		"no merge base",
-		"`git merge`/`git pull` fail with `refusing to merge unrelated histories`",
+		"`git merge`, `git pull` and `git merge-tree` fail with `refusing to merge unrelated histories`",
 		"git fetch --deepen",
 		"--filter=blob:none",
 		"git fetch --unshallow",
