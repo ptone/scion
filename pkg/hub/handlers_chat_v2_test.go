@@ -878,11 +878,13 @@ func TestChatV2_ConversationRead(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, "topic-read", proj.ID)
+	convID := topicConversationID(t, wcs, "topic-read")
 
 	// The watermark must name a real, persisted message — "msg-42" would
 	// now be rejected as not found.
 	msg := &store.Message{ID: tid("read-msg"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
-		Recipient: "thread:topic-read", Msg: "hi", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-read", CreatedAt: time.Now().UTC()}
+		Recipient: "thread:topic-read", Msg: "hi", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-read", ConversationID: convID, CreatedAt: time.Now().UTC()}
 	if err := s.CreateMessage(ctx, msg); err != nil {
 		t.Fatalf("CreateMessage: %v", err)
 	}
@@ -1043,7 +1045,7 @@ func TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed(t *testing.T) {
 // been recorded (e.g. by autoAdvanceSenderReadState on send, or a later
 // user-triggered advance).
 func TestChatV2_ConversationRead_Monotonic(t *testing.T) {
-	srv, s, wcs, proj, _ := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
@@ -1051,12 +1053,14 @@ func TestChatV2_ConversationRead_Monotonic(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, "topic-mono", proj.ID)
+	convID := topicConversationID(t, wcs, "topic-mono")
 
 	base := time.Now().UTC().Add(-time.Minute)
 	older := &store.Message{ID: tid("mono-older"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
-		Recipient: "thread:topic-mono", Msg: "first", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-mono", CreatedAt: base}
+		Recipient: "thread:topic-mono", Msg: "first", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-mono", ConversationID: convID, CreatedAt: base}
 	newer := &store.Message{ID: tid("mono-newer"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
-		Recipient: "thread:topic-mono", Msg: "second", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-mono", CreatedAt: base.Add(time.Second)}
+		Recipient: "thread:topic-mono", Msg: "second", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-mono", ConversationID: convID, CreatedAt: base.Add(time.Second)}
 	if err := s.CreateMessage(ctx, older); err != nil {
 		t.Fatalf("CreateMessage(older): %v", err)
 	}
@@ -1095,7 +1099,7 @@ func TestChatV2_ConversationRead_Monotonic(t *testing.T) {
 // sorts later in the history listing, counts as newer, and the lower-ID row
 // never counts as newer than it once it is the watermark.
 func TestChatV2_ConversationRead_MonotonicTieBreaksByID(t *testing.T) {
-	srv, s, wcs, proj, _ := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
@@ -1103,12 +1107,14 @@ func TestChatV2_ConversationRead_MonotonicTieBreaksByID(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, "topic-tie", proj.ID)
+	convID := topicConversationID(t, wcs, "topic-tie")
 
 	tied := time.Now().UTC()
 	a := &store.Message{ID: tid("tie-msg-a"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
-		Recipient: "thread:topic-tie", Msg: "a", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-tie", CreatedAt: tied}
+		Recipient: "thread:topic-tie", Msg: "a", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-tie", ConversationID: convID, CreatedAt: tied}
 	b := &store.Message{ID: tid("tie-msg-b"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
-		Recipient: "thread:topic-tie", Msg: "b", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-tie", CreatedAt: tied}
+		Recipient: "thread:topic-tie", Msg: "b", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-tie", ConversationID: convID, CreatedAt: tied}
 	if err := s.CreateMessage(ctx, a); err != nil {
 		t.Fatalf("CreateMessage(a): %v", err)
 	}
@@ -1225,7 +1231,7 @@ func TestChatV2_ConversationRead_StoreErrorReturns500(t *testing.T) {
 // lookup or write — proven here by swapping in a store whose GetMessage
 // always errors for that ID after the watermark is already set.
 func TestChatV2_ConversationRead_NoOpSkipsLookupWhenAlreadyCurrent(t *testing.T) {
-	srv, s, wcs, proj, _ := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
@@ -1233,9 +1239,11 @@ func TestChatV2_ConversationRead_NoOpSkipsLookupWhenAlreadyCurrent(t *testing.T)
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, "topic-noop", proj.ID)
+	convID := topicConversationID(t, wcs, "topic-noop")
 
 	msg := &store.Message{ID: tid("noop-msg"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
-		Recipient: "thread:topic-noop", Msg: "hi", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-noop", CreatedAt: time.Now().UTC()}
+		Recipient: "thread:topic-noop", Msg: "hi", Type: messages.TypeChat, Channel: "web", ThreadID: "topic-noop", ConversationID: convID, CreatedAt: time.Now().UTC()}
 	if err := s.CreateMessage(ctx, msg); err != nil {
 		t.Fatalf("CreateMessage: %v", err)
 	}
@@ -3839,22 +3847,23 @@ func TestChatV2_Edit_NonOwner_Forbidden(t *testing.T) {
 }
 
 func TestChatV2_Edit_AgentReplied_Conflict(t *testing.T) {
-	srv, s, _, topicID, msgID, projID := setupEditDeleteTest(t)
+	srv, s, wcs, topicID, msgID, projID := setupEditDeleteTest(t)
 	ctx := context.Background()
 
 	// Create an agent reply after the user's message.
 	agentMsgID := tid("msg-agent-reply")
 	agentMsg := &store.Message{
-		ID:        agentMsgID,
-		ProjectID: projID,
-		Sender:    "agent:helper-bot",
-		SenderID:  tid("agent-helper"),
-		Recipient: "user:dev@localhost",
-		Msg:       "I can help with that",
-		Type:      "assistant-reply",
-		Channel:   "web",
-		ThreadID:  topicID,
-		CreatedAt: time.Now().UTC().Add(1 * time.Second),
+		ID:             agentMsgID,
+		ProjectID:      projID,
+		Sender:         "agent:helper-bot",
+		SenderID:       tid("agent-helper"),
+		Recipient:      "user:dev@localhost",
+		Msg:            "I can help with that",
+		Type:           "assistant-reply",
+		Channel:        "web",
+		ThreadID:       topicID,
+		ConversationID: topicConversationID(t, wcs, topicID),
+		CreatedAt:      time.Now().UTC().Add(1 * time.Second),
 	}
 	if err := s.CreateMessage(ctx, agentMsg); err != nil {
 		t.Fatalf("CreateMessage (agent reply): %v", err)
@@ -3949,22 +3958,23 @@ func TestChatV2_Delete_NonOwner_Forbidden(t *testing.T) {
 }
 
 func TestChatV2_Delete_AgentReplied_Conflict(t *testing.T) {
-	srv, s, _, topicID, msgID, projID := setupEditDeleteTest(t)
+	srv, s, wcs, topicID, msgID, projID := setupEditDeleteTest(t)
 	ctx := context.Background()
 
 	// Create an agent reply after the user's message.
 	agentMsgID := tid("msg-agent-reply-del")
 	agentMsg := &store.Message{
-		ID:        agentMsgID,
-		ProjectID: projID,
-		Sender:    "agent:helper-bot",
-		SenderID:  tid("agent-helper-del"),
-		Recipient: "user:dev@localhost",
-		Msg:       "I responded already",
-		Type:      "assistant-reply",
-		Channel:   "web",
-		ThreadID:  topicID,
-		CreatedAt: time.Now().UTC().Add(1 * time.Second),
+		ID:             agentMsgID,
+		ProjectID:      projID,
+		Sender:         "agent:helper-bot",
+		SenderID:       tid("agent-helper-del"),
+		Recipient:      "user:dev@localhost",
+		Msg:            "I responded already",
+		Type:           "assistant-reply",
+		Channel:        "web",
+		ThreadID:       topicID,
+		ConversationID: topicConversationID(t, wcs, topicID),
+		CreatedAt:      time.Now().UTC().Add(1 * time.Second),
 	}
 	if err := s.CreateMessage(ctx, agentMsg); err != nil {
 		t.Fatalf("CreateMessage (agent reply): %v", err)
