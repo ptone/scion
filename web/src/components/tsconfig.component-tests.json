@@ -65,6 +65,7 @@
     "pages/profile-decisions.test.ts",
     "pages/profile-slack.test.ts",
     "shared/schedule-exec.test.ts",
+    "shared/step-list-editor.test.ts",
     "shared/chat/chat-theme-tokens.test.ts",
     "../styles/theme.test.ts"
   ],
