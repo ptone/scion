@@ -28,9 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubtestutil"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 )
 
 func testSoftDeleteDMParity(t *testing.T, wcs WebChatStore, db *sql.DB, isPostgres bool) {
@@ -192,28 +190,62 @@ func testSoftDeleteDMParity(t *testing.T, wcs WebChatStore, db *sql.DB, isPostgr
 }
 
 func TestSoftDeleteDM_SQLite(t *testing.T) {
-	s, err := entadapter.NewSQLiteStore(":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
-	require.NoError(t, s.Migrate(context.Background()))
+	_, s := testServer(t)
+	type dbProvider interface {
+		DB() *sql.DB
+	}
+	p, ok := s.(dbProvider)
+	require.True(t, ok)
 
-	wcs := NewWebChatStore(s.DB(), "sqlite")
+	wcs := NewWebChatStore(p.DB(), "sqlite")
 	require.NoError(t, wcs.Init())
 
-	testSoftDeleteDMParity(t, wcs, s.DB(), false)
+	testSoftDeleteDMParity(t, wcs, p.DB(), false)
 }
 
 func TestSoftDeleteDM_Postgres(t *testing.T) {
 	dsn := hubtestutil.RequirePostgresDSN(t)
 	ctx := context.Background()
 
-	s, err := entadapter.NewPostgresStore(ctx, dsn, store.PoolConfig{})
+	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
-	require.NoError(t, s.Migrate(ctx))
+	t.Cleanup(func() { _ = db.Close() })
 
-	wcs := NewWebChatStore(s.DB(), "postgres")
+	schema := "test_soft_delete_dm_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	_, err = db.ExecContext(ctx, `CREATE SCHEMA `+schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = db.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`) })
+
+	_, err = db.ExecContext(ctx, `SET search_path TO `+schema)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		CREATE TABLE conversations (
+			id uuid PRIMARY KEY,
+			kind text NOT NULL,
+			surface text NOT NULL,
+			external_ref text NOT NULL,
+			parent_ref text NOT NULL DEFAULT '',
+			display_name text NOT NULL DEFAULT '',
+			drift_state text NOT NULL DEFAULT 'active',
+			last_activity_at timestamptz NOT NULL,
+			last_message_seq bigint NOT NULL DEFAULT 0,
+			created_at timestamptz NOT NULL,
+			archived_at timestamptz,
+			deleted_at timestamptz
+		);
+		CREATE TABLE thread_group_members (
+			id uuid PRIMARY KEY,
+			group_id uuid NOT NULL,
+			project_id uuid NOT NULL,
+			conversation_id uuid NOT NULL,
+			added_by text NOT NULL,
+			added_at timestamptz NOT NULL
+		);
+	`)
+	require.NoError(t, err)
+
+	wcs := NewWebChatStore(db, "postgres")
 	require.NoError(t, wcs.Init())
 
-	testSoftDeleteDMParity(t, wcs, s.DB(), true)
+	testSoftDeleteDMParity(t, wcs, db, true)
 }

@@ -118,13 +118,21 @@ func executeConversationDelete(ctx context.Context, cmd *cobra.Command, client h
 		}
 		errOut := cmd.ErrOrStderr()
 		if len(targets) == 1 {
-			fmt.Fprintf(errOut, "Delete conversation %s (%s) for both participants? [y/N]: ", targets[0].label, targets[0].id)
-		} else {
-			fmt.Fprintf(errOut, "Conversations to delete for both participants:\n")
-			for _, t := range targets {
-				fmt.Fprintf(errOut, "  - %s (%s)\n", t.label, t.id)
+			if targets[0].label != "" && targets[0].label != targets[0].id {
+				_, _ = fmt.Fprintf(errOut, "Delete conversation %s (%s) for both participants? [y/N]: ", targets[0].label, targets[0].id)
+			} else {
+				_, _ = fmt.Fprintf(errOut, "Delete conversation %s for both participants? [y/N]: ", targets[0].id)
 			}
-			fmt.Fprintf(errOut, "Delete %d conversations for both participants? [y/N]: ", len(targets))
+		} else {
+			_, _ = fmt.Fprintf(errOut, "Conversations to delete for both participants:\n")
+			for _, t := range targets {
+				if t.label != "" && t.label != t.id {
+					_, _ = fmt.Fprintf(errOut, "  - %s (%s)\n", t.label, t.id)
+				} else {
+					_, _ = fmt.Fprintf(errOut, "  - %s\n", t.id)
+				}
+			}
+			_, _ = fmt.Fprintf(errOut, "Delete %d conversations for both participants? [y/N]: ", len(targets))
 		}
 		reader := bufio.NewReader(cmd.InOrStdin())
 		line, readErr := reader.ReadString('\n')
@@ -133,7 +141,7 @@ func executeConversationDelete(ctx context.Context, cmd *cobra.Command, client h
 		}
 		answer := strings.ToLower(strings.TrimSpace(line))
 		if answer != "y" && answer != "yes" {
-			fmt.Fprintln(errOut, "Cancelled.")
+			_, _ = fmt.Fprintln(errOut, "Cancelled.")
 			return nil
 		}
 	}
@@ -157,7 +165,7 @@ func executeConversationDelete(ctx context.Context, cmd *cobra.Command, client h
 
 	out := cmd.OutOrStdout()
 	for _, id := range deleted {
-		fmt.Fprintf(out, "Deleted conversation %s\n", id)
+		_, _ = fmt.Fprintf(out, "Deleted conversation %s\n", id)
 	}
 	return nil
 }

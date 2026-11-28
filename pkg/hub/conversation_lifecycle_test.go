@@ -105,6 +105,7 @@ func setupLifecycleHub(t *testing.T) (*Server, store.Store, WebChatStore, *sql.D
 		Slug:      "life-bot",
 		Name:      "Life Bot",
 		ProjectID: project.ID,
+		OwnerID:   alice.ID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -160,6 +161,7 @@ func TestConversationLifecycle_DeleteDM_AuthzMatrix(t *testing.T) {
 
 	otherProject := &store.Project{ID: api.NewUUID(), Slug: "other-proj", Name: "Other Project"}
 	require.NoError(t, s.CreateProject(ctx, otherProject))
+	createTestUserWithProjectRole(t, s, alice.ID, alice.Email, otherProject.ID, store.ProjectRoleMember)
 
 	dmKey := makeDMKey(agent.ID, alice.ID)
 	conv := seedLifecycleDirectConversation(t, ctx, s, wcs, "native", dmKey, "user", alice.ID, "agent", agent.ID)
@@ -176,7 +178,7 @@ func TestConversationLifecycle_DeleteDM_AuthzMatrix(t *testing.T) {
 	agentReq := httptest.NewRequest(http.MethodDelete, "/api/v1/conversations/"+conv.ID, nil)
 	agentReq = agentReq.WithContext(contextWithIdentity(agentReq.Context(), newTestAgentIdentity(agent.ID, agent.ProjectID, nil)))
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, agentReq)
+	srv.mux.ServeHTTP(rec, agentReq)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "agent principal must get 403")
 
 	// 3. Non-participant user -> 404.
@@ -202,11 +204,11 @@ func TestConversationLifecycle_DeleteDM_AuthzMatrix(t *testing.T) {
 	rec = doRequestAsUser(t, srv, alice, http.MethodDelete, "/api/v1/conversations/"+groupConv.ID, nil)
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 
-	// 6. Scoped UAT checks:
+	// 6. Scoped UAT checks (real bearer tokens through full HTTP middleware):
 	doAsUAT := func(projID string, scopes []string, path string) *httptest.ResponseRecorder {
+		tok := mintHubConfigToken(t, srv, alice.ID, projectBoundary(projID), scopes...)
 		req := httptest.NewRequest(http.MethodDelete, path, nil)
-		scoped := NewScopedUserIdentity(NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, alice.Role, "uat"), projID, scopes)
-		req = req.WithContext(contextWithIdentity(req.Context(), scoped))
+		req.Header.Set("Authorization", "Bearer "+tok)
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
 		return w
@@ -264,12 +266,12 @@ func TestConversationLifecycle_DeleteDM_FreshConversationAndSideEffects(t *testi
 	// Seed a scheduled message and a star on the DM.
 	sms := scheduledMessageStoreFrom(wcs)
 	require.NotNil(t, sms)
-	sm := &ScheduledMessage{
+	sm := &ScheduledChatMessage{
 		ID:              api.NewUUID(),
 		SenderUserID:    alice.ID,
 		ConversationKey: dmKey,
 		Content:         "future reminder",
-		DeliverAt:       time.Now().UTC().Add(time.Hour),
+		FireAt:          time.Now().UTC().Add(time.Hour),
 		Status:          ScheduledMessagePending,
 		CreatedAt:       time.Now().UTC(),
 	}
@@ -380,7 +382,11 @@ func TestConversationLifecycle_DeleteDM_FreshConversationAndSideEffects(t *testi
 	assert.Nil(t, rs, "pin/mute read state must be reset after delete")
 
 	// Part B: User <-> User DM publishes lifecycle event to BOTH user participants.
-	uuKey := makeUserDMKey(alice.ID, bob.ID)
+	u1, u2 := alice.ID, bob.ID
+	if u1 > u2 {
+		u1, u2 = u2, u1
+	}
+	uuKey := fmt.Sprintf("dm:user:%s:user:%s", u1, u2)
 	uuConv := seedLifecycleDirectConversation(t, ctx, s, wcs, "native", uuKey, "user", alice.ID, "user", bob.ID)
 	rec = doRequestAsUser(t, srv, alice, http.MethodDelete, "/api/v1/conversations/"+uuConv.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
@@ -480,7 +486,8 @@ func TestConversationLifecycle_ChatRetentionPhaseBPurgesDeletedDM(t *testing.T) 
 	sw := newChatRetentionSweeper(p.ChatRetention())
 	res, err := sw.RunTick(ctx, srv.chatRetentionPolicyAt(time.Now()))
 	require.NoError(t, err)
-	assert.EqualValues(t, 1, res.DeletedConversationMessages, "Phase B must purge the deleted DM's message")
+	assert.True(t, res.Ran, "retention tick must run")
+	assert.EqualValues(t, 1, res.Purged.DeletedConv, "Phase B must purge the deleted DM's message")
 
 	var remaining int
 	require.NoError(t, p.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE id = ?`, msg.ID).Scan(&remaining))
