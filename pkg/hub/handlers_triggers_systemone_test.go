@@ -29,12 +29,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
-	"github.com/GoogleCloudPlatform/scion/pkg/egress"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 )
 
@@ -211,7 +211,8 @@ func TestTriggerDispatcher_M1RecordedAuthorityPreEgressProductionWiring(t *testi
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{
-		  "results": {
+		  "model": "jev-1.14.0",
+		  "answers": {
 		    "q1": {"type": "noul", "noul": 0.92}
 		  },
 		  "usage": {"input_tokens": 12, "output_tokens": 2}
@@ -257,9 +258,9 @@ func TestTriggerDispatcher_M1RecordedAuthorityPreEgressProductionWiring(t *testi
 
 	soExpr := `{"inputs":["event.subject"],"spec":{"version":1,"binding":{"instance":"hub-judge-m1"},"questions":[{"id":"q1","type":"binary","instructions":"Is this urgent?"}],"output":{"question":"q1"}}}`
 
-	// Trigger 1 authored by f.member (project-member).
-	tr1Rec := f.doTrigger(t, f.memberAuth, "", http.MethodPost, CreateTriggerRequest{
-		Name:   "m1-member-trig",
+	// Trigger 1 authored by f.admin (project-admin, holds trigger.create/update and agent.message).
+	tr1Rec := f.doTrigger(t, f.adminAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "m1-admin-trig",
 		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
 		Match: &TriggerMatchSpec{
 			Rules: []TriggerMatchRuleSpec{
@@ -284,8 +285,9 @@ func TestTriggerDispatcher_M1RecordedAuthorityPreEgressProductionWiring(t *testi
 			ProjectID:  f.projectID,
 			SourceKind: store.TriggerSourceKindWebhook,
 			SourceID:   ep.ID,
-			EventType:  "webhook.received",
+			Type:       "webhook.received",
 			Subject:    "production outage on auth",
+			DedupKey:   "m1-dedup-" + evTag,
 			ReceivedAt: time.Now().UTC(),
 		}
 		require.NoError(t, f.store.CreateTriggerEvent(ctx, ev))
@@ -315,7 +317,7 @@ func TestTriggerDispatcher_M1RecordedAuthorityPreEgressProductionWiring(t *testi
 		return nil
 	}
 
-	// 1. Authorized positive control: f.member has project-member -> secret read & provider call occur.
+	// 1. Authorized positive control: f.admin has project-admin -> secret read & provider call occur.
 	secretReads.Store(0)
 	providerCalls.Store(0)
 	fireOK := dispatchAndLoadFire("authorized", tr1.ID)
@@ -324,15 +326,15 @@ func TestTriggerDispatcher_M1RecordedAuthorityPreEgressProductionWiring(t *testi
 	assert.NotEqual(t, store.TriggerFireStatusRefused, fireOK.Status, "authorized positive control must not be refused (err=%q)", fireOK.Error)
 	assert.NotEqual(t, trigger.ErrFireRecordedAuthorityRefused, fireOK.Error)
 
-	// 2. De-roled author: downgrade f.member from project-member to project-viewer.
-	_, err = f.store.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.member.ID)
+	// 2. De-roled author: downgrade f.admin from project-admin to project-viewer.
+	_, err = f.store.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.admin.ID)
 	require.NoError(t, err)
 	viewerRD, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)
 	require.NoError(t, err)
 	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
 		RoleDefinitionID: viewerRD.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      f.member.ID,
+		PrincipalID:      f.admin.ID,
 		ScopeType:        store.RoleScopeProject,
 		ScopeID:          f.projectID,
 		CreatedBy:        f.owner.ID,
@@ -349,8 +351,8 @@ func TestTriggerDispatcher_M1RecordedAuthorityPreEgressProductionWiring(t *testi
 	assert.Equal(t, trigger.ErrFireRecordedAuthorityRefused, fireDeroled.Error)
 	assert.Equal(t, "0/0", fireDeroled.MatchedThrough)
 
-	// 3. Removed author: remove all project role bindings for f.member.
-	_, err = f.store.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.member.ID)
+	// 3. Removed author: remove all project role bindings for f.admin.
+	_, err = f.store.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.admin.ID)
 	require.NoError(t, err)
 
 	secretReads.Store(0)
@@ -366,7 +368,7 @@ func TestTriggerDispatcher_M1RecordedAuthorityPreEgressProductionWiring(t *testi
 	pauseRec := f.doTrigger(t, f.ownerAuth, tr1.ID+"/pause", http.MethodPost, nil)
 	require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
 
-	// 4. Deleted author: create a fresh project-member user, author tr2, then delete the user.
+	// 4. Deleted author: create a fresh project-admin user, author tr2, then delete the user.
 	delUser := &store.User{
 		ID:          tid("m1-del-user"),
 		Email:       "m1-del-user@triggers.example.com",
@@ -376,10 +378,10 @@ func TestTriggerDispatcher_M1RecordedAuthorityPreEgressProductionWiring(t *testi
 		Created:     time.Now().UTC(),
 	}
 	require.NoError(t, f.store.CreateUser(ctx, delUser))
-	memberRD, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	adminRD, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
 	require.NoError(t, err)
 	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: memberRD.ID,
+		RoleDefinitionID: adminRD.ID,
 		PrincipalType:    store.RoleBindingPrincipalUser,
 		PrincipalID:      delUser.ID,
 		ScopeType:        store.RoleScopeProject,
