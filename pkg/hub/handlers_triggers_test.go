@@ -1998,18 +1998,19 @@ func TestTriggersAuthoring_UnsupportedDialectReturns400Never500(t *testing.T) {
 	var ep WebhookEndpointCreatedResponse
 	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
 
-	// Create with unknown ("rego") and denied ("system_one") dialects on match and subject,
+	// Create with unknown ("rego") and experiment-off ("system_one") dialects on match and subject,
 	// with both empty and non-empty expr -> always 400 ErrCodeInvalidRule, never 500.
 	for i, tc := range []struct {
-		slot    string
-		dialect string
-		expr    string
+		slot       string
+		dialect    string
+		expr       string
+		wantReason string
 	}{
-		{"match", "rego", ""},
-		{"match", "rego", "true"},
-		{"match", "system_one", "check deploy"},
-		{"subject", "rego", ""},
-		{"subject", "system_one", "derive subject"},
+		{"match", "rego", "", ruleengine.ReasonDialectNotAllowed},
+		{"match", "rego", "true", ruleengine.ReasonDialectNotAllowed},
+		{"match", "system_one", "check deploy", ruleengine.ReasonUnknownDialect},
+		{"subject", "rego", "", ruleengine.ReasonDialectNotAllowed},
+		{"subject", "system_one", "derive subject", ruleengine.ReasonUnknownDialect},
 	} {
 		req := CreateTriggerRequest{
 			Name:   fmt.Sprintf("bad-dialect-%d", i),
@@ -2028,8 +2029,8 @@ func TestTriggersAuthoring_UnsupportedDialectReturns400Never500(t *testing.T) {
 		assert.Equal(t, tc.slot, eb.Details["field"])
 		assert.Equal(t, tc.dialect, eb.Details["dialect"])
 		assert.Equal(t, "trigger", eb.Details["consumer"])
-		assert.Equal(t, ruleengine.ReasonDialectNotAllowed, eb.Details["reason"])
-		assert.Contains(t, eb.Message, ruleengine.ReasonDialectNotAllowed)
+		assert.Equal(t, tc.wantReason, eb.Details["reason"])
+		assert.Contains(t, eb.Message, tc.wantReason)
 	}
 
 	// PATCH into unsupported dialect -> 400 ErrCodeInvalidRule with ReasonDialectNotAllowed.
@@ -2042,16 +2043,16 @@ func TestTriggersAuthoring_UnsupportedDialectReturns400Never500(t *testing.T) {
 	var okTr TriggerResponse
 	require.NoError(t, json.Unmarshal(okRec.Body.Bytes(), &okTr))
 
-	sysOne := "system_one"
+	regoDialect := "rego"
 	patchRec := f.doTrigger(t, f.ownerAuth, okTr.ID, http.MethodPatch, UpdateTriggerRequest{
-		Match: &TriggerMatchPatchSpec{Dialect: &sysOne},
+		Match: &TriggerMatchPatchSpec{Dialect: &regoDialect},
 	})
 	require.Equal(t, http.StatusBadRequest, patchRec.Code, patchRec.Body.String())
 	patchErr := decodeTriggerRuleError(t, patchRec)
 	assert.Equal(t, ErrCodeInvalidRule, patchErr.Code)
 	assert.Equal(t, ruleengine.ReasonDialectNotAllowed, patchErr.Details["reason"])
 
-	// Resume on a stored paused trigger with a disallowed dialect or broken rule -> 400 (never 500), stays paused.
+	// Resume on a stored paused trigger with a disallowed/disabled dialect or broken rule -> 400 (never 500), stays paused.
 	now := time.Now().UTC()
 	pausedBadDialectID := api.NewUUID()
 	require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
@@ -2084,7 +2085,7 @@ func TestTriggersAuthoring_UnsupportedDialectReturns400Never500(t *testing.T) {
 	resumeErr := decodeTriggerRuleError(t, resumeBadDialect)
 	assert.Equal(t, ErrCodeInvalidRule, resumeErr.Code)
 	assert.Equal(t, "system_one", resumeErr.Details["dialect"])
-	assert.Equal(t, ruleengine.ReasonDialectNotAllowed, resumeErr.Details["reason"])
+	assert.Equal(t, ruleengine.ReasonUnknownDialect, resumeErr.Details["reason"])
 
 	stillPaused, err := f.store.GetTrigger(ctx, pausedBadDialectID)
 	require.NoError(t, err)
@@ -3193,7 +3194,7 @@ func TestTriggersAuthoring_MatchRulesCompileAllFailingElementsAndCaps(t *testing
 		e2 := rawElems[1].(map[string]any)
 		assert.Equal(t, float64(3), e2["element"])
 		assert.Equal(t, "system_one", e2["dialect"])
-		assert.Equal(t, ruleengine.ReasonDialectNotAllowed, e2["reason"])
+		assert.Equal(t, ruleengine.ReasonUnknownDialect, e2["reason"])
 
 		e3 := rawElems[2].(map[string]any)
 		assert.Equal(t, float64(4), e3["element"])

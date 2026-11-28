@@ -1584,6 +1584,13 @@ func selectInputFields(
 		}
 
 		val := supplied.Value
+		if name == "event.payload" && decl.Kind == spec.FieldKindJSON && len(compiled.PayloadPaths) > 0 {
+			narrowed, nErr := narrowJSONPayloadByPaths(val, compiled.PayloadPaths)
+			if nErr != nil {
+				return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+			}
+			val = narrowed
+		}
 		truncated := false
 		if decl.MaxBytes > 0 && len(val) > decl.MaxBytes {
 			if truncate {

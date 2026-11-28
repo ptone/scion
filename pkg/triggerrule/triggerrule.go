@@ -104,10 +104,28 @@ const (
 	// System One uncertainty and provider failure reasons (mixed-rule-arrays §5,
 	// pkg/systemone/provider).
 	reasonSystemOneAbstain             = "abstain"
+	reasonSystemOneAbstained           = "abstained"
 	reasonSystemOneTie                 = "tie"
+	reasonSystemOneBelowThreshold      = "below_threshold"
+	reasonSystemOneNoEligibleInstance  = "no_eligible_instance"
+	reasonSystemOneCapacity            = "capacity"
+	reasonSystemOneCircuitOpen         = "circuit_open"
+	reasonSystemOneUnavailable         = "unavailable"
+	reasonSystemOneInputTooLarge       = "input_too_large"
+	reasonSystemOneAuth                = "auth"
+	reasonSystemOneEgressRefused       = "egress_refused"
+	reasonSystemOneMalformedResponse   = "malformed_response"
+	reasonSystemOneProviderRefused     = "provider_refused"
+	reasonSystemOneContentBlocked      = "content_blocked"
+	reasonSystemOneModelMismatch       = "model_mismatch"
+	reasonSystemOneThresholdUnval      = "threshold_unvalidated"
 	reasonSystemOneProviderError       = "provider_error"
 	reasonSystemOneProviderUnavailable = "provider_unavailable"
 	reasonSystemOneRateLimited         = "rate_limited"
+	reasonSystemOneUnsupported         = "unsupported"
+	reasonSystemOneInvalidRequest      = "invalid_request"
+	reasonSystemOneInternal            = "internal"
+	reasonSystemOneDialectDisabled     = "dialect_disabled"
 )
 
 var allowedMatchReasons = map[string]bool{
@@ -138,10 +156,28 @@ var allowedMatchReasons = map[string]bool{
 	reasonUninitializedProgram:             true,
 	reasonInvalidCompiledProgram:           true,
 	reasonSystemOneAbstain:                 true,
+	reasonSystemOneAbstained:               true,
 	reasonSystemOneTie:                     true,
+	reasonSystemOneBelowThreshold:          true,
+	reasonSystemOneNoEligibleInstance:      true,
+	reasonSystemOneCapacity:                true,
+	reasonSystemOneCircuitOpen:             true,
+	reasonSystemOneUnavailable:             true,
+	reasonSystemOneInputTooLarge:           true,
+	reasonSystemOneAuth:                    true,
+	reasonSystemOneEgressRefused:           true,
+	reasonSystemOneMalformedResponse:       true,
+	reasonSystemOneProviderRefused:         true,
+	reasonSystemOneContentBlocked:          true,
+	reasonSystemOneModelMismatch:           true,
+	reasonSystemOneThresholdUnval:          true,
 	reasonSystemOneProviderError:           true,
 	reasonSystemOneProviderUnavailable:     true,
 	reasonSystemOneRateLimited:             true,
+	reasonSystemOneUnsupported:             true,
+	reasonSystemOneInvalidRequest:          true,
+	reasonSystemOneInternal:                true,
+	reasonSystemOneDialectDisabled:         true,
 }
 
 func sanitizeMatchReason(code, fallback string) string {
@@ -177,13 +213,78 @@ func SafeDialectName(d string) string {
 // RuleTraceElement records the content-free evaluation outcome of a single
 // match_rules element (§5).
 type RuleTraceElement struct {
-	Index      int           `json:"i"`
-	Dialect    string        `json:"dialect"`
-	Class      string        `json:"class"`
-	Reason     string        `json:"reason,omitempty"`
-	DurationMs int64         `json:"duration_ms"`
-	Provenance string        `json:"provenance,omitempty"`
-	Elapsed    time.Duration `json:"-"`
+	Index          int            `json:"i"`
+	Dialect        string         `json:"dialect"`
+	Class          string         `json:"class"`
+	Reason         string         `json:"reason,omitempty"`
+	DurationMs     int64          `json:"duration_ms"`
+	Provenance     string         `json:"provenance,omitempty"`
+	ProvenanceData map[string]any `json:"-"`
+	Elapsed        time.Duration  `json:"-"`
+}
+
+// MarshalJSON serializes RuleTraceElement, emitting ProvenanceData as a JSON
+// object under "provenance" when present and otherwise preserving legacy string
+// Provenance for exact byte parity with Stage 1 traces.
+func (e RuleTraceElement) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		Index      int    `json:"i"`
+		Dialect    string `json:"dialect"`
+		Class      string `json:"class"`
+		Reason     string `json:"reason,omitempty"`
+		DurationMs int64  `json:"duration_ms"`
+		Provenance any    `json:"provenance,omitempty"`
+	}
+	w := wire{
+		Index:      e.Index,
+		Dialect:    e.Dialect,
+		Class:      e.Class,
+		Reason:     e.Reason,
+		DurationMs: e.DurationMs,
+	}
+	if len(e.ProvenanceData) > 0 {
+		w.Provenance = e.ProvenanceData
+	} else if e.Provenance != "" {
+		w.Provenance = e.Provenance
+	}
+	return json.Marshal(w)
+}
+
+// UnmarshalJSON decodes RuleTraceElement, accepting either a legacy string
+// "provenance" or a structured JSON object "provenance".
+func (e *RuleTraceElement) UnmarshalJSON(data []byte) error {
+	type wire struct {
+		Index      int             `json:"i"`
+		Dialect    string          `json:"dialect"`
+		Class      string          `json:"class"`
+		Reason     string          `json:"reason,omitempty"`
+		DurationMs int64           `json:"duration_ms"`
+		Provenance json.RawMessage `json:"provenance,omitempty"`
+	}
+	var w wire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	e.Index = w.Index
+	e.Dialect = w.Dialect
+	e.Class = w.Class
+	e.Reason = w.Reason
+	e.DurationMs = w.DurationMs
+	e.Provenance = ""
+	e.ProvenanceData = nil
+	if trimmed := bytes.TrimSpace(w.Provenance); len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
+		switch trimmed[0] {
+		case '"':
+			if err := json.Unmarshal(trimmed, &e.Provenance); err != nil {
+				return err
+			}
+		case '{':
+			if err := json.Unmarshal(trimmed, &e.ProvenanceData); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // RuleTrace records the content-free per-element trace and unexecuted element
@@ -226,6 +327,11 @@ func EncodeRuleTrace(trace RuleTrace) string {
 	for i, el := range trace.Elements {
 		el.Dialect = SafeDialectName(el.Dialect)
 		el.Provenance = sanitizeTraceProvenance(el.Provenance)
+		if len(el.ProvenanceData) > 0 {
+			cp := make(map[string]any, len(el.ProvenanceData))
+			maps.Copy(cp, el.ProvenanceData)
+			el.ProvenanceData = cp
+		}
 		if el.Reason != "" && !allowedMatchReasons[el.Reason] {
 			if el.Class == MatchClassUncertain {
 				el.Reason = MatchReasonUncertain
@@ -240,6 +346,7 @@ func EncodeRuleTrace(trace RuleTrace) string {
 	}
 	for i := range work.Elements {
 		work.Elements[i].Provenance = ""
+		work.Elements[i].ProvenanceData = nil
 		if raw, err := json.Marshal(work); err == nil && len(raw) <= MaxRuleTraceBytes {
 			return string(raw)
 		}
@@ -597,9 +704,40 @@ func normalizeJSONNumbers(v any) (any, error) {
 type EvalOption func(*evalConfig)
 
 type evalConfig struct {
-	tracker        *ruleengine.BudgetTracker
-	compileTracker *ruleengine.BudgetTracker
-	onCompileMiss  func(dialect string)
+	tracker         *ruleengine.BudgetTracker
+	compileTracker  *ruleengine.BudgetTracker
+	onCompileMiss   func(dialect string)
+	payload         any
+	evalCompileCtx  func(context.Context) context.Context
+	errorProvenance func(error) map[string]any
+}
+
+// WithPayload attaches a typed dialect payload (for example a systemone.Request
+// carrying the trigger-authorized ProjectID and bounded event Input) to
+// ruleengine.Input.Payload for I/O dialects evaluated inside MatchAllWithTrace.
+func WithPayload(payload any) EvalOption {
+	return func(c *evalConfig) {
+		c.payload = payload
+	}
+}
+
+// WithEvalCompileContext supplies a context wrapper used when compiling I/O
+// dialect elements during MatchAllWithTrace (for example systemone.WithEvalCompile
+// so live instance/allowlist checks execute during EvaluatePending with full
+// provenance rather than failing inside Compile).
+func WithEvalCompileContext(fn func(context.Context) context.Context) EvalOption {
+	return func(c *evalConfig) {
+		c.evalCompileCtx = fn
+	}
+}
+
+// WithErrorProvenance supplies an optional extractor that recovers compact,
+// content-free structured provenance from dialect evaluation errors (for
+// example systemone.EvaluationFrom -> CompactRuleTraceProvenance).
+func WithErrorProvenance(fn func(error) map[string]any) EvalOption {
+	return func(c *evalConfig) {
+		c.errorProvenance = fn
+	}
 }
 
 // WithBudget attaches an aggregate per-event BudgetTracker (see NewEventBudget).
@@ -881,7 +1019,10 @@ func (r *Rules) MatchAllWithTrace(
 		ctx = context.Background()
 	}
 	scope = normalizeTriggerScope(scope, act.projectID)
-	input := ruleengine.Input{Activation: act.toMap()}
+	input := ruleengine.Input{
+		Activation: act.toMap(),
+		Payload:    cfg.payload,
+	}
 
 	// Build the Chain for the valid prefix of rules. Any trigger-level defect
 	// (empty expr, >MaxMatchRuleBytes, or un-admitted dialect) at index k stops
@@ -925,11 +1066,14 @@ func (r *Rules) MatchAllWithTrace(
 			break
 		}
 		if d.Declares().PerformsIO {
-			// T2: revisit eager IO compilation before earlier elements run once
-			// the trigger consumer admits IO dialects (today triggers grant CEL
-			// only, so this branch is unreachable in production). IO elements
-			// must be pre-compiled (A1 §4 / P18) and execute via EvaluatePending.
-			compiled, cErr := r.cachedCompileWithBudget(ctx, rawDialect, scope, elem.Expr, ruleengine.KindFilter, matchEnvRef(), cfg)
+			// IO elements are pre-compiled in pure spec form (A1 §4 / P18) and
+			// execute synchronously via EvaluatePending on reach. Live instance,
+			// allowlist, enabled, and admission checks run in EvaluatePending.
+			compileCtx := ctx
+			if cfg.evalCompileCtx != nil {
+				compileCtx = cfg.evalCompileCtx(ctx)
+			}
+			compiled, cErr := r.cachedCompileWithBudget(compileCtx, rawDialect, scope, elem.Expr, ruleengine.KindFilter, matchEnvRef(), cfg)
 			if cErr != nil {
 				defect = &prefixDefect{index: through, dialect: dialect, err: cErr}
 				break
@@ -1047,14 +1191,22 @@ func (r *Rules) MatchAllWithTrace(
 	for _, step := range chainRes.Steps {
 		safeDialect := SafeDialectName(step.Dialect)
 		cls, reason, stepErr := mapStepOutcomeToTrigger(step)
+		var provData map[string]any
+		if step.Err != nil && cfg.errorProvenance != nil {
+			provData = cfg.errorProvenance(step.Err)
+		}
+		if len(provData) == 0 && len(step.Provenance) > 0 {
+			provData = projectChainStepProvenance(step.Provenance)
+		}
 		trace.Elements = append(trace.Elements, RuleTraceElement{
-			Index:      step.Index,
-			Dialect:    safeDialect,
-			Class:      cls,
-			Reason:     reason,
-			DurationMs: max(step.Elapsed.Milliseconds(), int64(0)),
-			Provenance: sanitizeTraceProvenance(step.RawTrace),
-			Elapsed:    max(step.Elapsed, time.Duration(0)),
+			Index:          step.Index,
+			Dialect:        safeDialect,
+			Class:          cls,
+			Reason:         reason,
+			DurationMs:     max(step.Elapsed.Milliseconds(), int64(0)),
+			Provenance:     sanitizeTraceProvenance(step.RawTrace),
+			ProvenanceData: provData,
+			Elapsed:        max(step.Elapsed, time.Duration(0)),
 		})
 		lastDialect = safeDialect
 		decidingCls = cls
@@ -1139,6 +1291,31 @@ func (r *Rules) MatchAllWithTrace(
 		Dialect: lastDialect,
 		Class:   MatchClassMatched,
 	}, trace, nil
+}
+
+// projectChainStepProvenance adapts engine-validated typed ChainRun step
+// provenance fields into the trigger rule_trace compact projection shape
+// (mapping answer_bool/answer_label -> answer and p_top_bps -> p_top).
+func projectChainStepProvenance(raw map[string]any) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(raw))
+	for k, v := range raw {
+		switch k {
+		case "answer_bool":
+			out["answer"] = v
+		case "answer_label":
+			out["answer"] = v
+		case "p_top_bps":
+			if bps, ok := v.(int64); ok {
+				out["p_top"] = float64(bps) / 10000.0
+			}
+		default:
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // mapStepOutcomeToTrigger explicitly maps engine-owned ruleengine.StepClass

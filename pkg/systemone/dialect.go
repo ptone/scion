@@ -163,6 +163,8 @@ func (d *Dialect) Declares() ruleengine.Capabilities {
 			ruleengine.Kind(spec.KindJudgmentChoice),
 			ruleengine.Kind(spec.KindJudgments),
 		},
+		TraceReasons: dialectTraceReasons,
+		TraceFields:  dialectTraceFields,
 	}
 }
 
@@ -222,13 +224,15 @@ func (d *Dialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind
 		return ruleengine.Compiled{}, err
 	}
 
-	if rt := d.resolveRuntime(); rt != nil {
-		if err := rt.ValidateCompiled(ctx, compiled); err != nil {
-			return ruleengine.Compiled{}, err
+	if !isEvalCompile(ctx) {
+		if rt := d.resolveRuntime(); rt != nil {
+			if err := rt.ValidateCompiled(ctx, compiled); err != nil {
+				return ruleengine.Compiled{}, err
+			}
 		}
 	}
 
-	return ruleengine.NewCompiled(strings.TrimSpace(env.Consumer), DialectName, kind, &compiledRule{
+	return ruleengine.NewCompiledWithIdentity(strings.TrimSpace(env.Consumer), DialectName, kind, compiled.ContentHash, &compiledRule{
 		compiled: compiled,
 	}), nil
 }
@@ -309,10 +313,11 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 	})
 	if err == nil {
 		return ruleengine.Decision{
-			Kind:   c.Kind(),
-			Bool:   dec.Bool,
-			String: dec.String,
-			Detail: dec.Eval,
+			Kind:       c.Kind(),
+			Bool:       dec.Bool,
+			String:     dec.String,
+			Detail:     dec.Eval,
+			Provenance: ProjectTraceProvenance(dec.Eval),
 		}, nil
 	}
 

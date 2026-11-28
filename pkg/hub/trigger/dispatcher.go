@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 )
 
@@ -52,12 +53,14 @@ const (
 	DefaultMaxAge         = 72 * time.Hour
 	DefaultMaxPermanent   = 5
 
-	DefaultPerFireTimeout     = 30 * time.Second
-	DefaultEventRuleBudget    = time.Second
-	DefaultEventCompileBudget = triggerrule.EventCompileBudget
-	FireLeaseHorizon          = 10 * time.Minute
-	HistoryRetention          = 7 * 24 * time.Hour
-	MaxFireSubjectBytes       = 256
+	DefaultPerFireTimeout          = 30 * time.Second
+	DefaultEventRuleBudget         = time.Second
+	DefaultSystemOneEventAllowance = 2 * time.Second
+	MaxSystemOneEventAllowance     = 5 * time.Second
+	DefaultEventCompileBudget      = triggerrule.EventCompileBudget
+	FireLeaseHorizon               = 10 * time.Minute
+	HistoryRetention               = 7 * 24 * time.Hour
+	MaxFireSubjectBytes            = 256
 
 	DefaultReapBatchLimit      = 500
 	DefaultReconcileBatchLimit = 500
@@ -302,21 +305,22 @@ func firstTriggerActionType(tr *store.Trigger) string {
 
 // DispatcherConfig configures a trigger event Dispatcher.
 type DispatcherConfig struct {
-	Core           Core
-	Store          store.TriggerStore
-	Storage        func() storage.Storage
-	SubjectClaims  SubjectClaims
-	Queue          durablequeue.Queue
-	TxRunner       func(ctx context.Context, fn func(ctx context.Context, tx store.Tx, ts store.TriggerStore) error) error
-	Rules          *triggerrule.Rules
-	RuleMetrics    RuleEvalMetrics
-	FireAudit      FireAuditSink
-	PerFireTimeout time.Duration
-	RuleBudget     time.Duration
-	CompileBudget  time.Duration
-	Metrics        DispatcherMetrics
-	Logger         *slog.Logger
-	Now            func() time.Time
+	Core               Core
+	Store              store.TriggerStore
+	Storage            func() storage.Storage
+	SubjectClaims      SubjectClaims
+	Queue              durablequeue.Queue
+	TxRunner           func(ctx context.Context, fn func(ctx context.Context, tx store.Tx, ts store.TriggerStore) error) error
+	Rules              *triggerrule.Rules
+	RuleMetrics        RuleEvalMetrics
+	FireAudit          FireAuditSink
+	PerFireTimeout     time.Duration
+	RuleBudget         time.Duration
+	SystemOneAllowance time.Duration
+	CompileBudget      time.Duration
+	Metrics            DispatcherMetrics
+	Logger             *slog.Logger
+	Now                func() time.Time
 }
 
 // DrainerOptions configures a durablequeue.Drainer driving a Dispatcher.
@@ -340,28 +344,28 @@ type DrainerOptions struct {
 // triggers, claims idempotent trigger_fires rows, invokes Core.Fire, and marks
 // trigger_events rows processed (§6.3).
 //
-// Security L1 seam note (ptone/scion#8030; mixed-rule-arrays §7): consumer
-// "trigger" remains admitted exclusively to pure, no-I/O Grant("cel"), where
-// celengine.Program.Eval enforces a post-return wall-clock deadline backstop.
-// Admitting any second dialect to consumer "trigger" requires a dialect-level
-// or engine-level post-return deadline check so evaluation never trusts a
-// dialect to honor context cancellation.
+// Rule evaluation uses pkg/ruleengine's shared ChainRun (with engine-level
+// post-return deadline enforcement, L1) over one aggregate per-event
+// BudgetTracker shared across CEL and System One elements. Without a memo,
+// redelivery re-evaluates from element 1; a crash after a provider call may
+// repeat the provider call (t2-p2-trigger-binding-amendment §2.8).
 type Dispatcher struct {
-	core           Core
-	store          store.TriggerStore
-	storageFn      func() storage.Storage
-	claims         SubjectClaims
-	queue          durablequeue.Queue
-	txRunner       func(ctx context.Context, fn func(ctx context.Context, tx store.Tx, ts store.TriggerStore) error) error
-	rules          *triggerrule.Rules
-	ruleMetrics    RuleEvalMetrics
-	fireAudit      FireAuditSink
-	perFireTimeout time.Duration
-	ruleBudget     time.Duration
-	compileBudget  time.Duration
-	metrics        DispatcherMetrics
-	logger         *slog.Logger
-	now            func() time.Time
+	core               Core
+	store              store.TriggerStore
+	storageFn          func() storage.Storage
+	claims             SubjectClaims
+	queue              durablequeue.Queue
+	txRunner           func(ctx context.Context, fn func(ctx context.Context, tx store.Tx, ts store.TriggerStore) error) error
+	rules              *triggerrule.Rules
+	ruleMetrics        RuleEvalMetrics
+	fireAudit          FireAuditSink
+	perFireTimeout     time.Duration
+	ruleBudget         time.Duration
+	systemOneAllowance time.Duration
+	compileBudget      time.Duration
+	metrics            DispatcherMetrics
+	logger             *slog.Logger
+	now                func() time.Time
 
 	statsMu       sync.Mutex
 	evalStats     map[RuleEvalKey]RuleEvalBucket
@@ -384,6 +388,16 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	if ruleBudget <= 0 {
 		ruleBudget = DefaultEventRuleBudget
 	}
+	soAllowance := cfg.SystemOneAllowance
+	if soAllowance < 0 {
+		return nil, fmt.Errorf("trigger: SystemOneAllowance must be >= 0, got %s", soAllowance)
+	}
+	if soAllowance == 0 {
+		soAllowance = DefaultSystemOneEventAllowance
+	}
+	if soAllowance > MaxSystemOneEventAllowance {
+		return nil, fmt.Errorf("trigger: SystemOneAllowance %s exceeds maximum %s", soAllowance, MaxSystemOneEventAllowance)
+	}
 	compileBudget := cfg.CompileBudget
 	if compileBudget <= 0 {
 		compileBudget = DefaultEventCompileBudget
@@ -401,23 +415,24 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		fireAudit = NewSlogAuditSink(SlogAuditConfig{Now: nowFn})
 	}
 	return &Dispatcher{
-		core:           cfg.Core,
-		store:          cfg.Store,
-		storageFn:      cfg.Storage,
-		claims:         cfg.SubjectClaims,
-		queue:          cfg.Queue,
-		txRunner:       cfg.TxRunner,
-		rules:          cfg.Rules,
-		ruleMetrics:    cfg.RuleMetrics,
-		fireAudit:      fireAudit,
-		perFireTimeout: perFire,
-		ruleBudget:     ruleBudget,
-		compileBudget:  compileBudget,
-		metrics:        cfg.Metrics,
-		logger:         logger,
-		now:            nowFn,
-		evalStats:      make(map[RuleEvalKey]RuleEvalBucket),
-		compileMisses:  make(map[string]int64),
+		core:               cfg.Core,
+		store:              cfg.Store,
+		storageFn:          cfg.Storage,
+		claims:             cfg.SubjectClaims,
+		queue:              cfg.Queue,
+		txRunner:           cfg.TxRunner,
+		rules:              cfg.Rules,
+		ruleMetrics:        cfg.RuleMetrics,
+		fireAudit:          fireAudit,
+		perFireTimeout:     perFire,
+		ruleBudget:         ruleBudget,
+		systemOneAllowance: soAllowance,
+		compileBudget:      compileBudget,
+		metrics:            cfg.Metrics,
+		logger:             logger,
+		now:                nowFn,
+		evalStats:          make(map[RuleEvalKey]RuleEvalBucket),
+		compileMisses:      make(map[string]int64),
 	}, nil
 }
 
@@ -534,6 +549,17 @@ func (d *Dispatcher) NewDrainer(opts DrainerOptions) (*durablequeue.Drainer, err
 	if maxAge <= 0 {
 		maxAge = DefaultMaxAge
 	}
+	// Startup validation (t2-p2-trigger-binding-amendment §2.6): ensure
+	// HandlerTimeout > max event tracker budget + per-fire budget and
+	// HandlerTimeout < LeaseDuration so a setting change cannot break lease
+	// bounds.
+	minHandler := d.ruleBudget + d.systemOneAllowance + d.perFireTimeout
+	if handlerTimeout <= minHandler {
+		return nil, fmt.Errorf("trigger: HandlerTimeout (%s) must exceed ruleBudget + systemOneAllowance + perFireTimeout (%s)", handlerTimeout, minHandler)
+	}
+	if handlerTimeout >= leaseDur {
+		return nil, fmt.Errorf("trigger: HandlerTimeout (%s) must be less than LeaseDuration (%s)", handlerTimeout, leaseDur)
+	}
 
 	return durablequeue.NewDrainer(durablequeue.DrainerConfig{
 		Store:   opts.QueueStore,
@@ -633,7 +659,11 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		Lists:      ev.Lists,
 		Payload:    rawPayload,
 	}
-	budget := ruleengine.NewBudgetTracker(d.ruleBudget)
+	eventRuleBudget := d.ruleBudget
+	if anyMatchingCandidateHasSystemOne(candidates, ev.Type) {
+		eventRuleBudget += d.systemOneAllowance
+	}
+	budget := ruleengine.NewBudgetTracker(eventRuleBudget)
 	// SEC-3b2-01: separate per-event compile budget charged only on cache misses
 	// (never charged to eval budget, preserving F2).
 	compileBudget := ruleengine.NewBudgetTracker(d.compileBudget)
@@ -653,6 +683,8 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		earliestRetryAt       time.Time
 		stillCoalescingFires  = make(map[triggerActionKey]bool)
 		baseActBuilt          bool
+		soInputBuilt          bool
+		soInput               systemone.Input
 		overflowPreviewLoaded bool
 		overflowPreview       []byte
 		baseAct               triggerrule.Activation
@@ -869,17 +901,46 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				continue
 			}
 
+			// D2 fire-time re-check under recorded principal: agent-authored
+			// triggers may not evaluate System One elements in v1 (zero I/O).
+			hasSystemOne := HasSystemOneMatchRule(matchRules)
+			if hasSystemOne && IsAgentInitiatedTrigger(tr) {
+				hadAnyFire = true
+				if rErr := d.recordDirectFire(
+					ctx, tr, ev, deriveFireSubject(ev.Subject),
+					store.TriggerFireStatusRefused, ErrFireAgentSystemOneNotAllow,
+					"0/0", systemone.DialectName, "", AuditReasonAgentNotAllowed,
+				); rErr != nil {
+					return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
+				}
+				continue
+			}
+
 			// SEC-3b1rw-01 & SEC-3b2-01: ALWAYS pass WithBudget(budget) and
 			// WithCompileBudget(compileBudget) so evaluation and miss-compiles
 			// are each bounded by their separate per-event trackers.
+			evalOpts := []triggerrule.EvalOption{
+				triggerrule.WithBudget(budget),
+				triggerrule.WithCompileBudget(compileBudget),
+				triggerrule.WithCompileMissObserver(onCompileMiss),
+			}
+			if hasSystemOne {
+				if !soInputBuilt {
+					soInput = BuildSystemOneInput(baseEvent)
+					soInputBuilt = true
+				}
+				evalOpts = append(evalOpts,
+					triggerrule.WithPayload(BuildSystemOneRequest(soInput, tr)),
+					triggerrule.WithEvalCompileContext(systemone.WithEvalCompile),
+					triggerrule.WithErrorProvenance(SystemOneErrorProvenance),
+				)
+			}
 			res, trace, evalErr := d.rules.MatchAllWithTrace(
 				ctx,
 				scope,
 				matchRules,
 				trigAct,
-				triggerrule.WithBudget(budget),
-				triggerrule.WithCompileBudget(compileBudget),
-				triggerrule.WithCompileMissObserver(onCompileMiss),
+				evalOpts...,
 			)
 			for _, el := range trace.Elements {
 				d.recordRuleEval(ctx, el.Dialect, el.Class, el.Elapsed)

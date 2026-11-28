@@ -56,12 +56,15 @@ const (
 	CompletenessNone = "none"
 
 	// Portable v1 grammar limits (provider-design §4.3).
-	MaxQuestionsPerSpec  = 8
-	MaxInstructionsBytes = 2048
-	MaxCriteriaBytes     = 512
-	MinChoiceOptions     = 2
-	MaxChoiceOptions     = 64
-	MaxOptionDescBytes   = 512
+	MaxQuestionsPerSpec    = 8
+	MaxInstructionsBytes   = 2048
+	MaxCriteriaBytes       = 512
+	MinChoiceOptions       = 2
+	MaxChoiceOptions       = 64
+	MaxOptionDescBytes     = 512
+	MaxPayloadPaths        = 8
+	MaxPayloadPathBytes    = 256
+	MaxPayloadPathSegments = 16
 )
 
 // Kind identifies the consumer projection shape expected from a compiled rule
@@ -120,12 +123,13 @@ func AsCompileError(err error) (*CompileError, bool) {
 // Envelope is the outer rule envelope stored by consumers alongside the
 // dialect spec (provider-design §4.1).
 type Envelope struct {
-	Dialect    string            `json:"dialect,omitempty"`
-	Spec       Spec              `json:"spec"`
-	Inputs     []string          `json:"inputs,omitempty"`
-	Params     map[string]string `json:"params,omitempty"`
-	OnOversize string            `json:"on_oversize,omitempty"`
-	Timeout    string            `json:"timeout,omitempty"`
+	Dialect      string            `json:"dialect,omitempty"`
+	Spec         Spec              `json:"spec"`
+	Inputs       []string          `json:"inputs,omitempty"`
+	PayloadPaths []string          `json:"payload_paths,omitempty"`
+	Params       map[string]string `json:"params,omitempty"`
+	OnOversize   string            `json:"on_oversize,omitempty"`
+	Timeout      string            `json:"timeout,omitempty"`
 }
 
 // Spec is the system_one rule specification (provider-design §4.2).
@@ -363,6 +367,7 @@ type Compiled struct {
 	Spec           Spec
 	Kind           Kind
 	Inputs         []string
+	PayloadPaths   []string
 	Environment    ContentEnvironment
 	OnOversize     string
 	Timeout        time.Duration
