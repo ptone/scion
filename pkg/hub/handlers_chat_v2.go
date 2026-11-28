@@ -62,6 +62,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventfeed"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -1291,6 +1292,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 				if stored.DispatchFailureReason != nil {
 					resp.DispatchFailureReason = *stored.DispatchFailureReason
 					resp.DispatchFailureCode = dispatchFailureCodeFromReason(*stored.DispatchFailureReason)
+				}
+				if stored.ConversationID != "" && stored.ConversationSeq > 0 {
+					resp.Cursor = string(eventfeed.EncodeCursor(stored.ConversationID, stored.ConversationSeq))
 				}
 			}
 			writeJSON(w, http.StatusOK, resp)
@@ -2711,6 +2715,9 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		DispatchFailureCode: dispatchFailureCode,
 		ArtifactWarning:     artifactWarning,
 	}
+	if storeMsg.ConversationID != "" && storeMsg.ConversationSeq > 0 {
+		resp.Cursor = string(eventfeed.EncodeCursor(storeMsg.ConversationID, storeMsg.ConversationSeq))
+	}
 	if len(artifactRefs) > 0 {
 		resp.Artifacts = s.chatArtifactViews(ctx, artifactRefs)
 	}
@@ -2980,6 +2987,9 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 		Type:        storeMsg.Type,
 		CreatedAt:   now,
 		Attachments: s.filterReadableAttachments(ctx, storeMsg.ID, attachmentRefs),
+	}
+	if storeMsg.ConversationID != "" && storeMsg.ConversationSeq > 0 {
+		resp.Cursor = string(eventfeed.EncodeCursor(storeMsg.ConversationID, storeMsg.ConversationSeq))
 	}
 	if storeMsg.DispatchState == store.MessageDispatchNoRecipient {
 		resp.DispatchState = storeMsg.DispatchState
@@ -6452,6 +6462,7 @@ type chatMessageResponse struct {
 	SenderID    string                   `json:"senderId"`
 	Type        string                   `json:"type"`
 	CreatedAt   time.Time                `json:"createdAt"`
+	Cursor      string                   `json:"cursor,omitempty"`
 	Mentions    []messages.MentionResult `json:"mentions,omitempty"`
 	Attachments []AttachmentRef          `json:"attachments,omitempty"` // W7
 

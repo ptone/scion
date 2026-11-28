@@ -423,13 +423,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// With the budget set, the process exits within the grace whatever
 	// close is still running.
 	shutdownPlan.armExitWatchdog(signalsCtx.Done())
-	// The hub front waits for the co-located broker before it closes its
-	// listener (hub.ShutdownHooks.BeforeHTTPDrain).
+	// The hub front waits for the co-located broker and embedded MCP listener
+	// before closing its listener and tearing down the Hub (hub.ShutdownHooks.BeforeHTTPDrain).
 	brokerStop := newColocatedBrokerStop()
+	mcpStop := newEmbeddedMCPStop()
+	brokerBeforeDrain := brokerStop.beforeHTTPDrain(shutdownClock, brokerStopWaitFallback, shutdownPlan.brokerContext)
 	frontShutdownHooks := hub.ShutdownHooks{
 		Context:          shutdownPlan.teardownContext,
 		HTTPDrainContext: shutdownPlan.httpDrainContext,
-		BeforeHTTPDrain:  brokerStop.beforeHTTPDrain(shutdownClock, brokerStopWaitFallback, shutdownPlan.brokerContext),
+		BeforeHTTPDrain:  composeBeforeHTTPDrain(brokerBeforeDrain, mcpStop, shutdownPlan.httpDrainContext),
 	}
 
 	var wg sync.WaitGroup
@@ -776,7 +778,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		// 11b. Start embedded MCP server listener if configured (server.mcp.enabled / --enable-mcp).
 		if cfg.MCP.Enabled {
-			if err := startEmbeddedMCPServer(ctx, shutdownSeq, cfg, hubSrv, &wg, errCh); err != nil {
+			if err := startEmbeddedMCPServer(ctx, shutdownSeq, shutdownPlan.httpDrainContext, mcpStop, cfg, hubSrv, &wg, errCh); err != nil {
 				return shutdownSeq.startupErr(ctx, err)
 			}
 		}
@@ -2147,10 +2149,13 @@ func validateMCPStartup(cfg *config.GlobalConfig, hubEnabled bool) error {
 
 // startEmbeddedMCPServer builds and starts the embedded MCP HTTP listener
 // backed by an in-process RoundTripper into hubSrv.Handler(), registering its
-// BeginShutdown hook in shutdownPhaseMark.
+// BeginShutdown hook in shutdownPhaseMark and draining within httpDrainCtx
+// before Hub teardown completes.
 func startEmbeddedMCPServer(
 	ctx context.Context,
 	shutdownSeq *serverShutdownSequence,
+	httpDrainCtx func(context.Context) (context.Context, context.CancelFunc),
+	mcpStop *embeddedMCPStop,
 	cfg *config.GlobalConfig,
 	hubSrv *hub.Server,
 	wg *sync.WaitGroup,
@@ -2186,14 +2191,17 @@ func startEmbeddedMCPServer(
 	})
 
 	mcpSrv, err := mcpserver.New(mcpserver.Options{
-		Host:           mcpHost,
-		Port:           mcpPort,
-		Path:           mcpPath,
-		PublicURL:      cfg.MCP.PublicURL,
-		AllowedOrigins: cfg.MCP.AllowedOrigins,
-		Version:        ver,
-		Backend:        backend,
-		Logger:         slog.Default().With("component", "mcp"),
+		Host:                   mcpHost,
+		Port:                   mcpPort,
+		Path:                   mcpPath,
+		PublicURL:              cfg.MCP.PublicURL,
+		AllowedOrigins:         cfg.MCP.AllowedOrigins,
+		MaxStreamsPerPrincipal: cfg.MCP.MaxStreamsPerPrincipal,
+		StreamWait:             cfg.MCP.StreamWait,
+		ShutdownContext:        httpDrainCtx,
+		Version:                ver,
+		Backend:                backend,
+		Logger:                 slog.Default().With("component", "mcp"),
 	})
 	if err != nil {
 		return fmt.Errorf("initializing MCP server: %w", err)
@@ -2207,9 +2215,11 @@ func startEmbeddedMCPServer(
 		log.Printf("Starting MCP server on %s:%d (path=%s)", mcpHost, mcpPort, mcpPath)
 	}
 
+	mcpStop.markStarted()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer mcpStop.markStopped()
 		if err := mcpSrv.Start(ctx); err != nil {
 			errCh <- fmt.Errorf("mcp server error: %w", err)
 		}

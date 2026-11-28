@@ -401,8 +401,8 @@ func TestServer_ShutdownNoGoroutineLeak(t *testing.T) {
 		cancel()
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(tools.Tools) != 2 {
-		t.Fatalf("got %d tools, want 2", len(tools.Tools))
+	if len(tools.Tools) != 5 {
+		t.Fatalf("got %d tools, want 5", len(tools.Tools))
 	}
 	_ = session.Close()
 

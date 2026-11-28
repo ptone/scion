@@ -296,26 +296,28 @@ func TestIntegration_SendAndReadMessagesWithRealHub(t *testing.T) {
 
 	session := connectClient(fullUAT.Token)
 
-	// 5. tools/list returns exactly the two P1 tools with schemas and annotations.
+	// 5. tools/list returns exactly the five Increment 1 tools with schemas and annotations (§10 AC1).
 	listRes, err := session.ListTools(ctx, nil)
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	if len(listRes.Tools) != 2 {
-		t.Fatalf("ListTools returned %d tools, want 2", len(listRes.Tools))
+	if len(listRes.Tools) != 5 {
+		t.Fatalf("ListTools returned %d tools, want 5", len(listRes.Tools))
 	}
 	toolByName := make(map[string]*mcp.Tool, len(listRes.Tools))
 	for _, tl := range listRes.Tools {
 		toolByName[tl.Name] = tl
 	}
+	for _, name := range []string{"list_agents", "send_message", "list_conversations", "read_messages", "wait_for_messages"} {
+		if toolByName[name] == nil {
+			t.Fatalf("expected tool %q in tools/list, got %v", name, toolByName)
+		}
+		if toolByName[name].InputSchema == nil {
+			t.Fatalf("expected non-nil JSON input schema on tool %q", name)
+		}
+	}
 	sendTool := toolByName["send_message"]
 	readTool := toolByName["read_messages"]
-	if sendTool == nil || readTool == nil {
-		t.Fatalf("expected send_message and read_messages, got %v", toolByName)
-	}
-	if sendTool.InputSchema == nil || readTool.InputSchema == nil {
-		t.Fatal("expected non-nil JSON input schemas on both tools")
-	}
 	if sendTool.Annotations == nil || sendTool.Annotations.OpenWorldHint == nil || !*sendTool.Annotations.OpenWorldHint {
 		t.Fatalf("send_message annotations = %+v, want OpenWorldHint=true", sendTool.Annotations)
 	}

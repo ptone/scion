@@ -94,7 +94,7 @@ func TestStartEmbeddedMCPServer_ExperimentWiringAndBindGuard(t *testing.T) {
 		errCh := make(chan error, 1)
 		shutdownSeq := newServerShutdownSequence(func() {}, nil)
 
-		require.NoError(t, startEmbeddedMCPServer(ctx, shutdownSeq, &cfg, hubSrv, &wg, errCh))
+		require.NoError(t, startEmbeddedMCPServer(ctx, shutdownSeq, nil, nil, &cfg, hubSrv, &wg, errCh))
 		wg.Wait()
 		select {
 		case err := <-errCh:
@@ -122,7 +122,7 @@ func TestStartEmbeddedMCPServer_ExperimentWiringAndBindGuard(t *testing.T) {
 		errCh := make(chan error, 1)
 		shutdownSeq := newServerShutdownSequence(cancel, nil)
 
-		require.NoError(t, startEmbeddedMCPServer(srvCtx, shutdownSeq, &cfg, hubSrv, &wg, errCh))
+		require.NoError(t, startEmbeddedMCPServer(srvCtx, shutdownSeq, nil, nil, &cfg, hubSrv, &wg, errCh))
 		t.Cleanup(func() {
 			cancel()
 			wg.Wait()
@@ -181,6 +181,65 @@ func TestStartEmbeddedMCPServer_ExperimentWiringAndBindGuard(t *testing.T) {
 		// 3. Clean shutdown reports no error.
 		cancel()
 		wg.Wait()
+		select {
+		case err := <-errCh:
+			t.Fatalf("unexpected error on MCP server shutdown: %v", err)
+		default:
+		}
+	})
+
+	t.Run("shutdown_drain_orders_before_hub_teardown", func(t *testing.T) {
+		port := freeMCPTestPort(t)
+		cfg := config.DefaultGlobalConfig()
+		cfg.MCP.Enabled = true
+		cfg.MCP.Host = "127.0.0.1"
+		cfg.MCP.Port = port
+		cfg.MCP.Path = "/mcp"
+
+		srvCtx, cancel := context.WithCancel(ctx)
+		var wg sync.WaitGroup
+		errCh := make(chan error, 1)
+		shutdownSeq := newServerShutdownSequence(cancel, nil)
+		mcpStop := newEmbeddedMCPStop()
+		drainCtxCalled := false
+		httpDrainCtx := func(parent context.Context) (context.Context, context.CancelFunc) {
+			drainCtxCalled = true
+			return context.WithTimeout(parent, 5*time.Second)
+		}
+
+		require.NoError(t, startEmbeddedMCPServer(srvCtx, shutdownSeq, httpDrainCtx, mcpStop, &cfg, hubSrv, &wg, errCh))
+
+		baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+		deadline := time.Now().Add(3 * time.Second)
+		ready := false
+		for time.Now().Before(deadline) {
+			resp, err := http.Get(baseURL + "/healthz")
+			if err == nil {
+				_ = resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					ready = true
+					break
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		require.True(t, ready)
+
+		// Trigger shutdown sequence (mark + cancel) and verify waitBeforeHubTeardown
+		// blocks until MCP has drained and then returns promptly.
+		cancel()
+		waitDone := make(chan struct{})
+		go func() {
+			mcpStop.waitBeforeHubTeardown(ctx, httpDrainCtx)
+			close(waitDone)
+		}()
+		select {
+		case <-waitDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("mcpStop.waitBeforeHubTeardown did not complete within 5s")
+		}
+		wg.Wait()
+		assert.True(t, drainCtxCalled, "expected httpDrainCtx to be invoked during MCP shutdown")
 		select {
 		case err := <-errCh:
 			t.Fatalf("unexpected error on MCP server shutdown: %v", err)

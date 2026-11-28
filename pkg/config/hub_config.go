@@ -1770,6 +1770,52 @@ func (c MCPServerConfig) IsZero() bool {
 		c.StreamWait == 0
 }
 
+// MaxMCPStreamWait is the maximum allowed server.mcp.stream_wait duration,
+// matching the Hub's DefaultMaxWait of 55s (design §4.4).
+const MaxMCPStreamWait = 55 * time.Second
+
+// ValidateV1MCPConfig validates raw server.mcp settings from settings.yaml,
+// rejecting unparseable, non-positive, or above-ceiling (>55s) stream_wait
+// values and negative stream caps at config load time rather than silently
+// ignoring them.
+func ValidateV1MCPConfig(m *V1ServerMCPConfig) error {
+	if m == nil {
+		return nil
+	}
+	if m.StreamWait != "" {
+		d, err := time.ParseDuration(m.StreamWait)
+		if err != nil {
+			return fmt.Errorf("server.mcp.stream_wait: invalid duration %q: %w", m.StreamWait, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("server.mcp.stream_wait: must be positive, got %q", m.StreamWait)
+		}
+		if d > MaxMCPStreamWait {
+			return fmt.Errorf("server.mcp.stream_wait: must not exceed %s (Hub maximum), got %q", MaxMCPStreamWait, m.StreamWait)
+		}
+	}
+	if m.MaxStreamsPerPrincipal < 0 {
+		return fmt.Errorf("server.mcp.max_streams_per_principal: must be non-negative, got %d", m.MaxStreamsPerPrincipal)
+	}
+	return nil
+}
+
+func validateMCPGlobalConfig(gc *GlobalConfig) error {
+	if gc == nil {
+		return nil
+	}
+	if gc.MCP.MaxStreamsPerPrincipal < 0 {
+		return fmt.Errorf("server.mcp.max_streams_per_principal: must be non-negative, got %d", gc.MCP.MaxStreamsPerPrincipal)
+	}
+	if gc.MCP.StreamWait < 0 {
+		return fmt.Errorf("server.mcp.stream_wait: must be non-negative, got %s", gc.MCP.StreamWait)
+	}
+	if gc.MCP.StreamWait > MaxMCPStreamWait {
+		return fmt.Errorf("server.mcp.stream_wait: must not exceed %s (Hub maximum), got %s", MaxMCPStreamWait, gc.MCP.StreamWait)
+	}
+	return nil
+}
+
 // DefaultBrokerHost is the built-in runtime broker listen host
 // (server.broker.host) used when settings do not set one.
 const DefaultBrokerHost = "0.0.0.0"
@@ -1903,6 +1949,9 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 		if err := validateConduitDeliverRuntimesConfig(gc); err != nil {
 			return nil, err
 		}
+		if err := validateMCPGlobalConfig(gc); err != nil {
+			return nil, err
+		}
 		markTrustedProxiesSet(gc, nil)
 		return gc, nil
 	}
@@ -1919,6 +1968,9 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 		return nil, err
 	}
 	if err := validateConduitDeliverRuntimesConfig(gc); err != nil {
+		return nil, err
+	}
+	if err := validateMCPGlobalConfig(gc); err != nil {
 		return nil, err
 	}
 	markTrustedProxiesSet(gc, nil)
@@ -3210,6 +3262,9 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool, error) {
 	var v1Server V1ServerConfig
 	if err := decodeSettingsYAMLNode(serverNode, &v1Server); err != nil {
 		return nil, true, formatServerDecodeError(settingsPath, serverNode)
+	}
+	if err := ValidateV1MCPConfig(v1Server.MCP); err != nil {
+		return nil, true, fmt.Errorf("invalid settings in %s: %w", settingsPath, err)
 	}
 
 	var raw map[string]interface{}
