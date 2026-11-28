@@ -113,8 +113,10 @@ type githubCreatorTokenMissingErr struct {
 	err error
 }
 
-func (e githubCreatorTokenMissingErr) Error() string   { return e.err.Error() }
-func (e githubCreatorTokenMissingErr) Unwrap() []error { return []error{e.err, errGitHubCreatorTokenMissing} }
+func (e githubCreatorTokenMissingErr) Error() string { return e.err.Error() }
+func (e githubCreatorTokenMissingErr) Unwrap() []error {
+	return []error{e.err, errGitHubCreatorTokenMissing}
+}
 
 // githubAssociationGrant is the result of an authorized association check.
 type githubAssociationGrant struct {
