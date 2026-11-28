@@ -37,7 +37,7 @@ scion start <name> \
 
 ## Waiting On and Stopping Your Own Processes
 
-Your tool shell's command line contains every pattern you type, so `pgrep -f <pattern>` and `pkill -f <pattern>` match the shell running them: an `until ! pgrep -f …` loop never exits, and `pkill -f` kills your own tool shell (often exit 144), skipping the rest of that command. Track the process you started instead: use your harness's background-task completion notice, or record `$!` and `wait` on or `kill` that PID, or poll for an exit marker the command writes (`cmd >log 2>&1; echo "EXIT $?" >>log`).
+Your tool shell's command line contains every pattern you type, so `pgrep -f <pattern>` and `pkill -f <pattern>` match the shell running them: an `until ! pgrep -f …` loop never exits, and `pkill -f` kills your own tool shell (often exit 144), skipping the rest of that command. Track the process you started instead: use your harness's background-task completion notice, or record `$!`. You can `kill` that PID from any later call, but `wait` on it only in the command that started it: a later tool call runs in a new shell, where `wait` returns 127 at once while the process still runs. Across tool calls, poll `kill -0 "$PID"` for liveness, or poll an exit marker the command writes for its status (`cmd >log 2>&1; echo "EXIT $?" >>log`, then `until grep -q '^EXIT' log; do sleep 10; done`).
 
 ## Recommended Commands
 
