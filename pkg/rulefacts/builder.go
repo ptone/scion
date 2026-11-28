@@ -26,30 +26,43 @@ import (
 
 // MessageInput carries the in-flight envelope fields needed by FromMessage
 // without importing pkg/messages, pkg/messaging, or pkg/store.
+//
+// Origin trust invariant (contract v1 §3.3a): callers MUST populate Sender,
+// SenderID, and IsBridgeSender from the authenticated principal or hub-stamped
+// row, NEVER from untrusted request fields.
+//
+// Body invariant (contract v1 §3.2a): for policy units, callers MUST pass the
+// UNTRUNCATED evaluated input (the composite intro+prompt for E1/E2, or the
+// delivered copy body for mention copies) together with BodySource set;
+// FromMessage and Project compute message.bytes and message.body_truncated
+// against MaxBodyBytes (16 KiB).
 type MessageInput struct {
 	// Persisted identity (present for post-persist trigger_chat; empty for pre-persist policy scopes).
 	ID        string
 	CreatedAt time.Time
 
 	// Legacy StructuredMessage envelope fields.
+	// Sender and SenderID MUST come from the authenticated principal or hub-stamped row (v1 §3.3a).
 	Type        string
 	Sender      string
 	SenderID    string
 	Recipient   string
 	Broadcasted bool
 	Status      string
-	Body        string
-	HasChoices  bool
-	Urgent      bool
-	Metadata    map[string]string
-	EventJSON   []byte
+	// Body is the untruncated evaluated input / copy body / persisted body (v1 §3.2a).
+	Body       string
+	HasChoices bool
+	Urgent     bool
+	Metadata   map[string]string
+	EventJSON  []byte
 
 	// Derived counts & source metadata.
 	BodySource       BodySource
 	AttachmentCount  int
 	ArtifactCount    int
 	InteractionCount int
-	IsBridgeSender   bool
+	// IsBridgeSender MUST be set only from hub-verified bridge identity, never request fields (v1 §3.3a).
+	IsBridgeSender bool
 
 	// Pre-built ends and mentions (no I/O inside pkg/rulefacts).
 	SenderEnd    *End
@@ -81,7 +94,7 @@ type DeliveryInfo struct {
 	Delegated    bool
 }
 
-// AgentInput carries already-loaded agent row fields for EndFromAgent (no pkg/store import).
+// AgentInput carries already-loaded agent row fields for EndFromAgentWithLookup (no pkg/store import).
 type AgentInput struct {
 	ID            string
 	Slug          string
@@ -108,28 +121,13 @@ type UserInput struct {
 	Labels      map[string]string
 }
 
-// EndFromAgent constructs a typed End from already-loaded agent data and an
-// optional live template slug lookup callback (v1 §3.3b, §4.1).
+// EndFromAgentWithLookup constructs a typed End from already-loaded agent data
+// and a live template slug lookup callback that distinguishes
+// TemplateLookupOK, TemplateLookupNotFound, and TemplateLookupError (v1 §3.3b).
 //
-// When liveTemplateSlug returns ("", false) or is nil, Attributes.Template is
-// left unset and Attributes.TemplateLookup is set to TemplateLookupNotFound.
-func EndFromAgent(a AgentInput, applied *AppliedConfigInput, liveTemplateSlug func() (string, bool)) End {
-	var lookup func() (string, TemplateLookupStatus)
-	if liveTemplateSlug != nil {
-		lookup = func() (string, TemplateLookupStatus) {
-			slug, ok := liveTemplateSlug()
-			if !ok || slug == "" {
-				return "", TemplateLookupNotFound
-			}
-			return slug, TemplateLookupOK
-		}
-	}
-	return EndFromAgentWithLookup(a, applied, lookup)
-}
-
-// EndFromAgentWithLookup constructs a typed End like EndFromAgent, while
-// allowing callers to distinguish TemplateLookupNotFound from
-// TemplateLookupError (v1 §3.3b).
+// When lookup is nil, Attributes.Template is left unset and
+// Attributes.TemplateLookup is set to TemplateLookupError so provenance never
+// falsely claims not_found when no lookup was performed.
 func EndFromAgentWithLookup(a AgentInput, applied *AppliedConfigInput, lookup func() (string, TemplateLookupStatus)) End {
 	end := End{
 		Kind:       EndKindAgent,
@@ -153,7 +151,7 @@ func EndFromAgentWithLookup(a AgentInput, applied *AppliedConfigInput, lookup fu
 		end.Attributes.TemplateVersion = applied.TemplateHash
 	}
 	if lookup == nil {
-		end.Attributes.TemplateLookup = TemplateLookupNotFound
+		end.Attributes.TemplateLookup = TemplateLookupError
 	} else {
 		slug, status := lookup()
 		switch status {
@@ -164,10 +162,10 @@ func EndFromAgentWithLookup(a AgentInput, applied *AppliedConfigInput, lookup fu
 				end.Attributes.Template = slug
 				end.Attributes.TemplateLookup = TemplateLookupOK
 			}
-		case TemplateLookupError:
-			end.Attributes.TemplateLookup = TemplateLookupError
-		default:
+		case TemplateLookupNotFound:
 			end.Attributes.TemplateLookup = TemplateLookupNotFound
+		default:
+			end.Attributes.TemplateLookup = TemplateLookupError
 		}
 	}
 	return end
@@ -216,8 +214,9 @@ func TruncateBodyUTF8(body string, maxBytes int) (string, int, bool) {
 // envelope and already-loaded conversation/delivery metadata (v1 §3.2, §4.1).
 //
 // It mirrors pkg/messaging.MapLegacyEnvelope's kind/intent/event mapping and
-// hub-minted sender guards so an agent-sent type=system message with an Event
-// payload never yields hub-stamped event sub-blocks.
+// hub-minted sender guards so an agent-sent type=system message (or a non-system
+// message carrying Sender="trigger"/SenderID="TRIGGER") never yields
+// origin="trigger" or hub-stamped event sub-blocks.
 func FromMessage(in MessageInput, conv ConversationInfo, deliv DeliveryInfo) (Facts, error) {
 	if strings.TrimSpace(in.Type) == "" {
 		return Facts{}, errors.New("rulefacts: MessageInput.Type must not be empty")
@@ -514,9 +513,16 @@ type wireEventBody struct {
 	EventType     string              `json:"event_type,omitempty"`
 	Source        *EventSource        `json:"source,omitempty"`
 	Trigger       *EventTrigger       `json:"trigger,omitempty"`
-	Schedule      *EventSchedule      `json:"schedule,omitempty"`
+	Schedule      *wireEventSchedule  `json:"schedule,omitempty"`
 	TemplatedVars []string            `json:"templated_vars,omitempty"`
 	External      *wireExternalHeader `json:"external_payload,omitempty"`
+}
+
+type wireEventSchedule struct {
+	ID      string `json:"id,omitempty"`
+	Name    string `json:"name,omitempty"`
+	EventID string `json:"event_id,omitempty"`
+	FireAt  string `json:"fire_at,omitempty"`
 }
 
 type wireExternalHeader struct {
@@ -538,6 +544,19 @@ func parseHubEventJSON(raw []byte, schedulerOnly bool) (*EventFacts, bool) {
 			return nil, false
 		}
 	}
+	var sched *EventSchedule
+	if wire.Schedule != nil {
+		sched = &EventSchedule{
+			ID:      wire.Schedule.ID,
+			Name:    wire.Schedule.Name,
+			EventID: wire.Schedule.EventID,
+		}
+		if wire.Schedule.FireAt != "" {
+			if t, err := time.Parse(time.RFC3339Nano, wire.Schedule.FireAt); err == nil {
+				sched.FireAt = t.UTC()
+			}
+		}
+	}
 	ev := &EventFacts{
 		Type:          wire.Type,
 		EventType:     wire.EventType,
@@ -548,7 +567,7 @@ func parseHubEventJSON(raw []byte, schedulerOnly bool) (*EventFacts, bool) {
 		Subject:       wire.Subject,
 		Source:        cloneEventSource(wire.Source),
 		Trigger:       cloneEventTrigger(wire.Trigger),
-		Schedule:      cloneEventSchedule(wire.Schedule),
+		Schedule:      sched,
 		TemplatedVars: slices.Clone(wire.TemplatedVars),
 	}
 	if wire.External != nil {
@@ -597,13 +616,5 @@ func cloneEventTrigger(t *EventTrigger) *EventTrigger {
 		return nil
 	}
 	cp := *t
-	return &cp
-}
-
-func cloneEventSchedule(s *EventSchedule) *EventSchedule {
-	if s == nil {
-		return nil
-	}
-	cp := *s
 	return &cp
 }

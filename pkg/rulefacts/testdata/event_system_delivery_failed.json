@@ -1,0 +1,398 @@
+{
+  "name": "event_system_delivery_failed",
+  "schema_version": 1,
+  "facts": {
+    "message": {
+      "id": "msg-event-sys-1",
+      "created_at": "2026-11-28T19:00:00Z",
+      "kind": "event",
+      "type": "system",
+      "origin": "system",
+      "body": "Delivery failed for agent:tech-lead",
+      "bytes": 35,
+      "body_truncated": false,
+      "body_source": "persisted",
+      "has_choices": false,
+      "urgent": false,
+      "attachment_count": 0,
+      "artifact_count": 0,
+      "event": {
+        "type": "delivery.failed"
+      },
+      "system": {
+        "category": "delivery-failed"
+      }
+    },
+    "recipient": {
+      "kind": "agent",
+      "id": "agent-uuid-worker",
+      "slug": "dev-worker",
+      "project_id": "proj-uuid-1",
+      "created_by": {
+        "kind": "user",
+        "id": "user-uuid-alice"
+      },
+      "root_user_id": "user-uuid-alice",
+      "attributes": {
+        "name": "Dev Worker",
+        "template": "developer",
+        "template_lookup": "ok",
+        "template_id": "tmpl-uuid-dev",
+        "template_version": "sha256:dev-v1",
+        "labels": {
+          "role": "developer"
+        }
+      }
+    },
+    "conversation": {
+      "ref": "conv-group-1",
+      "id": "conv-group-1",
+      "kind": "group",
+      "surface": "native",
+      "project_id": "proj-uuid-1",
+      "agent_count": 1,
+      "user_count": 0,
+      "agent_participant_ids": [
+        "agent-uuid-worker"
+      ]
+    },
+    "mentions": {
+      "agent_count": 0,
+      "user_count": 0
+    },
+    "delivery": {
+      "surface": "agent_dm",
+      "via": "direct",
+      "copy": false,
+      "cross_project": false,
+      "delegated": false
+    }
+  },
+  "projections": {
+    "policy_a2a": {
+      "conversation": {
+        "agent_count": 1,
+        "agent_participant_ids": [
+          "agent-uuid-worker"
+        ],
+        "id": "conv-group-1",
+        "kind": "group",
+        "project_id": "proj-uuid-1",
+        "ref": "conv-group-1",
+        "surface": "native",
+        "thread_id": "",
+        "user_count": 0,
+        "user_participant_ids": []
+      },
+      "delivery": {
+        "copy": false,
+        "cross_project": false,
+        "delegated": false,
+        "surface": "agent_dm",
+        "via": "direct"
+      },
+      "mentions": {
+        "agent_count": 0,
+        "agent_ids": [],
+        "user_count": 0,
+        "user_ids": []
+      },
+      "message": {
+        "artifact_count": 0,
+        "attachment_count": 0,
+        "body": "Delivery failed for agent:tech-lead",
+        "body_source": "persisted",
+        "body_truncated": false,
+        "bytes": 35,
+        "event": {
+          "type": "delivery.failed"
+        },
+        "has_choices": false,
+        "kind": "event",
+        "origin": "system",
+        "system": {
+          "category": "delivery-failed"
+        },
+        "type": "system",
+        "urgent": false
+      },
+      "recipient": {
+        "attributes": {
+          "labels": {
+            "role": "developer"
+          },
+          "name": "Dev Worker",
+          "template": "developer",
+          "template_id": "tmpl-uuid-dev",
+          "template_lookup": "ok",
+          "template_version": "sha256:dev-v1"
+        },
+        "created_by": {
+          "id": "user-uuid-alice",
+          "kind": "user"
+        },
+        "id": "agent-uuid-worker",
+        "kind": "agent",
+        "project_id": "proj-uuid-1",
+        "root_user_id": "user-uuid-alice",
+        "slug": "dev-worker"
+      }
+    },
+    "policy_in": {
+      "conversation": {
+        "agent_count": 1,
+        "id": "conv-group-1",
+        "kind": "group",
+        "project_id": "proj-uuid-1",
+        "ref": "conv-group-1",
+        "surface": "native",
+        "thread_id": "",
+        "user_count": 0
+      },
+      "delivery": {
+        "copy": false,
+        "cross_project": false,
+        "delegated": false,
+        "surface": "agent_dm",
+        "via": "direct"
+      },
+      "mentions": {
+        "agent_count": 0,
+        "user_count": 0
+      },
+      "message": {
+        "artifact_count": 0,
+        "attachment_count": 0,
+        "body": "Delivery failed for agent:tech-lead",
+        "body_source": "persisted",
+        "body_truncated": false,
+        "bytes": 35,
+        "event": {
+          "type": "delivery.failed"
+        },
+        "has_choices": false,
+        "kind": "event",
+        "origin": "system",
+        "system": {
+          "category": "delivery-failed"
+        },
+        "type": "system",
+        "urgent": false
+      },
+      "recipient": {
+        "attributes": {
+          "labels": {
+            "role": "developer"
+          },
+          "name": "Dev Worker",
+          "template": "developer",
+          "template_id": "tmpl-uuid-dev",
+          "template_lookup": "ok",
+          "template_version": "sha256:dev-v1"
+        },
+        "created_by": {
+          "id": "user-uuid-alice",
+          "kind": "user"
+        },
+        "id": "agent-uuid-worker",
+        "kind": "agent",
+        "project_id": "proj-uuid-1",
+        "root_user_id": "user-uuid-alice",
+        "slug": "dev-worker"
+      }
+    },
+    "policy_out": {
+      "conversation": {
+        "agent_count": 1,
+        "id": "conv-group-1",
+        "kind": "group",
+        "project_id": "proj-uuid-1",
+        "ref": "conv-group-1",
+        "surface": "native",
+        "thread_id": "",
+        "user_count": 0
+      },
+      "delivery": {
+        "copy": false,
+        "cross_project": false,
+        "delegated": false,
+        "surface": "agent_dm",
+        "via": "direct"
+      },
+      "mentions": {
+        "agent_count": 0,
+        "user_count": 0
+      },
+      "message": {
+        "artifact_count": 0,
+        "attachment_count": 0,
+        "body": "Delivery failed for agent:tech-lead",
+        "body_source": "persisted",
+        "body_truncated": false,
+        "bytes": 35,
+        "event": {
+          "type": "delivery.failed"
+        },
+        "has_choices": false,
+        "kind": "event",
+        "origin": "system",
+        "system": {
+          "category": "delivery-failed"
+        },
+        "type": "system",
+        "urgent": false
+      }
+    },
+    "trigger_chat": {
+      "message": {
+        "artifact_count": 0,
+        "attachment_count": 0,
+        "body": "Delivery failed for agent:tech-lead",
+        "body_source": "persisted",
+        "body_truncated": false,
+        "bytes": 35,
+        "context": {
+          "conversation": {
+            "agent_count": 1,
+            "agent_participant_ids": [
+              "agent-uuid-worker"
+            ],
+            "id": "conv-group-1",
+            "kind": "group",
+            "project_id": "proj-uuid-1",
+            "ref": "conv-group-1",
+            "surface": "native",
+            "thread_id": "",
+            "user_count": 0,
+            "user_participant_ids": []
+          },
+          "delivery": {
+            "copy": false,
+            "cross_project": false,
+            "delegated": false,
+            "surface": "agent_dm",
+            "via": "direct"
+          },
+          "mentions": {
+            "agent_count": 0,
+            "agent_ids": [],
+            "user_count": 0,
+            "user_ids": []
+          }
+        },
+        "created_at": "2026-11-28T19:00:00Z",
+        "event": {
+          "type": "delivery.failed"
+        },
+        "has_choices": false,
+        "id": "msg-event-sys-1",
+        "kind": "event",
+        "origin": "system",
+        "system": {
+          "category": "delivery-failed"
+        },
+        "type": "system",
+        "urgent": false
+      },
+      "target": {
+        "attributes": {
+          "labels": {
+            "role": "developer"
+          },
+          "name": "Dev Worker",
+          "template": "developer",
+          "template_id": "tmpl-uuid-dev",
+          "template_lookup": "ok",
+          "template_version": "sha256:dev-v1"
+        },
+        "created_by": {
+          "id": "user-uuid-alice",
+          "kind": "user"
+        },
+        "id": "agent-uuid-worker",
+        "kind": "agent",
+        "project_id": "proj-uuid-1",
+        "root_user_id": "user-uuid-alice",
+        "slug": "dev-worker"
+      }
+    }
+  },
+  "declarations": {
+    "policy_a2a": [
+      {
+        "name": "message",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "sender",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "recipient",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "conversation",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "mentions",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "delivery",
+        "type": "map(string, dyn)"
+      }
+    ],
+    "policy_in": [
+      {
+        "name": "message",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "recipient",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "conversation",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "mentions",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "delivery",
+        "type": "map(string, dyn)"
+      }
+    ],
+    "policy_out": [
+      {
+        "name": "message",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "sender",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "conversation",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "mentions",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "delivery",
+        "type": "map(string, dyn)"
+      }
+    ],
+    "trigger_chat": [
+      {
+        "name": "event",
+        "type": "map(string, dyn)"
+      }
+    ]
+  }
+}

@@ -130,7 +130,9 @@ const (
 	// ScopeTriggerChat is the post-persist conversation-trigger scope (a2a-equivalent per ptone Q1).
 	ScopeTriggerChat Scope = "trigger_chat"
 
-	// ScopeLegacyPolicyV1 is the frozen legacy message_policy v1 compatibility scope.
+	// ScopeLegacyPolicyV1 is the frozen legacy message_policy v1 mirror scope.
+	// It is test/compatibility-only and never widens the frozen v1 surface:
+	// production legacy activation remains in pkg/messagepolicy.
 	ScopeLegacyPolicyV1 Scope = "legacy_policy_v1"
 )
 
@@ -348,9 +350,10 @@ const (
 
 // ContentInput records System One content-environment eligibility for a field (v1 §3.5).
 type ContentInput struct {
-	Eligible bool             `json:"eligible"`
-	MaxBytes int              `json:"max_bytes"`
-	Kind     ContentInputKind `json:"kind"`
+	Eligible    bool             `json:"eligible"`
+	MaxBytes    int              `json:"max_bytes"`
+	Kind        ContentInputKind `json:"kind"`
+	ContentOnly bool             `json:"content_only,omitempty"` // true if NOT emitted in CEL activation maps
 }
 
 // Field describes a single declared path in the message-facts contract (v1 §4.1, A1 §B.1).
@@ -418,11 +421,12 @@ func (r *Registry) VisibleIn(scope Scope) []Field {
 	return out
 }
 
-// ValidatePath checks whether path is a declared fact path visible in scope.
+// ValidatePath checks whether path is a declared CEL fact path visible in scope.
 // Consumers use this for authoring-time literal-path validation (v1 §4.2, R1).
-// Dynamic label keys under sender.attributes.labels.<k> and
-// recipient.attributes.labels.<k> are accepted when the parent labels map is
-// visible in scope.
+// Content-only fields (such as conversation.unmentioned_agent_slugs) are
+// rejected for CEL path validation. Dynamic label keys under
+// sender.attributes.labels.<k> and recipient.attributes.labels.<k> are accepted
+// when the parent labels map is visible in scope.
 func (r *Registry) ValidatePath(scope Scope, path string) error {
 	if !scope.Valid() {
 		return fmt.Errorf("rulefacts: unknown scope %q", scope)
@@ -440,6 +444,9 @@ func (r *Registry) ValidatePath(scope Scope, path string) error {
 			}
 		}
 		return fmt.Errorf("rulefacts: unknown fact path %q", path)
+	}
+	if f.Content != nil && f.Content.ContentOnly {
+		return fmt.Errorf("rulefacts: path %q is content-only and not a CEL fact path", path)
 	}
 	if !f.Visible.Has(scope) {
 		return fmt.Errorf("rulefacts: path %q is not visible in scope %q", path, scope)
@@ -511,12 +518,18 @@ func endFields(prefix string, visible ScopeSet, isRecipient bool) []Field {
 	if isRecipient {
 		kindContent = &ContentInput{Eligible: true, MaxBytes: 16, Kind: ContentInputText}
 	}
+	legacyRoot := visible | ScopeBitLegacyPolicyV1
+	legacyProjectID := visible
+	if !isRecipient {
+		// Today's legacy message_policy v1 exposes sender.project_id but not recipient.project_id.
+		legacyProjectID = visible | ScopeBitLegacyPolicyV1
+	}
 	return []Field{
-		{Path: prefix, Type: TypeObject("End"), Grade: GradeAuthority, IdentityRef: IdentityRefSelfEnd, Producer: "hub:principal", Visible: visible, Since: 1},
-		{Path: prefix + ".kind", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefSelfEnd, Producer: "hub:principal", Visible: visible, Since: 1, Content: kindContent},
-		{Path: prefix + ".id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefSelfEnd, Producer: "hub:principal", Visible: visible, Since: 1},
-		{Path: prefix + ".slug", Type: TypeString(), Grade: GradeDescriptor, IdentityRef: IdentityRefSelfEnd, Producer: "hub:principal", Visible: visible, Since: 1, Content: slugContent},
-		{Path: prefix + ".project_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefSelfEnd, Producer: "hub:principal", Visible: visible, Since: 1},
+		{Path: prefix, Type: TypeObject("End"), Grade: GradeAuthority, IdentityRef: IdentityRefSelfEnd, Producer: "hub:principal", Visible: legacyRoot, Since: 1},
+		{Path: prefix + ".kind", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefSelfEnd, Producer: "hub:principal", Visible: legacyRoot, Since: 1, Content: kindContent},
+		{Path: prefix + ".id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefSelfEnd, Producer: "hub:principal", Visible: legacyRoot, Since: 1},
+		{Path: prefix + ".slug", Type: TypeString(), Grade: GradeDescriptor, IdentityRef: IdentityRefSelfEnd, Producer: "hub:principal", Visible: legacyRoot, Since: 1, Content: slugContent},
+		{Path: prefix + ".project_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefSelfEnd, Producer: "hub:principal", Visible: legacyProjectID, Since: 1},
 		{Path: prefix + ".created_by", Type: TypeObject("PrincipalRef"), Grade: GradeAuthority, IdentityRef: IdentityRefSelfEnd, Producer: "hub:agent_row", Visible: visible, Since: 1},
 		{Path: prefix + ".created_by.kind", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefSelfEnd, Producer: "hub:agent_row", Visible: visible, Since: 1},
 		{Path: prefix + ".created_by.id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefSelfEnd, Producer: "hub:agent_row", Visible: visible, Since: 1},
@@ -532,65 +545,70 @@ func endFields(prefix string, visible ScopeSet, isRecipient bool) []Field {
 }
 
 func buildSchema() Registry {
-	allWithLegacy := ScopesAll | ScopeBitLegacyPolicyV1
-	senderScopes := ScopeBitPolicyOut | ScopeBitPolicyA2A | ScopeBitTriggerChat | ScopeBitLegacyPolicyV1
-	recipientScopes := ScopeBitPolicyIn | ScopeBitPolicyA2A | ScopeBitTriggerChat | ScopeBitLegacyPolicyV1
-	thirdPartyScopes := ScopeBitPolicyA2A | ScopeBitTriggerChat | ScopeBitLegacyPolicyV1
+	// ScopeBitLegacyPolicyV1 is attached ONLY to the frozen v1 subset so the
+	// legacy scope never widens the frozen message_policy v1 surface.
+	frozenV1 := ScopesAll | ScopeBitLegacyPolicyV1
+	senderScopes := ScopeBitPolicyOut | ScopeBitPolicyA2A | ScopeBitTriggerChat
+	recipientScopes := ScopeBitPolicyIn | ScopeBitPolicyA2A | ScopeBitTriggerChat
+	a2aAndTrigger := ScopeBitPolicyA2A | ScopeBitTriggerChat
+	thirdPartyLegacy := ScopeBitPolicyA2A | ScopeBitTriggerChat | ScopeBitLegacyPolicyV1
 
 	fields := []Field{
 		// message.* (envelope, persisted-only id/created_at, kind, payloads, content)
-		{Path: "message", Type: TypeObject("Message"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
+		{Path: "message", Type: TypeObject("Message"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: frozenV1, Since: 1},
 		{Path: "message.id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:message_row", Visible: ScopeBitTriggerChat, Since: 1},
 		{Path: "message.created_at", Type: TypeTimestamp(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:message_row", Visible: ScopeBitTriggerChat, Since: 1},
-		{Path: "message.kind", Type: TypeString(), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.intent", Type: TypeString(), Grade: GradeAsserted, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.type", Type: TypeString(), Grade: GradeAsserted, IdentityRef: IdentityRefNone, Producer: "sender", Visible: allWithLegacy, Since: 1, Content: &ContentInput{Eligible: true, MaxBytes: 64, Kind: ContentInputText}},
-		{Path: "message.origin", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.body", Type: TypeString(), Grade: GradeContent, IdentityRef: IdentityRefNone, Producer: "sender", Visible: allWithLegacy, Since: 1, Content: &ContentInput{Eligible: true, MaxBytes: MaxBodyBytes, Kind: ContentInputText}},
-		{Path: "message.bytes", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.body_truncated", Type: TypeBool(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.body_source", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.has_choices", Type: TypeBool(), Grade: GradeAsserted, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.urgent", Type: TypeBool(), Grade: GradeAsserted, IdentityRef: IdentityRefNone, Producer: "sender", Visible: allWithLegacy, Since: 1},
-		{Path: "message.attachment_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.artifact_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
+		{Path: "message.kind", Type: TypeString(), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
+		{Path: "message.intent", Type: TypeString(), Grade: GradeAsserted, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
+		{Path: "message.type", Type: TypeString(), Grade: GradeAsserted, IdentityRef: IdentityRefNone, Producer: "sender", Visible: frozenV1, Since: 1, Content: &ContentInput{Eligible: true, MaxBytes: 64, Kind: ContentInputText}},
+		{Path: "message.origin", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
+		{Path: "message.body", Type: TypeString(), Grade: GradeContent, IdentityRef: IdentityRefNone, Producer: "sender", Visible: frozenV1, Since: 1, Content: &ContentInput{Eligible: true, MaxBytes: MaxBodyBytes, Kind: ContentInputText}},
+		{Path: "message.bytes", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: frozenV1, Since: 1},
+		{Path: "message.body_truncated", Type: TypeBool(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: frozenV1, Since: 1},
+		{Path: "message.body_source", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
+		{Path: "message.has_choices", Type: TypeBool(), Grade: GradeAsserted, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: frozenV1, Since: 1},
+		{Path: "message.urgent", Type: TypeBool(), Grade: GradeAsserted, IdentityRef: IdentityRefNone, Producer: "sender", Visible: frozenV1, Since: 1},
+		{Path: "message.attachment_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: frozenV1, Since: 1},
+		{Path: "message.artifact_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
 
 		// message.event.* (present only when kind == "event"; EventBody.Attributes/Lists/URL are NOT facts in v1)
-		{Path: "message.event", Type: TypeObject("Event"), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.type", Type: TypeString(), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.event_type", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.event_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.fire_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.status", Type: TypeString(), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.reason", Type: TypeString(), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefValueDependent, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.subject", Type: TypeString(), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefValueDependent, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.source", Type: TypeObject("EventSource"), Grade: GradeAuthority, IdentityRef: IdentityRefValueDependent, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.source.kind", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.source.id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefValueDependent, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.source.name", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefValueDependent, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.trigger", Type: TypeObject("EventTrigger"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.trigger.id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.trigger.name", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.schedule", Type: TypeObject("EventSchedule"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:scheduler", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.schedule.id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:scheduler", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.schedule.name", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:scheduler", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.schedule.event_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:scheduler", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.schedule.fire_at", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:scheduler", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.external", Type: TypeObject("EventExternal"), Grade: GradeExternal, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.external.present", Type: TypeBool(), Grade: GradeExternal, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.external.verified", Type: TypeString(), Grade: GradeExternal, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.external.bytes", Type: TypeInt(), Grade: GradeExternal, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.external.truncated", Type: TypeBool(), Grade: GradeExternal, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
-		{Path: "message.event.templated_vars", Type: TypeList(TypeString()), Grade: GradeAuthority, IdentityRef: IdentityRefValueDependent, Producer: "hub:trigger", Visible: allWithLegacy, Since: 1},
+		// A1 §B.2 static visibility: subject, reason, and templated_vars are ALWAYS
+		// dropped in policy_out and policy_in, so their Visible set excludes out/in.
+		{Path: "message.event", Type: TypeObject("Event"), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.type", Type: TypeString(), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.event_type", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.event_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.fire_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.status", Type: TypeString(), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.reason", Type: TypeString(), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefValueDependent, Producer: "hub:derived", Visible: a2aAndTrigger, Since: 1},
+		{Path: "message.event.subject", Type: TypeString(), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefValueDependent, Producer: "hub:derived", Visible: a2aAndTrigger, Since: 1},
+		{Path: "message.event.source", Type: TypeObject("EventSource"), Grade: GradeAuthority, IdentityRef: IdentityRefValueDependent, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.source.kind", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.source.id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefValueDependent, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.source.name", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefValueDependent, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.trigger", Type: TypeObject("EventTrigger"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.trigger.id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.trigger.name", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.schedule", Type: TypeObject("EventSchedule"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:scheduler", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.schedule.id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:scheduler", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.schedule.name", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:scheduler", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.schedule.event_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:scheduler", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.schedule.fire_at", Type: TypeTimestamp(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:scheduler", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.external", Type: TypeObject("EventExternal"), Grade: GradeExternal, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.external.present", Type: TypeBool(), Grade: GradeExternal, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.external.verified", Type: TypeString(), Grade: GradeExternal, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.external.bytes", Type: TypeInt(), Grade: GradeExternal, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.external.truncated", Type: TypeBool(), Grade: GradeExternal, IdentityRef: IdentityRefNone, Producer: "hub:trigger", Visible: ScopesAll, Since: 1},
+		{Path: "message.event.templated_vars", Type: TypeList(TypeString()), Grade: GradeAuthority, IdentityRef: IdentityRefValueDependent, Producer: "hub:trigger", Visible: a2aAndTrigger, Since: 1},
 
 		// message.interaction.* (present only for hub-minted interaction types)
-		{Path: "message.interaction", Type: TypeObject("Interaction"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.interaction.kind", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.interaction.count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
+		{Path: "message.interaction", Type: TypeObject("Interaction"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
+		{Path: "message.interaction.kind", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
+		{Path: "message.interaction.count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
 
 		// message.system.* (present for type == system with system_category)
-		{Path: "message.system", Type: TypeObject("SystemInfo"), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "message.system.category", Type: TypeString(), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
+		{Path: "message.system", Type: TypeObject("SystemInfo"), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
+		{Path: "message.system.category", Type: TypeString(), Grade: GradeAssertedUnlessSystemOrigin, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
 	}
 
 	// sender.* and recipient.*
@@ -599,31 +617,31 @@ func buildSchema() Registry {
 
 	// conversation.*, mentions.*, delivery.*
 	fields = append(fields, []Field{
-		{Path: "conversation", Type: TypeObject("Conversation"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: allWithLegacy, Since: 1},
-		{Path: "conversation.ref", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefValueDependent, Producer: "hub:conversation", Visible: allWithLegacy, Since: 1},
-		{Path: "conversation.id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefValueDependent, Producer: "hub:conversation", Visible: allWithLegacy, Since: 1},
-		{Path: "conversation.kind", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: allWithLegacy, Since: 1},
-		{Path: "conversation.surface", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: allWithLegacy, Since: 1},
-		{Path: "conversation.project_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: allWithLegacy, Since: 1},
-		{Path: "conversation.thread_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: allWithLegacy, Since: 1},
-		{Path: "conversation.agent_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: allWithLegacy, Since: 1},
-		{Path: "conversation.user_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: allWithLegacy, Since: 1},
-		{Path: "conversation.agent_participant_ids", Type: TypeList(TypeString()), Grade: GradeAuthority, IdentityRef: IdentityRefThirdParty, Producer: "hub:conversation", Visible: thirdPartyScopes, Since: 1},
-		{Path: "conversation.user_participant_ids", Type: TypeList(TypeString()), Grade: GradeAuthority, IdentityRef: IdentityRefThirdParty, Producer: "hub:conversation", Visible: thirdPartyScopes, Since: 1},
-		{Path: "conversation.unmentioned_agent_slugs", Type: TypeList(TypeString()), Grade: GradeDescriptor, IdentityRef: IdentityRefThirdParty, Producer: "hub:derived", Visible: ScopeBitPolicyA2A | ScopeBitLegacyPolicyV1, Since: 1, Derived: true, Content: &ContentInput{Eligible: true, MaxBytes: 2048, Kind: ContentInputList}},
+		{Path: "conversation", Type: TypeObject("Conversation"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: frozenV1, Since: 1},
+		{Path: "conversation.ref", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefValueDependent, Producer: "hub:conversation", Visible: ScopesAll, Since: 1},
+		{Path: "conversation.id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefValueDependent, Producer: "hub:conversation", Visible: ScopesAll, Since: 1},
+		{Path: "conversation.kind", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: frozenV1, Since: 1},
+		{Path: "conversation.surface", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: ScopesAll, Since: 1},
+		{Path: "conversation.project_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: ScopesAll, Since: 1},
+		{Path: "conversation.thread_id", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: ScopesAll, Since: 1},
+		{Path: "conversation.agent_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: ScopesAll, Since: 1},
+		{Path: "conversation.user_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:conversation", Visible: ScopesAll, Since: 1},
+		{Path: "conversation.agent_participant_ids", Type: TypeList(TypeString()), Grade: GradeAuthority, IdentityRef: IdentityRefThirdParty, Producer: "hub:conversation", Visible: thirdPartyLegacy, Since: 1},
+		{Path: "conversation.user_participant_ids", Type: TypeList(TypeString()), Grade: GradeAuthority, IdentityRef: IdentityRefThirdParty, Producer: "hub:conversation", Visible: thirdPartyLegacy, Since: 1},
+		{Path: "conversation.unmentioned_agent_slugs", Type: TypeList(TypeString()), Grade: GradeDescriptor, IdentityRef: IdentityRefThirdParty, Producer: "hub:derived", Visible: ScopeBitPolicyA2A | ScopeBitLegacyPolicyV1, Since: 1, Derived: true, Content: &ContentInput{Eligible: true, MaxBytes: 2048, Kind: ContentInputList, ContentOnly: true}},
 
-		{Path: "mentions", Type: TypeObject("Mentions"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "mentions.agent_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "mentions.user_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: allWithLegacy, Since: 1},
-		{Path: "mentions.agent_ids", Type: TypeList(TypeString()), Grade: GradeAuthority, IdentityRef: IdentityRefThirdParty, Producer: "hub:derived", Visible: thirdPartyScopes, Since: 1},
-		{Path: "mentions.user_ids", Type: TypeList(TypeString()), Grade: GradeAuthority, IdentityRef: IdentityRefThirdParty, Producer: "hub:derived", Visible: thirdPartyScopes, Since: 1},
+		{Path: "mentions", Type: TypeObject("Mentions"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
+		{Path: "mentions.agent_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
+		{Path: "mentions.user_count", Type: TypeInt(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:derived", Visible: ScopesAll, Since: 1},
+		{Path: "mentions.agent_ids", Type: TypeList(TypeString()), Grade: GradeAuthority, IdentityRef: IdentityRefThirdParty, Producer: "hub:derived", Visible: thirdPartyLegacy, Since: 1},
+		{Path: "mentions.user_ids", Type: TypeList(TypeString()), Grade: GradeAuthority, IdentityRef: IdentityRefThirdParty, Producer: "hub:derived", Visible: thirdPartyLegacy, Since: 1},
 
-		{Path: "delivery", Type: TypeObject("Delivery"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:delivery", Visible: allWithLegacy, Since: 1},
-		{Path: "delivery.surface", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:delivery", Visible: allWithLegacy, Since: 1},
-		{Path: "delivery.via", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:delivery", Visible: allWithLegacy, Since: 1},
-		{Path: "delivery.copy", Type: TypeBool(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:delivery", Visible: allWithLegacy, Since: 1},
-		{Path: "delivery.cross_project", Type: TypeBool(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:delivery", Visible: allWithLegacy, Since: 1},
-		{Path: "delivery.delegated", Type: TypeBool(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:delivery", Visible: allWithLegacy, Since: 1},
+		{Path: "delivery", Type: TypeObject("Delivery"), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:delivery", Visible: ScopesAll, Since: 1},
+		{Path: "delivery.surface", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:delivery", Visible: frozenV1, Since: 1},
+		{Path: "delivery.via", Type: TypeString(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:delivery", Visible: ScopesAll, Since: 1},
+		{Path: "delivery.copy", Type: TypeBool(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:delivery", Visible: ScopesAll, Since: 1},
+		{Path: "delivery.cross_project", Type: TypeBool(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:delivery", Visible: ScopesAll, Since: 1},
+		{Path: "delivery.delegated", Type: TypeBool(), Grade: GradeAuthority, IdentityRef: IdentityRefNone, Producer: "hub:delivery", Visible: ScopesAll, Since: 1},
 	}...)
 
 	byPath := make(map[string]Field, len(fields))

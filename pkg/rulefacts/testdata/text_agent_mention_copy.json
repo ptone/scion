@@ -1,0 +1,446 @@
+{
+  "name": "text_agent_mention_copy",
+  "schema_version": 1,
+  "facts": {
+    "message": {
+      "created_at": "0001-01-01T00:00:00Z",
+      "kind": "text",
+      "intent": "request",
+      "type": "mention",
+      "origin": "agent",
+      "body": "Mentioned @tech-lead in group thread",
+      "bytes": 36,
+      "body_truncated": false,
+      "body_source": "copy_body",
+      "has_choices": false,
+      "urgent": false,
+      "attachment_count": 0,
+      "artifact_count": 0
+    },
+    "sender": {
+      "kind": "agent",
+      "id": "agent-uuid-worker",
+      "slug": "dev-worker",
+      "project_id": "proj-uuid-1",
+      "created_by": {
+        "kind": "user",
+        "id": "user-uuid-alice"
+      },
+      "root_user_id": "user-uuid-alice",
+      "attributes": {
+        "name": "Dev Worker",
+        "template": "developer",
+        "template_lookup": "ok",
+        "template_id": "tmpl-uuid-dev",
+        "template_version": "sha256:dev-v1",
+        "labels": {
+          "role": "developer"
+        }
+      }
+    },
+    "recipient": {
+      "kind": "agent",
+      "id": "agent-uuid-lead",
+      "slug": "tech-lead",
+      "project_id": "proj-uuid-1",
+      "created_by": {
+        "kind": "user",
+        "id": "user-uuid-alice"
+      },
+      "root_user_id": "user-uuid-alice",
+      "attributes": {
+        "name": "Tech Lead",
+        "template_lookup": "not_found",
+        "template_id": "tmpl-uuid-lead",
+        "template_version": "sha256:lead-v1",
+        "labels": {
+          "role": "lead"
+        }
+      }
+    },
+    "conversation": {
+      "ref": "dm:agent:agent-uuid-lead:agent:agent-uuid-worker",
+      "kind": "direct",
+      "surface": "native",
+      "project_id": "proj-uuid-1",
+      "agent_count": 2,
+      "user_count": 0,
+      "agent_participant_ids": [
+        "agent-uuid-worker",
+        "agent-uuid-lead"
+      ]
+    },
+    "mentions": {
+      "agent_count": 0,
+      "user_count": 0
+    },
+    "delivery": {
+      "surface": "mention_delivery",
+      "via": "body-mention",
+      "copy": true,
+      "cross_project": false,
+      "delegated": false
+    }
+  },
+  "projections": {
+    "policy_a2a": {
+      "conversation": {
+        "agent_count": 2,
+        "agent_participant_ids": [
+          "agent-uuid-worker",
+          "agent-uuid-lead"
+        ],
+        "kind": "direct",
+        "project_id": "proj-uuid-1",
+        "ref": "dm:agent:agent-uuid-lead:agent:agent-uuid-worker",
+        "surface": "native",
+        "thread_id": "",
+        "user_count": 0,
+        "user_participant_ids": []
+      },
+      "delivery": {
+        "copy": true,
+        "cross_project": false,
+        "delegated": false,
+        "surface": "mention_delivery",
+        "via": "body-mention"
+      },
+      "mentions": {
+        "agent_count": 0,
+        "agent_ids": [],
+        "user_count": 0,
+        "user_ids": []
+      },
+      "message": {
+        "artifact_count": 0,
+        "attachment_count": 0,
+        "body": "Mentioned @tech-lead in group thread",
+        "body_source": "copy_body",
+        "body_truncated": false,
+        "bytes": 36,
+        "has_choices": false,
+        "intent": "request",
+        "kind": "text",
+        "origin": "agent",
+        "type": "mention",
+        "urgent": false
+      },
+      "recipient": {
+        "attributes": {
+          "labels": {
+            "role": "lead"
+          },
+          "name": "Tech Lead",
+          "template_id": "tmpl-uuid-lead",
+          "template_lookup": "not_found",
+          "template_version": "sha256:lead-v1"
+        },
+        "created_by": {
+          "id": "user-uuid-alice",
+          "kind": "user"
+        },
+        "id": "agent-uuid-lead",
+        "kind": "agent",
+        "project_id": "proj-uuid-1",
+        "root_user_id": "user-uuid-alice",
+        "slug": "tech-lead"
+      },
+      "sender": {
+        "attributes": {
+          "labels": {
+            "role": "developer"
+          },
+          "name": "Dev Worker",
+          "template": "developer",
+          "template_id": "tmpl-uuid-dev",
+          "template_lookup": "ok",
+          "template_version": "sha256:dev-v1"
+        },
+        "created_by": {
+          "id": "user-uuid-alice",
+          "kind": "user"
+        },
+        "id": "agent-uuid-worker",
+        "kind": "agent",
+        "project_id": "proj-uuid-1",
+        "root_user_id": "user-uuid-alice",
+        "slug": "dev-worker"
+      }
+    },
+    "policy_in": {
+      "conversation": {
+        "agent_count": 2,
+        "kind": "direct",
+        "project_id": "proj-uuid-1",
+        "surface": "native",
+        "thread_id": "",
+        "user_count": 0
+      },
+      "delivery": {
+        "copy": true,
+        "cross_project": false,
+        "delegated": false,
+        "surface": "mention_delivery",
+        "via": "body-mention"
+      },
+      "mentions": {
+        "agent_count": 0,
+        "user_count": 0
+      },
+      "message": {
+        "artifact_count": 0,
+        "attachment_count": 0,
+        "body": "Mentioned @tech-lead in group thread",
+        "body_source": "copy_body",
+        "body_truncated": false,
+        "bytes": 36,
+        "has_choices": false,
+        "intent": "request",
+        "kind": "text",
+        "origin": "agent",
+        "type": "mention",
+        "urgent": false
+      },
+      "recipient": {
+        "attributes": {
+          "labels": {
+            "role": "lead"
+          },
+          "name": "Tech Lead",
+          "template_id": "tmpl-uuid-lead",
+          "template_lookup": "not_found",
+          "template_version": "sha256:lead-v1"
+        },
+        "created_by": {
+          "id": "user-uuid-alice",
+          "kind": "user"
+        },
+        "id": "agent-uuid-lead",
+        "kind": "agent",
+        "project_id": "proj-uuid-1",
+        "root_user_id": "user-uuid-alice",
+        "slug": "tech-lead"
+      }
+    },
+    "policy_out": {
+      "conversation": {
+        "agent_count": 2,
+        "kind": "direct",
+        "project_id": "proj-uuid-1",
+        "surface": "native",
+        "thread_id": "",
+        "user_count": 0
+      },
+      "delivery": {
+        "copy": true,
+        "cross_project": false,
+        "delegated": false,
+        "surface": "mention_delivery",
+        "via": "body-mention"
+      },
+      "mentions": {
+        "agent_count": 0,
+        "user_count": 0
+      },
+      "message": {
+        "artifact_count": 0,
+        "attachment_count": 0,
+        "body": "Mentioned @tech-lead in group thread",
+        "body_source": "copy_body",
+        "body_truncated": false,
+        "bytes": 36,
+        "has_choices": false,
+        "intent": "request",
+        "kind": "text",
+        "origin": "agent",
+        "type": "mention",
+        "urgent": false
+      },
+      "sender": {
+        "attributes": {
+          "labels": {
+            "role": "developer"
+          },
+          "name": "Dev Worker",
+          "template": "developer",
+          "template_id": "tmpl-uuid-dev",
+          "template_lookup": "ok",
+          "template_version": "sha256:dev-v1"
+        },
+        "created_by": {
+          "id": "user-uuid-alice",
+          "kind": "user"
+        },
+        "id": "agent-uuid-worker",
+        "kind": "agent",
+        "project_id": "proj-uuid-1",
+        "root_user_id": "user-uuid-alice",
+        "slug": "dev-worker"
+      }
+    },
+    "trigger_chat": {
+      "actor": {
+        "attributes": {
+          "labels": {
+            "role": "developer"
+          },
+          "name": "Dev Worker",
+          "template": "developer",
+          "template_id": "tmpl-uuid-dev",
+          "template_lookup": "ok",
+          "template_version": "sha256:dev-v1"
+        },
+        "created_by": {
+          "id": "user-uuid-alice",
+          "kind": "user"
+        },
+        "id": "agent-uuid-worker",
+        "kind": "agent",
+        "project_id": "proj-uuid-1",
+        "root_user_id": "user-uuid-alice",
+        "slug": "dev-worker"
+      },
+      "message": {
+        "artifact_count": 0,
+        "attachment_count": 0,
+        "body": "Mentioned @tech-lead in group thread",
+        "body_source": "copy_body",
+        "body_truncated": false,
+        "bytes": 36,
+        "context": {
+          "conversation": {
+            "agent_count": 2,
+            "agent_participant_ids": [
+              "agent-uuid-worker",
+              "agent-uuid-lead"
+            ],
+            "kind": "direct",
+            "project_id": "proj-uuid-1",
+            "ref": "dm:agent:agent-uuid-lead:agent:agent-uuid-worker",
+            "surface": "native",
+            "thread_id": "",
+            "user_count": 0,
+            "user_participant_ids": []
+          },
+          "delivery": {
+            "copy": true,
+            "cross_project": false,
+            "delegated": false,
+            "surface": "mention_delivery",
+            "via": "body-mention"
+          },
+          "mentions": {
+            "agent_count": 0,
+            "agent_ids": [],
+            "user_count": 0,
+            "user_ids": []
+          }
+        },
+        "has_choices": false,
+        "intent": "request",
+        "kind": "text",
+        "origin": "agent",
+        "type": "mention",
+        "urgent": false
+      },
+      "target": {
+        "attributes": {
+          "labels": {
+            "role": "lead"
+          },
+          "name": "Tech Lead",
+          "template_id": "tmpl-uuid-lead",
+          "template_lookup": "not_found",
+          "template_version": "sha256:lead-v1"
+        },
+        "created_by": {
+          "id": "user-uuid-alice",
+          "kind": "user"
+        },
+        "id": "agent-uuid-lead",
+        "kind": "agent",
+        "project_id": "proj-uuid-1",
+        "root_user_id": "user-uuid-alice",
+        "slug": "tech-lead"
+      }
+    }
+  },
+  "declarations": {
+    "policy_a2a": [
+      {
+        "name": "message",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "sender",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "recipient",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "conversation",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "mentions",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "delivery",
+        "type": "map(string, dyn)"
+      }
+    ],
+    "policy_in": [
+      {
+        "name": "message",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "recipient",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "conversation",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "mentions",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "delivery",
+        "type": "map(string, dyn)"
+      }
+    ],
+    "policy_out": [
+      {
+        "name": "message",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "sender",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "conversation",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "mentions",
+        "type": "map(string, dyn)"
+      },
+      {
+        "name": "delivery",
+        "type": "map(string, dyn)"
+      }
+    ],
+    "trigger_chat": [
+      {
+        "name": "event",
+        "type": "map(string, dyn)"
+      }
+    ]
+  }
+}

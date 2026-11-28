@@ -57,10 +57,15 @@ func Declarations(scope Scope, outer Naming) []celengine.Variable {
 		}
 
 	case NamingLegacyPolicyV1:
+		if scope != ScopeLegacyPolicyV1 {
+			return nil
+		}
+		// Exact mirror of today's frozen message_policy v1 mechanical variables
+		// (excluding consumer-owned judgment_* maps).
 		return []celengine.Variable{
 			{Name: "surface", Type: celengine.String()},
-			{Name: "sender", Type: celengine.Map(celengine.String(), celengine.Dyn())},
-			{Name: "recipient", Type: celengine.Map(celengine.String(), celengine.Dyn())},
+			{Name: "sender", Type: celengine.Map(celengine.String(), celengine.String())},
+			{Name: "recipient", Type: celengine.Map(celengine.String(), celengine.String())},
 			{Name: "message", Type: celengine.Map(celengine.String(), celengine.Dyn())},
 			{Name: "mentioned_agent_ids", Type: celengine.List(celengine.String())},
 			{Name: "mentioned_user_ids", Type: celengine.List(celengine.String())},

@@ -127,10 +127,10 @@ type EventTrigger struct {
 
 // EventSchedule carries hub-stamped schedule metadata on a schedule.fired event.
 type EventSchedule struct {
-	ID      string `json:"id,omitempty"`
-	Name    string `json:"name,omitempty"`
-	EventID string `json:"event_id,omitempty"`
-	FireAt  string `json:"fire_at,omitempty"`
+	ID      string    `json:"id,omitempty"`
+	Name    string    `json:"name,omitempty"`
+	EventID string    `json:"event_id,omitempty"`
+	FireAt  time.Time `json:"fire_at,omitempty"`
 }
 
 // EventExternal carries integrity-verified metadata about an external payload

@@ -22,6 +22,9 @@ import (
 // Activation holds a scope-projected CEL activation variable map (v1 §4.1).
 // Invisible paths are ABSENT from the map (not set to empty strings or empty
 // lists) so CEL has() returns false and direct reads yield missing_input.
+//
+// Activation is immutable after construction: Map returns a deep copy of the
+// underlying binding map so callers cannot mutate shared state.
 type Activation struct {
 	scope Scope
 	vars  map[string]any
@@ -32,12 +35,41 @@ func (a Activation) Scope() Scope {
 	return a.scope
 }
 
-// Map returns the underlying CEL variable binding map.
+// Map returns a deep copy of the underlying CEL variable binding map.
 func (a Activation) Map() map[string]any {
 	if a.vars == nil {
 		return map[string]any{}
 	}
-	return a.vars
+	return deepCopyMap(a.vars)
+}
+
+func deepCopyMap(src map[string]any) map[string]any {
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = deepCopyValue(v)
+	}
+	return dst
+}
+
+func deepCopyValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		return deepCopyMap(x)
+	case map[string]string:
+		out := make(map[string]string, len(x))
+		maps.Copy(out, x)
+		return out
+	case []string:
+		return slices.Clone(x)
+	case []any:
+		out := make([]any, len(x))
+		for i, elem := range x {
+			out[i] = deepCopyValue(elem)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // Project projects typed Facts into a scope-bounded CEL Activation (v1 §3.4,
@@ -47,18 +79,22 @@ func (a Activation) Map() map[string]any {
 //   - Opposite-end facts are ABSENT in policy_out (recipient absent) and
 //     policy_in (sender absent).
 //   - Third-party identity lists (mentions.agent_ids/user_ids,
-//     conversation.*_participant_ids, conversation.unmentioned_agent_slugs) are
-//     ABSENT in policy_out and policy_in, and present in policy_a2a and
-//     trigger_chat (Q1: a2a_equiv; unmentioned_agent_slugs is a2a/legacy only).
+//     conversation.*_participant_ids) are ABSENT in policy_out and policy_in,
+//     and present in policy_a2a and trigger_chat (Q1: a2a_equiv).
+//   - conversation.unmentioned_agent_slugs is System One content-only and is
+//     never emitted in CEL activation maps.
 //   - D1: conversation.ref and conversation.id are ABSENT in policy_out and
 //     policy_in when conversation.kind == "direct".
-//   - A1 §B.2: in policy_out and policy_in, value_dependent event fields
-//     (event.subject, event.reason, event.templated_vars) are DROPPED;
-//     event.source keeps id/name ONLY when source.kind is "agent" or "user" and
-//     source.id equals the visible end's id, otherwise only source.kind remains.
+//   - A1 §B.2: in policy_out and policy_in, event.subject, event.reason, and
+//     event.templated_vars are DROPPED; event.source keeps id/name ONLY when
+//     source.kind is "agent" or "user" and source.id equals the visible end's
+//     id, otherwise only source.kind remains.
 //   - message.id and message.created_at are ABSENT in policy scopes (pre-persist)
 //     and present in trigger_chat (post-persist).
 //   - message.body is truncated UTF-8 safely to MaxBodyBytes (16 KiB).
+//   - ScopeLegacyPolicyV1 emits strictly today's frozen message_policy v1 keys
+//     (test/compatibility mirror; production legacy activation stays in
+//     pkg/messagepolicy).
 func Project(f Facts, scope Scope) Activation {
 	switch scope {
 	case ScopePolicyOut:
@@ -126,25 +162,61 @@ func projectTriggerChat(f Facts) map[string]any {
 	return eventMap
 }
 
+// projectLegacyPolicyV1 emits strictly today's frozen message_policy v1
+// mechanical activation keys (matching messagepolicy.NewActivation, excluding
+// consumer-owned judgment_* maps). It never emits new v1-contract fields such
+// as message.kind, message.origin, message.event, or end attributes.
 func projectLegacyPolicyV1(f Facts) map[string]any {
-	vars := map[string]any{
-		"surface":             f.Delivery.Surface,
-		"message":             projectMessage(f.Message, ScopeLegacyPolicyV1, nil),
-		"mentioned_agent_ids": cloneStringsNonNil(f.Mentions.AgentIDs),
-		"mentioned_user_ids":  cloneStringsNonNil(f.Mentions.UserIDs),
-		"conversation":        projectConversation(f.Conversation, ScopeLegacyPolicyV1),
+	body, origBytes, truncated := boundBody(f.Message)
+
+	senderMap := map[string]string{
+		"kind":       "",
+		"id":         "",
+		"slug":       "",
+		"project_id": "",
 	}
 	if f.Sender != nil {
-		vars["sender"] = projectEnd(*f.Sender)
+		senderMap["kind"] = string(f.Sender.Kind)
+		senderMap["id"] = f.Sender.ID
+		senderMap["slug"] = f.Sender.Slug
+		senderMap["project_id"] = f.Sender.ProjectID
+	}
+
+	recipientMap := map[string]string{
+		"kind": "",
+		"id":   "",
+		"slug": "",
 	}
 	if f.Recipient != nil {
-		vars["recipient"] = projectEnd(*f.Recipient)
+		recipientMap["kind"] = string(f.Recipient.Kind)
+		recipientMap["id"] = f.Recipient.ID
+		recipientMap["slug"] = f.Recipient.Slug
 	}
-	return vars
+
+	return map[string]any{
+		"surface":   f.Delivery.Surface,
+		"sender":    senderMap,
+		"recipient": recipientMap,
+		"message": map[string]any{
+			"type":             f.Message.Type,
+			"body":             body,
+			"body_truncated":   truncated,
+			"bytes":            origBytes,
+			"has_choices":      f.Message.HasChoices,
+			"urgent":           f.Message.Urgent,
+			"attachment_count": f.Message.AttachmentCount,
+		},
+		"mentioned_agent_ids": cloneStringsNonNil(f.Mentions.AgentIDs),
+		"mentioned_user_ids":  cloneStringsNonNil(f.Mentions.UserIDs),
+		"conversation": map[string]any{
+			"kind":                  f.Conversation.Kind,
+			"agent_participant_ids": cloneStringsNonNil(f.Conversation.AgentParticipantIDs),
+			"user_participant_ids":  cloneStringsNonNil(f.Conversation.UserParticipantIDs),
+		},
+	}
 }
 
-func projectMessage(m MessageFacts, scope Scope, visibleEnd *End) map[string]any {
-	// Re-enforce MaxBodyBytes cap even if caller constructed Facts directly.
+func boundBody(m MessageFacts) (string, int64, bool) {
 	body := m.Body
 	origBytes := m.Bytes
 	truncated := m.BodyTruncated
@@ -162,6 +234,11 @@ func projectMessage(m MessageFacts, scope Scope, visibleEnd *End) map[string]any
 	if origBytes == 0 && len(body) > 0 {
 		origBytes = int64(len(body))
 	}
+	return body, origBytes, truncated
+}
+
+func projectMessage(m MessageFacts, scope Scope, visibleEnd *End) map[string]any {
+	body, origBytes, truncated := boundBody(m)
 
 	out := map[string]any{
 		"kind":             string(m.Kind),
@@ -226,8 +303,8 @@ func projectEvent(e EventFacts, scope Scope, visibleEnd *End) map[string]any {
 		out["status"] = e.Status
 	}
 
-	// Amendment A1 §B.2: subject, reason, templated_vars are value_dependent and
-	// not provable, so they are DROPPED in policy_out and policy_in.
+	// Amendment A1 §B.2 (defence in depth alongside static Schema.Visible):
+	// subject, reason, and templated_vars are DROPPED in policy_out and policy_in.
 	if !restrictValueDep {
 		if e.Reason != "" {
 			out["reason"] = e.Reason
@@ -282,8 +359,8 @@ func projectEvent(e EventFacts, scope Scope, visibleEnd *End) map[string]any {
 		if e.Schedule.EventID != "" {
 			sched["event_id"] = e.Schedule.EventID
 		}
-		if e.Schedule.FireAt != "" {
-			sched["fire_at"] = e.Schedule.FireAt
+		if !e.Schedule.FireAt.IsZero() {
+			sched["fire_at"] = e.Schedule.FireAt.UTC()
 		}
 		out["schedule"] = sched
 	}
@@ -362,16 +439,13 @@ func projectConversation(c ConversationFacts, scope Scope) map[string]any {
 		}
 	}
 
-	// Third-party participant lists: visible in policy_a2a, trigger_chat (Q1),
-	// and legacy_policy_v1; ABSENT in policy_out and policy_in.
-	if scope == ScopePolicyA2A || scope == ScopeTriggerChat || scope == ScopeLegacyPolicyV1 {
+	// Third-party participant lists: visible in policy_a2a and trigger_chat (Q1);
+	// ABSENT in policy_out and policy_in.
+	// Note: conversation.unmentioned_agent_slugs is System One content-only and
+	// is never emitted in CEL activation maps.
+	if scope == ScopePolicyA2A || scope == ScopeTriggerChat {
 		out["agent_participant_ids"] = cloneStringsNonNil(c.AgentParticipantIDs)
 		out["user_participant_ids"] = cloneStringsNonNil(c.UserParticipantIDs)
-	}
-
-	// Derived unmentioned_agent_slugs: a2a and legacy_policy_v1 only (v1 §3.5).
-	if (scope == ScopePolicyA2A || scope == ScopeLegacyPolicyV1) && c.UnmentionedAgentSlugs != nil {
-		out["unmentioned_agent_slugs"] = cloneStringsNonNil(c.UnmentionedAgentSlugs)
 	}
 
 	return out

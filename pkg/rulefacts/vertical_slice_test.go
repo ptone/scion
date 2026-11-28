@@ -79,7 +79,7 @@ func TestVerticalSlice_EventKind(t *testing.T) {
 	mapped, _, err := messaging.MapLegacyEnvelope(legacy, messaging.PersistedIdentity{MessageID: "msg-001"})
 	require.NoError(t, err)
 
-	recipient := rulefacts.EndFromAgent(
+	recipient := rulefacts.EndFromAgentWithLookup(
 		rulefacts.AgentInput{
 			ID:            "agent-uuid-1",
 			Slug:          "dev-worker",
@@ -94,7 +94,7 @@ func TestVerticalSlice_EventKind(t *testing.T) {
 			TemplateID:   "tmpl-1",
 			TemplateHash: "sha256:abc",
 		},
-		func() (string, bool) { return "developer", true },
+		func() (string, rulefacts.TemplateLookupStatus) { return "developer", rulefacts.TemplateLookupOK },
 	)
 
 	facts, err := rulefacts.FromMessage(

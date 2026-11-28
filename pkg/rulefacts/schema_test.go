@@ -125,4 +125,46 @@ func TestSchema_VisibilityAndValidatePath(t *testing.T) {
 	for _, sc := range rulefacts.AllScopes {
 		assert.Error(t, rulefacts.Schema.ValidatePath(sc, "message.nonexistent_field"))
 	}
+
+	// A1 §B.2 static visibility: always-dropped paths must exclude policy_out and policy_in.
+	for _, p := range []string{
+		"message.event.subject",
+		"message.event.reason",
+		"message.event.templated_vars",
+	} {
+		assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopePolicyOut, p))
+		assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopePolicyIn, p))
+		assert.NoError(t, rulefacts.Schema.ValidatePath(rulefacts.ScopePolicyA2A, p))
+		assert.NoError(t, rulefacts.Schema.ValidatePath(rulefacts.ScopeTriggerChat, p))
+	}
+
+	// conversation.unmentioned_agent_slugs is content-only, not a CEL fact path.
+	for _, sc := range append(rulefacts.AllScopes, rulefacts.ScopeLegacyPolicyV1) {
+		assert.Error(t, rulefacts.Schema.ValidatePath(sc, "conversation.unmentioned_agent_slugs"))
+	}
+
+	// message.event.schedule.fire_at is TypeTimestamp.
+	fireAtField, ok := rulefacts.Schema.Lookup("message.event.schedule.fire_at")
+	require.True(t, ok)
+	assert.Equal(t, rulefacts.CELKindTimestamp, fireAtField.Type.Kind)
+
+	// Legacy scope must NOT widen the frozen v1 surface.
+	for _, newPath := range []string{
+		"message.kind",
+		"message.origin",
+		"message.body_source",
+		"message.event",
+		"message.interaction",
+		"message.system",
+		"sender.attributes",
+		"sender.created_by",
+		"sender.root_user_id",
+		"recipient.project_id",
+		"recipient.attributes",
+		"conversation.ref",
+		"conversation.id",
+	} {
+		assert.Error(t, rulefacts.Schema.ValidatePath(rulefacts.ScopeLegacyPolicyV1, newPath),
+			"legacy_policy_v1 must not expose new path %q", newPath)
+	}
 }
