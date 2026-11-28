@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -363,8 +362,9 @@ func TestDecisionAnswerView_CommentAndNoCommentGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal no-comment: %v", err)
 	}
-	if strings.Contains(string(rawNoCmt), `"comment"`) {
-		t.Fatalf("no-comment DecisionAnswerView must omit comment key, got: %s", rawNoCmt)
+	const wantNoCmtJSON = `{"choiceId":"1","label":"Staging","provenance":"direct","surface":"native","responseMessageId":"","at":"2026-11-28T12:00:00Z"}`
+	if string(rawNoCmt) != wantNoCmtJSON {
+		t.Fatalf("no-comment DecisionAnswerView JSON mismatch:\n got: %s\nwant: %s", rawNoCmt, wantNoCmtJSON)
 	}
 
 	withCmt := noCmt

@@ -1369,20 +1369,99 @@ func TestDecisionsComment_ShowListGoldenAndHostileText(t *testing.T) {
 	})
 	withMockDecisionsServer(t, mux)
 
-	// 1. No-comment golden: show and list omit comment line and JSON "comment" key.
+	// 1. No-comment golden: show and list match exact literal upstream-main bytes (human and --json).
 	commentVal = ""
+	const wantShowNoCmt = "Decision deploy-target (release-bot/deploy-target)\n" +
+		"v1 [decided]\n" +
+		"  Question:     Where should it go?\n" +
+		"  Conversation: conv-1\n" +
+		"  Prompt:       prompt-1\n" +
+		"  Created:      2026-11-28 12:00 UTC\n" +
+		"  Decided:      2026-11-28 12:00 UTC\n" +
+		"  Choices:\n" +
+		"    - staging: Staging\n" +
+		"  Answers:\n" +
+		"    - Staging (staging) [direct] by Alice via native at 2026-11-28 12:00 UTC\n"
 	showNoCmt, err := runDecisionsTestCmd(t, "decisions", "show", "deploy-target")
 	require.NoError(t, err)
-	assert.NotContains(t, showNoCmt, "comment:")
+	assert.Equal(t, wantShowNoCmt, showNoCmt)
+
+	const wantShowNoCmtJSON = "{\n" +
+		"  \"key\": \"deploy-target\",\n" +
+		"  \"ref\": \"release-bot/deploy-target\",\n" +
+		"  \"versions\": [\n" +
+		"    {\n" +
+		"      \"rowId\": \"row-1\",\n" +
+		"      \"key\": \"deploy-target\",\n" +
+		"      \"ref\": \"release-bot/deploy-target\",\n" +
+		"      \"version\": 1,\n" +
+		"      \"status\": \"decided\",\n" +
+		"      \"question\": \"Where should it go?\",\n" +
+		"      \"conversationId\": \"conv-1\",\n" +
+		"      \"promptMessageId\": \"prompt-1\",\n" +
+		"      \"choices\": [\n" +
+		"        {\n" +
+		"          \"id\": \"staging\",\n" +
+		"          \"label\": \"Staging\"\n" +
+		"        }\n" +
+		"      ],\n" +
+		"      \"createdAt\": \"2026-11-28T12:00:00Z\",\n" +
+		"      \"decidedAt\": \"2026-11-28T12:00:00Z\",\n" +
+		"      \"answers\": [\n" +
+		"        {\n" +
+		"          \"choiceId\": \"staging\",\n" +
+		"          \"label\": \"Staging\",\n" +
+		"          \"answeredByName\": \"Alice\",\n" +
+		"          \"provenance\": \"direct\",\n" +
+		"          \"outcome\": \"answer\",\n" +
+		"          \"surface\": \"native\",\n" +
+		"          \"responseMessageId\": \"\",\n" +
+		"          \"at\": \"2026-11-28T12:00:00Z\"\n" +
+		"        }\n" +
+		"      ]\n" +
+		"    }\n" +
+		"  ]\n" +
+		"}\n"
 	showNoCmtJSON, err := runDecisionsTestCmd(t, "decisions", "show", "deploy-target", "--json")
 	require.NoError(t, err)
-	assert.NotContains(t, showNoCmtJSON, `"comment"`)
+	assert.Equal(t, wantShowNoCmtJSON, showNoCmtJSON)
 
+	const wantListNoCmt = "" +
+		"KEY            VER  STATUS   QUESTION             ANSWER   ANSWERED BY  PROVENANCE  CONVERSATION  AGE\n" +
+		"deploy-target  v1   decided  Where should it go?  Staging  Alice        direct      conv-1        just now\n"
 	listNoCmt, err := runDecisionsTestCmd(t, "decisions", "list", "--decided")
 	require.NoError(t, err)
+	assert.Equal(t, wantListNoCmt, listNoCmt)
+
+	const wantListNoCmtJSON = "{\n" +
+		"  \"items\": [\n" +
+		"    {\n" +
+		"      \"rowId\": \"row-1\",\n" +
+		"      \"key\": \"deploy-target\",\n" +
+		"      \"ref\": \"release-bot/deploy-target\",\n" +
+		"      \"version\": 1,\n" +
+		"      \"status\": \"decided\",\n" +
+		"      \"question\": \"Where should it go?\",\n" +
+		"      \"choices\": null,\n" +
+		"      \"conversationId\": \"conv-1\",\n" +
+		"      \"promptMessageId\": \"\",\n" +
+		"      \"createdAt\": \"2026-11-28T12:00:00Z\",\n" +
+		"      \"answer\": {\n" +
+		"        \"choiceId\": \"staging\",\n" +
+		"        \"label\": \"Staging\",\n" +
+		"        \"answeredByName\": \"Alice\",\n" +
+		"        \"provenance\": \"direct\",\n" +
+		"        \"outcome\": \"answer\",\n" +
+		"        \"surface\": \"native\",\n" +
+		"        \"responseMessageId\": \"\",\n" +
+		"        \"at\": \"2026-11-28T12:00:00Z\"\n" +
+		"      }\n" +
+		"    }\n" +
+		"  ]\n" +
+		"}\n"
 	listNoCmtJSON, err := runDecisionsTestCmd(t, "decisions", "list", "--decided", "--json")
 	require.NoError(t, err)
-	assert.NotContains(t, listNoCmtJSON, `"comment"`)
+	assert.Equal(t, wantListNoCmtJSON, listNoCmtJSON)
 
 	// 2. With plain comment: show prints comment line after answer line; --json includes comment;
 	// list human output is unchanged while list --json includes comment.

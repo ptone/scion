@@ -521,7 +521,40 @@ func TestProjectDecisions_SearchCommentWaitingMadeAndNoCommentGolden(t *testing.
 	assert.Equal(t, "cmt-topic", madeHit.Entries[0].Decision.Key)
 	assert.Equal(t, "Skip the loadtest window", madeHit.Entries[0].Comment)
 
-	// 4. No-comment golden: raw Made tab JSON omits "comment" when no comment was recorded.
+	// 4. No-comment golden: exact literal JSON equality for a log entry without a comment,
+	// plus live Made-tab response omits "comment" when no comment was recorded.
+	goldenLogEntry := ProjectDecisionLogEntryView{
+		Project:  ProjectDecisionProjectRef{ID: "p-1", Name: "Scion", Slug: "scion"},
+		AnswerID: "ans-1",
+		Decision: ProjectDecisionSummaryView{
+			RowID:           "row-1",
+			PromptMessageID: "msg-1",
+			PromptAvailable: true,
+			Key:             "nocmt-topic",
+			Ref:             "bot/nocmt-topic",
+			Version:         1,
+			Status:          "decided",
+			Question:        "Backup target?",
+			Choices:         []messages.Choice{{ID: "1", Label: "Yes"}, {ID: "2", Label: "No"}},
+			AskerAgentID:    "ag-1",
+			AskerAgentName:  "bot",
+		},
+		ChoiceID:              "1",
+		Label:                 "Yes",
+		AnsweredByName:        "Bob",
+		Provenance:            "direct",
+		Outcome:               "answer",
+		Surface:               "native",
+		At:                    time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC),
+		ChatKey:               "topic-1",
+		ConversationLabel:     "#general",
+		ConversationAvailable: true,
+	}
+	goldenLogBytes, err := json.Marshal(goldenLogEntry)
+	require.NoError(t, err)
+	const wantGoldenLogJSON = `{"project":{"id":"p-1","name":"Scion","slug":"scion"},"answerId":"ans-1","decision":{"rowId":"row-1","promptMessageId":"msg-1","promptAvailable":true,"key":"nocmt-topic","ref":"bot/nocmt-topic","version":1,"status":"decided","question":"Backup target?","choices":[{"id":"1","label":"Yes"},{"id":"2","label":"No"}],"askerAgentId":"ag-1","askerAgentName":"bot"},"choiceId":"1","label":"Yes","matchedDefault":false,"answeredByName":"Bob","provenance":"direct","outcome":"answer","surface":"native","sourceMessageAvailable":false,"at":"2026-11-28T12:00:00Z","chatKey":"topic-1","conversationLabel":"#general","conversationAvailable":true}`
+	assert.Equal(t, wantGoldenLogJSON, string(goldenLogBytes))
+
 	rawCode, rawBody := f.get(t, f.bob, url.Values{"tab": {ProjectDecisionsTabMade}, "q": {"nocmt-topic"}})
 	require.Equal(t, http.StatusOK, rawCode, string(rawBody))
 	assert.NotContains(t, string(rawBody), `"comment"`, "no-comment Made log entry must omit comment key")
