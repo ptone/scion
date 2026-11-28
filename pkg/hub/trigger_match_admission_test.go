@@ -951,3 +951,80 @@ func TestTriggersAuthoring_SystemOneReattributionAuthority(t *testing.T) {
 		{Dialect: "cel", Expr: celB},
 	}))
 }
+
+// TestTriggersAuthoring_ResumeSystemOneReattributionAuthority verifies §11.6 on
+// POST /triggers/{id}/resume (review 2 R1):
+//   - a trigger:update-only UAT pausing+resuming (or resuming an already-paused)
+//     S1-bearing trigger with system_one granted -> 400 system_one_authority,
+//     with status, principal, ceiling, and revision unchanged;
+//   - an update+create UAT, owner, and admin -> 200 (member lacks trigger.update -> 403);
+//   - a CEL-only trigger resumed by the update-only UAT -> 200;
+//   - an agent resume of an S1-bearing trigger -> still refused (400 agent_not_allowed).
+func TestTriggersAuthoring_ResumeSystemOneReattributionAuthority(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+	_ = installGrantedCountingSystemOneDialect(t, f)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "s116-resume-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	projBoundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.projectID}
+	uatUpdateOnly := scheduleTestUAT(t, f.ownerAuth, projBoundary, "trigger:update", "webhook_endpoint:read", "agent:message")
+	uatUpdateAndCreate := scheduleTestUAT(t, f.ownerAuth, projBoundary, "trigger:update", "trigger:create", "webhook_endpoint:read", "agent:message")
+
+	s1Rules := []store.TriggerMatchRule{
+		{Dialect: "cel", Expr: "true"},
+		{Dialect: "system_one", Expr: "Does this PR touch authentication?"},
+	}
+	s1Tr := seedStoredTriggerWithRules(t, f, ep.ID, "s116-resume-s1", store.TriggerStatusActive, s1Rules,
+		f.owner.ID, "user", f.owner.ID)
+
+	// 1. Pause by trigger:update-only UAT: allowed (authority-reducing, no re-attribution).
+	require.Equal(t, http.StatusOK, f.doTrigger(t, uatUpdateOnly, s1Tr.ID+"/pause", http.MethodPost, nil).Code)
+	pausedBefore, err := f.store.GetTrigger(ctx, s1Tr.ID)
+	require.NoError(t, err)
+
+	// 2. Resume by trigger:update-only UAT -> 400 system_one_authority;
+	// status, principal, ceiling, and revision remain unchanged.
+	resumeRec := f.doTrigger(t, uatUpdateOnly, s1Tr.ID+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusBadRequest, resumeRec.Code, resumeRec.Body.String())
+	eb := decodeTriggerRuleError(t, resumeRec)
+	assert.Equal(t, ErrCodeInvalidRule, eb.Code)
+	assert.Equal(t, triggerCategorySystemOneAuthority, eb.Details["category"])
+	assert.Equal(t, triggerMsgSystemOneReattributionRequires, eb.Details["message"])
+
+	afterRefusal, err := f.store.GetTrigger(ctx, s1Tr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerStatusPaused, afterRefusal.Status)
+	assert.Equal(t, pausedBefore.AuthorizationRevision, afterRefusal.AuthorizationRevision)
+	assert.Equal(t, pausedBefore.InitiatorAttribution, afterRefusal.InitiatorAttribution)
+	assert.Equal(t, pausedBefore.AuthorityCeiling, afterRefusal.AuthorityCeiling)
+
+	// 3. Member lacks trigger.update -> 403 on resume.
+	assert.Equal(t, http.StatusForbidden, f.doTrigger(t, f.memberAuth, s1Tr.ID+"/resume", http.MethodPost, nil).Code)
+
+	// 4. Positive controls: update+create UAT, admin, and owner (all hold trigger.create) -> 200.
+	require.Equal(t, http.StatusOK, f.doTrigger(t, uatUpdateAndCreate, s1Tr.ID+"/resume", http.MethodPost, nil).Code)
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, s1Tr.ID+"/pause", http.MethodPost, nil).Code)
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.adminAuth, s1Tr.ID+"/resume", http.MethodPost, nil).Code)
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, s1Tr.ID+"/pause", http.MethodPost, nil).Code)
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, s1Tr.ID+"/resume", http.MethodPost, nil).Code)
+
+	// 5. CEL-only trigger resumed by trigger:update-only UAT -> 200 (unchanged behaviour).
+	celTr := seedStoredTriggerWithRules(t, f, ep.ID, "s116-resume-cel", store.TriggerStatusPaused,
+		[]store.TriggerMatchRule{{Dialect: "cel", Expr: "true"}}, f.owner.ID, "user", f.owner.ID)
+	require.Equal(t, http.StatusOK, f.doTrigger(t, uatUpdateOnly, celTr.ID+"/resume", http.MethodPost, nil).Code)
+
+	// 6. Agent resume of a paused S1 trigger -> still refused (400 agent_not_allowed via O1 hook).
+	agentEpRec := f.doWebhookEndpoint(t, f.agentAAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "s116-resume-agent-ep"})
+	require.Equal(t, http.StatusCreated, agentEpRec.Code, agentEpRec.Body.String())
+	var agentEp WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(agentEpRec.Body.Bytes(), &agentEp))
+	agentPausedTr := seedStoredTriggerWithRules(t, f, agentEp.ID, "s116-resume-agent-s1", store.TriggerStatusPaused,
+		s1Rules, f.agentA.ID, "agent", f.agentA.ID)
+	agentResumeRec := f.doTrigger(t, f.agentAAuth, agentPausedTr.ID+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusBadRequest, agentResumeRec.Code, agentResumeRec.Body.String())
+	assert.Equal(t, triggerReasonAgentNotAllowed, decodeTriggerRuleError(t, agentResumeRec).Details["reason"])
+}

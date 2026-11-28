@@ -1520,14 +1520,6 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if !authorizeTriggerReuseSubject(w, tr.SubjectMode, ceiling, prov) {
 			return
 		}
-		resultingMatchRules, rErr := triggerMatchRules(*tr)
-		if rErr != nil {
-			writeCorruptTriggerMatchRulesError(w)
-			return
-		}
-		if !s.authorizeTriggerSystemOneReattribution(w, ctx, projectID, resultingMatchRules) {
-			return
-		}
 		if oldSourceKind != store.TriggerSourceKindGitHub &&
 			tr.SourceKind == store.TriggerSourceKindGitHub &&
 			!updatingActions &&
@@ -1628,10 +1620,16 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			tr.Notify = normalizedNotify
 			fields.Notify = true
 		}
-		attr := reattributeInitiator(ctx, tr.InitiatorAttribution)
+		resultingMatchRules, rErr := triggerMatchRules(*tr)
+		if rErr != nil {
+			writeCorruptTriggerMatchRulesError(w)
+			return
+		}
+		attr, ok := s.reattributeTriggerRevision(w, ctx, projectID, tr, resultingMatchRules, ceiling)
+		if !ok {
+			return
+		}
 		newAttr = &attr
-		tr.InitiatorAttribution = attr
-		tr.AuthorityCeiling = ceiling
 	}
 
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
@@ -1843,9 +1841,10 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	tr.ActionsCorrupt = false
 	tr.ActionType = ""
 	tr.ActionPayload = ""
-	newAttr := reattributeInitiator(ctx, tr.InitiatorAttribution)
-	tr.InitiatorAttribution = newAttr
-	tr.AuthorityCeiling = ceiling
+	newAttr, ok := s.reattributeTriggerRevision(w, ctx, projectID, tr, existingRules, ceiling)
+	if !ok {
+		return
+	}
 
 	fields := resumeFields
 	err := s.store.WithTx(ctx, func(tx store.Store) error {

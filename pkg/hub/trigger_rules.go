@@ -503,8 +503,8 @@ func validateAgentSystemOnePrefix(normalized []store.TriggerMatchRule, stored []
 }
 
 // authorizeTriggerSystemOneReattribution enforces mixed-rule-arrays-design.md
-// §11.6 on any PATCH that would re-attribute a trigger's revision
-// (changesFutureDispatch == true) when the resulting match rules contain any
+// §11.6 on any trigger revision re-attribution (updateTrigger PATCH and
+// resumeTrigger POST /resume) when the resulting match rules contain any
 // system_one element:
 //   - Agent callers are refused with 400 invalid_rule (agent_not_allowed, D2).
 //   - Non-agent callers whose effective ceiling lacks trigger.create in
@@ -512,7 +512,7 @@ func validateAgentSystemOnePrefix(normalized []store.TriggerMatchRule, stored []
 //     invalid_rule {category: "system_one_authority"}.
 //   - CEL-only / Types-only triggers (no system_one elements) are unaffected.
 //
-// Called in updateTrigger before WithTx (no I/O inside a transaction).
+// Called via reattributeTriggerRevision before WithTx (no I/O inside tx).
 func (s *Server) authorizeTriggerSystemOneReattribution(
 	w http.ResponseWriter,
 	ctx context.Context,
@@ -533,6 +533,7 @@ func (s *Server) authorizeTriggerSystemOneReattribution(
 		writeTriggerMatchElementErrors(w, []triggerElementFailure{makeAgentSystemOneNotAllowedFailure(firstS1Elem)})
 		return false
 	}
+	// Live Decide over the same principal/credential source as the frozen ceiling.
 	if !s.triggerAccessDecision(ctx, projectID, ActionCreate, nil).allowed {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRule, triggerMsgSystemOneReattributionRequires, map[string]any{
 			"field":    "match",
@@ -544,6 +545,28 @@ func (s *Server) authorizeTriggerSystemOneReattribution(
 		return false
 	}
 	return true
+}
+
+// reattributeTriggerRevision performs trigger revision re-attribution together
+// with the §11.6 System One authority check (mixed-rule-arrays-design.md §11.6,
+// ptone/scion#9916). Every trigger re-attribution site (updateTrigger and
+// resumeTrigger) MUST go through this helper before WithTx (no I/O inside tx);
+// enforced structurally by TestTriggerReattribution_OnlyViaGuardedHelper.
+func (s *Server) reattributeTriggerRevision(
+	w http.ResponseWriter,
+	ctx context.Context,
+	projectID string,
+	tr *store.Trigger,
+	resultingRules []triggerrule.Rule,
+	ceiling store.EffectCeiling,
+) (store.InitiatorAttribution, bool) {
+	if !s.authorizeTriggerSystemOneReattribution(w, ctx, projectID, resultingRules) {
+		return store.InitiatorAttribution{}, false
+	}
+	attr := reattributeInitiator(ctx, tr.InitiatorAttribution)
+	tr.InitiatorAttribution = attr
+	tr.AuthorityCeiling = ceiling
+	return attr, true
 }
 
 // authorizeNewOrChangedTriggerMatchElement is the authoring authorization hook
@@ -584,6 +607,8 @@ func (*Server) authorizeNewOrChangedTriggerMatchElement(_ context.Context, elemN
 //   - POST /triggers/{id}/resume (resumeTrigger):
 //     allowStoredAdmissionSkip=false -> full re-admission on all stored elements,
 //     returning 400 invalid_rule {element, category: dialect_not_allowed, ...}.
+//     Both updateTrigger (on changesFutureDispatch) and resumeTrigger also
+//     enforce §11.6 re-attribution authority via reattributeTriggerRevision.
 //   - Fire-time evaluation (triggerrule.MatchAllWithTrace): unchanged; engine
 //     deny-by-default refuses any non-granted dialect with 0 provider calls.
 func (s *Server) writeAndValidateTriggerMatch(
