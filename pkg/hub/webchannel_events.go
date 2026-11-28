@@ -73,3 +73,11 @@ type DMPromotedEvent struct {
 	// NewTopic is the created thread.
 	NewTopic WebChatTopic `json:"newTopic"`
 }
+
+// ChatDMLifecycleEvent is published on user.<id>.chat.dm.lifecycle when a
+// native DM conversation is deleted, archived, or unarchived.
+type ChatDMLifecycleEvent struct {
+	ConversationKey string `json:"conversationKey"`
+	ConversationID  string `json:"conversationId"`
+	Action          string `json:"action"`
+}

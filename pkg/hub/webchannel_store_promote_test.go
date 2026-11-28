@@ -285,8 +285,9 @@ VALUES
 	require.Equal(t, 2, count)
 }
 
-// TestDeleteDM verifies the standalone DeleteDM method.
-func TestDeleteDM(t *testing.T) {
+// TestSoftDeleteDM_LegacyRegistryOnly verifies SoftDeleteDM when no
+// conversations table/row exists (pre-conversation legacy DM).
+func TestSoftDeleteDM_LegacyRegistryOnly(t *testing.T) {
 	store, db := newPromoteTestStore(t)
 	defer db.Close() //nolint:errcheck
 
@@ -312,8 +313,10 @@ func TestDeleteDM(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, dms, 1)
 
-	// Delete
-	require.NoError(t, store.DeleteDM(ctx, dmKey))
+	// SoftDeleteDM with nil predicate clears registry and returns "".
+	convID, err := store.SoftDeleteDM(ctx, dmKey, nil)
+	require.NoError(t, err)
+	require.Empty(t, convID)
 
 	// Verify both rows gone
 	dms, err = store.ListDMs(ctx, "user-uuid-1")

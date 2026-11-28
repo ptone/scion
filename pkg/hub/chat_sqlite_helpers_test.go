@@ -67,13 +67,11 @@ func requireLiveSendAnswer(t *testing.T, srv *Server, user *store.User, key stri
 	assert.Equal(t, live.Body.String(), rec.Body.String(), "body must match a live send")
 }
 
-// testScheduledDMDeleteRemovesScheduled checks DeleteDM on a store (run on
-// Postgres from TestScheduledStore_Postgres).
+// testScheduledDMDeleteRemovesScheduled checks DeleteScheduledMessagesForConversation
+// on a store for a DM conversation key (run on Postgres from TestScheduledStore_Postgres).
 func testScheduledDMDeleteRemovesScheduled(t *testing.T, sms ScheduledMessageStore) {
 	t.Helper()
 	ctx := context.Background()
-	wcs, ok := sms.(WebChatStore)
-	require.True(t, ok)
 	key := "dm:agent:" + tid("dmdel-agent") + ":user:" + tid("dmdel-user")
 	m := newTestScheduledRow("dmdel", "dmdel-user", time.Now().Add(time.Hour))
 	m.ConversationKey = key
@@ -83,7 +81,9 @@ func testScheduledDMDeleteRemovesScheduled(t *testing.T, sms ScheduledMessageSto
 	keep.ConversationKey = "dmdel-other"
 	_, _, err = sms.CreateScheduledMessage(ctx, keep)
 	require.NoError(t, err)
-	require.NoError(t, wcs.DeleteDM(ctx, key))
+	n, err := sms.DeleteScheduledMessagesForConversation(ctx, key)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, n)
 	got, err := sms.GetScheduledMessage(ctx, "dmdel-user", m.ID)
 	require.NoError(t, err)
 	assert.Nil(t, got)

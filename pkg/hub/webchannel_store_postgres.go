@@ -2364,22 +2364,100 @@ func (s *pgWebChatStore) UpdateThreadID(ctx context.Context, oldThreadID, newThr
 	return int(n), nil
 }
 
-// DeleteDM removes all webchat_dm rows for the given conversation key,
-// and the scheduled messages and stars of that conversation.
-func (s *pgWebChatStore) DeleteDM(ctx context.Context, conversationKey string) error {
-	const query = `DELETE FROM webchat_dm WHERE conversation_key = $1`
-	_, err := s.db.ExecContext(ctx, query, conversationKey)
+// hasTable reports whether the named table exists in the store's current schema.
+func (s *pgWebChatStore) hasTable(ctx context.Context, name string) (bool, string, error) {
+	qualified, err := s.table(ctx, name)
 	if err != nil {
-		return fmt.Errorf("webchat store: delete DM: %w", err)
+		return false, "", err
 	}
-	// The conversation's scheduled messages and stars go with it.
-	if _, err := s.DeleteScheduledMessagesForConversation(ctx, conversationKey); err != nil {
-		return fmt.Errorf("webchat store: delete DM: %w", err)
+	var reg sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT to_regclass($1)`, qualified).Scan(&reg); err != nil {
+		return false, "", fmt.Errorf("webchat store: check table %s: %w", name, err)
 	}
-	if _, err := s.DeleteMessageStarsForConversation(ctx, conversationKey); err != nil {
-		return fmt.Errorf("webchat store: delete DM: %w", err)
+	return reg.Valid && reg.String != "", qualified, nil
+}
+
+// SoftDeleteDM atomically soft-deletes a native DM's live conversation row,
+// removes its thread-group membership, and clears its webchat_dm,
+// webchat_read_state, and webchat_mention rows.
+func (s *pgWebChatStore) SoftDeleteDM(ctx context.Context, dmKey string, inactiveBefore *time.Time) (string, error) {
+	hasConv, conversationsTable, err := s.hasTable(ctx, "conversations")
+	if err != nil {
+		return "", err
 	}
-	return nil
+	hasTGM, tgmTable, err := s.hasTable(ctx, "thread_group_members")
+	if err != nil {
+		return "", err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("webchat store: soft-delete DM begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var convID string
+	if hasConv {
+		var id string
+		var lastActivity sql.NullTime
+		err := tx.QueryRowContext(ctx,
+			`SELECT id::text, last_activity_at FROM `+conversationsTable+`
+			  WHERE surface = 'native' AND external_ref = $1 AND deleted_at IS NULL
+			  FOR UPDATE`,
+			dmKey).Scan(&id, &lastActivity)
+		switch {
+		case err == nil:
+			if inactiveBefore != nil {
+				if !lastActivity.Valid || !lastActivity.Time.Before(*inactiveBefore) {
+					return "", ErrLifecycleSkipped
+				}
+			}
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			res, err := tx.ExecContext(ctx,
+				`UPDATE `+conversationsTable+` SET deleted_at = $1 WHERE id = $2::uuid AND deleted_at IS NULL`,
+				now, id)
+			if err != nil {
+				return "", fmt.Errorf("webchat store: soft-delete DM conversation: %w", err)
+			}
+			if n, _ := res.RowsAffected(); n == 0 && inactiveBefore != nil {
+				return "", ErrLifecycleSkipped
+			}
+			convID = id
+		case errors.Is(err, sql.ErrNoRows):
+			if inactiveBefore != nil {
+				return "", ErrLifecycleSkipped
+			}
+		default:
+			return "", fmt.Errorf("webchat store: soft-delete DM lookup: %w", err)
+		}
+	} else if inactiveBefore != nil {
+		return "", ErrLifecycleSkipped
+	}
+
+	if convID != "" && hasTGM {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM `+tgmTable+` WHERE conversation_id = $1::uuid`, convID); err != nil {
+			return "", fmt.Errorf("webchat store: soft-delete DM thread group members: %w", err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM webchat_dm WHERE conversation_key = $1`, dmKey); err != nil {
+		return "", fmt.Errorf("webchat store: soft-delete DM registry: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM webchat_read_state WHERE conversation_key = $1`, dmKey); err != nil {
+		return "", fmt.Errorf("webchat store: soft-delete DM read state: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM webchat_mention WHERE conversation_key = $1`, dmKey); err != nil {
+		return "", fmt.Errorf("webchat store: soft-delete DM mentions: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("webchat store: soft-delete DM commit: %w", err)
+	}
+	return convID, nil
 }
 
 // MigrateReadState re-keys all webchat_read_state rows from oldKey to newKey.

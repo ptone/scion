@@ -4637,8 +4637,29 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 			"unable to resolve DM conversation; retry", nil)
 		return
 	case errors.Is(convErr, store.ErrNotFound):
-		// Pre-conversation-model hub — no direct conversation exists.
-		// Pass "" and let the legacy thread_id arm in PromoteDM carry it.
+		// Pre-conversation-model hub — no direct conversation exists, OR the DM
+		// was soft-deleted (which removes webchat_dm rows and sets
+		// conversations.deleted_at). Refuse promotion with 404 unless a live
+		// webchat_dm registry row exists for the caller and key.
+		dms, dmErr := wcs.ListDMs(ctx, user.ID())
+		if dmErr != nil {
+			slog.ErrorContext(ctx, "DM registry lookup failed during promote",
+				"dm_key", key, "error", dmErr)
+			writeError(w, http.StatusServiceUnavailable, "LOOKUP_FAILED",
+				"unable to resolve DM conversation; retry", nil)
+			return
+		}
+		foundDM := false
+		for _, dm := range dms {
+			if dm.ConversationKey == key {
+				foundDM = true
+				break
+			}
+		}
+		if !foundDM {
+			NotFound(w, "Conversation")
+			return
+		}
 	default:
 		// Transient DB error, context deadline, pool timeout, etc.
 		// Refusing is the recoverable direction: the user retries and gets

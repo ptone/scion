@@ -482,6 +482,7 @@ export type StateEventType =
   | 'chat-message-edited'
   | 'chat-message-deleted'
   | 'chat-dm-promoted'
+  | 'chat-dm-lifecycle'
   | 'chat-scheduled-updated'
   | 'chat-stars-updated'
   | 'chat-send-progress'
@@ -877,6 +878,8 @@ export class StateManager extends EventTarget {
       // the user-scoped subject rather than project.{id}.chat.typing.
       if (parts[3] === 'dm' && parts.length >= 5 && parts[4] === 'promoted') {
         this.notifyWithData('chat-dm-promoted', data);
+      } else if (parts[3] === 'dm' && parts.length >= 5 && parts[4] === 'lifecycle') {
+        this.notifyWithData('chat-dm-lifecycle', data);
       } else if (parts[3] === 'scheduled') {
         // The user's own scheduled messages (sender-only; never a message).
         this.notifyWithData('chat-scheduled-updated', data);

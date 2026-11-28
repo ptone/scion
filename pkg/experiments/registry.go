@@ -297,6 +297,11 @@ const DecisionRetention = "hub.decision_retention"
 // route answers 404; sequence allocation and backfill remain active.
 const ConversationWatch = "hub.conversation_watch"
 
+// ConversationLifecycle gates conversation delete, archive, unarchive, and
+// bulk lifecycle cleanup (ptone/scion#9841). While off, lifecycle routes
+// answer 404.
+const ConversationLifecycle = "hub.conversation_lifecycle"
+
 // PortView gates the page view mode of the agent port proxy
 // (ptone/scion#5569): a user who opens an exposed port's link from the hub
 // is sent to a short-lived page link under /api/v1/portview/, through
@@ -1572,6 +1577,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#8654",
 		Owner:       "uploads-owner",
 		ReviewBy:    "2027-02-25",
+	},
+	{
+		Name:        ConversationLifecycle,
+		Title:       "Conversation lifecycle",
+		Description: "Enables conversation delete, archive, unarchive, and bulk inactivity cleanup on /api/v1/conversations (ptone/scion#9841). While off, lifecycle routes answer 404.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9841",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-03-31",
 	},
 }
 

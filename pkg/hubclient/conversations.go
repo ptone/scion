@@ -69,6 +69,9 @@ type ConversationService interface {
 	// Leave removes the caller from a conversation.
 	Leave(ctx context.Context, conversationID string) error
 
+	// Delete soft-deletes a conversation (DELETE /api/v1/conversations/{id}).
+	Delete(ctx context.Context, conversationID string) error
+
 	// Watch performs one long-poll request against GET /api/v1/conversations/{id}/watch.
 	Watch(ctx context.Context, conversationID string, opts WatchOptions) (*WatchResult, error)
 }
@@ -124,10 +127,11 @@ type ConversationDetail struct {
 	store.Conversation
 	Participants []ConversationParticipantDetail `json:"participants,omitempty"`
 	// DMPeer is the other party of a direct conversation, relative to the
-	// caller. Set by the hub on list responses only.
+	// caller. Set by the hub on both list and single-conversation GET responses.
 	DMPeer *ConversationPeer `json:"dmPeer,omitempty"`
 	// ThreadName is the linked webchat topic name of a native group
-	// conversation without a display name. Set on list responses only.
+	// conversation without a display name. Set on both list and
+	// single-conversation GET responses.
 	ThreadName string `json:"threadName,omitempty"`
 }
 
@@ -384,6 +388,15 @@ func (s *conversationService) AddParticipant(ctx context.Context, conversationID
 // Leave removes the caller from a conversation.
 func (s *conversationService) Leave(ctx context.Context, conversationID string) error {
 	resp, err := s.c.post(ctx, "/api/v1/conversations/"+url.PathEscape(conversationID)+"/leave", nil, nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// Delete soft-deletes a conversation.
+func (s *conversationService) Delete(ctx context.Context, conversationID string) error {
+	resp, err := s.c.delete(ctx, "/api/v1/conversations/"+url.PathEscape(conversationID), nil)
 	if err != nil {
 		return err
 	}

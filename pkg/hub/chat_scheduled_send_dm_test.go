@@ -251,13 +251,15 @@ func TestScheduledSend_DM_SendNowAndDismiss(t *testing.T) {
 	assert.Equal(t, ScheduledMessageCancelled, f.row(t, f.bob, failed.ID).Status)
 }
 
-// Deleting a DM deletes its scheduled messages.
+// Deleting a DM's scheduled messages removes only that DM's scheduled rows.
 func TestScheduledSend_DMDelete_DeletesScheduled(t *testing.T) {
 	f := newScheduledSendFixture(t)
 	key := scheduledDMKey(t, "agent", f.agent.ID, "user", f.bob.ID)
 	sm := f.scheduleIn(t, f.bob, key, "doomed dm")
 	topic := f.schedule(t, f.bob, "topic survives", time.Now().Add(time.Hour))
-	require.NoError(t, f.wcs.DeleteDM(context.Background(), key))
+	_, err := f.wcs.SoftDeleteDM(context.Background(), key, nil)
+	require.NoError(t, err)
+	f.srv.deleteScheduledMessagesOfConversation(context.Background(), key)
 	got, err := f.sms.GetScheduledMessage(context.Background(), f.bob.ID, sm.ID)
 	require.NoError(t, err)
 	assert.Nil(t, got)

@@ -545,11 +545,7 @@ func TestThreadGroupMigration_SkipsDeletedConversation(t *testing.T) {
 	f := newTGMFixture(t)
 	ctx := context.Background()
 	t1 := f.topic(f.proj.ID, "t1")
-	conv, err := f.s.GetConversation(ctx, f.conv(t1))
-	require.NoError(t, err)
-	now := time.Now()
-	conv.DeletedAt = &now
-	require.NoError(t, f.s.UpdateConversation(ctx, conv))
+	require.NoError(t, f.s.DeleteConversation(ctx, f.conv(t1)))
 	f.setPrefs("u-a", groupsDoc(t, map[string][]personalThreadGroup{f.proj.ID: {tgmPG("g1", "Release", t1)}}), "")
 
 	st := f.pass()
