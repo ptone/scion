@@ -906,4 +906,105 @@ describe('Project GitHub page shell (M1.5)', () => {
 
     expect(requestedUrls.filter((u) => u.includes('/github'))).toEqual([]);
   });
+
+  it('hides the header readiness slot when triggers_readiness is absent', async () => {
+    stubProjectFetch(makeProjectGitHub());
+
+    const el = document.createElement('scion-page-project-github') as ScionPageProjectGithub;
+    document.body.appendChild(el);
+    await vi.waitFor(() => {
+      expect(el.shadowRoot?.querySelector('[data-testid="github-status-header"]')).not.toBeNull();
+    });
+    await el.updateComplete;
+
+    const slot = el.shadowRoot!.querySelector('[data-testid="github-header-readiness"]')!;
+    expect(slot.hasAttribute('hidden')).toBe(true);
+    expect(slot.querySelector('scion-integration-readiness')).toBeNull();
+  });
+
+  it('renders the header readiness summary and Automation link when triggers_readiness is present', async () => {
+    stubProjectFetch(
+      makeProjectGitHub({
+        triggers_readiness: {
+          ready: false,
+          missing_events: ['issue_comment'],
+          missing_permissions: ['issues:write', 'pull_requests:write'],
+        },
+      })
+    );
+
+    const el = document.createElement('scion-page-project-github') as ScionPageProjectGithub;
+    document.body.appendChild(el);
+    await vi.waitFor(() => {
+      expect(el.shadowRoot?.querySelector('scion-integration-readiness')).not.toBeNull();
+    });
+    await el.updateComplete;
+
+    const slot = el.shadowRoot!.querySelector('[data-testid="github-header-readiness"]')!;
+    expect(slot.hasAttribute('hidden')).toBe(false);
+
+    const renderer = slot.querySelector('scion-integration-readiness') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await renderer.updateComplete;
+
+    const summary = renderer.shadowRoot!.querySelector(
+      '[data-testid="integration-readiness-summary"]'
+    )!;
+    expect(summary.getAttribute('data-state')).toBe('missing');
+    expect(
+      renderer.shadowRoot!.querySelector('[data-testid="integration-readiness-summary-text"]')
+        ?.textContent
+    ).toBe('Missing 1 event, 2 permissions');
+
+    const link = renderer.shadowRoot!.querySelector(
+      '[data-testid="integration-readiness-link"]'
+    ) as HTMLAnchorElement;
+    expect(link).not.toBeNull();
+    expect(link.getAttribute('href')).toBe('/projects/proj-gh-1/github?tab=automation');
+  });
+
+  it('switches to the registered automation tab when clicking the header readiness link', async () => {
+    registerProjectGitHubTab({
+      id: 'automation',
+      label: 'Automation',
+      order: 10,
+      requiresConnection: true,
+      render: () => html`<div data-testid="automation-panel">Automation content</div>`,
+    });
+
+    stubProjectFetch(
+      makeProjectGitHub({
+        triggers_readiness: {
+          ready: true,
+          missing_events: [],
+          missing_permissions: [],
+        },
+      })
+    );
+
+    window.history.replaceState({}, '', '/projects/proj-gh-1/github?tab=connection');
+    const el = document.createElement('scion-page-project-github') as ScionPageProjectGithub;
+    document.body.appendChild(el);
+    await vi.waitFor(() => {
+      expect(el.shadowRoot?.querySelector('scion-integration-readiness')).not.toBeNull();
+    });
+    await el.updateComplete;
+
+    const connTab = el.shadowRoot!.querySelector('[data-testid="github-tab-connection"]')!;
+    expect(connTab.hasAttribute('active')).toBe(true);
+
+    const renderer = el.shadowRoot!.querySelector('scion-integration-readiness') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await renderer.updateComplete;
+    const link = renderer.shadowRoot!.querySelector(
+      '[data-testid="integration-readiness-link"]'
+    ) as HTMLAnchorElement;
+    link.click();
+    await el.updateComplete;
+
+    const autoTab = el.shadowRoot!.querySelector('[data-testid="github-tab-automation"]')!;
+    expect(autoTab.hasAttribute('active')).toBe(true);
+  });
 });

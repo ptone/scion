@@ -38,6 +38,7 @@ import { current, projectTrail, projectsRoot, type Named } from '../../client/cr
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { projectDisplayName, projectLabelNow } from '../../client/project-label.js';
 import '../shared/breadcrumb.js';
+import '../shared/integration-readiness.js';
 import '../shared/project-github-card.js';
 import './not-found.js';
 
@@ -399,6 +400,18 @@ export class ScionPageProjectGithub extends LitElement {
     return project ? projectTrail(project) : [projectsRoot()];
   }
 
+  private handleReadinessLinkClick(e: Event): void {
+    const target = e
+      .composedPath()
+      .find((n): n is HTMLAnchorElement => n instanceof HTMLAnchorElement);
+    if (!target) return;
+    if (!this.githubInfo || !isProjectGitHubConnected(this.githubInfo)) return;
+    if (this.getTabs().some((t) => t.id === 'automation')) {
+      e.preventDefault();
+      this.activeTab = 'automation';
+    }
+  }
+
   private renderStatusHeader(info: ProjectGitHubInfo): TemplateResult {
     const connected = isProjectGitHubConnected(info);
     const repo =
@@ -462,9 +475,25 @@ export class ScionPageProjectGithub extends LitElement {
               </div>
             `
           : nothing}
-
-        <!-- Extension points populated by M1.4 (readiness) and M5 (routing) -->
-        <div class="status-header-item" data-testid="github-header-readiness" hidden></div>
+        ${info.triggers_readiness
+          ? html`
+              <div class="status-header-item" data-testid="github-header-readiness">
+                <scion-integration-readiness
+                  compact
+                  label="Triggers"
+                  .readiness=${info.triggers_readiness}
+                  linkHref=${`/projects/${encodeURIComponent(this.projectId)}/github?tab=automation`}
+                  linkLabel="Automation →"
+                  @click=${(e: Event) => this.handleReadinessLinkClick(e)}
+                ></scion-integration-readiness>
+              </div>
+            `
+          : html`<div
+              class="status-header-item"
+              data-testid="github-header-readiness"
+              hidden
+            ></div>`}
+        <!-- Extension point populated by M5 (routing) -->
         <div class="status-header-item" data-testid="github-header-routing" hidden></div>
       </div>
     `;
