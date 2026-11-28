@@ -277,6 +277,17 @@ sets envelope metadata `decision_comment` (the raw unquoted text):
 comment="Staging, but skip the load test this time."
 ```
 
+On a multi-decision set, there is at most one overall comment per card,
+delivered as a single trailing `comment="..."` line after the per-row lines
+(plus `decision_comment` metadata):
+
+```text
+[decision-response] 2 decisions answered by <user> (prompt <message-id>)
+region v1 ("Which region ...") answer=us-central1 (choice 1, recommended)
+notify v1 ("Notify ...") answer=No (choice 2)
+comment="Hold the announcement until the canary has run for an hour."
+```
+
 - When no comment was given, neither the `comment="..."` line nor
   `decision_comment` is sent.
 - Confirming an interpreted answer **with a comment** delivers a
