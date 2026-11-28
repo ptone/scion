@@ -1238,11 +1238,11 @@ func TestActionInbox_IsRecipient_ConversationLookupErrorFailsClosedAndDoesNotMem
 	departedIdent := NewAuthenticatedUser(outsider.ID, outsider.Email, outsider.DisplayName, outsider.Role, string(ClientTypeWeb))
 	lostProjectIdent := NewAuthenticatedUser(lostProjectUser.ID, lostProjectUser.Email, lostProjectUser.DisplayName, lostProjectUser.Role, string(ClientTypeWeb))
 
-	validScope, err := srv.newActionInboxScope(ctx, validIdent)
+	validScope, err := srv.newActionInboxScope(ctx, validIdent, scopeMemberProjects)
 	require.NoError(t, err)
-	departedScope, err := srv.newActionInboxScope(ctx, departedIdent)
+	departedScope, err := srv.newActionInboxScope(ctx, departedIdent, scopeMemberProjects)
 	require.NoError(t, err)
-	lostProjectScope, err := srv.newActionInboxScope(ctx, lostProjectIdent)
+	lostProjectScope, err := srv.newActionInboxScope(ctx, lostProjectIdent, scopeMemberProjects)
 	require.NoError(t, err)
 
 	// Under GetConversation fault: all three must fail closed (false), and the

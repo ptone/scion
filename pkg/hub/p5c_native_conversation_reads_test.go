@@ -451,9 +451,9 @@ func TestP5c_F1StoredReadersWithoutThreadID(t *testing.T) {
 		peerIdent := NewAuthenticatedUser(peerUser.ID, peerUser.Email, peerUser.DisplayName, peerUser.Role, string(ClientTypeWeb))
 		outsiderIdent := NewAuthenticatedUser(outsiderUser.ID, outsiderUser.Email, outsiderUser.DisplayName, outsiderUser.Role, string(ClientTypeWeb))
 
-		peerScope, err := srv.newActionInboxScope(ctx, peerIdent)
+		peerScope, err := srv.newActionInboxScope(ctx, peerIdent, scopeMemberProjects)
 		require.NoError(t, err)
-		outsiderScope, err := srv.newActionInboxScope(ctx, outsiderIdent)
+		outsiderScope, err := srv.newActionInboxScope(ctx, outsiderIdent, scopeMemberProjects)
 		require.NoError(t, err)
 
 		assert.True(t, peerScope.isRecipient(ctx, "", promptID, false),
