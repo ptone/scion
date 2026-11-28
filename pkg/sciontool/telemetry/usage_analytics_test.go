@@ -205,8 +205,15 @@ func TestUsageAnalyticsVerifiedRequestIDReplay(t *testing.T) {
 	restarted, _ := analyticsDeriver(t, dir, claudeUsageRule{})
 	feed(restarted, claudeLogs(proto.Clone(rec).(*logspb.LogRecord)))
 	evs := stagedEvents(t, o)
-	if len(evs) != 1 || evs[0].SourceIdentity != "request_id" || !strings.HasPrefix(evs[0].SourceEventID, "rid1:") {
-		t.Fatalf("events = %+v", evs)
+	wantRID := telemetrycontract.NativeRequestIDHash(claudeUsageScope, "api_request", "req_011CUabcdefghijklmnopq")
+	if len(evs) != 1 || evs[0].SourceIdentity != "request_id" || evs[0].SourceEventID != wantRID {
+		t.Fatalf("events = %+v, want SourceEventID=%q", evs, wantRID)
+	}
+	// Golden check: Track 1 rid1: hash must stay byte-identical to
+	// "rid1:" + sha256("32:com.anthropic.claude_code.events11:api_request26:req_011CUabcdefghijklmnopq").
+	const goldenRID = "rid1:fc8c7957949126ee78ec9a64c75e41b9f36be684d13acc013f8cc21f7ee508cf"
+	if evs[0].SourceEventID != goldenRID {
+		t.Fatalf("Track 1 rid1: golden mismatch: got %q, want %q", evs[0].SourceEventID, goldenRID)
 	}
 	if o.Stats().CertainDuplicates+restartedOutboxDup(restarted) != 2 {
 		t.Errorf("certain duplicates not counted: %+v", o.Stats())

@@ -715,7 +715,7 @@ func trustedRequestID(scopeName string, attrs []*commonpb.KeyValue) string {
 // and the canonical attribute key, else none.
 func logRecordIdentity(scopeName, eventName string, record *logspb.LogRecord) (identity, sourceEventID string) {
 	if id := trustedRequestID(scopeName, record.GetAttributes()); id != "" {
-		return telemetrycontract.SourceIdentityRequestID, "rid1:" + lengthPrefixedHash(scopeName, eventName, id)
+		return telemetrycontract.SourceIdentityRequestID, telemetrycontract.NativeRequestIDHash(scopeName, eventName, id)
 	}
 	recordTime := record.GetTimeUnixNano()
 	if recordTime == 0 {
