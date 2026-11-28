@@ -1478,6 +1478,33 @@ func TestListAgentDecisions_Search(t *testing.T) {
 	})
 }
 
+func TestListAgentDecisions_SearchComment(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	withRow := f.create(t, false, yesNo("cmt-hit", "Deploy target?")).Decisions[0].RowID
+	inWith := f.answer(withRow, "1", "user-1", "")
+	inWith.Comment = "Skip the loadtest cluster"
+	_, _, err := f.cs.RecordAnswer(ctx, inWith)
+	require.NoError(t, err)
+
+	withoutRow := f.create(t, false, yesNo("cmt-miss", "Backup target?")).Decisions[0].RowID
+	_, _, err = f.cs.RecordAnswer(ctx, f.answer(withoutRow, "1", "user-1", ""))
+	require.NoError(t, err)
+
+	rows, _, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateDecided, "LOADTEST", "", 50)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, withRow, rows[0].ID)
+	require.NotNil(t, rows[0].EffectiveAnswer())
+	assert.Equal(t, "Skip the loadtest cluster", rows[0].EffectiveAnswer().Comment)
+
+	// Another agent cannot find f.agentID's decision by its comment.
+	otherRows, _, err := f.cs.ListAgentDecisions(ctx, uuid.New().String(), store.DecisionListStateAll, "LOADTEST", "", 50)
+	require.NoError(t, err)
+	assert.Empty(t, otherRows)
+}
+
 func TestGetAgentDecisionVersions(t *testing.T) {
 	f := newDecisionFixture(t)
 	ctx := context.Background()

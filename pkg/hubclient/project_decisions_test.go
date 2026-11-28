@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -128,5 +129,38 @@ func TestProjectDecisionService_ListQueryAndSearchSupport(t *testing.T) {
 	}
 	if resp.SupportsSearch() {
 		t.Error("a response without a conversations facet does not support search")
+	}
+}
+
+func TestProjectDecisionLogEntry_CommentAndNoCommentGolden(t *testing.T) {
+	noCmt := ProjectDecisionLogEntry{
+		AnswerID:   "ans-1",
+		ChoiceID:   "1",
+		Label:      "Staging",
+		Provenance: "direct",
+		Outcome:    "answer",
+		Surface:    "native",
+	}
+	rawNoCmt, err := json.Marshal(noCmt)
+	if err != nil {
+		t.Fatalf("marshal no-comment log entry: %v", err)
+	}
+	const wantNoCmtJSON = `{"project":{"id":"","name":"","slug":""},"answerId":"ans-1","decision":{"rowId":"","promptMessageId":"","promptAvailable":false,"key":"","ref":"","version":0,"status":"","question":"","choices":null,"askerAgentId":"","askerAgentName":""},"choiceId":"1","label":"Staging","matchedDefault":false,"answeredByName":"","provenance":"direct","outcome":"answer","surface":"native","sourceMessageAvailable":false,"at":"0001-01-01T00:00:00Z","chatKey":"","conversationLabel":"","conversationAvailable":false}`
+	if string(rawNoCmt) != wantNoCmtJSON {
+		t.Fatalf("no-comment ProjectDecisionLogEntry JSON mismatch:\n got: %s\nwant: %s", rawNoCmt, wantNoCmtJSON)
+	}
+
+	withCmt := noCmt
+	withCmt.Comment = "Skip the load test"
+	rawWithCmt, err := json.Marshal(withCmt)
+	if err != nil {
+		t.Fatalf("marshal with-comment log entry: %v", err)
+	}
+	var decoded ProjectDecisionLogEntry
+	if err := json.Unmarshal(rawWithCmt, &decoded); err != nil {
+		t.Fatalf("unmarshal with-comment log entry: %v", err)
+	}
+	if decoded.Comment != "Skip the load test" {
+		t.Fatalf("decoded.Comment = %q, want %q", decoded.Comment, "Skip the load test")
 	}
 }

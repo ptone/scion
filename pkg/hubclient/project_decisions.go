@@ -133,6 +133,7 @@ type ProjectDecisionLogEntry struct {
 	ChoiceID               string                    `json:"choiceId"`
 	Label                  string                    `json:"label"`
 	OtherText              string                    `json:"otherText,omitempty"`
+	Comment                string                    `json:"comment,omitempty"`
 	MatchedDefault         bool                      `json:"matchedDefault"`
 	PreviousChoiceLabel    string                    `json:"previousChoiceLabel,omitempty"`
 	PreviousOtherText      string                    `json:"previousOtherText,omitempty"`

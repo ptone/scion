@@ -1300,3 +1300,202 @@ func TestDecisionsOther_RecordShowListAndValidation(t *testing.T) {
 	require.NotNil(t, parsedList.Items[0].Answer)
 	assert.Equal(t, "europe-west4 canary", parsedList.Items[0].Answer.OtherText)
 }
+
+func TestDecisionsComment_ShowListGoldenAndHostileText(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "agent")
+	fixedNow := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	restoreNow := clitime.SetNow(func() time.Time { return fixedNow })
+	defer restoreNow()
+	clitime.SetZone(time.UTC)
+	defer clitime.SetZone(nil)
+
+	var commentVal string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/decisions/deploy-target", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionShowResponse{
+			Key: "deploy-target",
+			Ref: "release-bot/deploy-target",
+			Versions: []hubclient.AgentDecisionVersionView{{
+				RowID:           "row-1",
+				Key:             "deploy-target",
+				Ref:             "release-bot/deploy-target",
+				Version:         1,
+				Status:          "decided",
+				Question:        "Where should it go?",
+				ConversationID:  "conv-1",
+				PromptMessageID: "prompt-1",
+				Choices:         []messages.Choice{{ID: "staging", Label: "Staging"}},
+				CreatedAt:       fixedNow,
+				DecidedAt:       &fixedNow,
+				Answers: []hubclient.DecisionAnswerView{{
+					ChoiceID:       "staging",
+					Label:          "Staging",
+					Comment:        commentVal,
+					AnsweredByName: "Alice",
+					Provenance:     "direct",
+					Outcome:        "answer",
+					Surface:        "native",
+					At:             fixedNow,
+				}},
+			}},
+		})
+	})
+	mux.HandleFunc("/api/v1/agent/decisions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionListResponse{
+			Query: r.URL.Query().Get("q"),
+			Items: []hubclient.AgentDecisionListItem{{
+				RowID:          "row-1",
+				Key:            "deploy-target",
+				Ref:            "release-bot/deploy-target",
+				Version:        1,
+				Status:         "decided",
+				Question:       "Where should it go?",
+				ConversationID: "conv-1",
+				CreatedAt:      fixedNow,
+				Answer: &hubclient.DecisionAnswerView{
+					ChoiceID:       "staging",
+					Label:          "Staging",
+					Comment:        commentVal,
+					AnsweredByName: "Alice",
+					Provenance:     "direct",
+					Outcome:        "answer",
+					Surface:        "native",
+					At:             fixedNow,
+				},
+			}},
+		})
+	})
+	withMockDecisionsServer(t, mux)
+
+	// 1. No-comment golden: show and list match exact literal upstream-main bytes (human and --json).
+	commentVal = ""
+	const wantShowNoCmt = "Decision deploy-target (release-bot/deploy-target)\n" +
+		"v1 [decided]\n" +
+		"  Question:     Where should it go?\n" +
+		"  Conversation: conv-1\n" +
+		"  Prompt:       prompt-1\n" +
+		"  Created:      2026-11-28 12:00 UTC\n" +
+		"  Decided:      2026-11-28 12:00 UTC\n" +
+		"  Choices:\n" +
+		"    - staging: Staging\n" +
+		"  Answers:\n" +
+		"    - Staging (staging) [direct] by Alice via native at 2026-11-28 12:00 UTC\n"
+	showNoCmt, err := runDecisionsTestCmd(t, "decisions", "show", "deploy-target")
+	require.NoError(t, err)
+	assert.Equal(t, wantShowNoCmt, showNoCmt)
+
+	const wantShowNoCmtJSON = "{\n" +
+		"  \"key\": \"deploy-target\",\n" +
+		"  \"ref\": \"release-bot/deploy-target\",\n" +
+		"  \"versions\": [\n" +
+		"    {\n" +
+		"      \"rowId\": \"row-1\",\n" +
+		"      \"key\": \"deploy-target\",\n" +
+		"      \"ref\": \"release-bot/deploy-target\",\n" +
+		"      \"version\": 1,\n" +
+		"      \"status\": \"decided\",\n" +
+		"      \"question\": \"Where should it go?\",\n" +
+		"      \"conversationId\": \"conv-1\",\n" +
+		"      \"promptMessageId\": \"prompt-1\",\n" +
+		"      \"choices\": [\n" +
+		"        {\n" +
+		"          \"id\": \"staging\",\n" +
+		"          \"label\": \"Staging\"\n" +
+		"        }\n" +
+		"      ],\n" +
+		"      \"createdAt\": \"2026-11-28T12:00:00Z\",\n" +
+		"      \"decidedAt\": \"2026-11-28T12:00:00Z\",\n" +
+		"      \"answers\": [\n" +
+		"        {\n" +
+		"          \"choiceId\": \"staging\",\n" +
+		"          \"label\": \"Staging\",\n" +
+		"          \"answeredByName\": \"Alice\",\n" +
+		"          \"provenance\": \"direct\",\n" +
+		"          \"outcome\": \"answer\",\n" +
+		"          \"surface\": \"native\",\n" +
+		"          \"responseMessageId\": \"\",\n" +
+		"          \"at\": \"2026-11-28T12:00:00Z\"\n" +
+		"        }\n" +
+		"      ]\n" +
+		"    }\n" +
+		"  ]\n" +
+		"}\n"
+	showNoCmtJSON, err := runDecisionsTestCmd(t, "decisions", "show", "deploy-target", "--json")
+	require.NoError(t, err)
+	assert.Equal(t, wantShowNoCmtJSON, showNoCmtJSON)
+
+	const wantListNoCmt = "" +
+		"KEY            VER  STATUS   QUESTION             ANSWER   ANSWERED BY  PROVENANCE  CONVERSATION  AGE\n" +
+		"deploy-target  v1   decided  Where should it go?  Staging  Alice        direct      conv-1        just now\n"
+	listNoCmt, err := runDecisionsTestCmd(t, "decisions", "list", "--decided")
+	require.NoError(t, err)
+	assert.Equal(t, wantListNoCmt, listNoCmt)
+
+	const wantListNoCmtJSON = "{\n" +
+		"  \"items\": [\n" +
+		"    {\n" +
+		"      \"rowId\": \"row-1\",\n" +
+		"      \"key\": \"deploy-target\",\n" +
+		"      \"ref\": \"release-bot/deploy-target\",\n" +
+		"      \"version\": 1,\n" +
+		"      \"status\": \"decided\",\n" +
+		"      \"question\": \"Where should it go?\",\n" +
+		"      \"choices\": null,\n" +
+		"      \"conversationId\": \"conv-1\",\n" +
+		"      \"promptMessageId\": \"\",\n" +
+		"      \"createdAt\": \"2026-11-28T12:00:00Z\",\n" +
+		"      \"answer\": {\n" +
+		"        \"choiceId\": \"staging\",\n" +
+		"        \"label\": \"Staging\",\n" +
+		"        \"answeredByName\": \"Alice\",\n" +
+		"        \"provenance\": \"direct\",\n" +
+		"        \"outcome\": \"answer\",\n" +
+		"        \"surface\": \"native\",\n" +
+		"        \"responseMessageId\": \"\",\n" +
+		"        \"at\": \"2026-11-28T12:00:00Z\"\n" +
+		"      }\n" +
+		"    }\n" +
+		"  ]\n" +
+		"}\n"
+	listNoCmtJSON, err := runDecisionsTestCmd(t, "decisions", "list", "--decided", "--json")
+	require.NoError(t, err)
+	assert.Equal(t, wantListNoCmtJSON, listNoCmtJSON)
+
+	// 2. With plain comment: show prints comment line after answer line; --json includes comment;
+	// list human output is unchanged while list --json includes comment.
+	commentVal = "Staging, but skip the load test."
+	showWithCmt, err := runDecisionsTestCmd(t, "decisions", "show", "deploy-target")
+	require.NoError(t, err)
+	assert.Equal(t, showNoCmt+"      comment: \"Staging, but skip the load test.\"\n", showWithCmt)
+
+	showWithCmtJSON, err := runDecisionsTestCmd(t, "decisions", "show", "deploy-target", "--json")
+	require.NoError(t, err)
+	var parsedShow hubclient.AgentDecisionShowResponse
+	require.NoError(t, json.Unmarshal([]byte(showWithCmtJSON), &parsedShow))
+	require.Len(t, parsedShow.Versions, 1)
+	require.Len(t, parsedShow.Versions[0].Answers, 1)
+	assert.Equal(t, "Staging, but skip the load test.", parsedShow.Versions[0].Answers[0].Comment)
+
+	listWithCmt, err := runDecisionsTestCmd(t, "decisions", "list", "--decided", "-q", "load test")
+	require.NoError(t, err)
+	assert.Equal(t, listNoCmt, listWithCmt, "decisions list human table columns must be unchanged")
+
+	listWithCmtJSON, err := runDecisionsTestCmd(t, "decisions", "list", "--decided", "--json")
+	require.NoError(t, err)
+	var parsedList hubclient.AgentDecisionListResponse
+	require.NoError(t, json.Unmarshal([]byte(listWithCmtJSON), &parsedList))
+	require.Len(t, parsedList.Items, 1)
+	require.NotNil(t, parsedList.Items[0].Answer)
+	assert.Equal(t, "Staging, but skip the load test.", parsedList.Items[0].Answer.Comment)
+
+	// 3. Hostile comment text (ANSI escape, newline, tab, bidi override) is rendered safely on one line.
+	commentVal = "\x1b[31mred\x1b[0m\nline2\t\u202ehidden"
+	showHostile, err := runDecisionsTestCmd(t, "decisions", "show", "deploy-target")
+	require.NoError(t, err)
+	assert.NotContains(t, showHostile, "\x1b")
+	assert.NotContains(t, showHostile, "\u202e")
+	assert.NotContains(t, showHostile, "\t")
+	assert.Contains(t, showHostile, fmt.Sprintf("      comment: \"%s\"\n", collapseSingleLine(commentVal)))
+}

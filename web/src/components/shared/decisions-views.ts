@@ -531,6 +531,55 @@ export const decisionsPageSharedStyles: CSSResult = css`
     overflow-wrap: anywhere;
   }
 
+  .made-cmt {
+    margin-top: 0.2rem;
+    font-size: 0.8rem;
+    color: var(--scion-text-secondary, #475569);
+    overflow-wrap: anywhere;
+  }
+
+  .made-cmt sl-icon {
+    font-size: 0.85rem;
+    vertical-align: -0.1em;
+    color: var(--scion-text-muted, #64748b);
+    margin-inline-end: 0.25rem;
+  }
+
+  .made-cmt-clamp {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .made-cmt-tag {
+    display: inline-block;
+    font: 600 0.68rem/1 var(--scion-font-mono, monospace);
+    padding: 0.18rem 0.38rem;
+    border-radius: var(--scion-radius-sm);
+    background: var(--scion-badge-primary-bg, #dbeafe);
+    color: var(--scion-badge-primary-text, #1e40af);
+    margin-inline-end: 0.3rem;
+    vertical-align: middle;
+  }
+
+  .made-detail-cmt {
+    display: flex;
+    gap: 0.4rem;
+    align-items: flex-start;
+    padding: 0.35rem 0.55rem;
+    border-radius: var(--scion-radius);
+    background: var(--scion-bg-subtle, #f1f5f9);
+    color: var(--scion-text, #1e293b);
+    overflow-wrap: anywhere;
+  }
+
+  .made-detail-cmt sl-icon {
+    margin-top: 0.15rem;
+    color: var(--scion-text-muted, #64748b);
+    flex-shrink: 0;
+  }
+
   .surf {
     display: inline-flex;
     gap: 0.3rem;
@@ -1398,6 +1447,16 @@ export function renderMadeDetailPanel(
         : html`<span class="muted" data-detail-no-choices
             >Offered choices are not available.</span
           >`}
+      ${!isDismiss && e.comment
+        ? html`<div class="made-detail-cmt" data-detail-comment-wrap>
+            <sl-icon name="chat-square-text" aria-hidden="true"></sl-icon>
+            <span>
+              ${e.batchId
+                ? html`<span class="made-cmt-tag" data-detail-set-comment>set comment</span>`
+                : nothing}<span data-detail-comment>${e.comment}</span>
+            </span>
+          </div>`
+        : nothing}
       <div class="made-detail-notes">
         ${isDismiss
           ? html`<span data-detail-dismissed
@@ -1452,6 +1511,7 @@ export function renderMadeRow(
   const replyHref = isDismiss ? null : replyHrefForEntry(e, projectId);
   const answerLabel = e.label || e.choiceId;
   const otherText = !isDismiss && isOtherAnswer(e) ? e.otherText : undefined;
+  const comment = !isDismiss && e.comment ? e.comment : undefined;
   const prevText =
     !isDismiss && e.provenance === 'direct' && e.outcome === 'override' && e.previousChoiceLabel
       ? `from ${e.previousChoiceLabel}${e.previousOtherText ? ` “${e.previousOtherText}”` : ''}`
@@ -1489,7 +1549,7 @@ export function renderMadeRow(
       <td class="q">
         <span class="q-text" title=${e.decision.question}>${e.decision.question}</span>
       </td>
-      <td data-answer-cell class=${otherText ? 'ans' : nothing}>
+      <td data-answer-cell class=${otherText || comment ? 'ans' : nothing}>
         ${isDismiss
           ? html`<b>Dismissed</b>${dismissReason}`
           : otherText
@@ -1497,6 +1557,13 @@ export function renderMadeRow(
                 <b>${answerLabel}:</b> “${otherText}”
               </div>`
             : html`<b>${answerLabel}</b>`}
+        ${comment
+          ? html`<div class="made-cmt made-cmt-clamp" data-answer-comment title=${comment}>
+              <sl-icon name="chat-square-text" aria-hidden="true"></sl-icon>${e.batchId
+                ? html`<span class="made-cmt-tag" data-set-comment-tag>set comment</span>`
+                : nothing}${comment}
+            </div>`
+          : nothing}
       </td>
       <td data-answered-by>${renderAnsweredBy(e, opts.currentUserId)}</td>
       <td data-provenance>
@@ -1553,6 +1620,7 @@ export function renderMadeItem(
   const replyHref = isDismiss ? null : replyHrefForEntry(e, projectId);
   const answerLabel = e.label || e.choiceId;
   const otherText = !isDismiss && isOtherAnswer(e) ? e.otherText : undefined;
+  const comment = !isDismiss && e.comment ? e.comment : undefined;
   const prevText =
     !isDismiss && e.outcome === 'override' && e.previousChoiceLabel
       ? `from ${e.previousChoiceLabel}${e.previousOtherText ? ` “${e.previousOtherText}”` : ''}`
@@ -1573,6 +1641,13 @@ export function renderMadeItem(
         ${renderProvenanceBadge(e)} ${renderAwaitingBadge(e)} ${renderRecommendationMarker(e)}
       </div>
       <div>${e.decision.question}</div>
+      ${comment
+        ? html`<div class="made-cmt made-cmt-clamp" data-answer-comment title=${comment}>
+            <sl-icon name="chat-square-text" aria-hidden="true"></sl-icon>${e.batchId
+              ? html`<span class="made-cmt-tag" data-set-comment-tag>set comment</span>`
+              : nothing}${comment}
+          </div>`
+        : nothing}
       ${isDismiss && e.dismissReason
         ? html`<div class="dismiss-reason muted" data-dismiss-reason>${e.dismissReason}</div>`
         : nothing}

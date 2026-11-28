@@ -491,3 +491,104 @@ func TestDecisionSearch_MadeOtherTextAndPreviousOtherText(t *testing.T) {
 	assert.True(t, interpEntries[0].AwaitingConfirmation)
 	assert.Empty(t, interpEntries[0].PreviousOtherText)
 }
+
+func TestDecisionSearch_MadeCommentAndWildcardEscape(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	projectID := backfillTestProject(t, cs, "decision-search-comment")
+
+	aliceID := uuid.New().String()
+	require.NoError(t, cs.CreateUser(ctx, &store.User{
+		ID:          aliceID,
+		Email:       "alice@example.com",
+		DisplayName: "Alice",
+		Status:      "active",
+		Created:     time.Now(),
+	}))
+
+	botID := uuid.New().String()
+	topic := uuid.New().String()
+	promptRes, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+		Message: &store.Message{
+			ID:        uuid.New().String(),
+			ProjectID: projectID,
+			Sender:    "agent:release-bot",
+			SenderID:  botID,
+			Recipient: "group:topic",
+			ThreadID:  topic,
+		},
+		AskerAgentID:   botID,
+		AskerAgentName: "release-bot",
+		Decisions: []messages.Decision{
+			{
+				Key:      "cmt-one",
+				Question: "Ship to staging?",
+				Choices:  []messages.Choice{{ID: "1", Label: "Yes"}, {ID: "2", Label: "No"}},
+			},
+			{
+				Key:      "cmt-none",
+				Question: "Tag release?",
+				Choices:  []messages.Choice{{ID: "1", Label: "Yes"}, {ID: "2", Label: "No"}},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, promptRes.Decisions, 2)
+
+	ansWith, _, err := cs.RecordAnswer(ctx, &store.RecordAnswerInput{
+		DecisionRowID:    promptRes.Decisions[0].RowID,
+		ChoiceID:         "1",
+		Comment:          "Skip 50% load_test until Friday",
+		AnsweredByUserID: aliceID,
+		AnsweredByName:   "Alice",
+		AnsweredByEmail:  "alice@example.com",
+		Provenance:       store.DecisionProvenanceDirect,
+		Outcome:          store.DecisionOutcomeAnswer,
+		Surface:          store.DecisionSurfaceNative,
+		ResponseMessage: &store.Message{
+			ID:        uuid.New().String(),
+			ProjectID: projectID,
+			ThreadID:  topic,
+			Sender:    "user:Alice",
+			Recipient: "agent:release-bot",
+			Msg:       "answered with comment",
+		},
+	})
+	require.NoError(t, err)
+
+	_, _, err = cs.RecordAnswer(ctx, &store.RecordAnswerInput{
+		DecisionRowID:    promptRes.Decisions[1].RowID,
+		ChoiceID:         "1",
+		AnsweredByUserID: aliceID,
+		AnsweredByName:   "Alice",
+		AnsweredByEmail:  "alice@example.com",
+		Provenance:       store.DecisionProvenanceDirect,
+		Outcome:          store.DecisionOutcomeAnswer,
+		Surface:          store.DecisionSurfaceNative,
+		ResponseMessage: &store.Message{
+			ID:        uuid.New().String(),
+			ProjectID: projectID,
+			ThreadID:  topic,
+			Sender:    "user:Alice",
+			Recipient: "agent:release-bot",
+			Msg:       "answered without comment",
+		},
+	})
+	require.NoError(t, err)
+
+	// Case-insensitive literal substring match on comment.
+	entries, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topic}, store.ProjectDecisionAnswerFilter{
+		Query: "50% LOAD_TEST",
+	}, "", 50)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, ansWith.ID, entries[0].Answer.ID)
+	assert.Equal(t, "Skip 50% load_test until Friday", entries[0].Answer.Comment)
+
+	// Wildcard '%' must not match unrelated rows.
+	wildMiss, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topic}, store.ProjectDecisionAnswerFilter{
+		Query: "99%",
+	}, "", 50)
+	require.NoError(t, err)
+	assert.Empty(t, wildMiss)
+}

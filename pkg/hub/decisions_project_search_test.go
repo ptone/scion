@@ -473,3 +473,125 @@ func TestProjectDecisions_SearchOtherTextWaitingAndMade(t *testing.T) {
 	assert.Equal(t, "Another region", madeHit.Entries[0].PreviousChoiceLabel)
 	assert.Equal(t, "europe-north2 canary", madeHit.Entries[0].PreviousOtherText)
 }
+
+func TestProjectDecisions_SearchCommentWaitingMadeAndNoCommentGolden(t *testing.T) {
+	f := newDecisionsSearchFixture(t)
+
+	// 1. In-memory Waiting tab search (pendingPromptMatches) matches a comment on an effective answer.
+	scope := &decisionScopeSet{
+		projectReadableScope: &projectReadableScope{
+			conversationLabel: map[string]string{},
+			agentNames:        map[string]string{},
+		},
+	}
+	promptWithComment := &store.ProjectDecisionPrompt{
+		ChatKey: "topic-1",
+		Decisions: []*store.Decision{{
+			Key:      "dep-wait",
+			Question: "Deploy now?",
+			Answers: []*store.DecisionAnswer{{
+				ChoiceID:    "1",
+				ChoiceLabel: "Staging",
+				Comment:     "Skip the loadtest cluster",
+				Provenance:  store.DecisionProvenanceDirect,
+				Outcome:     store.DecisionOutcomeAnswer,
+			}},
+		}},
+	}
+	assert.True(t, pendingPromptMatches(scope, promptWithComment, "loadtest"))
+	assert.False(t, pendingPromptMatches(scope, promptWithComment, "nonexistent"))
+
+	// 2. Topic decision answered WITH a comment + topic decision answered WITHOUT a comment (no-comment golden).
+	_, pWith := f.topicPrompt(t, `[{"id":"cmt-topic","question":"Deploy target?","choices":["Staging","Canary"]}]`, false)
+	ansWithRR := f.answer(t, f.bob, pWith.Decisions[0].RowID, map[string]interface{}{
+		"choice_id": "1",
+		"comment":   "Skip the loadtest window",
+	})
+	require.Equal(t, http.StatusOK, ansWithRR.Code, ansWithRR.Body.String())
+
+	_, pWithout := f.topicPrompt(t, `[{"id":"nocmt-topic","question":"Backup target?","choices":["Yes","No"]}]`, false)
+	ansWithoutRR := f.answer(t, f.bob, pWithout.Decisions[0].RowID, map[string]interface{}{
+		"choice_id": "1",
+	})
+	require.Equal(t, http.StatusOK, ansWithoutRR.Code, ansWithoutRR.Body.String())
+
+	// 3. Made tab SQL search finds the comment case-insensitively and returns entry.Comment.
+	madeHit := f.made(t, f.bob, url.Values{"q": {"LOADTEST"}})
+	require.Len(t, madeHit.Entries, 1)
+	assert.Equal(t, "cmt-topic", madeHit.Entries[0].Decision.Key)
+	assert.Equal(t, "Skip the loadtest window", madeHit.Entries[0].Comment)
+
+	// 4. No-comment golden: exact literal JSON equality for a log entry without a comment,
+	// plus live Made-tab response omits "comment" when no comment was recorded.
+	goldenLogEntry := ProjectDecisionLogEntryView{
+		Project:  ProjectDecisionProjectRef{ID: "p-1", Name: "Scion", Slug: "scion"},
+		AnswerID: "ans-1",
+		Decision: ProjectDecisionSummaryView{
+			RowID:           "row-1",
+			PromptMessageID: "msg-1",
+			PromptAvailable: true,
+			Key:             "nocmt-topic",
+			Ref:             "bot/nocmt-topic",
+			Version:         1,
+			Status:          "decided",
+			Question:        "Backup target?",
+			Choices:         []messages.Choice{{ID: "1", Label: "Yes"}, {ID: "2", Label: "No"}},
+			AskerAgentID:    "ag-1",
+			AskerAgentName:  "bot",
+		},
+		ChoiceID:              "1",
+		Label:                 "Yes",
+		AnsweredByName:        "Bob",
+		Provenance:            "direct",
+		Outcome:               "answer",
+		Surface:               "native",
+		At:                    time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC),
+		ChatKey:               "topic-1",
+		ConversationLabel:     "#general",
+		ConversationAvailable: true,
+	}
+	goldenLogBytes, err := json.Marshal(goldenLogEntry)
+	require.NoError(t, err)
+	const wantGoldenLogJSON = `{"project":{"id":"p-1","name":"Scion","slug":"scion"},"answerId":"ans-1","decision":{"rowId":"row-1","promptMessageId":"msg-1","promptAvailable":true,"key":"nocmt-topic","ref":"bot/nocmt-topic","version":1,"status":"decided","question":"Backup target?","choices":[{"id":"1","label":"Yes"},{"id":"2","label":"No"}],"askerAgentId":"ag-1","askerAgentName":"bot"},"choiceId":"1","label":"Yes","matchedDefault":false,"answeredByName":"Bob","provenance":"direct","outcome":"answer","surface":"native","sourceMessageAvailable":false,"at":"2026-11-28T12:00:00Z","chatKey":"topic-1","conversationLabel":"#general","conversationAvailable":true}`
+	assert.Equal(t, wantGoldenLogJSON, string(goldenLogBytes))
+
+	rawCode, rawBody := f.get(t, f.bob, url.Values{"tab": {ProjectDecisionsTabMade}, "q": {"nocmt-topic"}})
+	require.Equal(t, http.StatusOK, rawCode, string(rawBody))
+	assert.NotContains(t, string(rawBody), `"comment"`, "no-comment Made log entry must omit comment key")
+
+	// 5. DM privacy: another user cannot find a DM decision by searching its comment.
+	dmAnsRR := f.answer(t, f.bob, f.dmRowID, map[string]interface{}{
+		"choice_id": "1",
+		"comment":   "dm-only-canary-token",
+	})
+	require.Equal(t, http.StatusOK, dmAnsRR.Code, dmAnsRR.Body.String())
+
+	bobDMHit := f.made(t, f.bob, url.Values{"q": {"dm-only-canary-token"}})
+	require.Len(t, bobDMHit.Entries, 1)
+	assert.Equal(t, "rotate-key", bobDMHit.Entries[0].Decision.Key)
+	assert.Equal(t, "dm-only-canary-token", bobDMHit.Entries[0].Comment)
+
+	aliceDMMiss := f.made(t, f.alice, url.Values{"q": {"dm-only-canary-token"}})
+	assert.Empty(t, aliceDMMiss.Entries, "comment search must respect DM privacy")
+
+	// 6. Agent decisions list -q finds comments, and show returns comment (and omits it when absent).
+	listRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?state=decided&q=LOADTEST", nil)
+	require.Equal(t, http.StatusOK, listRR.Code, listRR.Body.String())
+	var listResp struct {
+		Items []struct {
+			Key    string `json:"key"`
+			Answer *struct {
+				Comment string `json:"comment,omitempty"`
+			} `json:"answer,omitempty"`
+		} `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(listRR.Body.Bytes(), &listResp))
+	require.Len(t, listResp.Items, 1)
+	assert.Equal(t, "cmt-topic", listResp.Items[0].Key)
+	require.NotNil(t, listResp.Items[0].Answer)
+	assert.Equal(t, "Skip the loadtest window", listResp.Items[0].Answer.Comment)
+
+	showNoCmtRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/nocmt-topic", nil)
+	require.Equal(t, http.StatusOK, showNoCmtRR.Code, showNoCmtRR.Body.String())
+	assert.NotContains(t, showNoCmtRR.Body.String(), `"comment"`, "no-comment agent show JSON must omit comment key")
+}

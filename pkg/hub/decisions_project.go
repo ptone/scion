@@ -141,6 +141,7 @@ type ProjectDecisionLogEntryView struct {
 	ChoiceID               string                     `json:"choiceId"`
 	Label                  string                     `json:"label"`
 	OtherText              string                     `json:"otherText,omitempty"`
+	Comment                string                     `json:"comment,omitempty"`
 	MatchedDefault         bool                       `json:"matchedDefault"`
 	PreviousChoiceLabel    string                     `json:"previousChoiceLabel,omitempty"`
 	PreviousOtherText      string                     `json:"previousOtherText,omitempty"`
@@ -1210,7 +1211,7 @@ func pendingPromptMatches(set *decisionScopeSet, p *store.ProjectDecisionPrompt,
 		if contains(d.Question) || contains(d.Key) || contains(d.AskerAgentName) {
 			return true
 		}
-		if a := d.EffectiveAnswer(); a != nil && (contains(a.ChoiceLabel) || contains(a.OtherText)) {
+		if a := d.EffectiveAnswer(); a != nil && (contains(a.ChoiceLabel) || contains(a.OtherText) || contains(a.Comment)) {
 			return true
 		}
 	}
@@ -1678,6 +1679,7 @@ func (s *Server) buildProjectDecisionLogViews(
 			ChoiceID:               a.ChoiceID,
 			Label:                  a.ChoiceLabel,
 			OtherText:              a.OtherText,
+			Comment:                a.Comment,
 			MatchedDefault:         a.MatchedDefault,
 			PreviousChoiceLabel:    e.PreviousChoiceLabel,
 			PreviousOtherText:      e.PreviousOtherText,
