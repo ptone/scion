@@ -198,24 +198,29 @@ func ValidateTrajectoryRelativePath(harness, relPath string) error {
 		}
 	}
 
-	switch harness {
-	case "claude":
-		if !strings.HasPrefix(relPath, ".claude/projects/") {
-			return fmt.Errorf("native_relative_path for claude must be under .claude/projects/")
-		}
-		if !strings.HasSuffix(relPath, ".jsonl") {
-			return fmt.Errorf("native_relative_path for claude must end with .jsonl")
-		}
-		// Ensure there is a filename after ".claude/projects/" (not just ".claude/projects/.jsonl" is still a filename,
-		// and there is at least one non-empty element after the root).
-		rest := strings.TrimPrefix(relPath, ".claude/projects/")
-		if rest == ".jsonl" {
-			return fmt.Errorf("native_relative_path for claude must name a session file")
-		}
-	default:
+	spec, ok := HarnessTrajectorySpecFor(harness)
+	if !ok {
 		return fmt.Errorf("unsupported trajectory harness %q", harness)
 	}
-	return nil
+	for _, rule := range spec.Rules {
+		root := strings.Trim(rule.Root, "/")
+		if root == "" {
+			continue
+		}
+		prefix := root + "/"
+		if !strings.HasPrefix(relPath, prefix) {
+			continue
+		}
+		if rule.Suffix != "" && !strings.HasSuffix(relPath, rule.Suffix) {
+			continue
+		}
+		rest := strings.TrimPrefix(relPath, prefix)
+		if rule.Suffix != "" && rest == rule.Suffix {
+			return fmt.Errorf("native_relative_path for %s must name a session file", harness)
+		}
+		return nil
+	}
+	return fmt.Errorf("native_relative_path %q does not match any allow-listed root for harness %q", relPath, harness)
 }
 
 // TrajectorySegmentPrepareRequest is the wire payload for
