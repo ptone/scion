@@ -94,8 +94,15 @@ type BarResult struct {
 type EvalOptions struct {
 	// MemoryBudgetBytes, when > 0, enforces PeakMemoryBytes <= MemoryBudgetBytes.
 	MemoryBudgetBytes int64
-	// ExpectDrain, when true, evaluates planned_drain_4503 (>= 1 relay_restart).
+	// ExpectDrain, when true, evaluates planned_drain_4503 (relay_restart,
+	// deadline, and post-drain replacement clauses).
 	ExpectDrain bool
+	// DrainDeadline is the configured hub drain deadline (e.g. 30s) used to
+	// evaluate whether 4503 closes occurred within DrainDeadline + Tolerance.
+	DrainDeadline time.Duration
+	// DrainDeadlineTolerance is added to DrainDeadline when evaluating 4503
+	// close timing (default 5s when DrainDeadline > 0).
+	DrainDeadlineTolerance time.Duration
 	// AllowUnevaluated lists bar names explicitly permitted to remain
 	// unevaluated without turning the overall verdict into INCOMPLETE.
 	AllowUnevaluated []string
@@ -108,10 +115,15 @@ type EvalOptions struct {
 	// MessageRowsCreated is the total number of Hub message rows created.
 	MessageRowsCreated int64
 	// LargeBodyRowsPerDelivery records how many Hub message rows are bound per
-	// 512 KiB delivery (e.g. 33 for ceil(512KiB/16000)).
+	// 512 KiB delivery (e.g. 33 for ceil(512KiB/15886) with \n\n join).
 	LargeBodyRowsPerDelivery int
 	// ExpectedLargeBodyCount overrides res.ExpectedLargeBodyCount when > 0.
 	ExpectedLargeBodyCount int
+	// BrokerFlushMode documents the broker flush implementation and any
+	// deviation from production defaults (e.g. mirrored_v2_22_short_debounce).
+	BrokerFlushMode string
+	// BrokerDebounceMS records the fake broker's debounce delay in milliseconds.
+	BrokerDebounceMS int64
 }
 
 // Report is the machine-readable JSON output emitted by hack/conduit-c19.
@@ -123,6 +135,8 @@ type Report struct {
 	DurationMS       int64    `json:"duration_ms"`
 	AgentCount       int      `json:"agent_count"`
 	ClockSkewMS      float64  `json:"clock_skew_ms"`
+	BrokerFlushMode  string   `json:"broker_flush_mode,omitempty"`
+	BrokerDebounceMS int64    `json:"broker_debounce_ms,omitempty"`
 	AllowUnevaluated []string `json:"allow_unevaluated,omitempty"`
 
 	Counts struct {
@@ -180,13 +194,18 @@ type Report struct {
 	} `json:"memory"`
 
 	Drain struct {
-		Expected          bool     `json:"expected"`
-		Count4503         int64    `json:"count_4503"`
-		RelayRestartCount int64    `json:"relay_restart_4503"`
-		OtherCount        int64    `json:"other_4503"`
-		Reasons           []string `json:"reasons,omitempty"`
-		OtherReasons      []string `json:"other_reasons,omitempty"`
-		Reconnects        int64    `json:"session_reconnections"`
+		Expected             bool     `json:"expected"`
+		Count4503            int64    `json:"count_4503"`
+		RelayRestartCount    int64    `json:"relay_restart_4503"`
+		OtherCount           int64    `json:"other_4503"`
+		Reasons              []string `json:"reasons,omitempty"`
+		OtherReasons         []string `json:"other_reasons,omitempty"`
+		TriggerTo4503MaxMS   float64  `json:"trigger_to_4503_max_ms,omitempty"`
+		DeadlineMS           int64    `json:"deadline_ms,omitempty"`
+		DeadlineEvaluated    bool     `json:"deadline_evaluated"`
+		PostDrainWork        int64    `json:"post_drain_work_succeeded"`
+		ReplacementEvaluated bool     `json:"replacement_evaluated"`
+		Reconnects           int64    `json:"session_reconnections"`
 	} `json:"drain"`
 
 	FirstError string      `json:"first_error,omitempty"`
@@ -209,6 +228,8 @@ func BuildReport(res *Result, opts EvalOptions) Report {
 	r.DurationMS = res.Duration.Milliseconds()
 	r.AgentCount = res.AgentCount
 	r.ClockSkewMS = durMS(opts.ClockSkew)
+	r.BrokerFlushMode = opts.BrokerFlushMode
+	r.BrokerDebounceMS = opts.BrokerDebounceMS
 	if len(opts.AllowUnevaluated) > 0 {
 		r.AllowUnevaluated = append([]string(nil), opts.AllowUnevaluated...)
 	}
@@ -271,7 +292,12 @@ func BuildReport(res *Result, opts EvalOptions) Report {
 	r.Drain.OtherCount = res.Drain4503OtherCount
 	r.Drain.Reasons = res.Drain4503Reasons
 	r.Drain.OtherReasons = res.Drain4503OtherReasons
+	r.Drain.PostDrainWork = res.PostDrainWorkSucceeded
 	r.Drain.Reconnects = res.SessionReconnections
+	r.Drain.DeadlineMS = opts.DrainDeadline.Milliseconds()
+	if len(res.Drain4503Delays) > 0 {
+		r.Drain.TriggerTo4503MaxMS = durMS(SummarizeLatencies(res.Drain4503Delays).Max)
+	}
 
 	if res.FirstError != nil {
 		r.FirstError = res.FirstError.Error()
@@ -329,6 +355,7 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 			Required:  true,
 			Evaluated: true,
 			Pass:      val < BarControlP99AddedMaxMS,
+			Note:      "agent-0 conduit session PTY open+echo probe (off broker-RPC churn path)",
 		})
 	} else {
 		bars = append(bars, BarResult{
@@ -339,7 +366,7 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 			Required:  true,
 			Evaluated: false,
 			Pass:      false,
-			Note:      "missing baseline or load control samples",
+			Note:      "missing baseline or under-load agent-session control probe samples",
 		})
 	}
 
@@ -353,6 +380,7 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 		Required:  true,
 		Evaluated: true,
 		Pass:      r.Counts.Total429s <= Bar429MaxCount,
+		Note:      "counts direct HTTP 429s from /message, /deliver, and control probes plus broker-session 429s surfaced as Hub 502 (per-source split in observed)",
 	})
 
 	// 3. Deliver-mode bars (v2.22 §6.2).
@@ -396,7 +424,7 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 				Required:  true,
 				Evaluated: true,
 				Pass:      paste512.P99MS <= BarDeliverPasteP99MaxMS,
-				Note:      "512 KiB deliveries only",
+				Note:      "512 KiB deliveries only; measures fake-agent RecordingTmuxRunner handler time (includes readiness wait and extra submits, not real tmux)",
 			})
 		}
 
@@ -468,7 +496,7 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 			Pass:      badDeliveries == 0 && r.Counts.DeliverSucceeded > 0,
 		})
 
-		// Rotate-token mix disclosure (R7).
+		// Rotate-token mix disclosure.
 		if res.ExpectedRotateTokenCount > 0 {
 			bars = append(bars, BarResult{
 				Name:      BarRotateTokenMix,
@@ -494,7 +522,7 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 		}
 	}
 
-	// 4. Broker RPC error bar in every mode where broker-RPC churn ran (R4).
+	// 4. Broker RPC error bar in every mode where broker-RPC churn ran.
 	if r.Mode == ModeBrokerRPC || res.BrokerRPCEnabled {
 		bars = append(bars, BarResult{
 			Name:      BarBrokerRPCErrors,
@@ -505,10 +533,11 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 			Required:  true,
 			Evaluated: true,
 			Pass:      r.Counts.BrokerRPCErrors == 0 && r.Counts.BrokerRPCSucceeded > 0,
+			Note:      "client_conc is driver goroutine concurrency (--rpc-concurrency); broker_session_conc is inbound in-flight high-water on the broker conduit session (subject to MaxConcurrentRPCs=128)",
 		})
 	}
 
-	// 5. Aggregate session memory / hub RSS (R6). Required in all L6 modes.
+	// 5. Aggregate session memory / hub RSS. Required in all L6 modes.
 	switch {
 	case r.Memory.SampleErrors > 0:
 		bars = append(bars, BarResult{
@@ -556,23 +585,14 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 		})
 	}
 
-	// 6. Planned drain 4503 observation (requires reason relay_restart). Required in all L6 modes.
-	drainObs := fmt.Sprintf("relay_restart=%d other_4503=%d reconnects=%d", r.Drain.RelayRestartCount, r.Drain.OtherCount, r.Drain.Reconnects)
-	if opts.ExpectDrain {
+	// 6. Planned drain 4503 observation (R-5: evaluates relay_restart, deadline,
+	//    and post-drain replacement work; unmeasurable clause => unevaluated).
+	drainObs := fmt.Sprintf("relay_restart=%d other_4503=%d trigger_to_4503_max=%.0fms post_drain_work=%d reconnects=%d",
+		r.Drain.RelayRestartCount, r.Drain.OtherCount, r.Drain.TriggerTo4503MaxMS, r.Drain.PostDrainWork, r.Drain.Reconnects)
+	if !opts.ExpectDrain {
 		bars = append(bars, BarResult{
 			Name:      BarPlannedDrain4503,
-			Threshold: ">= 1 (reason=relay_restart)",
-			Observed:  drainObs,
-			Value:     float64(r.Drain.RelayRestartCount),
-			Unit:      "count",
-			Required:  true,
-			Evaluated: true,
-			Pass:      r.Drain.RelayRestartCount >= 1,
-		})
-	} else {
-		bars = append(bars, BarResult{
-			Name:      BarPlannedDrain4503,
-			Threshold: ">= 1 (reason=relay_restart)",
+			Threshold: ">= 1 relay_restart within deadline + post-drain work",
 			Observed:  drainObs,
 			Value:     float64(r.Drain.RelayRestartCount),
 			Unit:      "count",
@@ -581,6 +601,67 @@ func evaluateBars(r *Report, res *Result, opts EvalOptions) []BarResult {
 			Pass:      false,
 			Note:      "planned drain not enabled (--expect-drain not set)",
 		})
+	} else {
+		hasTrigger := !res.DrainTriggeredAt.IsZero()
+		hasDeadline := opts.DrainDeadline > 0
+		tol := opts.DrainDeadlineTolerance
+		if tol <= 0 {
+			tol = 5 * time.Second
+		}
+		deadlineBound := opts.DrainDeadline + tol
+		r.Drain.DeadlineEvaluated = hasTrigger && hasDeadline && len(res.Drain4503Delays) > 0
+		r.Drain.ReplacementEvaluated = hasTrigger
+
+		switch {
+		case r.Drain.RelayRestartCount < 1:
+			// Definite failure: expected relay_restart 4503 was never observed.
+			bars = append(bars, BarResult{
+				Name:      BarPlannedDrain4503,
+				Threshold: ">= 1 relay_restart within deadline + post-drain work",
+				Observed:  drainObs,
+				Value:     0,
+				Unit:      "count",
+				Required:  true,
+				Evaluated: true,
+				Pass:      false,
+				Note:      "no 4503 relay_restart close observed",
+			})
+		case !hasTrigger || !hasDeadline:
+			// Unmeasurable deadline/replacement clauses must never PASS.
+			bars = append(bars, BarResult{
+				Name:      BarPlannedDrain4503,
+				Threshold: ">= 1 relay_restart within deadline + post-drain work",
+				Observed:  drainObs,
+				Value:     float64(r.Drain.RelayRestartCount),
+				Unit:      "count",
+				Required:  true,
+				Evaluated: false,
+				Pass:      false,
+				Note:      "deadline/replacement clauses unmeasurable without --drain-cmd/--drain-after and --drain-deadline",
+			})
+		default:
+			maxDelay := SummarizeLatencies(res.Drain4503Delays).Max
+			withinDeadline := len(res.Drain4503Delays) > 0 && maxDelay <= deadlineBound
+			replacementOK := r.Drain.PostDrainWork >= 1
+			pass := withinDeadline && replacementOK
+			note := fmt.Sprintf("deadline<=%s (incl. %s tolerance), post_drain_work=%d", deadlineBound, tol, r.Drain.PostDrainWork)
+			if !withinDeadline {
+				note = fmt.Sprintf("4503 close delay %.0fms exceeded deadline %s", durMS(maxDelay), deadlineBound)
+			} else if !replacementOK {
+				note = "no post-drain replacement work succeeded after drain trigger"
+			}
+			bars = append(bars, BarResult{
+				Name:      BarPlannedDrain4503,
+				Threshold: fmt.Sprintf(">= 1 relay_restart <= %s + post-drain work >= 1", deadlineBound),
+				Observed:  drainObs,
+				Value:     float64(r.Drain.RelayRestartCount),
+				Unit:      "count",
+				Required:  true,
+				Evaluated: true,
+				Pass:      pass,
+				Note:      note,
+			})
+		}
 	}
 
 	return bars

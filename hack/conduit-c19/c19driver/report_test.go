@@ -86,6 +86,7 @@ func TestSkewCorrectedDelay(t *testing.T) {
 }
 
 func TestBuildReport_AllBarsPass(t *testing.T) {
+	trigAt := time.Now().Add(-15 * time.Second)
 	res := &Result{
 		Mode:                           ModeDeliver,
 		RunTag:                         "c19-test-1",
@@ -111,26 +112,39 @@ func TestBuildReport_AllBarsPass(t *testing.T) {
 		PeakMemoryBytes:                200 * 1024 * 1024,
 		MemorySource:                   "proc_hub_pids",
 		MemoryPIDCount:                 2,
+		DrainTriggeredAt:               trigAt,
 		Drain4503Count:                 2,
 		Drain4503RelayRestartCount:     2,
 		Drain4503Reasons:               []string{"relay_restart", "relay_restart"},
+		Drain4503Delays:                []time.Duration{10 * time.Second, 14 * time.Second},
+		PostDrainWorkSucceeded:         12,
 	}
 
 	rep := BuildReport(res, EvalOptions{
 		MemoryBudgetBytes:        512 * 1024 * 1024,
 		ExpectDrain:              true,
+		DrainDeadline:            15 * time.Second,
+		DrainDeadlineTolerance:   5 * time.Second,
 		HubURL:                   "https://lb.test",
 		MessageRowsCreated:       314,
 		LargeBodyRowsPerDelivery: 33,
+		BrokerFlushMode:          "mirrored_v2_22_short_debounce",
+		BrokerDebounceMS:         150,
 	})
 	assert.Equal(t, VerdictPass, rep.Verdict)
 	assert.True(t, rep.Pass, "all bars should pass: %+v", rep.Bars)
 	// Nearest-rank p99 of [5ms, 10ms] = 10ms; [15ms, 25ms] = 25ms -> added = 15ms.
 	assert.InDelta(t, 15.0, rep.Latencies.ControlP99AddedMS, 0.01)
 	assert.Contains(t, findBar(t, rep.Bars, BarHubRSSPeak).Observed, "source=proc_hub_pids, pids=2")
+	assert.Contains(t, findBar(t, rep.Bars, BarDeliverPasteP99).Note, "RecordingTmuxRunner")
+	assert.Contains(t, findBar(t, rep.Bars, BarHTTP429Count).Note, "per-source split")
 	assert.Equal(t, int64(314), rep.Counts.MessageRowsCreated)
 	assert.Equal(t, 33, rep.Counts.LargeBodyRowsPerDelivery)
 	assert.Equal(t, int64(120), rep.Counts.MaxConcurrentBrokerSessionRPCs)
+	assert.Equal(t, "mirrored_v2_22_short_debounce", rep.BrokerFlushMode)
+	assert.Equal(t, int64(150), rep.BrokerDebounceMS)
+	assert.True(t, rep.Drain.DeadlineEvaluated)
+	assert.True(t, rep.Drain.ReplacementEvaluated)
 
 	raw, err := json.Marshal(rep)
 	require.NoError(t, err)
@@ -167,7 +181,6 @@ func TestBuildReport_UnevaluatedRequiredBarsIncomplete(t *testing.T) {
 		LargePasteLatencies:      []time.Duration{500 * time.Millisecond, 600 * time.Millisecond},
 		SendToReceiptDelays:      []time.Duration{10 * time.Millisecond},
 		CombinedDeliverLatencies: []time.Duration{610 * time.Millisecond},
-		// No BaselineControlLatencies, no MemorySamples, no Drain4503, no RotateToken.
 	}
 
 	rep := BuildReport(res, EvalOptions{})
@@ -199,6 +212,81 @@ func TestBuildReport_UnevaluatedRequiredBarsIncomplete(t *testing.T) {
 			assert.True(t, b.Waived)
 		}
 	}
+}
+
+// R-5: Planned drain evaluates relay_restart, deadline, and post-drain
+// replacement clauses; unmeasurable clauses stay unevaluated (INCOMPLETE),
+// never PASS.
+func TestBuildReport_PlannedDrainClauses(t *testing.T) {
+	base := func() *Result {
+		return &Result{
+			Mode:                       ModePhase2,
+			Duration:                   10 * time.Second,
+			AgentCount:                 2,
+			BaselineControlLatencies:   []time.Duration{5 * time.Millisecond},
+			LoadControlLatencies:       []time.Duration{8 * time.Millisecond},
+			PeakMemoryBytes:            100 * 1024 * 1024,
+			MemorySource:               "proc_hub_pids",
+			MemoryPIDCount:             1,
+			Drain4503Count:             1,
+			Drain4503RelayRestartCount: 1,
+			Drain4503Reasons:           []string{"relay_restart"},
+		}
+	}
+
+	// 1. relay_restart observed, but no drain trigger timestamp -> unmeasurable -> INCOMPLETE.
+	rNoTrig := base()
+	rep := BuildReport(rNoTrig, EvalOptions{
+		MemoryBudgetBytes: 512 * 1024 * 1024,
+		ExpectDrain:       true,
+		DrainDeadline:     15 * time.Second,
+	})
+	assert.Equal(t, VerdictIncomplete, rep.Verdict)
+	drainBar := findBar(t, rep.Bars, BarPlannedDrain4503)
+	assert.False(t, drainBar.Evaluated)
+	assert.False(t, drainBar.Pass)
+
+	// 2. relay_restart arrived past DrainDeadline + Tolerance -> FAIL.
+	rLate := base()
+	rLate.DrainTriggeredAt = time.Now().Add(-30 * time.Second)
+	rLate.Drain4503Delays = []time.Duration{25 * time.Second}
+	rLate.PostDrainWorkSucceeded = 5
+	repLate := BuildReport(rLate, EvalOptions{
+		MemoryBudgetBytes:      512 * 1024 * 1024,
+		ExpectDrain:            true,
+		DrainDeadline:          15 * time.Second,
+		DrainDeadlineTolerance: 5 * time.Second,
+	})
+	assert.Equal(t, VerdictFail, repLate.Verdict)
+	assert.False(t, findBar(t, repLate.Bars, BarPlannedDrain4503).Pass)
+
+	// 3. relay_restart within deadline, but 0 post-drain replacement work -> FAIL.
+	rNoRepl := base()
+	rNoRepl.DrainTriggeredAt = time.Now().Add(-10 * time.Second)
+	rNoRepl.Drain4503Delays = []time.Duration{8 * time.Second}
+	rNoRepl.PostDrainWorkSucceeded = 0
+	repNoRepl := BuildReport(rNoRepl, EvalOptions{
+		MemoryBudgetBytes:      512 * 1024 * 1024,
+		ExpectDrain:            true,
+		DrainDeadline:          15 * time.Second,
+		DrainDeadlineTolerance: 5 * time.Second,
+	})
+	assert.Equal(t, VerdictFail, repNoRepl.Verdict)
+	assert.False(t, findBar(t, repNoRepl.Bars, BarPlannedDrain4503).Pass)
+
+	// 4. relay_restart within deadline AND post-drain work >= 1 -> PASS.
+	rOK := base()
+	rOK.DrainTriggeredAt = time.Now().Add(-10 * time.Second)
+	rOK.Drain4503Delays = []time.Duration{8 * time.Second}
+	rOK.PostDrainWorkSucceeded = 3
+	repOK := BuildReport(rOK, EvalOptions{
+		MemoryBudgetBytes:      512 * 1024 * 1024,
+		ExpectDrain:            true,
+		DrainDeadline:          15 * time.Second,
+		DrainDeadlineTolerance: 5 * time.Second,
+	})
+	assert.Equal(t, VerdictPass, repOK.Verdict)
+	assert.True(t, findBar(t, repOK.Bars, BarPlannedDrain4503).Pass)
 }
 
 // R2: Nearest-rank p99 must not drop the worst sample at small n.
@@ -248,12 +336,10 @@ func TestBuildReport_512KPasteDoesNotFallbackToSmallBodies(t *testing.T) {
 		AllowUnevaluated: []string{BarControlP99Added, BarHubRSSPeak, BarPlannedDrain4503, BarRotateTokenMix},
 	}
 
-	// Case 1: zero 512 KiB samples -> FAIL even though small pastes are 50ms.
 	repEmpty := BuildReport(&baseRes, opts)
 	assert.Equal(t, VerdictFail, repEmpty.Verdict)
 	assert.False(t, findBar(t, repEmpty.Bars, BarDeliverPasteP99).Pass)
 
-	// Case 2: 2 of 4 configured 512 KiB samples -> FAIL.
 	partial := baseRes
 	partial.LargePasteLatencies = []time.Duration{500 * time.Millisecond, 600 * time.Millisecond}
 	repPartial := BuildReport(&partial, opts)
@@ -293,6 +379,7 @@ func TestBuildReport_BarFailures(t *testing.T) {
 	rep := BuildReport(res, EvalOptions{
 		MemoryBudgetBytes: 512 * 1024 * 1024,
 		ExpectDrain:       true,
+		DrainDeadline:     15 * time.Second,
 	})
 	assert.Equal(t, VerdictFail, rep.Verdict)
 	assert.False(t, rep.Pass)

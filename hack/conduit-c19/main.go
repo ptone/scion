@@ -44,7 +44,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/hack/conduit-c19/c19driver"
 	"github.com/GoogleCloudPlatform/scion/internal/conduittest"
-	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/envelope"
@@ -54,12 +53,13 @@ import (
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
-// maxMessageChunkBytes matches messages.MaxMessageLength (16,000 chars) so
-// each 512 KiB large delivery creates ceil(524288 / 16000) = 33 real message
-// rows whose texts concatenate to the exact delivered body (v2.22 §1.6).
-const maxMessageChunkBytes = 16000
+// maxMessageChunkBytes stays below messages.MaxMessageLength (16,000 chars)
+// with ~1,000 bytes of headroom per row for the Hub's structured DeliveryText
+// framing so that 33 coalesced rows total ~510-520 KiB and fit inside a single
+// 512 KiB (524,288-byte) v2.22 /deliver flush without splitting.
+const maxMessageChunkBytes = 15000
 
-const largeBodyRowsPerDelivery = (c19driver.LargeBodyBytes + maxMessageChunkBytes - 1) / maxMessageChunkBytes
+const largeBodyRowsPerDelivery = 33
 
 type cliConfig struct {
 	Mode                    c19driver.Mode
@@ -75,6 +75,7 @@ type cliConfig struct {
 	Duration                time.Duration
 	DeliverInterval         time.Duration
 	LargeBodyCount          int
+	LargeBodyPacing         time.Duration
 	RotateTokenCount        int
 	RotateURLTemplate       string
 	BrokerRPCCount          int
@@ -82,6 +83,7 @@ type cliConfig struct {
 	BrokerRPCPacing         time.Duration
 	BrokerRPCLatency        time.Duration
 	BrokerMaxConcurrentRPCs int
+	BrokerDebounce          time.Duration
 	ControlConcurrency      int
 	BaselineControlSamples  int
 	ControlProbeRate        float64
@@ -96,6 +98,8 @@ type cliConfig struct {
 	MemoryBudgetBytes       int64
 	DrainAfter              time.Duration
 	DrainCmd                string
+	DrainDeadline           time.Duration
+	DrainDeadlineTolerance  time.Duration
 	ExpectDrain             bool
 	AllowUnevaluated        []string
 	MessageIDsFile          string
@@ -148,22 +152,24 @@ func parseFlags(args []string, getenv func(string) string) (*cliConfig, error) {
 	fs.StringVar(&cfg.AgentsFile, "agents-file", getenv("C19_AGENTS_FILE"), "Path to JSON file listing AgentTarget entries (env: C19_AGENTS_FILE)")
 	fs.IntVar(&cfg.AgentLimit, "agents", 0, "Maximum number of agents to use from --agents-file (0 = all)")
 	fs.StringVar(&cfg.UserToken, "user-token", getenv("C19_USER_TOKEN"), "User/admin bearer token for Hub API calls (prefer env C19_USER_TOKEN)")
-	fs.StringVar(&cfg.UserID, "user-id", getenv("C19_USER_ID"), "User principal ID for Conduit tunnel Hello (env: C19_USER_ID)")
-	fs.StringVar(&cfg.BrokerID, "broker-id", getenv("C19_BROKER_ID"), "Runtime broker ID for Conduit broker session and /deliver (env: C19_BROKER_ID)")
+	fs.StringVar(&cfg.UserID, "user-id", getenv("C19_USER_ID"), "User principal ID for Conduit tunnel Hello (optional; resolved from GET /api/v1/auth/me when unset)")
+	fs.StringVar(&cfg.BrokerID, "broker-id", getenv("C19_BROKER_ID"), "Runtime broker ID for Conduit broker session, control channel, and /deliver (env: C19_BROKER_ID)")
 	fs.StringVar(&brokerSecretStr, "broker-secret", getenv("C19_BROKER_SECRET"), "Raw broker HMAC secret (prefer env C19_BROKER_SECRET over CLI flag)")
 	fs.StringVar(&brokerSecretB64, "broker-secret-b64", getenv("C19_BROKER_SECRET_B64"), "Base64-encoded broker HMAC secret (prefer env C19_BROKER_SECRET_B64)")
 	fs.DurationVar(&cfg.Duration, "duration", 30*time.Second, "Active load duration")
 	fs.DurationVar(&cfg.DeliverInterval, "deliver-interval", 2*time.Second, "Per-agent delivery cadence in deliver mode")
 	fs.IntVar(&cfg.LargeBodyCount, "large-body-count", 10, "Number of 512 KiB deliveries to inject in deliver mode")
+	fs.DurationVar(&cfg.LargeBodyPacing, "large-body-pacing", 0, "Delay between 512 KiB deliveries (0 = auto Duration/(count+1), negative = unpaced)")
 	fs.IntVar(&cfg.RotateTokenCount, "rotate-count", 0, "Number of rotate-token calls (requires --rotate-url-template)")
 	fs.StringVar(&cfg.RotateURLTemplate, "rotate-url-template", getenv("C19_ROTATE_URL_TEMPLATE"), "Optional URL template with {agent_id} for POST rotate-token control RPCs")
 	fs.IntVar(&cfg.BrokerRPCCount, "broker-rpc-count", 0, "Total broker RPCs (0 = continuous for --duration)")
-	fs.IntVar(&cfg.BrokerRPCConcurrency, "rpc-concurrency", 128, "Concurrent broker-RPC workers (default 128 to exercise MaxConcurrentRPCs)")
+	fs.IntVar(&cfg.BrokerRPCConcurrency, "rpc-concurrency", 128, "Client-side concurrent broker-RPC workers (default 128; session high-water is reported separately)")
 	fs.DurationVar(&cfg.BrokerRPCPacing, "rpc-pacing", 0, "Optional per-worker delay between broker RPCs for smooth pacing")
 	fs.DurationVar(&cfg.BrokerRPCLatency, "broker-rpc-latency", 0, "Simulated latency inside the fake broker RPC handler so in-flight RPCs overlap on the broker session")
 	fs.IntVar(&cfg.BrokerMaxConcurrentRPCs, "broker-max-concurrent-rpcs", 0, "Override MaxConcurrentRPCs on the fake broker conduit session (0 = library default 128)")
+	fs.DurationVar(&cfg.BrokerDebounce, "broker-debounce", 500*time.Millisecond, "Debounce window for the fake broker's mirrored v2.22 message flusher (production default is 2s; disclosed in report)")
 	fs.IntVar(&cfg.ControlConcurrency, "control-concurrency", 8, "Concurrent control RPC workers")
-	fs.IntVar(&cfg.BaselineControlSamples, "baseline-samples", 20, "Baseline control probes measured before load starts")
+	fs.IntVar(&cfg.BaselineControlSamples, "baseline-samples", 30, "Baseline agent-session control probes measured before load starts (after 2 warmup probes)")
 	fs.Float64Var(&cfg.ControlProbeRate, "control-probe-rate", c19driver.DefaultControlProbeRate, "Under-load control probe frequency in probes/sec (default 4.0)")
 	fs.IntVar(&cfg.PTYCount, "pty-count", 4, "Number of concurrent PTY echo/keepalive sessions in phase2 mode (or drain observers)")
 	fs.BoolVar(&cfg.StalledTunnel, "stalled-tunnel", true, "Open a stalled bulk TCP tunnel on agent 0")
@@ -174,9 +180,11 @@ func parseFlags(args []string, getenv func(string) string) (*cliConfig, error) {
 	fs.StringVar(&hubRSSPIDsStr, "hub-rss-pids", getenv("C19_HUB_RSS_PIDS"), "Comma-separated hub PIDs to sum VmRSS from /proc/<pid>/status")
 	fs.StringVar(&cfg.HubRSSCmd, "hub-rss-cmd", getenv("C19_HUB_RSS_CMD"), "Optional shell command printing aggregate hub RSS in bytes")
 	fs.Int64Var(&memoryBudgetMB, "memory-budget-mb", 0, "Peak hub RSS budget in MiB (required unless hub_rss_peak is in --allow-unevaluated)")
-	fs.DurationVar(&cfg.DrainAfter, "drain-after", 0, "Optional delay into the load window before running --drain-cmd")
-	fs.StringVar(&cfg.DrainCmd, "drain-cmd", "", "Optional shell command to trigger a planned hub drain")
-	fs.BoolVar(&cfg.ExpectDrain, "expect-drain", false, "Require at least one 4503 relay_restart planned-drain close observation")
+	fs.DurationVar(&cfg.DrainAfter, "drain-after", 0, "Delay into the load window before running --drain-cmd")
+	fs.StringVar(&cfg.DrainCmd, "drain-cmd", "", "Shell command to trigger a planned hub drain")
+	fs.DurationVar(&cfg.DrainDeadline, "drain-deadline", 30*time.Second, "Expected hub drain deadline for 4503 relay_restart closes")
+	fs.DurationVar(&cfg.DrainDeadlineTolerance, "drain-deadline-tolerance", 5*time.Second, "Tolerance added to --drain-deadline when evaluating 4503 close timing")
+	fs.BoolVar(&cfg.ExpectDrain, "expect-drain", false, "Evaluate planned_drain_4503 (relay_restart, deadline, and post-drain replacement work)")
 	fs.StringVar(&allowUnevaluatedStr, "allow-unevaluated", "", "Comma-separated bar names explicitly permitted to remain unevaluated (echoed in report)")
 	fs.StringVar(&cfg.MessageIDsFile, "message-ids-file", "", "Optional path to write created Hub message IDs (one per line) for PG audit")
 	fs.StringVar(&cfg.OutputPath, "output", "", "Write machine-readable JSON report to this file path")
@@ -269,8 +277,6 @@ func parseFlags(args []string, getenv func(string) string) (*cliConfig, error) {
 		}
 	}
 
-	// Refuse to start in L6 modes without hub RSS budget/source or planned-drain
-	// config unless explicitly waived via --allow-unevaluated (R1).
 	if !slices.Contains(cfg.AllowUnevaluated, c19driver.BarHubRSSPeak) {
 		if cfg.MemoryBudgetBytes <= 0 || (len(cfg.HubRSSPIDs) == 0 && cfg.HubRSSCmd == "") {
 			return nil, errors.New("hub RSS measurement requires --memory-budget-mb and (--hub-rss-pids or --hub-rss-cmd), or pass --allow-unevaluated=hub_rss_peak")
@@ -278,16 +284,13 @@ func parseFlags(args []string, getenv func(string) string) (*cliConfig, error) {
 	}
 	if !slices.Contains(cfg.AllowUnevaluated, c19driver.BarPlannedDrain4503) {
 		if !cfg.ExpectDrain && cfg.DrainCmd == "" {
-			return nil, errors.New("planned drain verification requires --expect-drain (and optionally --drain-cmd), or pass --allow-unevaluated=planned_drain_4503")
+			return nil, errors.New("planned drain verification requires --expect-drain (and --drain-cmd/--drain-after), or pass --allow-unevaluated=planned_drain_4503")
 		}
 	}
 	if cfg.DrainCmd != "" && !cfg.ExpectDrain {
 		cfg.ExpectDrain = true
 	}
 
-	if cfg.UserID == "" {
-		cfg.UserID = "c19-load-user"
-	}
 	return cfg, nil
 }
 
@@ -319,6 +322,65 @@ func loadAgentsFile(path string, limit int, hubURLs []string, defaultHubURL stri
 		}
 	}
 	return targets, nil
+}
+
+func resolveUserID(ctx context.Context, hc *http.Client, hubURL, userToken string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, hubURL+"/api/v1/auth/me", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("GET /api/v1/auth/me: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GET /api/v1/auth/me answered %d: %s (pass --user-id or C19_USER_ID if /auth/me is unavailable)", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var me struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &me); err != nil {
+		return "", fmt.Errorf("decode /api/v1/auth/me: %w", err)
+	}
+	if me.ID == "" {
+		return "", errors.New("GET /api/v1/auth/me returned empty id; pass --user-id or C19_USER_ID")
+	}
+	return me.ID, nil
+}
+
+func resolveAgentSlugs(ctx context.Context, hc *http.Client, hubURL, userToken string, targets []c19driver.AgentTarget) map[string]string {
+	slugToID := make(map[string]string, len(targets)*2)
+	for _, t := range targets {
+		slugToID[t.AgentID] = t.AgentID
+		if t.Slug != "" {
+			slugToID[t.Slug] = t.AgentID
+			continue
+		}
+		// Best-effort resolve slug from Hub GET /api/v1/agents/{id}.
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, hubURL+"/api/v1/agents/"+t.AgentID, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+userToken)
+		resp, err := hc.Do(req)
+		if err != nil {
+			continue
+		}
+		var info struct {
+			Slug string `json:"slug"`
+		}
+		if resp.StatusCode == http.StatusOK {
+			_ = json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&info)
+		}
+		_ = resp.Body.Close()
+		if info.Slug != "" {
+			slugToID[info.Slug] = t.AgentID
+		}
+	}
+	return slugToID
 }
 
 func updateAtomicHighWater(high *atomic.Int64, cur int64) {
@@ -353,8 +415,21 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		Timeout: 120 * time.Second,
 	}
 
+	// R-2: resolve authenticated user principal ID from Hub /api/v1/auth/me
+	// when --user-id is omitted and the stalled tunnel is enabled.
+	userID := cfg.UserID
+	if cfg.StalledTunnel && userID == "" {
+		resolveCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		userID, err = resolveUserID(resolveCtx, httpClient, cfg.HubURL, cfg.UserToken)
+		cancel()
+		if err != nil {
+			return c19driver.Report{}, fmt.Errorf("resolve user id for stalled tunnel: %w", err)
+		}
+	}
+
 	var (
 		broker                 *conduittest.Broker
+		flusher                *c19BrokerFlusher
 		brokerSessionInFlight  atomic.Int64
 		brokerSessionHighWater atomic.Int64
 	)
@@ -383,12 +458,6 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 					map[string]string{"Content-Type": "application/json"},
 					[]byte(`{"logs":"c19-broker-rpc-ok"}`),
 				))
-			case strings.HasSuffix(envReq.Path, "/message"):
-				return envelope.ResponseToRPC(wsprotocol.NewResponseEnvelope(
-					envReq.RequestID, http.StatusOK,
-					map[string]string{"Content-Type": "application/json"},
-					[]byte(`{"status":"ok"}`),
-				))
 			case req.GetPath() == "/v1/broker/list", req.GetPath() == "/v1/broker/status":
 				return &conduitv1.RpcResponse{Status: http.StatusOK, Body: []byte(`{"ok":true}`)}
 			default:
@@ -403,17 +472,35 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		if cfg.BrokerMaxConcurrentRPCs > 0 {
 			sessCfg.MaxConcurrentRPCs = cfg.BrokerMaxConcurrentRPCs
 		}
+
+		// R-1 (product path): in deliver mode, also connect the broker's real
+		// control channel so Hub HybridBrokerClient.MessageAgent dispatches
+		// reach c19BrokerFlusher, which mirrors v2.22 flush/batching and calls
+		// /deliver itself (never racing /deliver from the CLI).
+		var ccHandler http.Handler
+		if cfg.Mode == c19driver.ModeDeliver {
+			slugCtx, slugCancel := context.WithTimeout(ctx, 15*time.Second)
+			slugToID := resolveAgentSlugs(slugCtx, httpClient, cfg.HubURL, cfg.UserToken, targets)
+			slugCancel()
+			flusher = newC19BrokerFlusher(slugToID, cfg.BrokerDebounce, cfg.ExtraSubmits, cfg.ExtraSubmitDelay)
+			ccHandler = flusher
+		}
+
 		broker, err = conduittest.StartBroker(conduittest.BrokerOptions{
-			HubURL:          cfg.HubURL,
-			BrokerID:        cfg.BrokerID,
-			BrokerSecret:    cfg.BrokerSecret,
-			RPCHandler:      rpcHandler,
-			Session:         sessCfg,
-			HTTPClient:      httpClient,
-			TLSClientConfig: tlsCfg,
+			HubURL:                cfg.HubURL,
+			BrokerID:              cfg.BrokerID,
+			BrokerSecret:          cfg.BrokerSecret,
+			RPCHandler:            rpcHandler,
+			Session:               sessCfg,
+			ControlChannelHandler: ccHandler,
+			HTTPClient:            httpClient,
+			TLSClientConfig:       tlsCfg,
 		})
 		if err != nil {
 			return c19driver.Report{}, fmt.Errorf("start fake broker: %w", err)
+		}
+		if flusher != nil {
+			flusher.SetBroker(broker)
 		}
 		defer func() { _ = broker.Close() }()
 
@@ -421,7 +508,7 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		err = broker.WaitHealthy(waitCtx)
 		waitCancel()
 		if err != nil {
-			return c19driver.Report{}, fmt.Errorf("wait for broker conduit session: %w", err)
+			return c19driver.Report{}, fmt.Errorf("wait for broker conduit/control channel: %w", err)
 		}
 	}
 
@@ -449,6 +536,7 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		Duration:                 cfg.Duration,
 		DeliverInterval:          cfg.DeliverInterval,
 		LargeBodyCount:           cfg.LargeBodyCount,
+		LargeBodyPacing:          cfg.LargeBodyPacing,
 		RotateTokenCount:         cfg.RotateTokenCount,
 		BrokerRPCCount:           cfg.BrokerRPCCount,
 		BrokerRPCContinuous:      cfg.Mode == c19driver.ModeBrokerRPC || (cfg.Mode == c19driver.ModeDeliver && cfg.BrokerRPCCount == 0 && broker != nil),
@@ -459,14 +547,18 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		BaselineControlSamples:   cfg.BaselineControlSamples,
 		ControlProbeRate:         cfg.ControlProbeRate,
 		EnableBulkTunnelOnAgent0: cfg.StalledTunnel,
-		EnablePTY:                cfg.Mode == c19driver.ModePhase2 || cfg.ExpectDrain,
+		EnablePTY:                true, // agent 0 PTY is used by the agent-session control probe in all modes (R-4)
 		ClockSkew:                cfg.ClockSkew,
 		DrainAfter:               cfg.DrainAfter,
 		MemorySampler:            makeMemorySampler(cfg.HubRSSPIDs, cfg.HubRSSCmd),
+		// R-4: control probe crosses agent 0's conduit session (sharing it with
+		// the stalled bulk tunnel) and is completely off the broker-RPC churn path.
+		ControlProbe: makeLiveAgentSessionProbe(cfg, tlsCfg),
 	}
 
 	if cfg.Mode == c19driver.ModeDeliver {
-		driverCfg.Deliver = makeLiveDeliver(httpClient, cfg, broker, recordMsgIDs)
+		driverCfg.Deliver = makeLiveDeliver(httpClient, cfg, flusher, recordMsgIDs)
+		driverCfg.OnLoadComplete = flusher.FlushAll
 	}
 	if broker != nil {
 		driverCfg.BrokerRPC = makeLiveBrokerRPC(httpClient, cfg, targets)
@@ -474,11 +566,8 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 	if cfg.RotateURLTemplate != "" {
 		driverCfg.RotateToken = makeLiveRotateToken(httpClient, cfg)
 	}
-	if cfg.Mode == c19driver.ModePhase2 {
-		driverCfg.ControlProbe = makeLivePTYPreflight(httpClient, cfg)
-	}
 	if cfg.StalledTunnel {
-		driverCfg.StalledTunnel = makeLiveStalledTunnel(cfg, tlsCfg)
+		driverCfg.StalledTunnel = makeLiveStalledTunnel(cfg, userID, tlsCfg)
 	}
 	if cfg.Mode == c19driver.ModePhase2 || cfg.ExpectDrain {
 		ptyCount := cfg.PTYCount
@@ -516,9 +605,11 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		}
 	}
 
-	report := c19driver.BuildReport(res, c19driver.EvalOptions{
+	evalOpts := c19driver.EvalOptions{
 		MemoryBudgetBytes:        cfg.MemoryBudgetBytes,
 		ExpectDrain:              cfg.ExpectDrain,
+		DrainDeadline:            cfg.DrainDeadline,
+		DrainDeadlineTolerance:   cfg.DrainDeadlineTolerance,
 		AllowUnevaluated:         cfg.AllowUnevaluated,
 		ClockSkew:                cfg.ClockSkew,
 		HubURL:                   cfg.HubURL,
@@ -526,7 +617,12 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 		MessageRowsCreated:       msgRowsCreated.Load(),
 		LargeBodyRowsPerDelivery: largeBodyRowsPerDelivery,
 		ExpectedLargeBodyCount:   cfg.LargeBodyCount,
-	})
+	}
+	if cfg.Mode == c19driver.ModeDeliver {
+		evalOpts.BrokerFlushMode = "mirrored_v2_22_short_debounce"
+		evalOpts.BrokerDebounceMS = cfg.BrokerDebounce.Milliseconds()
+	}
+	report := c19driver.BuildReport(res, evalOpts)
 
 	jsonBytes, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
@@ -549,59 +645,43 @@ func run(ctx context.Context, cfg *cliConfig, stdout, stderr io.Writer) (c19driv
 	return report, nil
 }
 
-// splitMessageChunks partitions body into slices of at most maxChunk bytes so
-// that strings.Join(chunks, "") == body and every chunk fits within
-// messages.MaxMessageLength (16,000 chars).
-func splitMessageChunks(body string, maxChunk int) []string {
-	if maxChunk <= 0 || len(body) <= maxChunk {
-		return []string{body}
-	}
-	chunks := make([]string, 0, (len(body)+maxChunk-1)/maxChunk)
-	for off := 0; off < len(body); off += maxChunk {
-		end := min(off+maxChunk, len(body))
-		chunks = append(chunks, body[off:end])
-	}
-	return chunks
-}
-
-// makeLiveDeliver creates real message rows via POST /api/v1/agents/{id}/message
-// (splitting 512 KiB bodies into ceil(512KiB/16000) = 33 rows whose texts
-// concatenate to the delivered body, matching v2.22 §1.6), then sends one
-// deliver-message flush binding all created message_ids via the broker's
-// POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/deliver endpoint.
-func makeLiveDeliver(hc *http.Client, cfg *cliConfig, broker *conduittest.Broker, onIDs func([]string)) func(context.Context, string, string) (int, string, error) {
+// makeLiveDeliver posts real user messages via POST /api/v1/agents/{id}/message
+// (splitting 512 KiB bodies into 33 chunks of 15,000 bytes posted with bounded
+// concurrency so all 33 rows coalesce inside one debounce window into a single
+// ~510-520 KiB v2.22 /deliver flush) and waits for the fake broker (which
+// receives the Hub's control-channel dispatch) to flush and call /deliver itself.
+// The CLI never calls /deliver directly.
+func makeLiveDeliver(hc *http.Client, cfg *cliConfig, flusher *c19BrokerFlusher, onIDs func([]string)) func(context.Context, string, string) (int, string, error) {
 	return func(ctx context.Context, agentID, body string) (int, string, error) {
-		chunks := splitMessageChunks(body, maxMessageChunkBytes)
-		msgIDs := make([]string, 0, len(chunks))
-		for _, chunk := range chunks {
-			msgID, status, err := createHubMessageRow(ctx, hc, cfg.HubURL, cfg.UserToken, agentID, chunk)
-			if err != nil {
-				return status, "", err
+		var chunks []string
+		if len(body) >= c19driver.LargeBodyMinBytes {
+			// Produce 33 chunks of 15,000 bytes (495,000 raw bytes); with the
+			// Hub's ~450-byte DeliveryText wrapper per row, the coalesced flush
+			// lands at ~510 KiB (>= LargeBodyMinBytes and <= 512 KiB cap).
+			chunks = make([]string, largeBodyRowsPerDelivery)
+			chunkText := strings.Repeat("X", maxMessageChunkBytes)
+			for i := range chunks {
+				chunks[i] = chunkText
 			}
-			msgIDs = append(msgIDs, msgID)
+		} else {
+			chunks = splitChunksForJoin(body, maxMessageChunkBytes, brokerFlushSeparator)
+		}
+
+		// Post chunks sequentially so chunk order is preserved and small
+		// single-host testbeds are not CPU-stampeded; the broker flusher's
+		// sliding debounce timer coalesces all chunks into one ~512 KiB flush.
+		msgIDs := make([]string, len(chunks))
+		for i, ch := range chunks {
+			id, st, err := createHubMessageRow(ctx, hc, cfg.HubURL, cfg.UserToken, agentID, ch)
+			if err != nil {
+				return st, "", err
+			}
+			msgIDs[i] = id
 		}
 		if onIDs != nil {
 			onIDs(msgIDs)
 		}
-
-		text := body
-		req := &agentcontrol.DeliverRequest{
-			V:          1,
-			DeliveryID: "c19-" + uuid.NewString(),
-			MessageIDs: msgIDs,
-			Op:         agentcontrol.OpPaste,
-			Text:       &text,
-			DeadlineMS: 92000,
-			SubmitKeys: []string{"Enter"},
-		}
-		if cfg.ExtraSubmits > 0 {
-			req.ExtraSubmits = &agentcontrol.ExtraSubmits{
-				Count:   cfg.ExtraSubmits,
-				DelayMS: int(cfg.ExtraSubmitDelay.Milliseconds()),
-			}
-		}
-		dStatus, resp, err := broker.DeliverMessage(ctx, agentID, req)
-		return dStatus, string(resp.Outcome), err
+		return flusher.WaitForMessages(ctx, msgIDs)
 	}
 }
 
@@ -702,23 +782,51 @@ func makeLiveRotateToken(hc *http.Client, cfg *cliConfig) func(context.Context, 
 	}
 }
 
-func makeLivePTYPreflight(hc *http.Client, cfg *cliConfig) func(context.Context, string) error {
+// makeLiveAgentSessionProbe opens a PTY WebSocket to agentID (agent 0, sharing
+// its conduit session with the stalled bulk TCP tunnel and off the broker-RPC
+// churn path), sends one echo frame, waits for the echo from the agent's fake
+// PTY, and closes cleanly. This measures real agent-session responsiveness and
+// detects session-window / head-of-line stalls (R-4).
+func makeLiveAgentSessionProbe(cfg *cliConfig, tlsCfg *tls.Config) func(context.Context, string) error {
+	dialer := &websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+		TLSClientConfig:  tlsCfg,
+	}
 	return func(ctx context.Context, agentID string) error {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.HubURL+"/api/v1/agents/"+agentID+"/pty", nil)
+		u := httpToWSURL(cfg.HubURL) + "/api/v1/agents/" + agentID + "/pty?cols=80&rows=24"
+		conn, resp, err := dialer.DialContext(ctx, u, http.Header{"Authorization": {"Bearer " + cfg.UserToken}})
 		if err != nil {
+			if resp != nil {
+				defer func() { _ = resp.Body.Close() }()
+				return &c19driver.HTTPStatusError{Status: resp.StatusCode, Err: fmt.Errorf("pty probe dial: %w", err)}
+			}
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+cfg.UserToken)
-		resp, err := hc.Do(req)
-		if err != nil {
+		defer func() {
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "probe-done"),
+				time.Now().Add(time.Second))
+			_ = conn.Close()
+		}()
+
+		const probePayload = "c19-ctrl-probe"
+		deadline := time.Now().Add(5 * time.Second)
+		if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+			deadline = dl
+		}
+		_ = conn.SetWriteDeadline(deadline)
+		if err := conn.WriteJSON(wsprotocol.NewPTYDataMessage([]byte(probePayload))); err != nil {
 			return err
 		}
-		defer func() { _ = resp.Body.Close() }()
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 16*1024))
-		if resp.StatusCode != http.StatusOK {
-			return &c19driver.HTTPStatusError{
-				Status: resp.StatusCode,
-				Err:    fmt.Errorf("GET /api/v1/agents/%s/pty answered %d", agentID, resp.StatusCode),
+		_ = conn.SetReadDeadline(deadline)
+		var got strings.Builder
+		for !strings.Contains(got.String(), probePayload) {
+			var msg wsprotocol.PTYDataMessage
+			if err := conn.ReadJSON(&msg); err != nil {
+				return err
+			}
+			if msg.Type == wsprotocol.TypeData {
+				got.Write(msg.Data)
 			}
 		}
 		return nil
@@ -732,7 +840,28 @@ func httpToWSURL(httpURL string) string {
 	return "ws://" + strings.TrimPrefix(httpURL, "http://")
 }
 
-func makeLiveStalledTunnel(cfg *cliConfig, tlsCfg *tls.Config) func(context.Context, string) (func(), error) {
+// decodeTunnelStreamID decodes the user-side stream ID from a POST /v1/tunnels
+// JSON response using the shared relay.TunnelResponseStreamIDKey ("streamId").
+func decodeTunnelStreamID(body []byte) (uint32, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return 0, fmt.Errorf("decode tunnel response: %w", err)
+	}
+	raw, ok := fields[relay.TunnelResponseStreamIDKey]
+	if !ok {
+		return 0, fmt.Errorf("tunnel response missing %q field: %s", relay.TunnelResponseStreamIDKey, strings.TrimSpace(string(body)))
+	}
+	var id uint32
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return 0, fmt.Errorf("decode %q: %w", relay.TunnelResponseStreamIDKey, err)
+	}
+	if id == 0 {
+		return 0, fmt.Errorf("tunnel response returned stream id 0")
+	}
+	return id, nil
+}
+
+func makeLiveStalledTunnel(cfg *cliConfig, userID string, tlsCfg *tls.Config) func(context.Context, string) (func(), error) {
 	return func(ctx context.Context, agentID string) (func(), error) {
 		var (
 			mu      sync.Mutex
@@ -764,7 +893,7 @@ func makeLiveStalledTunnel(cfg *cliConfig, tlsCfg *tls.Config) func(context.Cont
 		}
 		hello := &conduitv1.Hello{
 			PrincipalKind: conduitv1.PrincipalKind_PRINCIPAL_KIND_USER,
-			PrincipalId:   cfg.UserID,
+			PrincipalId:   userID,
 		}
 		dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
@@ -796,19 +925,17 @@ func makeLiveStalledTunnel(cfg *cliConfig, tlsCfg *tls.Config) func(context.Cont
 			_ = ls.Close()
 			return nil, fmt.Errorf("open tcp tunnel answered %d: %s", resp.GetStatus(), string(resp.GetBody()))
 		}
-		var ok struct {
-			StreamID uint32 `json:"stream_id"`
-		}
-		if err := json.Unmarshal(resp.GetBody(), &ok); err != nil {
+		streamID, err := decodeTunnelStreamID(resp.GetBody())
+		if err != nil {
 			_ = ls.Close()
-			return nil, fmt.Errorf("decode tunnel response: %w", err)
+			return nil, err
 		}
 
 		deadline := time.Now().Add(10 * time.Second)
 		var stream conduit.Stream
 		for time.Now().Before(deadline) {
 			mu.Lock()
-			stream = streams[ok.StreamID]
+			stream = streams[streamID]
 			mu.Unlock()
 			if stream != nil {
 				break
@@ -822,7 +949,7 @@ func makeLiveStalledTunnel(cfg *cliConfig, tlsCfg *tls.Config) func(context.Cont
 		}
 		if stream == nil {
 			_ = ls.Close()
-			return nil, fmt.Errorf("tunnel stream %d did not arrive", ok.StreamID)
+			return nil, fmt.Errorf("tunnel stream %d did not arrive", streamID)
 		}
 		return func() {
 			_ = stream.Close()
@@ -905,6 +1032,7 @@ func asCloseError(err error) (*websocket.CloseError, bool) {
 func recordPTYClose(pr *c19driver.PTYResult, ce *websocket.CloseError) {
 	pr.CloseCode = ce.Code
 	pr.CloseReason = ce.Text
+	pr.ClosedAt = time.Now()
 	if ce.Code == wsprotocol.ClosePTYUpstreamUnavailable {
 		pr.Drain4503 = true
 	}

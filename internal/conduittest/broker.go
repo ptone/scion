@@ -18,8 +18,10 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,23 +45,33 @@ type BrokerOptions struct {
 	Rand            func(int64) int64
 	HTTPClient      *http.Client
 	TLSClientConfig *tls.Config
+	// ControlChannelHandler, when non-nil, also connects a real
+	// runtimebroker.ControlChannelClient to the Hub's control channel
+	// (/api/v1/runtime-brokers/connect) so durable Hub->broker operations such
+	// as POST /api/v1/agents/{slug}/message are dispatched over the product
+	// control channel alongside the Conduit session.
+	ControlChannelHandler http.Handler
 }
 
-// Broker is a fake broker wired with the real runtimebroker.ConduitDialer and
-// a real HMAC-authenticated hubclient.Client (the same HTTP client path
+// Broker is a fake broker wired with the real runtimebroker.ConduitDialer, an
+// optional real runtimebroker.ControlChannelClient, and a real
+// HMAC-authenticated hubclient.Client (the same HTTP client path
 // hubConduitDeliverer calls).
 type Broker struct {
-	BrokerID  string
-	Dialer    *runtimebroker.ConduitDialer
-	HubClient hubclient.Client
-	ws        *FaultWSDialer
+	BrokerID       string
+	Dialer         *runtimebroker.ConduitDialer
+	ControlChannel *runtimebroker.ControlChannelClient
+	HubClient      hubclient.Client
+	ws             *FaultWSDialer
+	ccConnected    atomic.Bool
 
 	stopOnce sync.Once
 	stopFn   func() error
 }
 
 // StartBroker starts a fake broker dialing opts.HubURL. Call WaitHealthy to
-// wait until the conduit command path becomes healthy, and Close to stop it.
+// wait until the conduit command path (and control channel, if configured)
+// becomes healthy, and Close to stop it.
 func StartBroker(opts BrokerOptions) (*Broker, error) {
 	version := opts.Version
 	if version == "" {
@@ -115,16 +127,50 @@ func StartBroker(opts BrokerOptions) (*Broker, error) {
 		HubClient: hc,
 		ws:        wsDialer,
 	}
+
+	var ccExited chan struct{}
+	if opts.ControlChannelHandler != nil {
+		ccCfg := runtimebroker.DefaultControlChannelConfig()
+		ccCfg.HubEndpoint = opts.HubURL
+		ccCfg.BrokerID = opts.BrokerID
+		ccCfg.SecretKey = opts.BrokerSecret
+		ccCfg.Version = version
+		ccCfg.ReconnectInitial = 100 * time.Millisecond
+		ccCfg.ReconnectMax = time.Second
+		ccCfg.OnConnectionStateChange = func(connected bool) {
+			fb.ccConnected.Store(connected)
+		}
+		cc := runtimebroker.NewControlChannelClient(ccCfg, opts.ControlChannelHandler, nil, "conduittest", slog.Default())
+		fb.ControlChannel = cc
+		ccExited = make(chan struct{})
+		go func() {
+			defer close(ccExited)
+			_ = cc.Connect(runCtx)
+		}()
+	}
+
 	fb.stopFn = func() error {
 		var stopErr error
 		fb.stopOnce.Do(func() {
 			wsDialer.Restore()
 			cancel()
 			wsDialer.CloseCurrent()
+			if fb.ControlChannel != nil {
+				_ = fb.ControlChannel.Close()
+			}
 			select {
 			case <-exited:
 			case <-time.After(10 * time.Second):
 				stopErr = fmt.Errorf("conduittest: fake broker %s did not stop within 10s", opts.BrokerID)
+			}
+			if ccExited != nil {
+				select {
+				case <-ccExited:
+				case <-time.After(10 * time.Second):
+					if stopErr == nil {
+						stopErr = fmt.Errorf("conduittest: fake broker %s control channel did not stop within 10s", opts.BrokerID)
+					}
+				}
 			}
 		})
 		return stopErr
@@ -133,17 +179,20 @@ func StartBroker(opts BrokerOptions) (*Broker, error) {
 }
 
 // WaitHealthy polls until the broker's conduit command path reaches healthy
-// state or ctx expires.
+// state (and the control channel is connected, if configured) or ctx expires.
 func (b *Broker) WaitHealthy(ctx context.Context) error {
 	tick := time.NewTicker(25 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if b.Dialer.CommandPathState() == api.BrokerHealthHealthy {
+		conduitOK := b.Dialer.CommandPathState() == api.BrokerHealthHealthy
+		ccOK := b.ControlChannel == nil || b.ccConnected.Load()
+		if conduitOK && ccOK {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("broker %s command path state = %q: %w", b.BrokerID, b.Dialer.CommandPathState(), ctx.Err())
+			return fmt.Errorf("broker %s command path state=%q cc_connected=%v: %w",
+				b.BrokerID, b.Dialer.CommandPathState(), b.ccConnected.Load(), ctx.Err())
 		case <-tick.C:
 		}
 	}
