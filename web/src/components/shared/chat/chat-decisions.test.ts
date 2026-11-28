@@ -2055,3 +2055,200 @@ describe('single-choice confirmation decisions (ptone/scion#8786)', () => {
     expect(r1Btn.getAttribute('aria-pressed')).toBe('true');
   });
 });
+
+describe('scion-chat-decisions single-card optional comment (ptone/scion#9834)', () => {
+  it('opens a labelled comment input, submits choice + trimmed comment in one request, and clears on 200', async () => {
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: {
+          ...answered('yes', { id: 'u-me', name: 'Me' }),
+          decision: {
+            ...answered('yes', { id: 'u-me', name: 'Me' }).decision!,
+            comment: 'Skip the load test',
+          },
+        },
+        responseMessageId: 'resp-1',
+      })
+    );
+    const el = await mount([view()]);
+    await settle(el);
+
+    const addBtn = root(el).querySelector<HTMLButtonElement>('[data-action="add-comment"]');
+    expect(addBtn).toBeTruthy();
+    addBtn!.click();
+    await el.updateComplete;
+
+    const input = root(el).querySelector<HTMLElement & { value: string }>('.cbox sl-input');
+    expect(input).toBeTruthy();
+    expect(input!.getAttribute('label')).toBe('Comment (optional)');
+    expect(input!.getAttribute('maxlength')).toBe('200');
+    expect(root(el).querySelector('.cbox .sub')?.textContent?.trim()).toBe(
+      'Sent with the choice you click.'
+    );
+
+    // Enter inside the comment input posts nothing.
+    input!.value = '  Skip the load test  ';
+    input!.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await el.updateComplete;
+    expect(apiFetch).not.toHaveBeenCalled();
+
+    // Clicking a choice submits choice + trimmed comment in one POST.
+    button(el, 'yes').click();
+    await settle(el);
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(apiFetch.mock.calls[0]![1]!.body as string) as Record<string, unknown>;
+    expect(body.choice_id).toBe('yes');
+    expect(body.comment).toBe('Skip the load test');
+    expect(root(el).querySelector('.cbox')).toBeNull();
+    expect(root(el).querySelector('[data-decision-comment] .t')?.textContent).toBe(
+      'Skip the load test'
+    );
+  });
+
+  it('omits the comment key when no draft or whitespace-only draft is present, and Escape closes empty field', async () => {
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: answered('yes', { id: 'u-me', name: 'Me' }),
+        responseMessageId: 'resp-1',
+      })
+    );
+    const el = await mount([view()]);
+    await settle(el);
+
+    // Open and close empty field with Escape.
+    root(el).querySelector<HTMLButtonElement>('[data-action="add-comment"]')!.click();
+    await el.updateComplete;
+    const input = root(el).querySelector<HTMLElement & { value: string }>('.cbox sl-input')!;
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await el.updateComplete;
+    expect(root(el).querySelector('.cbox')).toBeNull();
+    expect(root(el).querySelector('[data-action="add-comment"]')).toBeTruthy();
+
+    // Open again, type spaces only, click choice -> no comment key in JSON.
+    root(el).querySelector<HTMLButtonElement>('[data-action="add-comment"]')!.click();
+    await el.updateComplete;
+    const input2 = root(el).querySelector<HTMLElement & { value: string }>('.cbox sl-input')!;
+    input2.value = '   ';
+    input2.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+
+    button(el, 'yes').click();
+    await settle(el);
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(apiFetch.mock.calls[0]![1]!.body as string) as Record<string, unknown>;
+    expect('comment' in body).toBe(false);
+  });
+
+  it('shows counter at 160+ chars with aria-live polite at 180+ chars and keeps draft on network error', async () => {
+    apiFetch.mockRejectedValueOnce(new Error('offline'));
+    const el = await mount([view()]);
+    await settle(el);
+
+    root(el).querySelector<HTMLButtonElement>('[data-action="add-comment"]')!.click();
+    await el.updateComplete;
+    const input = root(el).querySelector<HTMLElement & { value: string }>('.cbox sl-input')!;
+
+    input.value = 'a'.repeat(165);
+    input.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    let cnt = root(el).querySelector('.cbox .cnt');
+    expect(cnt?.textContent?.trim()).toBe('165 / 200');
+    expect(cnt?.getAttribute('aria-live')).toBeNull();
+
+    input.value = 'a'.repeat(185);
+    input.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    cnt = root(el).querySelector('.cbox .cnt');
+    expect(cnt?.textContent?.trim()).toBe('185 / 200');
+    expect(cnt?.getAttribute('aria-live')).toBe('polite');
+
+    // Network failure keeps the draft open and populated.
+    button(el, 'yes').click();
+    await settle(el);
+    const keptInput = root(el).querySelector<HTMLElement & { value: string }>('.cbox sl-input');
+    expect(keptInput).toBeTruthy();
+    expect(keptInput!.value).toBe('a'.repeat(185));
+  });
+
+  it('drops the draft and appends "Your comment was not sent." on read-only 409 refusal', async () => {
+    apiFetch.mockResolvedValueOnce(
+      res(409, {
+        error: {
+          code: 'already_answered',
+          message: 'already answered',
+          details: {
+            decision: answered('no', { id: 'u-other', name: 'Alice' }),
+          },
+        },
+      })
+    );
+    const el = await mount([view()]);
+    await settle(el);
+
+    root(el).querySelector<HTMLButtonElement>('[data-action="add-comment"]')!.click();
+    await el.updateComplete;
+    const input = root(el).querySelector<HTMLElement & { value: string }>('.cbox sl-input')!;
+    input.value = 'my unsent comment';
+    input.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+
+    button(el, 'yes').click();
+    await settle(el);
+
+    expect(root(el).querySelector('.cbox')).toBeNull();
+    expect(showToast).toHaveBeenCalledWith(
+      'Already answered by Alice. Your comment was not sent.',
+      'warning'
+    );
+  });
+
+  it('shows interpreted confirm sub-line when draft is non-empty and renders answered comment as plain text', async () => {
+    const interp = view({
+      status: 'decided',
+      askerAgentName: 'release-bot',
+      decision: {
+        choiceId: 'yes',
+        label: 'Yes',
+        answeredByUserId: 'u-me',
+        answeredByName: 'Me',
+        provenance: 'agent_interpreted',
+        surface: 'native',
+        responseMessageId: 'resp-0',
+        at: '2026-11-12T15:42:00Z',
+      },
+    });
+    const el = await mount([interp]);
+    await settle(el);
+
+    root(el).querySelector<HTMLButtonElement>('[data-action="add-comment"]')!.click();
+    await el.updateComplete;
+    const input = root(el).querySelector<HTMLElement & { value: string }>('.cbox sl-input')!;
+    input.value = 'Page me when green';
+    input.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+
+    expect(root(el).querySelector('.cbox .sub')?.textContent?.trim()).toBe(
+      'Confirming with a comment sends it to release-bot.'
+    );
+
+    // Answered card renders Markdown, HTML, and @mentions as literal plain text.
+    const literal = '**bold** <img src=x onerror="window.__cmtXss=1"> @alice';
+    el.decisions = [
+      {
+        ...answered('yes', { id: 'u-me', name: 'Me' }),
+        decision: {
+          ...answered('yes', { id: 'u-me', name: 'Me' }).decision!,
+          comment: literal,
+        },
+      },
+    ];
+    await settle(el);
+    const cmtSpan = root(el).querySelector('[data-decision-comment] .t');
+    expect(cmtSpan?.textContent).toBe(literal);
+    expect(cmtSpan?.children.length).toBe(0);
+    expect((window as unknown as { __cmtXss?: number }).__cmtXss).toBeUndefined();
+  });
+});

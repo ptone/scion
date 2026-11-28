@@ -816,4 +816,33 @@ describe('set Other free-form response lines (ptone/scion#8153)', () => {
     expect(text(rows[1])).toBe('notify Yes (recommended)');
     expect(rows[1]!.querySelector('.other-text')).toBeNull();
   });
+
+  it('renders single-answer comment as plain text and omits not-sent on confirmed-with-comment', async () => {
+    const literal = '**bold** <b>html</b> @alice';
+    const el = await mount({
+      response: single({ comment: literal }),
+    });
+    const cmt = root(el).querySelector('[data-decision-comment]');
+    expect(cmt?.textContent).toBe(`— “${literal}”`);
+    expect(cmt?.children.length).toBe(0);
+
+    // No comment -> no comment span.
+    el.response = single();
+    await el.updateComplete;
+    expect(root(el).querySelector('[data-decision-comment]')).toBeNull();
+
+    // Confirm WITHOUT comment -> shows "not sent to the agent".
+    el.response = single({ outcome: 'confirm' });
+    await el.updateComplete;
+    expect(root(el).querySelector('[data-state="not-sent"]')).toBeTruthy();
+    expect(root(el).querySelector('[data-decision-comment]')).toBeNull();
+
+    // Confirm WITH comment -> shows comment and omits "not sent to the agent".
+    el.response = single({ outcome: 'confirm', comment: 'Page me when green' });
+    await el.updateComplete;
+    expect(root(el).querySelector('[data-state="not-sent"]')).toBeNull();
+    expect(root(el).querySelector('[data-decision-comment]')?.textContent).toBe(
+      '— “Page me when green”'
+    );
+  });
 });

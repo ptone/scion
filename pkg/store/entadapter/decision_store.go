@@ -678,6 +678,9 @@ func validateRecordAnswerInput(in *store.RecordAnswerInput) error {
 	if _, verr := messages.NormalizeOtherText(in.ChoiceID, in.OtherText); verr != nil {
 		return fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
 	}
+	if _, verr := messages.NormalizeDecisionComment(in.Comment); verr != nil {
+		return fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
+	}
 	if err := decisionanswer.ProvenanceValidator(decisionanswer.Provenance(in.Provenance)); err != nil {
 		return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
 	}
@@ -703,8 +706,8 @@ func validateRecordAnswerInput(in *store.RecordAnswerInput) error {
 }
 
 // sameAnswer reports whether an existing row is the answer in describes:
-// same (choice_id, other_text), non-dismiss outcome, and same answerer.
-func sameAnswer(row *ent.DecisionAnswer, in *store.RecordAnswerInput, otherText string) bool {
+// same (choice_id, other_text, comment), non-dismiss outcome, and same answerer.
+func sameAnswer(row *ent.DecisionAnswer, in *store.RecordAnswerInput, otherText, comment string) bool {
 	if row.Outcome == decisionanswer.OutcomeDismiss {
 		return false
 	}
@@ -718,6 +721,13 @@ func sameAnswer(row *ent.DecisionAnswer, in *store.RecordAnswerInput, otherText 
 	if rowOther != otherText {
 		return false
 	}
+	rowComment := ""
+	if row.Comment != nil {
+		rowComment = *row.Comment
+	}
+	if rowComment != comment {
+		return false
+	}
 	if in.AnsweredByUserID != "" || row.AnsweredByUserID != nil {
 		return row.AnsweredByUserID != nil && *row.AnsweredByUserID == in.AnsweredByUserID
 	}
@@ -729,6 +739,10 @@ func sameAnswer(row *ent.DecisionAnswer, in *store.RecordAnswerInput, otherText 
 // ErrDecisionAnswerConflict when the key names a different answer.
 func (c *CompositeStore) replayableAnswer(ctx context.Context, in *store.RecordAnswerInput) (*store.DecisionAnswer, bool, error) {
 	otherText, verr := messages.NormalizeOtherText(in.ChoiceID, in.OtherText)
+	if verr != nil {
+		return nil, false, fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
+	}
+	comment, verr := messages.NormalizeDecisionComment(in.Comment)
 	if verr != nil {
 		return nil, false, fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
 	}
@@ -749,7 +763,7 @@ func (c *CompositeStore) replayableAnswer(ctx context.Context, in *store.RecordA
 	if err != nil {
 		return nil, false, mapError(err)
 	}
-	if !sameAnswer(row, in, otherText) {
+	if !sameAnswer(row, in, otherText, comment) {
 		return nil, false, fmt.Errorf("%w: the idempotency key was used for a different answer", store.ErrDecisionAnswerConflict)
 	}
 	return answerToStore(row), true, nil
@@ -759,6 +773,10 @@ func (c *CompositeStore) replayableAnswer(ctx context.Context, in *store.RecordA
 func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAnswerInput) (*store.DecisionAnswer, bool, error) {
 	client := c.client
 	otherText, verr := messages.NormalizeOtherText(in.ChoiceID, in.OtherText)
+	if verr != nil {
+		return nil, false, fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
+	}
+	comment, verr := messages.NormalizeDecisionComment(in.Comment)
 	if verr != nil {
 		return nil, false, fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
 	}
@@ -842,6 +860,7 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 		SetChoiceID(in.ChoiceID).
 		SetChoiceLabel(label).
 		SetNillableOtherText(nullableString(otherText)).
+		SetNillableComment(nullableString(comment)).
 		SetNillableAnsweredByUserID(nullableString(in.AnsweredByUserID)).
 		SetAnsweredByName(in.AnsweredByName).
 		SetAnsweredByEmail(in.AnsweredByEmail).
@@ -1433,6 +1452,9 @@ func answerToStore(r *ent.DecisionAnswer) *store.DecisionAnswer {
 	}
 	if r.OtherText != nil {
 		a.OtherText = *r.OtherText
+	}
+	if r.Comment != nil {
+		a.Comment = *r.Comment
 	}
 	if r.AnsweredByUserID != nil {
 		a.AnsweredByUserID = *r.AnsweredByUserID

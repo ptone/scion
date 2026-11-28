@@ -36,6 +36,8 @@ type DecisionAnswer struct {
 	ChoiceLabel string `json:"choice_label,omitempty"`
 	// OtherText holds the value of the "other_text" field.
 	OtherText *string `json:"other_text,omitempty"`
+	// Comment holds the value of the "comment" field.
+	Comment *string `json:"comment,omitempty"`
 	// AnsweredByUserID holds the value of the "answered_by_user_id" field.
 	AnsweredByUserID *string `json:"answered_by_user_id,omitempty"`
 	// AnsweredByName holds the value of the "answered_by_name" field.
@@ -84,7 +86,7 @@ func (*DecisionAnswer) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case decisionanswer.FieldVersion:
 			values[i] = new(sql.NullInt64)
-		case decisionanswer.FieldKey, decisionanswer.FieldQuestionText, decisionanswer.FieldChoiceID, decisionanswer.FieldChoiceLabel, decisionanswer.FieldOtherText, decisionanswer.FieldAnsweredByUserID, decisionanswer.FieldAnsweredByName, decisionanswer.FieldAnsweredByEmail, decisionanswer.FieldProvenance, decisionanswer.FieldOutcome, decisionanswer.FieldDismissReason, decisionanswer.FieldSurface, decisionanswer.FieldAuthorizingUserID, decisionanswer.FieldDelegationGrantID, decisionanswer.FieldIdempotencyKey:
+		case decisionanswer.FieldKey, decisionanswer.FieldQuestionText, decisionanswer.FieldChoiceID, decisionanswer.FieldChoiceLabel, decisionanswer.FieldOtherText, decisionanswer.FieldComment, decisionanswer.FieldAnsweredByUserID, decisionanswer.FieldAnsweredByName, decisionanswer.FieldAnsweredByEmail, decisionanswer.FieldProvenance, decisionanswer.FieldOutcome, decisionanswer.FieldDismissReason, decisionanswer.FieldSurface, decisionanswer.FieldAuthorizingUserID, decisionanswer.FieldDelegationGrantID, decisionanswer.FieldIdempotencyKey:
 			values[i] = new(sql.NullString)
 		case decisionanswer.FieldCreatedAt:
 			values[i] = new(sql.NullTime)
@@ -165,6 +167,13 @@ func (_m *DecisionAnswer) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.OtherText = new(string)
 				*_m.OtherText = value.String
+			}
+		case decisionanswer.FieldComment:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field comment", values[i])
+			} else if value.Valid {
+				_m.Comment = new(string)
+				*_m.Comment = value.String
 			}
 		case decisionanswer.FieldAnsweredByUserID:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -338,6 +347,11 @@ func (_m *DecisionAnswer) String() string {
 	builder.WriteString(", ")
 	if v := _m.OtherText; v != nil {
 		builder.WriteString("other_text=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.Comment; v != nil {
+		builder.WriteString("comment=")
 		builder.WriteString(*v)
 	}
 	builder.WriteString(", ")

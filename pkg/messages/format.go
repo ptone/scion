@@ -65,6 +65,7 @@ const (
 	MetadataChoiceID           = "choice_id"
 	MetadataDecisionProvenance = "decision_provenance"
 	MetadataDecisionOtherText  = "decision_other_text"
+	MetadataDecisionComment    = "decision_comment"
 	// MetadataDecisionBatch and MetadataDecisionAnswers are set instead of the
 	// five keys above on the response of a set submit (design choices v5,
 	// 5.1): the batch id and a compact key@version=choiceId list (or JSON
@@ -109,6 +110,7 @@ var deliveryMetadataAllowlist = map[string]bool{
 	MetadataChoiceID:              true,
 	MetadataDecisionProvenance:    true,
 	MetadataDecisionOtherText:     true,
+	MetadataDecisionComment:       true,
 	MetadataDecisionBatch:         true,
 	MetadataDecisionAnswers:       true,
 	MetadataDecisionDismissReason: true,

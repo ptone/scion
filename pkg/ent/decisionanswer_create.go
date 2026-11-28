@@ -86,6 +86,20 @@ func (_c *DecisionAnswerCreate) SetNillableOtherText(v *string) *DecisionAnswerC
 	return _c
 }
 
+// SetComment sets the "comment" field.
+func (_c *DecisionAnswerCreate) SetComment(v string) *DecisionAnswerCreate {
+	_c.mutation.SetComment(v)
+	return _c
+}
+
+// SetNillableComment sets the "comment" field if the given value is not nil.
+func (_c *DecisionAnswerCreate) SetNillableComment(v *string) *DecisionAnswerCreate {
+	if v != nil {
+		_c.SetComment(*v)
+	}
+	return _c
+}
+
 // SetAnsweredByUserID sets the "answered_by_user_id" field.
 func (_c *DecisionAnswerCreate) SetAnsweredByUserID(v string) *DecisionAnswerCreate {
 	_c.mutation.SetAnsweredByUserID(v)
@@ -539,6 +553,10 @@ func (_c *DecisionAnswerCreate) createSpec() (*DecisionAnswer, *sqlgraph.CreateS
 		_spec.SetField(decisionanswer.FieldOtherText, field.TypeString, value)
 		_node.OtherText = &value
 	}
+	if value, ok := _c.mutation.Comment(); ok {
+		_spec.SetField(decisionanswer.FieldComment, field.TypeString, value)
+		_node.Comment = &value
+	}
 	if value, ok := _c.mutation.AnsweredByUserID(); ok {
 		_spec.SetField(decisionanswer.FieldAnsweredByUserID, field.TypeString, value)
 		_node.AnsweredByUserID = &value
@@ -732,6 +750,9 @@ func (u *DecisionAnswerUpsertOne) UpdateNewValues() *DecisionAnswerUpsertOne {
 		}
 		if _, exists := u.create.mutation.OtherText(); exists {
 			s.SetIgnore(decisionanswer.FieldOtherText)
+		}
+		if _, exists := u.create.mutation.Comment(); exists {
+			s.SetIgnore(decisionanswer.FieldComment)
 		}
 		if _, exists := u.create.mutation.AnsweredByName(); exists {
 			s.SetIgnore(decisionanswer.FieldAnsweredByName)
@@ -1053,6 +1074,9 @@ func (u *DecisionAnswerUpsertBulk) UpdateNewValues() *DecisionAnswerUpsertBulk {
 			}
 			if _, exists := b.mutation.OtherText(); exists {
 				s.SetIgnore(decisionanswer.FieldOtherText)
+			}
+			if _, exists := b.mutation.Comment(); exists {
+				s.SetIgnore(decisionanswer.FieldComment)
 			}
 			if _, exists := b.mutation.AnsweredByName(); exists {
 				s.SetIgnore(decisionanswer.FieldAnsweredByName)

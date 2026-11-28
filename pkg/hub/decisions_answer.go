@@ -55,6 +55,7 @@ const decisionResponseQuestionMax = 200
 type DecisionAnswerRequest struct {
 	ChoiceID       string `json:"choice_id"`
 	OtherText      string `json:"other_text,omitempty"`
+	Comment        string `json:"comment,omitempty"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	Surface        string `json:"surface,omitempty"`
 }
@@ -349,6 +350,14 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 			map[string]interface{}{"field": "surface"})
 		return
 	}
+	comment, verr := messages.NormalizeDecisionComment(req.Comment)
+	if verr != nil {
+		ValidationError(w, verr.Message, map[string]interface{}{
+			"field": verr.Field,
+			"code":  verr.Code,
+		})
+		return
+	}
 
 	// Steps 1 and 2: the row, its conversation, the caller's send rights.
 	d, chatKey, ok := s.loadAuthorizedDecision(w, ctx, user, rowID, true)
@@ -405,7 +414,7 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	// recorded answer is a fresh answer and gets every check below.
 	if req.IdempotencyKey != "" {
 		if prior := answerWithIdempotencyKey(d, req.IdempotencyKey); prior != nil {
-			if prior.ChoiceID != choice.ID || prior.OtherText != otherText || prior.AnsweredByUserID != user.ID() {
+			if prior.ChoiceID != choice.ID || prior.OtherText != otherText || prior.Comment != comment || prior.AnsweredByUserID != user.ID() {
 				s.writeDecisionAnswered(w, ctx, d)
 				return
 			}
@@ -460,8 +469,10 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	// The decision-response is a message from the user to the asking agent:
 	// it gets the messaging check of a chat send to an agent
 	// (sendAgentRouted), before anything is recorded. Nothing is delivered
-	// to a gone asker or for a confirm, so those need none.
-	willDeliver := !askerGone && outcome != store.DecisionOutcomeConfirm
+	// to a gone asker or for a comment-free confirm, so those need none;
+	// confirming with a comment delivers the comment to the asking agent
+	// (ptone/scion#9834, D4).
+	willDeliver := !askerGone && (outcome != store.DecisionOutcomeConfirm || comment != "")
 	if willDeliver {
 		if allowed, reason, _ := s.authorizeAgentMessage(ctx, user, asker, false); !allowed {
 			writeError(w, http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
@@ -472,13 +483,14 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 			return
 		}
 	}
-	responseMsg := s.decisionResponseStoreMessage(ctx, user, d, chatKey, choice, otherText, asker, askerGone, willDeliver)
+	responseMsg := s.decisionResponseStoreMessage(ctx, user, d, chatKey, choice, otherText, comment, asker, askerGone, willDeliver)
 
 	// Step 5: record the answer and store the response, in one transaction.
 	answer, replayed, err := s.store.RecordAnswer(ctx, &store.RecordAnswerInput{
 		DecisionRowID:    d.ID,
 		ChoiceID:         choice.ID,
 		OtherText:        otherText,
+		Comment:          comment,
 		AnsweredByUserID: user.ID(),
 		AnsweredByName:   user.DisplayName(),
 		AnsweredByEmail:  user.Email(),
@@ -541,11 +553,12 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 		return
 	}
 
-	// Step 6: publish the stored response, deliver it to the asker (not a
-	// confirmation: the agent already acted on that answer), and tell every
+	// Step 6: publish the stored response, deliver it to the asker (a
+	// comment-free confirmation is not delivered: the agent already acted on
+	// that answer; a confirmation with a comment is delivered), and tell every
 	// open card.
 	s.publishDecisionResponse(ctx, responseMsg, cur, answer)
-	if !askerGone && outcome != store.DecisionOutcomeConfirm {
+	if willDeliver {
 		s.deliverDecisionResponse(ctx, asker, responseMsg, answer, overridden)
 	}
 	s.publishDecisionUpdatedAt(ctx, d.ProjectID, d.MessageID, chatKey, view)
@@ -619,10 +632,13 @@ func (s *Server) canAutoWakeDecisionAsker(ctx context.Context, asker *store.Agen
 // prompt's conversation. A gone asker (askerGone; asker is then unused) or
 // one that cannot take a message (and will not auto-wake) gets the row born
 // failed, as a chat send to it would.
-func (s *Server) decisionResponseStoreMessage(ctx context.Context, user UserIdentity, d *store.Decision, chatKey string, choice messages.Choice, otherText string, asker *store.Agent, askerGone, willDeliver bool) *store.Message {
+func (s *Server) decisionResponseStoreMessage(ctx context.Context, user UserIdentity, d *store.Decision, chatKey string, choice messages.Choice, otherText, comment string, asker *store.Agent, askerGone, willDeliver bool) *store.Message {
 	body := decisionResponseLine(userDisplay(user), d.Key, choice.Label, d.Question)
 	if choice.ID == messages.ChoiceIDOther {
 		body = decisionOtherResponseLine(userDisplay(user), d.Key, choice.Label, otherText, d.Question)
+	}
+	if comment != "" {
+		body += fmt.Sprintf(" — comment: \"%s\"", messages.EscapeMarkdownPlain(comment))
 	}
 	m := &store.Message{
 		ID:             api.NewUUID(),
@@ -698,13 +714,20 @@ func decisionResponseAgentLine(a *store.DecisionAnswer, overridden *store.Decisi
 	if a.ChoiceID == messages.ChoiceIDOther && a.OtherText != "" {
 		otherPart = " text=" + strconv.Quote(a.OtherText)
 	}
-	line := fmt.Sprintf("[decision-response] %s v%d (%q) answer=%s (choice %s)%s by %s",
-		a.Key, a.Version, truncateRunes(plainLine(a.QuestionText), decisionResponseQuestionMax), a.ChoiceLabel, a.ChoiceID, otherPart, who)
+	choiceNote := "choice " + a.ChoiceID
+	if a.Outcome == store.DecisionOutcomeConfirm {
+		choiceNote += ", confirmed"
+	}
+	line := fmt.Sprintf("[decision-response] %s v%d (%q) answer=%s (%s)%s by %s",
+		a.Key, a.Version, truncateRunes(plainLine(a.QuestionText), decisionResponseQuestionMax), a.ChoiceLabel, choiceNote, otherPart, who)
 	if overridden != nil {
 		line += ", overriding interpreted answer " + overridden.ChoiceLabel
 		if overridden.ChoiceID == messages.ChoiceIDOther && overridden.OtherText != "" {
 			line += " text=" + strconv.Quote(overridden.OtherText)
 		}
+	}
+	if a.Comment != "" {
+		line += "\ncomment=" + strconv.Quote(a.Comment)
 	}
 	return line
 }
@@ -782,6 +805,9 @@ func (s *Server) deliverDecisionResponse(ctx context.Context, asker *store.Agent
 		meta[messages.MetadataDecisionProvenance] = a.Provenance
 		if a.ChoiceID == messages.ChoiceIDOther && a.OtherText != "" {
 			meta[messages.MetadataDecisionOtherText] = a.OtherText
+		}
+		if a.Comment != "" {
+			meta[messages.MetadataDecisionComment] = a.Comment
 		}
 	}, "decision-response")
 }

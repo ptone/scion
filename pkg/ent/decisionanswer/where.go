@@ -100,6 +100,11 @@ func OtherText(v string) predicate.DecisionAnswer {
 	return predicate.DecisionAnswer(sql.FieldEQ(FieldOtherText, v))
 }
 
+// Comment applies equality check predicate on the "comment" field. It's identical to CommentEQ.
+func Comment(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldEQ(FieldComment, v))
+}
+
 // AnsweredByUserID applies equality check predicate on the "answered_by_user_id" field. It's identical to AnsweredByUserIDEQ.
 func AnsweredByUserID(v string) predicate.DecisionAnswer {
 	return predicate.DecisionAnswer(sql.FieldEQ(FieldAnsweredByUserID, v))
@@ -663,6 +668,81 @@ func OtherTextEqualFold(v string) predicate.DecisionAnswer {
 // OtherTextContainsFold applies the ContainsFold predicate on the "other_text" field.
 func OtherTextContainsFold(v string) predicate.DecisionAnswer {
 	return predicate.DecisionAnswer(sql.FieldContainsFold(FieldOtherText, v))
+}
+
+// CommentEQ applies the EQ predicate on the "comment" field.
+func CommentEQ(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldEQ(FieldComment, v))
+}
+
+// CommentNEQ applies the NEQ predicate on the "comment" field.
+func CommentNEQ(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldNEQ(FieldComment, v))
+}
+
+// CommentIn applies the In predicate on the "comment" field.
+func CommentIn(vs ...string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldIn(FieldComment, vs...))
+}
+
+// CommentNotIn applies the NotIn predicate on the "comment" field.
+func CommentNotIn(vs ...string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldNotIn(FieldComment, vs...))
+}
+
+// CommentGT applies the GT predicate on the "comment" field.
+func CommentGT(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldGT(FieldComment, v))
+}
+
+// CommentGTE applies the GTE predicate on the "comment" field.
+func CommentGTE(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldGTE(FieldComment, v))
+}
+
+// CommentLT applies the LT predicate on the "comment" field.
+func CommentLT(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldLT(FieldComment, v))
+}
+
+// CommentLTE applies the LTE predicate on the "comment" field.
+func CommentLTE(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldLTE(FieldComment, v))
+}
+
+// CommentContains applies the Contains predicate on the "comment" field.
+func CommentContains(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldContains(FieldComment, v))
+}
+
+// CommentHasPrefix applies the HasPrefix predicate on the "comment" field.
+func CommentHasPrefix(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldHasPrefix(FieldComment, v))
+}
+
+// CommentHasSuffix applies the HasSuffix predicate on the "comment" field.
+func CommentHasSuffix(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldHasSuffix(FieldComment, v))
+}
+
+// CommentIsNil applies the IsNil predicate on the "comment" field.
+func CommentIsNil() predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldIsNull(FieldComment))
+}
+
+// CommentNotNil applies the NotNil predicate on the "comment" field.
+func CommentNotNil() predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldNotNull(FieldComment))
+}
+
+// CommentEqualFold applies the EqualFold predicate on the "comment" field.
+func CommentEqualFold(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldEqualFold(FieldComment, v))
+}
+
+// CommentContainsFold applies the ContainsFold predicate on the "comment" field.
+func CommentContainsFold(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldContainsFold(FieldComment, v))
 }
 
 // AnsweredByUserIDEQ applies the EQ predicate on the "answered_by_user_id" field.

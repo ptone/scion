@@ -46509,6 +46509,7 @@ type DecisionAnswerMutation struct {
 	choice_id               *string
 	choice_label            *string
 	other_text              *string
+	comment                 *string
 	answered_by_user_id     *string
 	answered_by_name        *string
 	answered_by_email       *string
@@ -46991,6 +46992,55 @@ func (m *DecisionAnswerMutation) OtherTextCleared() bool {
 func (m *DecisionAnswerMutation) ResetOtherText() {
 	m.other_text = nil
 	delete(m.clearedFields, decisionanswer.FieldOtherText)
+}
+
+// SetComment sets the "comment" field.
+func (m *DecisionAnswerMutation) SetComment(s string) {
+	m.comment = &s
+}
+
+// Comment returns the value of the "comment" field in the mutation.
+func (m *DecisionAnswerMutation) Comment() (r string, exists bool) {
+	v := m.comment
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldComment returns the old "comment" field's value of the DecisionAnswer entity.
+// If the DecisionAnswer object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionAnswerMutation) OldComment(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldComment is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldComment requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldComment: %w", err)
+	}
+	return oldValue.Comment, nil
+}
+
+// ClearComment clears the value of the "comment" field.
+func (m *DecisionAnswerMutation) ClearComment() {
+	m.comment = nil
+	m.clearedFields[decisionanswer.FieldComment] = struct{}{}
+}
+
+// CommentCleared returns if the "comment" field was cleared in this mutation.
+func (m *DecisionAnswerMutation) CommentCleared() bool {
+	_, ok := m.clearedFields[decisionanswer.FieldComment]
+	return ok
+}
+
+// ResetComment resets all changes to the "comment" field.
+func (m *DecisionAnswerMutation) ResetComment() {
+	m.comment = nil
+	delete(m.clearedFields, decisionanswer.FieldComment)
 }
 
 // SetAnsweredByUserID sets the "answered_by_user_id" field.
@@ -47743,7 +47793,7 @@ func (m *DecisionAnswerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DecisionAnswerMutation) Fields() []string {
-	fields := make([]string, 0, 26)
+	fields := make([]string, 0, 27)
 	if m.decision_row_id != nil {
 		fields = append(fields, decisionanswer.FieldDecisionRowID)
 	}
@@ -47770,6 +47820,9 @@ func (m *DecisionAnswerMutation) Fields() []string {
 	}
 	if m.other_text != nil {
 		fields = append(fields, decisionanswer.FieldOtherText)
+	}
+	if m.comment != nil {
+		fields = append(fields, decisionanswer.FieldComment)
 	}
 	if m.answered_by_user_id != nil {
 		fields = append(fields, decisionanswer.FieldAnsweredByUserID)
@@ -47848,6 +47901,8 @@ func (m *DecisionAnswerMutation) Field(name string) (ent.Value, bool) {
 		return m.ChoiceLabel()
 	case decisionanswer.FieldOtherText:
 		return m.OtherText()
+	case decisionanswer.FieldComment:
+		return m.Comment()
 	case decisionanswer.FieldAnsweredByUserID:
 		return m.AnsweredByUserID()
 	case decisionanswer.FieldAnsweredByName:
@@ -47909,6 +47964,8 @@ func (m *DecisionAnswerMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldChoiceLabel(ctx)
 	case decisionanswer.FieldOtherText:
 		return m.OldOtherText(ctx)
+	case decisionanswer.FieldComment:
+		return m.OldComment(ctx)
 	case decisionanswer.FieldAnsweredByUserID:
 		return m.OldAnsweredByUserID(ctx)
 	case decisionanswer.FieldAnsweredByName:
@@ -48014,6 +48071,13 @@ func (m *DecisionAnswerMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetOtherText(v)
+		return nil
+	case decisionanswer.FieldComment:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetComment(v)
 		return nil
 	case decisionanswer.FieldAnsweredByUserID:
 		v, ok := value.(string)
@@ -48182,6 +48246,9 @@ func (m *DecisionAnswerMutation) ClearedFields() []string {
 	if m.FieldCleared(decisionanswer.FieldOtherText) {
 		fields = append(fields, decisionanswer.FieldOtherText)
 	}
+	if m.FieldCleared(decisionanswer.FieldComment) {
+		fields = append(fields, decisionanswer.FieldComment)
+	}
 	if m.FieldCleared(decisionanswer.FieldAnsweredByUserID) {
 		fields = append(fields, decisionanswer.FieldAnsweredByUserID)
 	}
@@ -48222,6 +48289,9 @@ func (m *DecisionAnswerMutation) ClearField(name string) error {
 	switch name {
 	case decisionanswer.FieldOtherText:
 		m.ClearOtherText()
+		return nil
+	case decisionanswer.FieldComment:
+		m.ClearComment()
 		return nil
 	case decisionanswer.FieldAnsweredByUserID:
 		m.ClearAnsweredByUserID()
@@ -48281,6 +48351,9 @@ func (m *DecisionAnswerMutation) ResetField(name string) error {
 		return nil
 	case decisionanswer.FieldOtherText:
 		m.ResetOtherText()
+		return nil
+	case decisionanswer.FieldComment:
+		m.ResetComment()
 		return nil
 	case decisionanswer.FieldAnsweredByUserID:
 		m.ResetAnsweredByUserID()

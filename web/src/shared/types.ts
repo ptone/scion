@@ -1919,6 +1919,7 @@ export interface AnswerView {
   choiceId: string;
   label: string;
   otherText?: string;
+  comment?: string;
   answeredByUserId?: string;
   answeredByName?: string;
   answeredByEmail?: string;
@@ -1975,6 +1976,7 @@ export interface DecisionResponseView {
   choiceId: string;
   label: string;
   otherText?: string;
+  comment?: string;
   provenance: string;
   /** "answer", "confirm", "override", or "dismiss". */
   outcome?: string;

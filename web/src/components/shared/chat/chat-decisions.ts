@@ -219,6 +219,14 @@ export class ScionChatDecisions extends LitElement {
   @state()
   private otherDraft = '';
 
+  /** Single mode: whether the optional comment field is open. */
+  @state()
+  private commentOpen = false;
+
+  /** Single mode: draft text in the optional comment field (memory only). */
+  @state()
+  private commentDraft = '';
+
   /** Single mode: row/response key whose interpreted Other text seeded `otherDraft`. */
   @state()
   private interpretedOtherSeedKey = '';
@@ -1227,6 +1235,134 @@ export class ScionChatDecisions extends LitElement {
       overflow-wrap: anywhere;
     }
 
+    .addc {
+      margin-top: 0.5rem;
+      display: inline-flex;
+      gap: 0.3rem;
+      align-items: center;
+      font-size: var(--chat-fs-sm, 0.875rem);
+      color: var(--scion-text-secondary, #475569);
+      background: none;
+      border: 0;
+      padding: 0.15rem 0;
+      cursor: pointer;
+      font-family: inherit;
+    }
+
+    .addc sl-icon {
+      font-size: 0.95rem;
+    }
+
+    .addc:hover:not(:disabled) {
+      color: var(--scion-primary, #3b82f6);
+    }
+
+    .addc:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: 2px;
+      border-radius: var(--scion-radius-sm);
+    }
+
+    .addc:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    .cbox {
+      margin-top: 0.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+
+    .cbox .lab {
+      font-size: var(--chat-fs-sm, 0.875rem);
+      color: var(--scion-text-secondary, #475569);
+      display: flex;
+      gap: 0.35rem;
+      align-items: center;
+    }
+
+    .cbox .lab .opt-tag {
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .cbox .lab .spacer {
+      flex: 1;
+    }
+
+    .cbox .cnt {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .cbox .cnt.warn {
+      color: var(--scion-status-warning, #d97706);
+    }
+
+    .cbox .cnt.over {
+      color: var(--scion-status-danger, #dc2626);
+    }
+
+    .cbox sl-input {
+      width: 100%;
+    }
+
+    .cbox sl-input::part(form-control-label) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      clip-path: inset(50%);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .cbox sl-input::part(base) {
+      background: var(--scion-surface, #fff);
+      border-color: var(--scion-border, #e2e8f0);
+    }
+
+    .cbox sl-input::part(input) {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .cbox sl-input::part(input)::placeholder {
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .cbox .sub {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .cmt {
+      margin-top: 0.45rem;
+      display: flex;
+      gap: 0.45rem;
+      align-items: flex-start;
+      padding: 0.4rem 0.6rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      background: var(--scion-bg-subtle, #f1f5f9);
+      font-size: var(--chat-fs-base, 0.9375rem);
+      color: var(--scion-text, #1e293b);
+    }
+
+    .cmt sl-icon {
+      margin-top: 0.2rem;
+      color: var(--scion-text-muted, #64748b);
+      flex-shrink: 0;
+    }
+
+    .cmt .t {
+      overflow-wrap: anywhere;
+    }
+
     @media (max-width: 480px) {
       .editor .ctl sl-input {
         flex-basis: 100%;
@@ -1359,6 +1495,14 @@ export class ScionChatDecisions extends LitElement {
           } else if (this.answerBlocked) {
             this.otherOpen = false;
           }
+        }
+      }
+      if (this.commentOpen || this.commentDraft) {
+        if (!row || !isOpenDecision(row) || !this.rowActionable(row)) {
+          this.commentOpen = false;
+          this.commentDraft = '';
+        } else if (this.answerBlocked) {
+          this.commentOpen = false;
         }
       }
     }
@@ -1956,21 +2100,47 @@ export class ScionChatDecisions extends LitElement {
     await this.choose(d, OTHER_CHOICE_ID, trimmed);
   }
 
+  private async openComment(d: DecisionView): Promise<void> {
+    if (!this.actionable(d)) return;
+    if (d.status !== 'pending' && !this.isActionableInterpreted(d)) return;
+    this.commentOpen = true;
+    await this.updateComplete;
+    const input = this.shadowRoot?.querySelector<
+      HTMLElement & { updateComplete?: Promise<unknown> }
+    >('.cbox sl-input');
+    if (input?.updateComplete) {
+      await input.updateComplete;
+    }
+    focusElement(input);
+  }
+
+  private async closeEmptyComment(): Promise<void> {
+    if (this.commentDraft !== '') return;
+    this.commentOpen = false;
+    await this.updateComplete;
+    const btn = this.shadowRoot?.querySelector<HTMLElement>('[data-action="add-comment"]');
+    focusElement(btn);
+  }
+
   private async choose(d: DecisionView, choiceId: string, otherText?: string): Promise<void> {
     if (!this.actionable(d)) return;
     this.submitting = { rowId: d.rowId, choiceId };
+    const trimmedComment = this.commentDraft.trim();
     try {
       const res = await answerDecision(
         d.rowId,
         choiceId,
         crypto.randomUUID(),
         this.surface,
-        otherText
+        otherText,
+        trimmedComment || undefined
       );
       if (res.ok) {
         this.pendingChange = null;
         this.otherOpen = false;
         this.otherDraft = '';
+        this.commentOpen = false;
+        this.commentDraft = '';
         this.applyOwn(res.decision, res.responseMessageId);
         return;
       }
@@ -1979,32 +2149,43 @@ export class ScionChatDecisions extends LitElement {
         // (`not_recorded_answerer`, where `writeNotRecordedAnswerer` includes
         // `details.decision`): refresh the card to the authoritative view (read-only
         // for non-owner, not blocked) and warn.
+        const hadComment = this.commentDraft.trim().length > 0;
+        const commentNote = hadComment ? ' Your comment was not sent.' : '';
         this.pendingChange = null;
         this.otherOpen = false;
         this.otherDraft = '';
+        this.commentOpen = false;
+        this.commentDraft = '';
         this.applyOwn(res.decision);
         if (res.code === 'already_answered') {
           const who = this.answeredBy(res.decision);
-          showToast(`Already answered by ${who}.`, 'warning');
+          showToast(`Already answered by ${who}.${commentNote}`, 'warning');
         } else if (res.code === 'replaced') {
           const v = res.replacedBy?.version ?? res.decision.replacedBy?.version;
-          showToast(v ? `Replaced by v${v}.` : 'This decision was replaced.', 'warning');
+          showToast(
+            `${v ? `Replaced by v${v}.` : 'This decision was replaced.'}${commentNote}`,
+            'warning'
+          );
         } else if (res.code === 'dismissed') {
           const who = this.dismissedBy(res.decision);
           showToast(
-            who === 'you' ? 'You dismissed this decision.' : `${who} dismissed this decision.`,
+            `${who === 'you' ? 'You dismissed this decision.' : `${who} dismissed this decision.`}${commentNote}`,
             'warning'
           );
         } else if (res.code === 'withdrawn') {
           const who = this.withdrawnBy(res.decision);
-          showToast(`No longer needed: ${who} withdrew this decision`, 'warning');
+          showToast(
+            `No longer needed: ${who} withdrew this decision${hadComment ? '. Your comment was not sent.' : ''}`,
+            'warning'
+          );
         } else {
-          showToast(res.message, 'warning');
+          showToast(`${res.message}${commentNote}`, 'warning');
         }
         return;
       }
       if (res.status === 403) {
         this.otherOpen = false;
+        this.commentOpen = false;
         this.applyDenied(d, res.code, res.reason);
         return;
       }
@@ -2209,6 +2390,13 @@ export class ScionChatDecisions extends LitElement {
         </div>
         ${!stacked && editorOpen && otherOpt ? this.renderOtherEditor(d, otherOpt) : nothing}
         ${showStaticOtherText ? html`<div class="otext">“${d.decision!.otherText}”</div>` : nothing}
+        ${d.status === 'decided' && d.decision?.provenance === 'direct' && d.decision.comment
+          ? html`<div class="cmt" data-decision-comment>
+              <sl-icon name="chat-square-text" aria-hidden="true"></sl-icon>
+              <span class="t">${d.decision.comment}</span>
+            </div>`
+          : nothing}
+        ${d.status === 'pending' ? this.renderSingleCommentControl(d) : nothing}
         ${this.renderSingleActionsAndFoot(d)}
         ${showHint && !this.submitting
           ? html`<div class="hint" id=${this.hintId}>
@@ -2730,6 +2918,76 @@ export class ScionChatDecisions extends LitElement {
     </div>`;
   }
 
+  private renderSingleCommentControl(d: DecisionView): TemplateResult | typeof nothing {
+    if (this.isSet) return nothing;
+    if (this.answerBlocked || !this.rowActionable(d)) return nothing;
+    if (d.status !== 'pending' && !this.isActionableInterpreted(d)) return nothing;
+    if (!this.commentOpen) {
+      return html`<button
+        type="button"
+        class="addc"
+        data-action="add-comment"
+        ?disabled=${!!this.submitting}
+        @click=${() => void this.openComment(d)}
+      >
+        <sl-icon name="chat-square-text" aria-hidden="true"></sl-icon>Add comment
+      </button>`;
+    }
+    const trimmed = this.commentDraft.trim();
+    const trimmedLen = [...trimmed].length;
+    const showCounter = trimmedLen >= 160;
+    const warnCounter = trimmedLen >= 180 && trimmedLen <= 200;
+    const overCounter = trimmedLen > 200;
+    const announceCounter = warnCounter || overCounter;
+    const isInterpretedConfirm =
+      this.isActionableInterpreted(d) &&
+      this.pendingChange?.rowId !== d.rowId &&
+      !this.otherOpen &&
+      (!this.isActionableInterpretedOther(d) ||
+        this.otherDraft.trim() === (d.decision?.otherText ?? ''));
+    const subText =
+      isInterpretedConfirm && trimmed.length > 0
+        ? `Confirming with a comment sends it to ${d.askerAgentName || 'the agent'}.`
+        : 'Sent with the choice you click.';
+    return html`<div class="cbox" data-comment-editor>
+      <span class="lab">
+        <sl-icon name="chat-square-text" aria-hidden="true"></sl-icon>
+        Comment <span class="opt-tag">(optional)</span>
+        <span class="spacer"></span>
+        ${showCounter
+          ? html`<span
+              class="cnt${overCounter ? ' over' : warnCounter ? ' warn' : ''}"
+              role=${announceCounter ? 'status' : nothing}
+              aria-live=${announceCounter ? 'polite' : nothing}
+              >${trimmedLen} / 200</span
+            >`
+          : nothing}
+      </span>
+      <sl-input
+        size="small"
+        label="Comment (optional)"
+        maxlength="200"
+        .value=${this.commentDraft}
+        ?disabled=${!!this.submitting}
+        @sl-input=${(e: Event) => {
+          this.commentDraft = (e.target as HTMLInputElement).value ?? '';
+        }}
+        @keydown=${(e: KeyboardEvent) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            e.stopPropagation();
+          } else if (e.key === 'Escape' && this.commentDraft === '') {
+            e.preventDefault();
+            e.stopPropagation();
+            void this.closeEmptyComment();
+          }
+        }}
+      >
+        <span slot="help-text" class="sub">${subText}</span>
+      </sl-input>
+    </div>`;
+  }
+
   private renderSingleActionsAndFoot(d: DecisionView): TemplateResult | typeof nothing {
     if (this.submitting?.rowId === d.rowId) {
       return this.actionState.renderSubmittingBanner('Sending…');
@@ -2749,40 +3007,41 @@ export class ScionChatDecisions extends LitElement {
       if (this.pendingChange?.rowId === d.rowId) {
         const target = d.choices.find((c) => c.id === this.pendingChange?.choiceId);
         if (target) {
-          return html`<div class="confirmbar" role="region" aria-label="Confirm answer change">
-            <sl-icon name="arrow-left-right" aria-hidden="true"></sl-icon>
-            <span role="status" aria-live="polite"
-              >Change your answer from ${origDisplay} to <b>${target.label}</b>?
-              ${d.askerAgentName || 'The agent'} will be told.</span
-            >
-            <span class="spacer"></span>
-            <sl-button
-              size="small"
-              data-action="cancel-change"
-              @click=${() => {
-                this.pendingChange = null;
-              }}
-              >Cancel</sl-button
-            >
-            <sl-button
-              size="small"
-              variant="primary"
-              data-action="confirm-change"
-              @click=${() => {
-                const cid = target.id;
-                this.pendingChange = null;
-                void this.choose(d, cid);
-              }}
-              >Change answer</sl-button
-            >
-          </div>`;
+          return html`${this.renderTerminalFoot(d)}${this.renderSingleCommentControl(d)}
+            <div class="confirmbar" role="region" aria-label="Confirm answer change">
+              <sl-icon name="arrow-left-right" aria-hidden="true"></sl-icon>
+              <span role="status" aria-live="polite"
+                >Change your answer from ${origDisplay} to <b>${target.label}</b>?
+                ${d.askerAgentName || 'The agent'} will be told.</span
+              >
+              <span class="spacer"></span>
+              <sl-button
+                size="small"
+                data-action="cancel-change"
+                @click=${() => {
+                  this.pendingChange = null;
+                }}
+                >Cancel</sl-button
+              >
+              <sl-button
+                size="small"
+                variant="primary"
+                data-action="confirm-change"
+                @click=${() => {
+                  const cid = target.id;
+                  this.pendingChange = null;
+                  void this.choose(d, cid);
+                }}
+                >Change answer</sl-button
+              >
+            </div>`;
         }
       }
       if (!origIsOther && this.otherOpen && d.other) {
         const trimmed = this.otherDraft.trim();
         const trimmedLen = [...trimmed].length;
         const canSubmit = trimmedLen > 0 && trimmedLen <= 200 && !this.submitting;
-        return html`${this.renderTerminalFoot(d)}
+        return html`${this.renderTerminalFoot(d)}${this.renderSingleCommentControl(d)}
           <div class="confirmbar" role="region" aria-label="Confirm answer change">
             <sl-icon name="arrow-left-right" aria-hidden="true"></sl-icon>
             <span role="status" aria-live="polite"
@@ -2818,7 +3077,7 @@ export class ScionChatDecisions extends LitElement {
         const otherLabel = d.other?.label || d.decision.label;
         if (trimmed !== origText) {
           const canSubmit = trimmedLen > 0 && trimmedLen <= 200 && !this.submitting;
-          return html`${this.renderTerminalFoot(d)}
+          return html`${this.renderTerminalFoot(d)}${this.renderSingleCommentControl(d)}
             <div class="confirmbar" role="region" aria-label="Confirm answer change">
               <sl-icon name="arrow-left-right" aria-hidden="true"></sl-icon>
               <span role="status" aria-live="polite"
@@ -2849,7 +3108,7 @@ export class ScionChatDecisions extends LitElement {
               >
             </div>`;
         }
-        return html`${this.renderTerminalFoot(d)}
+        return html`${this.renderTerminalFoot(d)}${this.renderSingleCommentControl(d)}
           <div class="confirm-row">
             <sl-button
               size="small"
@@ -2863,7 +3122,7 @@ export class ScionChatDecisions extends LitElement {
             <span>or edit your answer or pick another choice to change it</span>
           </div>`;
       }
-      return html`${this.renderTerminalFoot(d)}
+      return html`${this.renderTerminalFoot(d)}${this.renderSingleCommentControl(d)}
         <div class="confirm-row">
           <sl-button
             size="small"

@@ -59,6 +59,9 @@ const (
 	// MaxOtherTextLen is the most characters (runes) in a free-form Other
 	// answer after trimming surrounding spaces (design-8146 §4.3, D2).
 	MaxOtherTextLen = 200
+	// MaxDecisionCommentLen is the most characters (runes) in an optional
+	// decision comment after trimming surrounding spaces (ptone/scion#9834).
+	MaxDecisionCommentLen = 200
 	// MaxDecisionKeyLen is the most characters in a decision key or a
 	// choice id.
 	MaxDecisionKeyLen = 32
@@ -664,6 +667,33 @@ func NormalizeOtherText(choiceID, raw string) (string, *DecisionValidationError)
 			Field:   "other_text",
 			Code:    DecisionErrTooLong,
 			Message: fmt.Sprintf("other_text is at most %d characters", MaxOtherTextLen),
+		}
+	}
+	return trimmed, nil
+}
+
+// NormalizeDecisionComment validates and normalizes an optional overall
+// comment on a decision answer (ptone/scion#9834). Raw must be valid
+// single-line plain text (no newlines, tabs, control, or bidi/format runes).
+// Empty or whitespace-only input normalizes to "" (no comment). Non-empty
+// trimmed text must be at most MaxDecisionCommentLen runes.
+func NormalizeDecisionComment(raw string) (string, *DecisionValidationError) {
+	if !validPlainText(raw) {
+		return "", &DecisionValidationError{
+			Field:   "comment",
+			Code:    DecisionErrInvalid,
+			Message: "comment must be one line of plain text without control characters",
+		}
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+	if utf8.RuneCountInString(trimmed) > MaxDecisionCommentLen {
+		return "", &DecisionValidationError{
+			Field:   "comment",
+			Code:    DecisionErrTooLong,
+			Message: fmt.Sprintf("comment is at most %d characters", MaxDecisionCommentLen),
 		}
 	}
 	return trimmed, nil

@@ -502,6 +502,57 @@ func TestNormalizeOtherText(t *testing.T) {
 	}
 }
 
+func TestNormalizeDecisionComment(t *testing.T) {
+	got, verr := NormalizeDecisionComment("  Staging, skip the load test  ")
+	if verr != nil || got != "Staging, skip the load test" {
+		t.Fatalf("got (%q, %v), want (\"Staging, skip the load test\", nil)", got, verr)
+	}
+
+	for _, empty := range []string{"", "    ", "\u00a0\u3000"} {
+		got, verr = NormalizeDecisionComment(empty)
+		if verr != nil || got != "" {
+			t.Fatalf("empty/whitespace %q: got (%q, %v), want (\"\", nil)", empty, got, verr)
+		}
+	}
+
+	atCap := strings.Repeat("é", MaxDecisionCommentLen)
+	got, verr = NormalizeDecisionComment("  " + atCap + "  ")
+	if verr != nil || got != atCap {
+		t.Fatalf("200-rune comment rejected: (%q, %v)", got, verr)
+	}
+
+	errCases := []struct {
+		name     string
+		raw      string
+		wantCode string
+	}{
+		{"newline", "a\nb", DecisionErrInvalid},
+		{"trailing newline", "hello\n", DecisionErrInvalid},
+		{"bare newline", "\n", DecisionErrInvalid},
+		{"tab", "a\tb", DecisionErrInvalid},
+		{"leading tab", "\thello", DecisionErrInvalid},
+		{"bare tab", "\t", DecisionErrInvalid},
+		{"carriage return", "a\rb", DecisionErrInvalid},
+		{"control NUL", "a\x00b", DecisionErrInvalid},
+		{"bidi override", "a\u202eb", DecisionErrInvalid},
+		{"zero width", "a\u200bb", DecisionErrInvalid},
+		{"line separator", "a\u2028b", DecisionErrInvalid},
+		{"invalid utf8", "a\xffb", DecisionErrInvalid},
+		{"201 runes", strings.Repeat("é", MaxDecisionCommentLen+1), DecisionErrTooLong},
+	}
+	for _, tc := range errCases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, verr := NormalizeDecisionComment(tc.raw)
+			if verr == nil {
+				t.Fatalf("expected %s error, got %q", tc.wantCode, out)
+			}
+			if verr.Field != "comment" || verr.Code != tc.wantCode {
+				t.Errorf("got field=%q code=%q, want comment %s", verr.Field, verr.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
 func TestNormalizeDecisions_ReportsEveryError(t *testing.T) {
 	in := []DecisionInput{
 		{ID: "bad key", Question: "", Choices: nil},
