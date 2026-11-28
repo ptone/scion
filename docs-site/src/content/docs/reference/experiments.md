@@ -99,7 +99,7 @@ Retiring an experiment is either a **graduation** (the feature becomes permanent
 - In code and tests, the only references to the name left are its `compiledRetired` entry and one web test asserting that the name resolves OFF.
 - Put a release note in the PR description.
 
-Follow the full [experiment-removal checklist](/scion/contributing/removing-an-experiment/).
+Follow the full [experiment-removal checklist](/scion/contributing/removing-an-experiment/). Flipping a compiled default, with or without retiring the experiment, reaches tests and readers that never name it; see [Flipping a default](/scion/contributing/removing-an-experiment/#flipping-a-default).
 
 ## Precedence and localStorage
 

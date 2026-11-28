@@ -418,7 +418,7 @@ Beyond skills you publish, **platform skills** are embedded in the Scion binary 
 | `git-sandbox` | `inject_when: git_workspace` | Git workflow protocol for sandbox and worktree workspaces. |
 | `scion-agent-manage` | Always | Managing concurrent agents (`scion start`, `look`, `reincarnate`), lifecycle rules (`references/agent-lifecycle.md`), and recovery (`references/troubleshooting.md`). |
 | `scion-artifacts` | `experiment: hub.artifacts` | Publishing, versioning, fetching, listing, and reviewing [artifacts](/scion/hosted/user/artifacts/) with CriticMarkup (`scion artifact`), sending references with `scion message --artifact`, and agent-mode limits. |
-| `scion-cli-operations` | Always | Container sandbox operational constraints and Hub-only CLI/API access rules. |
+| `scion-cli-operations` | Always | Container sandbox operational constraints, Hub-only CLI/API access rules, and shell safety (the zsh tool shell, and waiting on and stopping your own processes). |
 | `scion-conversation` | Always | Managing conversations, participants, and message retrieval (`scion conversation`). |
 | `scion-messaging` | Always *(with gated sections)* | Sending messages to users and agents (`scion message`), addressing, mentions, and history catch-up (see [Messaging & Notifications](/scion/hosted/user/messaging/)). Gates `references/decisions.md` and inline decision-prompt guidance on `web.decisions`, and its `--artifact` pointer on `hub.artifacts`. |
 | `scion-scheduler` | Always | One-shot and recurring [schedules](/scion/hosted/user/scheduling/) (`scion schedule`), time zones, scheduled container exec (`--type exec`), and the blocked-wait pairing rule. |

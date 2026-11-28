@@ -20,8 +20,10 @@ On substrate, `sciontool` runs root-context operations with an inherited `PATH` 
 
 ## What a failure means
 
-- **Unresolved command argument:** resolve bare command names with `rootexec.Resolve("<cmd>")` in the same function before calling `exec.Command`/`exec.CommandContext` (pair with `rootexec.Env(...)` so ambient `PATH`/`LD_*` variables are not inherited; use `rootexec.SelfExe()` for `/proc/self/exe` self-re-exec), or pass an absolute string literal.
+- **Unresolved command argument:** resolve bare command names with `rootexec.Resolve("<cmd>")` in the same function before calling `exec.Command`/`exec.CommandContext` (pair with `rootexec.Env(...)` so ambient `PATH`/`LD_*` variables are not inherited; use `rootexec.SelfExe()` for `/proc/self/exe` self-re-exec), or pass an absolute string literal. Tests of such code must inject the resolver or detector: `PATH` stubs do not reach a `rootexec.Resolve`d binary, so the test passes only on hosts that have the real one.
 - **Legitimate site the static check cannot prove** (for example, a privilege-dropped workload command or a helper-resolved path across an intervening call): add an `execSite` entry with a one-line reason to `execSiteAllowlist` in `pkg/sciontool/rootexec/guard_test.go`.
 - **Stale allowlist entry:** a listed call was removed, moved to another function, or rewritten—update or delete its entry in `execSiteAllowlist`.
 - **Renamed/dot `os/exec` import or escaping constructor value:** switch to plain `import "os/exec"` and call `exec.Command`/`exec.CommandContext` (or a package-level alias var) directly.
 - **New root-context package under `pkg/sciontool/`:** add the directory to `guardedDirs` in `pkg/sciontool/rootexec/guard_test.go`.
+
+The guard does not bound process lifetime. Each harness hook runs as its own short-lived `sciontool hook` process, so `sync.Once` means once per invocation; persist state that must hold once per agent. A timeout on `exec.CommandContext` with captured output does not bound wall time without `cmd.WaitDelay`, and after a normal exit `WaitDelay` only closes pipes, so kill the process group when descendants may keep stdout open.

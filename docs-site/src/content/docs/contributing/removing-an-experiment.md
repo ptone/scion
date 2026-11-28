@@ -1,6 +1,6 @@
 ---
 title: Removing an Experiment
-description: Checklist for retiring a hub-wide experiment, whether it graduates or is abandoned.
+description: Checklist for retiring a hub-wide experiment, whether it graduates or is abandoned, and for flipping its compiled default.
 ---
 
 This checklist covers retiring a registered experiment from `pkg/experiments/registry.go`. Retiring happens in one of two ways:
@@ -8,7 +8,7 @@ This checklist covers retiring a registered experiment from `pkg/experiments/reg
 - **Graduation:** the feature becomes permanent.
 - **Abandonment:** the feature is deleted.
 
-For how experiments work, see the [Experiments reference](/scion/reference/experiments/). This checklist was written from the first removal, the terminal workspace experiment (ptone/scion#4917). Use that PR as a worked example.
+Flipping an experiment's compiled default without retiring it is covered in [Flipping a default](#flipping-a-default). For how experiments work, see the [Experiments reference](/scion/reference/experiments/). This checklist was written from the first removal, the terminal workspace experiment (ptone/scion#4917). Use that PR as a worked example.
 
 ## 1. Decide and record
 
@@ -88,3 +88,12 @@ The release note goes in the PR description; there is no release-note file. Say:
 - [ ] Web, in `web/`: the touched unit tests, `npm run typecheck`, `npm run lint`, `npm run format:check`, `npm run build` and `npm run test:e2e-perf`. `typecheck` and `lint` don't cover the E2E sources, so also run `npm run lint:e2e` and `npm run lint:e2e-perf`.
 - [ ] Playwright: the suites whose files changed, and `web/e2e/experiments.spec.ts` (main config) when the experiments tab or its test changed.
 - [ ] Docs: `npm run build` in `docs-site/`, which runs the link validator.
+
+## Flipping a default
+
+Changing `Default` in `pkg/experiments/registry.go` (and `DEFAULT_ON_FLAGS` for web layers) changes behaviour for every hub without an override, including tests that never name the experiment. A graduation makes the same change permanent, so these checks apply to it too.
+
+- [ ] Find tests and fixtures that assume the old default: they build registries from `experiments.Default()` or assert one variant's layout without setting the flag. Set the flag explicitly in tests that assert one variant.
+- [ ] Find non-hub readers that resolve the experiment against the compiled registry (`git grep -n '<CONST>'` outside `pkg/hub`).
+- [ ] Run all `pkg/hub` shards on both tag sets, the full `./cmd` tests, and the full web unit suite, not only the experiment's own tests.
+- [ ] Code that reads the experiment before stored overrides load (startup bootstrap, migrations, init) always sees the compiled default. Don't document "disable it to roll back" for that behaviour.
