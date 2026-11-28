@@ -138,7 +138,7 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	var totalApprox bool
 	// Check if user has admin-level list visibility via permission.
 	// Direct unfiltered store listing is only safe when the caller also has
-	// unrestricted hub-wide project read access; otherwise project members
+	// unrestricted hub-wide project read access; otherwise project-scoped
 	// groups must be filtered by project read access.
 	hasAdminView := false
 	if identity != nil {
@@ -170,8 +170,8 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		groupItems, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
 	} else if identity != nil {
 		// Authenticated non-admin: use authorizedList for policy-enforced filtering
-		// and filter project members groups by project read access.
-		membersGroupsByID := make(map[string]*store.Group)
+		// and filter project-scoped groups by project read access.
+		projectGroupsByID := make(map[string]*store.Group)
 		projectReadCache := make(map[string]bool)
 		readCtx := withAuthzInputMemo(ctx)
 		groupReadBatch := func(ctx context.Context, ident Identity, resources []Resource) ([]bool, error) {
@@ -183,8 +183,8 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 				if !allowed[i] {
 					continue
 				}
-				g, isMembersGroup := membersGroupsByID[res.ID]
-				if !isMembersGroup {
+				g, isProjectGroup := projectGroupsByID[res.ID]
+				if !isProjectGroup {
 					continue
 				}
 				canRead, cached := projectReadCache[g.ProjectID]
@@ -205,9 +205,9 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 				return authorizedCandidatePage[store.Group]{}, err
 			}
 			for i := range page.Items {
-				if store.IsProjectMembersGroup(&page.Items[i]) {
+				if isProjectScopedGroup(&page.Items[i]) {
 					g := page.Items[i]
-					membersGroupsByID[g.ID] = &g
+					projectGroupsByID[g.ID] = &g
 				}
 			}
 			return authorizedCandidatePage[store.Group]{Items: page.Items, NextCursor: page.NextCursor}, nil
@@ -499,15 +499,23 @@ func (s *Server) handleGroupRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// isProjectScopedGroup reports whether group belongs to a project (such as
+// project:<slug>:members or project:<slug>:agents) and therefore requires
+// project read access on the owning project to be visible.
+func isProjectScopedGroup(group *store.Group) bool {
+	return group != nil && (group.ProjectID != "" || group.GroupType == store.GroupTypeProjectAgents)
+}
+
 // isGroupVisibleToCaller is the central visibility decision for groups.
-// Project members groups are visible only to callers with project read access
-// on the owning project; all other groups are visible. Any non-ErrNotFound
-// store error is returned so callers fail closed.
+// Project-scoped groups (including project members and project agents groups)
+// are visible only to callers with project read access on the owning project;
+// all other groups are visible. Any non-ErrNotFound store error is returned so
+// callers fail closed.
 func (s *Server) isGroupVisibleToCaller(ctx context.Context, identity Identity, group *store.Group) (bool, error) {
 	if group == nil {
 		return false, nil
 	}
-	if !store.IsProjectMembersGroup(group) {
+	if !isProjectScopedGroup(group) {
 		return true, nil
 	}
 	return s.canReadProjectStrict(ctx, identity, group.ProjectID)
@@ -585,7 +593,7 @@ func (s *Server) filterVisibleGroups(ctx context.Context, identity Identity, gro
 	filtered := make([]store.Group, 0, len(groups))
 	for i := range groups {
 		g := &groups[i]
-		if !store.IsProjectMembersGroup(g) {
+		if !isProjectScopedGroup(g) {
 			filtered = append(filtered, *g)
 			continue
 		}
