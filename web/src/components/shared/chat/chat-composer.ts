@@ -317,11 +317,17 @@ export class ScionChatComposer extends LitElement {
   /** W7: Upload in progress. */
   @state() private uploading = false;
 
-  /** Percent of the current large-upload batch sent, or null when using legacy upload. */
-  @state() private uploadPercent: number | null = null;
+  /** Active chunked chat attachment upload batches, each with its own AbortController. */
+  @state() private _uploadBatches: Array<{
+    id: number;
+    label: string;
+    percent: number;
+    controller: AbortController;
+  }> = [];
 
-  /** Abort controller for the active chunked chat attachment upload, if any. */
-  private _uploadAbortController: AbortController | null = null;
+  private _nextUploadBatchId = 0;
+
+  private _legacyUploadCount = 0;
 
   /** Artifacts picked with "Attach artifact", sent as references. */
   @state() private pendingArtifacts: PendingArtifact[] = [];
@@ -389,13 +395,10 @@ export class ScionChatComposer extends LitElement {
       // made in: a topic upload carries the topic's project, which a DM
       // refuses at send. Drafts keep only text, so they are dropped rather
       // than carried over.
-      this._uploadAbortController?.abort();
-      this._uploadAbortController = null;
+      this.abortAllUploads();
       this.pendingFiles = [];
       this.uploadFailures = [];
       this.pendingArtifacts = [];
-      this.uploading = false;
-      this.uploadPercent = null;
       this.resetMentionTracking();
       this.restoreDraft();
     }
@@ -1176,8 +1179,7 @@ export class ScionChatComposer extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    this._uploadAbortController?.abort();
-    this._uploadAbortController = null;
+    this.abortAllUploads();
     // Flush any pending draft so it is not lost when the component unmounts.
     this.flushDraft(this.conversationKey);
   }
@@ -1418,22 +1420,27 @@ export class ScionChatComposer extends LitElement {
           ${this.pendingArtifacts.length > 0 ? this.renderPendingArtifacts() : nothing}
           ${this.pendingFiles.length > 0 ? this.renderPendingFiles() : nothing}
           ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
-          ${this.uploading
-            ? html`<div class="upload-progress" role="status">
+          ${this._uploadBatches.map(
+            (batch) =>
+              html`<div class="upload-progress" role="status" data-upload-batch=${batch.id}>
                 <span
-                  >${this.uploadPercent !== null
-                    ? `Uploading... ${this.uploadPercent}%`
-                    : 'Uploading...'}</span
+                  >${this._uploadBatches.length > 1
+                    ? `Uploading ${batch.label}... ${batch.percent}%`
+                    : `Uploading... ${batch.percent}%`}</span
                 >
-                ${this._uploadAbortController
-                  ? html`<sl-button
-                      size="small"
-                      variant="text"
-                      class="upload-cancel-btn"
-                      @click=${() => this.cancelUpload()}
-                      >Cancel</sl-button
-                    >`
-                  : nothing}
+                <sl-button
+                  size="small"
+                  variant="text"
+                  class="upload-cancel-btn"
+                  data-upload-batch=${batch.id}
+                  @click=${() => this.cancelUpload(batch.id)}
+                  >Cancel</sl-button
+                >
+              </div>`
+          )}
+          ${this._legacyUploadCount > 0
+            ? html`<div class="upload-progress" role="status">
+                <span>Uploading...</span>
               </div>`
             : nothing}
         </div>
@@ -2017,9 +2024,26 @@ export class ScionChatComposer extends LitElement {
     await this.uploadFiles(Array.from(files));
   }
 
-  /** Cancel an in-progress large attachment upload. */
-  private cancelUpload(): void {
-    this._uploadAbortController?.abort();
+  private syncUploadingState(): void {
+    this.uploading = this._uploadBatches.length > 0 || this._legacyUploadCount > 0;
+  }
+
+  private abortAllUploads(): void {
+    for (const batch of this._uploadBatches) {
+      batch.controller.abort();
+    }
+    this._uploadBatches = [];
+    this._legacyUploadCount = 0;
+    this.uploading = false;
+  }
+
+  /** Cancel an in-progress large attachment upload batch (by ID, or latest if omitted). */
+  private cancelUpload(batchId?: number): void {
+    if (batchId !== undefined) {
+      this._uploadBatches.find((b) => b.id === batchId)?.controller.abort();
+      return;
+    }
+    this._uploadBatches[this._uploadBatches.length - 1]?.controller.abort();
   }
 
   /**
@@ -2048,10 +2072,14 @@ export class ScionChatComposer extends LitElement {
     const switchedAway = (): boolean => this.conversationKey !== uploadKey;
 
     if (isFeatureEnabled('hub.large_uploads')) {
+      const batchId = ++this._nextUploadBatchId;
       const controller = new AbortController();
-      this._uploadAbortController = controller;
-      this.uploading = true;
-      this.uploadPercent = 0;
+      const label = files.length === 1 ? files[0].name : `${files.length} files`;
+      this._uploadBatches = [
+        ...this._uploadBatches,
+        { id: batchId, label, percent: 0, controller },
+      ];
+      this.syncUploadingState();
       try {
         const [{ uploadChatAttachments }, { getUploadLimits, formatUploadSize }] =
           await Promise.all([
@@ -2086,7 +2114,10 @@ export class ScionChatComposer extends LitElement {
           legacyMaxFileSize: limits.maxAttachmentSize,
           onProgress: (sent, total) => {
             if (switchedAway()) return;
-            this.uploadPercent = total > 0 ? Math.min(100, Math.round((sent / total) * 100)) : 100;
+            const pct = total > 0 ? Math.min(100, Math.round((sent / total) * 100)) : 100;
+            this._uploadBatches = this._uploadBatches.map((b) =>
+              b.id === batchId ? { ...b, percent: pct } : b
+            );
           },
           signal: controller.signal,
         });
@@ -2109,18 +2140,16 @@ export class ScionChatComposer extends LitElement {
           })
         );
       } finally {
-        if (this._uploadAbortController === controller) {
-          this._uploadAbortController = null;
-        }
+        this._uploadBatches = this._uploadBatches.filter((b) => b.id !== batchId);
         if (!switchedAway()) {
-          this.uploading = false;
-          this.uploadPercent = null;
+          this.syncUploadingState();
         }
       }
       return;
     }
 
-    this.uploading = true;
+    this._legacyUploadCount += 1;
+    this.syncUploadingState();
     try {
       const { apiFetch } = await import('../../../client/api.js');
       const { getUploadLimits, formatUploadSize } =
@@ -2206,7 +2235,8 @@ export class ScionChatComposer extends LitElement {
     } finally {
       // After a switch the indicator belongs to the new conversation, which
       // the switch already reset; an upload started there may be running.
-      if (!switchedAway()) this.uploading = false;
+      this._legacyUploadCount = Math.max(0, this._legacyUploadCount - 1);
+      if (!switchedAway()) this.syncUploadingState();
     }
   }
 

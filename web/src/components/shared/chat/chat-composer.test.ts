@@ -1321,4 +1321,137 @@ describe('composer — large uploads (hub.large_uploads)', () => {
       { name: 'over.bin', error: 'exceeds the maximum size of 10 MiB' },
     ]);
   });
+
+  it('gives overlapping upload batches independent abort controllers so cancelling one leaves the other running', async () => {
+    const { setFeatureFlag } = await import('../../../utils/feature-flags.js');
+    setFeatureFlag('hub.large_uploads', true);
+
+    const el = createComposer();
+    el.projectId = 'proj-large';
+    el.conversationMode = 'thread';
+    el.conversationKey = 'topic:proj-large:overlap';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const fileA = new File([new Uint8Array(9 * 1024 * 1024)], 'batch-a.bin', {
+      type: 'application/octet-stream',
+    });
+    const fileB = new File([new Uint8Array(9 * 1024 * 1024)], 'batch-b.bin', {
+      type: 'application/octet-stream',
+    });
+
+    const deletedIds: string[] = [];
+    let putAStarted!: () => void;
+    const putAStartedPromise = new Promise<void>((r) => {
+      putAStarted = r;
+    });
+    let putBStarted!: () => void;
+    const putBStartedPromise = new Promise<void>((r) => {
+      putBStarted = r;
+    });
+    let releaseB!: () => void;
+    const releaseBPromise = new Promise<void>((r) => {
+      releaseB = r;
+    });
+
+    apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url === '/api/v1/chat/attachments/uploads' && method === 'POST') {
+        const rawBody = typeof init?.body === 'string' ? init.body : '{}';
+        const body = JSON.parse(rawBody) as { name?: string };
+        const sid = body.name === 'batch-a.bin' ? 'upl_a' : 'upl_b';
+        return new Response(
+          JSON.stringify({
+            id: sid,
+            transport: 'hub_chunked',
+            chunkBytes: 8 * 1024 * 1024,
+            maxBytes: 1024 * 1024 * 1024,
+            received: 0,
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.startsWith('/api/v1/chat/attachments/uploads/upl_a?offset=') && method === 'PUT') {
+        putAStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('Aborted', 'AbortError'))
+          );
+        });
+      }
+      if (url.startsWith('/api/v1/chat/attachments/uploads/upl_b?offset=') && method === 'PUT') {
+        const off = Number(new URL(url, 'http://hub.test').searchParams.get('offset'));
+        const chunk = init?.body as Blob;
+        if (off === 0) {
+          putBStarted();
+          await releaseBPromise;
+          if (init?.signal?.aborted) {
+            throw new DOMException('Aborted', 'AbortError');
+          }
+        }
+        return new Response(
+          JSON.stringify({
+            received: off + chunk.size,
+            expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url === '/api/v1/chat/attachments/uploads/upl_b/complete' && method === 'POST') {
+        return new Response(
+          JSON.stringify({
+            id: 'att-b',
+            name: 'batch-b.bin',
+            mime: 'application/octet-stream',
+            size: fileB.size,
+            url: '/api/v1/chat/attachments/att-b',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (method === 'DELETE' && url.startsWith('/api/v1/chat/attachments/uploads/')) {
+        deletedIds.push(url.split('/').pop()!);
+        return new Response(null, { status: 204 });
+      }
+      return new Response('{}', { status: 500 });
+    });
+
+    // Start two overlapping batches.
+    const uploadA = el.uploadFiles([fileA]);
+    const uploadB = el.uploadFiles([fileB]);
+    await Promise.all([putAStartedPromise, putBStartedPromise]);
+    await el.updateComplete;
+
+    // Both batches have their own Cancel button.
+    const cancelButtons = Array.from(
+      el.shadowRoot?.querySelectorAll('.upload-cancel-btn') ?? []
+    ) as HTMLElement[];
+    expect(cancelButtons).toHaveLength(2);
+
+    // Cancel batch A only; batch B must keep running and remain uploading.
+    cancelButtons[0].click();
+    await uploadA;
+    await el.updateComplete;
+
+    expect(deletedIds).toEqual(['upl_a']);
+    expect(el.uploading).toBe(true);
+
+    // Let batch B finish and verify it attaches cleanly without being aborted.
+    releaseB();
+    await uploadB;
+    await el.updateComplete;
+
+    expect(deletedIds).toEqual(['upl_a']);
+    expect(el.uploading).toBe(false);
+    expect(el.pendingFiles).toEqual([
+      {
+        id: 'att-b',
+        name: 'batch-b.bin',
+        mime: 'application/octet-stream',
+        size: fileB.size,
+        url: '/api/v1/chat/attachments/att-b',
+      },
+    ]);
+  });
 });

@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -920,4 +921,69 @@ func TestChatUploads_MinChunkFloorAndPartsCap(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, afterCap.Parts, 3, "refused commit must not append to parts")
 	assert.Empty(t, afterCap.LeaseToken, "refused commit must release the lease")
+}
+
+// TestChatUploads_SweeperNilBlobsKeepsRowAndBacksOff verifies that when no blob
+// store is configured, the sweeper does not delete terminal chat_attachment
+// rows without cleaning up staging; instead it logs once, keeps the row, and
+// backs off its updated_at timestamp until a blob store is available.
+func TestChatUploads_SweeperNilBlobsKeepsRowAndBacksOff(t *testing.T) {
+	env := newChatUploadEnv(t, true, true)
+	ctx := context.Background()
+
+	// Start a chat attachment session and upload one chunk so staging exists.
+	minChunk := bytes.Repeat([]byte("z"), uploadMinChunkBytes)
+	startRec := chatUploadJSONReq(t, env.srv, env.token, http.MethodPost, "/api/v1/chat/attachments/uploads",
+		UploadStartRequest{Name: "nil-blobs.bin", Size: uploadMinChunkBytes + 10})
+	require.Equal(t, http.StatusCreated, startRec.Code)
+	var started UploadStartResponse
+	require.NoError(t, json.Unmarshal(startRec.Body.Bytes(), &started))
+	require.Equal(t, http.StatusOK, chatUploadChunkReq(t, env.srv, env.token,
+		"/api/v1/chat/attachments/uploads/"+started.ID+"?offset=0", minChunk).Code)
+
+	sess, err := env.st.GetUploadSession(ctx, started.ID)
+	require.NoError(t, err)
+
+	// Transition to expired (terminal) while blobs are still configured, then
+	// clear the server's blob store before the terminal-row retention window elapses.
+	require.NoError(t, env.st.TransitionUploadSession(ctx, sess.ID,
+		[]store.UploadSessionState{store.UploadStateUploading}, store.UploadStateExpired, "", nil))
+	env.srv.SetStorage(nil)
+
+	// Capture slog output to verify the nil-blobs warning is logged once.
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	// First sweep past the 15-minute terminal retention window.
+	sweepAt1 := sess.UpdatedAt.Add(20 * time.Minute)
+	env.srv.sweepUploadSessions(ctx, sweepAt1)
+
+	kept1, err := env.st.GetUploadSession(ctx, sess.ID)
+	require.NoError(t, err, "sweeper must not delete chat_attachment row when blobs is nil")
+	assert.Equal(t, store.UploadStateExpired, kept1.State)
+	assert.False(t, kept1.UpdatedAt.Before(sweepAt1), "sweeper must back off updated_at on nil blobs")
+	assert.Equal(t, 1, strings.Count(logBuf.String(), "blob store not configured"),
+		"nil-blobs warning should be logged once")
+
+	// Second sweep another 20 minutes later still keeps the row and does not repeat the warning.
+	sweepAt2 := sweepAt1.Add(20 * time.Minute)
+	env.srv.sweepUploadSessions(ctx, sweepAt2)
+
+	kept2, err := env.st.GetUploadSession(ctx, sess.ID)
+	require.NoError(t, err, "sweeper must keep chat_attachment row across repeated sweeps while blobs is nil")
+	assert.False(t, kept2.UpdatedAt.Before(sweepAt2), "sweeper must back off updated_at again")
+	assert.Equal(t, 1, strings.Count(logBuf.String(), "blob store not configured"),
+		"nil-blobs warning must not repeat on subsequent sweeps")
+
+	// Restore the blob store: next sweep past retention removes staging and deletes the row.
+	env.srv.SetStorage(env.blobs)
+	env.srv.sweepUploadSessions(ctx, sweepAt2.Add(20*time.Minute))
+
+	_, err = env.st.GetUploadSession(ctx, sess.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "sweeper should delete row once blob store is restored and staging cleaned")
+	listedAfter, err := env.blobs.List(ctx, storage.ListOptions{Prefix: storage.DirPrefix(sess.StagingRef)})
+	require.NoError(t, err)
+	assert.Empty(t, listedAfter.Objects, "staged objects should be cleaned once blob store is restored")
 }

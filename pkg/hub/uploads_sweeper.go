@@ -30,6 +30,19 @@ const (
 	uploadSweepMaxBatches     = 20
 )
 
+var errUploadBlobStoreUnconfigured = errors.New("blob store not configured")
+
+func (s *Server) logUploadSweepCleanupFailure(ctx context.Context, msg string, sess *store.UploadSession, err error) {
+	if errors.Is(err, errUploadBlobStoreUnconfigured) {
+		if s.uploadSweepNilBlobsLogged.CompareAndSwap(false, true) {
+			slog.WarnContext(ctx, "upload-session-sweep: blob store not configured; deferring chat_attachment staging cleanup and row deletion",
+				"session_id", sess.ID, "state", sess.State)
+		}
+		return
+	}
+	slog.WarnContext(ctx, msg, "session_id", sess.ID, "state", sess.State, "error", err)
+}
+
 // uploadSessionSweepHandler returns the recurring singleton job that expires
 // idle/hard-expired upload sessions, fails stuck finalizing sessions, and
 // removes staging + rows for terminal sessions past the 15-minute retention
@@ -76,8 +89,7 @@ func (s *Server) sweepUploadSessions(ctx context.Context, now time.Time) {
 				}
 				progressed = true
 				if cerr := s.cleanupUploadSessionStaging(ctx, sess); cerr != nil {
-					slog.WarnContext(ctx, "upload-session-sweep: best-effort staging cleanup after expiry failed",
-						"session_id", sess.ID, "error", cerr)
+					s.logUploadSweepCleanupFailure(ctx, "upload-session-sweep: best-effort staging cleanup after expiry failed", sess, cerr)
 				}
 
 			case sess.State == store.UploadStateFinalizing:
@@ -90,14 +102,12 @@ func (s *Server) sweepUploadSessions(ctx context.Context, now time.Time) {
 				}
 				progressed = true
 				if cerr := s.cleanupUploadSessionStaging(ctx, sess); cerr != nil {
-					slog.WarnContext(ctx, "upload-session-sweep: best-effort staging cleanup after finalizing failure failed",
-						"session_id", sess.ID, "error", cerr)
+					s.logUploadSweepCleanupFailure(ctx, "upload-session-sweep: best-effort staging cleanup after finalizing failure failed", sess, cerr)
 				}
 
 			case sess.State.IsTerminal():
 				if err := s.cleanupUploadSessionStaging(ctx, sess); err != nil {
-					slog.WarnContext(ctx, "upload-session-sweep: staging cleanup failed; backing off row for retry",
-						"session_id", sess.ID, "state", sess.State, "error", err)
+					s.logUploadSweepCleanupFailure(ctx, "upload-session-sweep: staging cleanup failed; backing off row for retry", sess, err)
 					if terr := s.store.TouchUploadSessionUpdatedAt(ctx, sess.ID, now); terr != nil && !errors.Is(terr, store.ErrNotFound) {
 						slog.WarnContext(ctx, "upload-session-sweep: failed to back off terminal session row",
 							"session_id", sess.ID, "error", terr)
@@ -181,8 +191,9 @@ func (s *Server) cleanupUploadSessionStaging(ctx context.Context, sess *store.Up
 	case store.UploadTargetChatAttachment:
 		blobs := s.artifactBackend().Blobs
 		if blobs == nil {
-			return nil
+			return errUploadBlobStoreUnconfigured
 		}
+		s.uploadSweepNilBlobsLogged.Store(false)
 		return newObjectUploadSink(blobs, nil).Cleanup(ctx, sess)
 
 	default:

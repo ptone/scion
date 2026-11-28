@@ -2280,6 +2280,10 @@ type Server struct {
 	// logs unavailability at most once while shared project storage is not
 	// mounted on this Hub (ptone/scion#7932).
 	nfsOrphanUnavailableLogged atomic.Bool
+	// uploadSweepNilBlobsLogged ensures upload-session-sweep logs at most once
+	// while no blob store is configured for chat_attachment staging cleanup
+	// (ptone/scion#8654).
+	uploadSweepNilBlobsLogged atomic.Bool
 	// projectConfigIdentity records shared-backend projects whose
 	// <ProjectRoot>/.scion/project-id names another project
 	// (project_config_identity health check).
