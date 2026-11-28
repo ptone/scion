@@ -21,6 +21,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"go/format"
 	"os"
@@ -62,12 +63,16 @@ var defOrder = []string{
 	"AudioSource",
 }
 
-// fieldOrder preserves Harbor Pydantic field declaration order so marshaled
-// JSON has stable, human-friendly key ordering.
+// fieldOrder preserves Harbor Pydantic model_fields declaration order
+// (harbor==0.27.0) so marshaled JSON has stable key ordering matching Harbor.
+// Note: schema.json is exported with sort_keys=True for deterministic diffs,
+// which erases Pydantic declaration order, so hack/check-atif-schema.sh cannot
+// detect a future field reorder in Harbor; update this table if Harbor changes
+// field declaration order.
 var fieldOrder = map[string][]string{
 	"Trajectory": {
 		"schema_version", "session_id", "trajectory_id", "agent", "steps",
-		"final_metrics", "notes", "continued_trajectory_ref", "subagent_trajectories", "extra",
+		"notes", "final_metrics", "continued_trajectory_ref", "extra", "subagent_trajectories",
 	},
 	"Agent": {
 		"name", "version", "model_name", "tool_definitions", "extra",
@@ -87,7 +92,7 @@ var fieldOrder = map[string][]string{
 		"source_call_id", "content", "subagent_trajectory_ref", "extra",
 	},
 	"SubagentTrajectoryRef": {
-		"session_id", "trajectory_id", "trajectory_path", "extra",
+		"trajectory_id", "session_id", "trajectory_path", "extra",
 	},
 	"Metrics": {
 		"prompt_tokens", "completion_tokens", "cached_tokens", "cost_usd",
@@ -116,6 +121,9 @@ var intFields = map[string]bool{
 }
 
 func main() {
+	outPath := flag.String("out", "types_gen.go", "output Go source file path")
+	flag.Parse()
+
 	raw, err := os.ReadFile("schema.json")
 	if err != nil {
 		fatalf("read schema.json: %v", err)
@@ -198,8 +206,8 @@ const SchemaVersionV18 = "ATIF-v1.8"
 	if err != nil {
 		fatalf("format generated Go source: %v\n%s", err, buf.String())
 	}
-	if err := os.WriteFile("types_gen.go", formatted, 0o644); err != nil {
-		fatalf("write types_gen.go: %v", err)
+	if err := os.WriteFile(*outPath, formatted, 0o644); err != nil {
+		fatalf("write %s: %v", *outPath, err)
 	}
 }
 

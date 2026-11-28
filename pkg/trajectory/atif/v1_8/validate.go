@@ -17,9 +17,10 @@ package v1_8
 import (
 	"bytes"
 	_ "embed"
-	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
@@ -78,9 +79,21 @@ func compileSchemas() (*jsonschema.Schema, *jsonschema.Schema, error) {
 	return trajectorySchema, stepSchema, compileErr
 }
 
-// ValidateTrajectoryJSON validates raw JSON bytes against the committed
-// Harbor ATIF-v1.8 JSON Schema using santhosh-tekuri/jsonschema/v6.
+// ValidateTrajectoryJSON validates raw JSON bytes against both the committed
+// Harbor ATIF-v1.8 JSON Schema (via santhosh-tekuri/jsonschema/v6) and Harbor's
+// cross-field Pydantic semantic invariants.
 func ValidateTrajectoryJSON(data []byte) error {
+	if err := validateTrajectorySchemaOnly(data); err != nil {
+		return err
+	}
+	t, err := ParseTrajectory(data)
+	if err != nil {
+		return err
+	}
+	return validateTrajectorySemantics(t)
+}
+
+func validateTrajectorySchemaOnly(data []byte) error {
 	schema, _, err := compileSchemas()
 	if err != nil {
 		return err
@@ -96,7 +109,9 @@ func ValidateTrajectoryJSON(data []byte) error {
 }
 
 // ValidateStepJSON validates a single ATIF-v1.8 Step JSON object against
-// #/$defs/Step in the committed Harbor ATIF-v1.8 JSON Schema.
+// #/$defs/Step in the committed Harbor ATIF-v1.8 JSON Schema and Harbor's
+// Step-level semantic invariants (timestamp format, agent-only fields,
+// llm_call_count == 0 rules, and ContentPart text/source constraints).
 func ValidateStepJSON(data []byte) error {
 	_, schema, err := compileSchemas()
 	if err != nil {
@@ -109,22 +124,26 @@ func ValidateStepJSON(data []byte) error {
 	if err := schema.Validate(v); err != nil {
 		return fmt.Errorf("ATIF-v1.8 step schema validation failed: %w", err)
 	}
-	return nil
+	step, err := ParseStep(data)
+	if err != nil {
+		return err
+	}
+	return validateStepSemantics(step)
 }
 
-// ValidateTrajectory marshals t to JSON and validates it against the committed
-// ATIF-v1.8 JSON Schema as well as Harbor's cross-field semantic invariants
-// (sequential step IDs, agent-only step fields, llm_call_count=0 restrictions,
-// tool_call_id references, and embedded subagent trajectory_id uniqueness).
+// ValidateTrajectory encodes t with EncodeTrajectory and validates it against
+// both the committed ATIF-v1.8 JSON Schema and Harbor's cross-field semantic
+// invariants (sequential step IDs, Step-level rules, tool_call_id references,
+// and embedded subagent trajectory_id uniqueness).
 func ValidateTrajectory(t *Trajectory) error {
 	if t == nil {
 		return fmt.Errorf("trajectory is nil")
 	}
-	data, err := json.Marshal(t)
+	data, err := EncodeTrajectory(t)
 	if err != nil {
-		return fmt.Errorf("marshal ATIF trajectory: %w", err)
+		return fmt.Errorf("encode ATIF trajectory: %w", err)
 	}
-	if err := ValidateTrajectoryJSON(data); err != nil {
+	if err := validateTrajectorySchemaOnly(data); err != nil {
 		return err
 	}
 	return validateTrajectorySemantics(t)
@@ -137,30 +156,8 @@ func validateTrajectorySemantics(t *Trajectory) error {
 		if step.StepID != expectedID {
 			return fmt.Errorf("steps[%d].step_id: expected %d (sequential from 1), got %d", i, expectedID, step.StepID)
 		}
-		if step.Source != "agent" {
-			if step.ModelName != nil {
-				return fmt.Errorf("steps[%d].model_name is only allowed when source is 'agent' (got %q)", i, step.Source)
-			}
-			if step.ReasoningEffort != nil {
-				return fmt.Errorf("steps[%d].reasoning_effort is only allowed when source is 'agent' (got %q)", i, step.Source)
-			}
-			if step.ReasoningContent != nil {
-				return fmt.Errorf("steps[%d].reasoning_content is only allowed when source is 'agent' (got %q)", i, step.Source)
-			}
-			if len(step.ToolCalls) > 0 {
-				return fmt.Errorf("steps[%d].tool_calls is only allowed when source is 'agent' (got %q)", i, step.Source)
-			}
-			if step.Metrics != nil {
-				return fmt.Errorf("steps[%d].metrics is only allowed when source is 'agent' (got %q)", i, step.Source)
-			}
-		}
-		if step.Source == "agent" && step.LLMCallCount != nil && *step.LLMCallCount == 0 {
-			if step.Metrics != nil {
-				return fmt.Errorf("steps[%d].metrics must be absent when llm_call_count is 0", i)
-			}
-			if step.ReasoningContent != nil {
-				return fmt.Errorf("steps[%d].reasoning_content must be absent when llm_call_count is 0", i)
-			}
+		if err := validateStepSemantics(step); err != nil {
+			return fmt.Errorf("steps[%d]: %w", i, err)
 		}
 		if step.Observation != nil {
 			callIDs := make(map[string]struct{}, len(step.ToolCalls))
@@ -194,4 +191,122 @@ func validateTrajectorySemantics(t *Trajectory) error {
 		}
 	}
 	return nil
+}
+
+// validateStepSemantics enforces Harbor's Step and ContentPart Pydantic
+// validators (step.py and content.py).
+func validateStepSemantics(step *Step) error {
+	if step == nil {
+		return fmt.Errorf("step is nil")
+	}
+	if step.Timestamp != nil {
+		if err := validateISO8601Timestamp(*step.Timestamp); err != nil {
+			return fmt.Errorf("timestamp: %w", err)
+		}
+	}
+	if step.Source != "agent" {
+		if step.ModelName != nil {
+			return fmt.Errorf("model_name is only allowed when source is 'agent' (got %q)", step.Source)
+		}
+		if step.ReasoningEffort != nil {
+			return fmt.Errorf("reasoning_effort is only allowed when source is 'agent' (got %q)", step.Source)
+		}
+		if step.ReasoningContent != nil {
+			return fmt.Errorf("reasoning_content is only allowed when source is 'agent' (got %q)", step.Source)
+		}
+		if step.ToolCalls != nil {
+			return fmt.Errorf("tool_calls is only allowed when source is 'agent' (got %q)", step.Source)
+		}
+		if step.Metrics != nil {
+			return fmt.Errorf("metrics is only allowed when source is 'agent' (got %q)", step.Source)
+		}
+	}
+	if step.Source == "agent" && step.LLMCallCount != nil && *step.LLMCallCount == 0 {
+		if step.Metrics != nil {
+			return fmt.Errorf("metrics must be absent when llm_call_count is 0")
+		}
+		if step.ReasoningContent != nil {
+			return fmt.Errorf("reasoning_content must be absent when llm_call_count is 0")
+		}
+	}
+
+	if step.Message.IsParts {
+		for i := range step.Message.Parts {
+			if err := validateContentPart(&step.Message.Parts[i]); err != nil {
+				return fmt.Errorf("message[%d]: %w", i, err)
+			}
+		}
+	}
+	if step.Observation != nil {
+		for i := range step.Observation.Results {
+			c := step.Observation.Results[i].Content
+			if c != nil && c.IsParts {
+				for j := range c.Parts {
+					if err := validateContentPart(&c.Parts[j]); err != nil {
+						return fmt.Errorf("observation.results[%d].content[%d]: %w", i, j, err)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateContentPart(p *ContentPart) error {
+	switch p.Type {
+	case "text":
+		if p.Text == nil {
+			return fmt.Errorf("type='text' requires 'text' field")
+		}
+		if p.Source != nil {
+			return fmt.Errorf("type='text' must not have 'source' field")
+		}
+	case "image":
+		if p.Text != nil {
+			return fmt.Errorf("type='image' must not have 'text' field")
+		}
+		if p.Source == nil || p.Source.Image == nil || p.Source.Audio != nil {
+			return fmt.Errorf("type='image' requires an ImageSource")
+		}
+	case "audio":
+		if p.Text != nil {
+			return fmt.Errorf("type='audio' must not have 'text' field")
+		}
+		if p.Source == nil || p.Source.Audio == nil || p.Source.Image != nil {
+			return fmt.Errorf("type='audio' requires an AudioSource")
+		}
+	default:
+		return fmt.Errorf("unsupported content part type %q", p.Type)
+	}
+	return nil
+}
+
+// iso8601Layouts covers the common ISO 8601 forms accepted by Python's
+// datetime.fromisoformat(v.replace("Z", "+00:00")): RFC 3339 (with/without
+// fractional seconds), space-separated datetime, naive datetime, and date-only.
+// Note: Go is intentionally slightly stricter than Python 3.11+ fromisoformat
+// on esoteric forms (e.g. week dates like 2026-W01-1); Scion producers always
+// emit RFC 3339 UTC timestamps.
+var iso8601Layouts = []string{
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05Z07:00",
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02T15:04:05",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05",
+	"2006-01-02",
+}
+
+func validateISO8601Timestamp(v string) error {
+	if strings.TrimSpace(v) != v || v == "" {
+		return fmt.Errorf("invalid ISO 8601 timestamp %q", v)
+	}
+	for _, layout := range iso8601Layouts {
+		if _, err := time.Parse(layout, v); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid ISO 8601 timestamp %q", v)
 }

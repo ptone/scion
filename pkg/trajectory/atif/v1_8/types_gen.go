@@ -26,11 +26,11 @@ type Trajectory struct {
 	TrajectoryID           *string        `json:"trajectory_id,omitempty"`
 	Agent                  Agent          `json:"agent"`
 	Steps                  []Step         `json:"steps"`
-	FinalMetrics           *FinalMetrics  `json:"final_metrics,omitempty"`
 	Notes                  *string        `json:"notes,omitempty"`
+	FinalMetrics           *FinalMetrics  `json:"final_metrics,omitempty"`
 	ContinuedTrajectoryRef *string        `json:"continued_trajectory_ref,omitempty"`
-	SubagentTrajectories   []Trajectory   `json:"subagent_trajectories,omitempty"`
 	Extra                  map[string]any `json:"extra,omitempty"`
+	SubagentTrajectories   []Trajectory   `json:"subagent_trajectories,omitempty"`
 }
 
 // Agent: Agent configuration.
@@ -82,8 +82,8 @@ type ObservationResult struct {
 
 // SubagentTrajectoryRef: Reference to a delegated subagent trajectory.
 type SubagentTrajectoryRef struct {
-	SessionID      *string        `json:"session_id,omitempty"`
 	TrajectoryID   *string        `json:"trajectory_id,omitempty"`
+	SessionID      *string        `json:"session_id,omitempty"`
 	TrajectoryPath *string        `json:"trajectory_path,omitempty"`
 	Extra          map[string]any `json:"extra,omitempty"`
 }

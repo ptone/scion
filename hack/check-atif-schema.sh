@@ -14,12 +14,13 @@
 # limitations under the License.
 
 # Checks that pkg/trajectory/atif/v1_8/schema.json matches the JSON Schema
-# exported by the pinned harbor==0.27.0 Pydantic models, and validates any
-# golden *.atif.json fixtures under pkg/trajectory/convert/ against Harbor's
-# Pydantic Trajectory.model_validate_json.
+# exported by the pinned harbor==0.27.0 Pydantic models, validates any golden
+# *.atif.json fixtures under pkg/trajectory/convert/ against Harbor's Pydantic
+# Trajectory.model_validate_json, and confirms Harbor rejects every negative
+# fixture under pkg/trajectory/atif/v1_8/testdata/invalid/.
 #
-# Locally (CI unset), skips with exit 0 and a clear message if python3, venv,
-# or PyPI network access is unavailable. Under CI (CI non-empty), fails hard.
+# Locally (CI unset), skips with exit 0 and a clear message if python3 (>=3.12),
+# venv, or PyPI network access is unavailable. Under CI (CI non-empty), fails hard.
 
 set -euo pipefail
 
@@ -39,6 +40,11 @@ skip_or_fail() {
 
 if ! command -v python3 >/dev/null 2>&1; then
     skip_or_fail "python3 not found in PATH; cannot run ATIF-v1.8 schema drift check"
+fi
+
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)'; then
+    PY_VER="$(python3 --version 2>&1 || echo unknown)"
+    skip_or_fail "python3 >= 3.12 is required for harbor==0.27.0 (found ${PY_VER})"
 fi
 
 TMPDIR_WORK="$(mktemp -d "${TMPDIR:-/tmp}/atif-schema-check.XXXXXX")"
@@ -93,4 +99,43 @@ for path_str in sys.argv[1:]:
 if failed:
     sys.exit(1)
 EOF
+fi
+
+# Verify Harbor Pydantic rejects every negative fixture (proves Go and Pydantic agree).
+INVALID_DIR="${REPO_ROOT}/pkg/trajectory/atif/v1_8/testdata/invalid"
+if [ -d "${INVALID_DIR}" ]; then
+    INVALID_FILES=()
+    while IFS= read -r -d '' f; do
+        INVALID_FILES+=("$f")
+    done < <(find "${INVALID_DIR}" -maxdepth 1 -name '*.json' -print0 | sort -z)
+
+    if [ "${#INVALID_FILES[@]}" -gt 0 ]; then
+        "${VENV}/bin/python" - "${INVALID_FILES[@]}" <<'EOF'
+import sys
+from pathlib import Path
+from pydantic import ValidationError
+from harbor.models.trajectories import Step, Trajectory
+
+failed = 0
+for path_str in sys.argv[1:]:
+    p = Path(path_str)
+    raw = p.read_text(encoding="utf-8")
+    if p.name.endswith(".step.json"):
+        model = Step
+    elif p.name.endswith(".trajectory.json"):
+        model = Trajectory
+    else:
+        print(f"FAIL: unknown negative fixture naming convention: {p}", file=sys.stderr)
+        failed += 1
+        continue
+    try:
+        model.model_validate_json(raw)
+        print(f"FAIL (Harbor unexpectedly accepted negative fixture): {p}", file=sys.stderr)
+        failed += 1
+    except ValidationError:
+        print(f"OK (Harbor rejected negative fixture): {p.name}")
+if failed:
+    sys.exit(1)
+EOF
+    fi
 fi
