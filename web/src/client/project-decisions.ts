@@ -141,6 +141,7 @@ export interface ProjectDecisionLogEntryView {
   choiceId: string;
   label: string;
   otherText?: string;
+  comment?: string;
   matchedDefault: boolean;
   previousChoiceLabel?: string;
   previousOtherText?: string;

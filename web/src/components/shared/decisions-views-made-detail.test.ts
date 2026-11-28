@@ -538,3 +538,89 @@ describe('Made awaiting confirmation badge', () => {
     expect(root.querySelector('[data-awaiting-confirmation]')).toBeNull();
   });
 });
+
+describe('Made answer comment rendering', () => {
+  it('renders no comment markup when comment is absent', () => {
+    const root = mountTemplate(
+      renderMadeTableAndMobileList([entry()], {
+        currentUserId: 'u-me',
+        showProjectColumn: false,
+        defaultProjectId: 'p-1',
+        disclosure: disclosure(['ans-1']),
+      })
+    );
+    expect(root.querySelector('[data-answer-comment]')).toBeNull();
+    expect(root.querySelector('[data-set-comment-tag]')).toBeNull();
+    expect(root.querySelector('[data-detail-comment]')).toBeNull();
+    expect(root.querySelector('[data-answer-cell]')?.classList.contains('ans')).toBe(false);
+  });
+
+  it('shows clamped comment with title in answer cell and full text in expanded row', () => {
+    const cmt =
+      'Staging, but skip the load test this time: the cluster is shared with the perf team until Friday.';
+    const root = mountTemplate(
+      renderMadeTableAndMobileList([entry({ comment: cmt })], {
+        currentUserId: 'u-me',
+        showProjectColumn: false,
+        defaultProjectId: 'p-1',
+        disclosure: disclosure(['ans-1']),
+      })
+    );
+    const cell = root.querySelector('[data-answer-cell]')!;
+    expect(cell.classList.contains('ans')).toBe(true);
+    const cmtEl = cell.querySelector<HTMLElement>('[data-answer-comment]')!;
+    expect(cmtEl).not.toBeNull();
+    expect(cmtEl.classList.contains('made-cmt-clamp')).toBe(true);
+    expect(cmtEl.getAttribute('title')).toBe(cmt);
+    expect(text(cmtEl)).toBe(cmt);
+    expect(cmtEl.querySelector('[data-set-comment-tag]')).toBeNull();
+
+    // Expanded detail shows full comment without set-comment tag.
+    const detailCmt = root.querySelector('[data-detail-comment]')!;
+    expect(text(detailCmt)).toBe(cmt);
+    expect(root.querySelector('[data-detail-set-comment]')).toBeNull();
+
+    // Mobile item also renders the clamped comment with title.
+    const mobileCmt = root.querySelector<HTMLElement>(
+      '[data-mobile-answer="ans-1"] [data-answer-comment]'
+    )!;
+    expect(mobileCmt).not.toBeNull();
+    expect(mobileCmt.getAttribute('title')).toBe(cmt);
+    expect(text(mobileCmt)).toBe(cmt);
+  });
+
+  it('adds "set comment" tag on rows with a batchId', () => {
+    const cmt = 'Hold the announcement until the canary has run for an hour.';
+    const root = mountTemplate(
+      renderMadeTableAndMobileList([entry({ comment: cmt, batchId: 'batch-1' })], {
+        currentUserId: 'u-me',
+        showProjectColumn: false,
+        defaultProjectId: 'p-1',
+        disclosure: disclosure(['ans-1']),
+      })
+    );
+    const cellTag = root.querySelector('[data-answer-cell] [data-set-comment-tag]');
+    expect(text(cellTag)).toBe('set comment');
+    const detailTag = root.querySelector('[data-detail-set-comment]');
+    expect(text(detailTag)).toBe('set comment');
+    const mobileTag = root.querySelector('[data-mobile-answer="ans-1"] [data-set-comment-tag]');
+    expect(text(mobileTag)).toBe('set comment');
+  });
+
+  it('renders comment as plain text (no HTML or Markdown injection)', () => {
+    const hostile = '<img src=x onerror="window.__pwned=1"><b>bold</b> **md** @alice';
+    const root = mountTemplate(
+      renderMadeTableAndMobileList([entry({ comment: hostile })], {
+        currentUserId: 'u-me',
+        showProjectColumn: false,
+        defaultProjectId: 'p-1',
+        disclosure: disclosure(['ans-1']),
+      })
+    );
+    expect(root.querySelector('img')).toBeNull();
+    expect(root.querySelector('[data-answer-comment] b')).toBeNull();
+    expect(root.querySelector('[data-detail-comment] b')).toBeNull();
+    expect(text(root.querySelector('[data-answer-cell] [data-answer-comment]'))).toBe(hostile);
+    expect(text(root.querySelector('[data-detail-comment]'))).toBe(hostile);
+  });
+});
