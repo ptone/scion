@@ -37,6 +37,7 @@ var guardedDirs = []string{
 	"pkg/sciontool/supervisor",
 	"pkg/sciontool/services",
 	"pkg/sciontool/telemetry",
+	"pkg/sciontool/trajectory",
 }
 
 // execSite identifies one exec.Command/exec.CommandContext call site
@@ -187,6 +188,16 @@ var execSiteAllowlist = map[execSite]string{
 		Func: "runExec",
 		Call: `execCommandContext(runCtx, shPath, "-c", cmdString)`,
 	}: "shPath comes from execResolve (rootexec.Resolve) a few lines above",
+
+	// trajectory/normalize_exec_unix.go's buildCommand: selfExe defaults to
+	// rootexec.SelfExe() ("/proc/self/exe") and is validated as an absolute
+	// path in NewSandboxExecutor; the child runs with dropped workload
+	// Credential (failing closed if UID/GID <= 0) and a from-scratch env.
+	{
+		File: "pkg/sciontool/trajectory/normalize_exec_unix.go",
+		Func: "SandboxExecutor.buildCommand",
+		Call: `exec.CommandContext(ctx, selfExe, shimArgs...)`,
+	}: "selfExe defaults to rootexec.SelfExe() (/proc/self/exe), validated absolute, and runs with dropped workload Credential",
 }
 
 // aliasKind records what kind of exec constructor a package-level var
