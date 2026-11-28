@@ -644,6 +644,11 @@ jobs:
           esac
           exit "$rc"
 
+      - name: Check ATIF-v1.8 Schema Drift
+        if: ${{ !cancelled() }}
+        run: |
+          CI=true ./hack/check-atif-schema.sh
+
       - name: Test Image and CD Scripts
         run: |
           if ! make test-image-scripts; then
