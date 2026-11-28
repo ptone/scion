@@ -289,6 +289,8 @@ var prefixSubRouteTable = []prefixSubRouteRow{
 	{prefix: "/api/v1/users/", pattern: "/api/v1/users/{id}/delete-blockers", methods: []string{http.MethodGet}},
 	{prefix: "/api/v1/users/", pattern: "/api/v1/users/{id}/deletion", methods: []string{http.MethodGet}},
 	{prefix: "/api/v1/users/", pattern: "/api/v1/users/{id}/usage", methods: []string{http.MethodGet}},
+	{prefix: "/api/v1/users/", pattern: "/api/v1/users/{id}/usage/budgets", methods: []string{http.MethodGet}},
+	{prefix: "/api/v1/users/", pattern: "/api/v1/users/{id}/usage/budgets/{budgetId}:override", methods: []string{http.MethodPost}},
 
 	// /api/v1/users/me/injected-skills/
 	{prefix: "/api/v1/users/me/injected-skills/", pattern: "/api/v1/users/me/injected-skills/{id}", methods: []string{http.MethodDelete}},
