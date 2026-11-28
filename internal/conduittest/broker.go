@@ -16,7 +16,9 @@ package conduittest
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -31,13 +33,15 @@ import (
 
 // BrokerOptions configures a fake Conduit broker.
 type BrokerOptions struct {
-	HubURL       string
-	BrokerID     string
-	BrokerSecret []byte
-	Version      string
-	Incarnation  string
-	RPCHandler   conduit.RPCHandler
-	Rand         func(int64) int64
+	HubURL          string
+	BrokerID        string
+	BrokerSecret    []byte
+	Version         string
+	Incarnation     string
+	RPCHandler      conduit.RPCHandler
+	Rand            func(int64) int64
+	HTTPClient      *http.Client
+	TLSClientConfig *tls.Config
 }
 
 // Broker is a fake broker wired with the real runtimebroker.ConduitDialer and
@@ -70,6 +74,9 @@ func StartBroker(opts BrokerOptions) (*Broker, error) {
 	}
 
 	wsDialer := NewFaultWSDialer()
+	if opts.TLSClientConfig != nil {
+		wsDialer.Dialer().TLSClientConfig = opts.TLSClientConfig
+	}
 	d, err := runtimebroker.NewConduitDialer(runtimebroker.ConduitDialConfig{
 		HubEndpoint: opts.HubURL,
 		BrokerID:    opts.BrokerID,
@@ -84,7 +91,11 @@ func StartBroker(opts BrokerOptions) (*Broker, error) {
 		return nil, fmt.Errorf("conduittest: NewConduitDialer: %w", err)
 	}
 
-	hc, err := hubclient.New(opts.HubURL, hubclient.WithHMACAuth(opts.BrokerID, opts.BrokerSecret))
+	hcOpts := []hubclient.Option{hubclient.WithHMACAuth(opts.BrokerID, opts.BrokerSecret)}
+	if opts.HTTPClient != nil {
+		hcOpts = append(hcOpts, hubclient.WithHTTPClient(opts.HTTPClient))
+	}
+	hc, err := hubclient.New(opts.HubURL, hcOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("conduittest: hubclient.New: %w", err)
 	}

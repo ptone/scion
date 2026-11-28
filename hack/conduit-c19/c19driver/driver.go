@@ -13,15 +13,14 @@
 // limitations under the License.
 
 // Package c19driver implements the Criterion 19 Conduit load profile used by
-// the CI functional smoke test (pkg/hub/conduit_ha_c19_test.go). The live
-// load-driver CLI binary (creating real message rows via the hub API and
-// running the full §3.2.2 live profile) is deferred to Phase 8
-// (ptone/scion#9536). This package is validation tooling and is not shipped in
-// production binaries.
+// both the CI functional smoke test (pkg/hub/conduit_ha_c19_test.go) and the
+// live load-driver CLI binary (hack/conduit-c19/main.go). This package is
+// validation tooling and is not shipped in production binaries.
 package c19driver
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -33,11 +32,60 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/internal/conduittest"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
 // LargeBodyBytes is the 512 KiB payload size exercised by the C19 profile.
 const LargeBodyBytes = 512 * 1024
+
+// Mode selects which Criterion 19 traffic mix to execute.
+type Mode string
+
+const (
+	// ModePhase2 runs Phase 2 traffic: PTY echo/keepalive + stalled bulk TCP
+	// tunnel + control RPCs + planned drain observation.
+	ModePhase2 Mode = "phase2"
+	// ModeBrokerRPC runs Phase 3 broker-RPC traffic: high-concurrency hub->broker
+	// RPC churn + stalled bulk TCP tunnel + control RPCs + planned drain.
+	ModeBrokerRPC Mode = "broker-rpc"
+	// ModeDeliver runs Phase 4 / v2.22 §6.2 deliver-message traffic: per-agent
+	// deliveries + 512 KiB bodies + rotate-token + concurrent broker RPC churn +
+	// stalled bulk TCP tunnel + planned drain.
+	ModeDeliver Mode = "deliver"
+)
+
+// Valid reports whether m is a recognized C19 mode.
+func (m Mode) Valid() bool {
+	switch m {
+	case ModePhase2, ModeBrokerRPC, ModeDeliver:
+		return true
+	default:
+		return false
+	}
+}
+
+// HTTPStatusError wraps an error with an HTTP status code so c19driver can
+// distinguish 429 responses from other failures across BrokerRPC/ControlProbe.
+type HTTPStatusError struct {
+	Status int
+	Err    error
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("http %d: %v", e.Status, e.Err)
+	}
+	return fmt.Sprintf("http %d", e.Status)
+}
+
+func (e *HTTPStatusError) Unwrap() error { return e.Err }
+
+func is429(err error) bool {
+	var se *HTTPStatusError
+	return errors.As(err, &se) && se.Status == http.StatusTooManyRequests
+}
 
 // AgentTarget identifies one fake agent to launch in the C19 load profile.
 type AgentTarget struct {
@@ -48,40 +96,106 @@ type AgentTarget struct {
 	HubURL    string `json:"hub_url,omitempty"`
 }
 
+// PTYResult summarizes one PTY worker's echo/keepalive loop and any observed
+// planned-drain 4503 close frame.
+type PTYResult struct {
+	EchoSucceeded int64
+	EchoErrors    int64
+	Latencies     []time.Duration
+	Drain4503     bool
+	CloseCode     int
+	CloseReason   string
+}
+
+// MemorySample records one point-in-time RSS / memory observation.
+type MemorySample struct {
+	Timestamp time.Time `json:"timestamp"`
+	Bytes     int64     `json:"bytes"`
+	Source    string    `json:"source"`
+}
+
 // Config configures a C19 load run.
 type Config struct {
+	// Mode selects the traffic mix (default ModeDeliver when empty).
+	Mode Mode
 	// Agents lists the N fake agents to start concurrently (e.g. N=50).
 	Agents []AgentTarget
 	// DefaultHubURL is used for any AgentTarget whose HubURL is empty.
 	DefaultHubURL string
+	// HTTPClient and TLSClientConfig are forwarded to fake agents when set.
+	HTTPClient      *http.Client
+	TLSClientConfig *tls.Config
 	// Duration is the active load phase length (default 5s).
 	Duration time.Duration
 	// DeliverInterval is the per-agent delivery cadence (default 2s).
 	DeliverInterval time.Duration
 	// LargeBodyCount is the number of 512 KiB deliver-message calls to inject
-	// across the run (default 4).
+	// across the run (default 4 in smoke; 0 disables).
 	LargeBodyCount int
 	// RotateTokenCount is the number of rotate-token control RPCs to inject
-	// when RotateToken is non-nil (default 10).
+	// when RotateToken is non-nil.
 	RotateTokenCount int
-	// BrokerRPCCount is the number of broker RPCs (list/status churn) to
-	// inject when BrokerRPC is non-nil (default 20).
+	// BrokerRPCCount is the total number of broker RPCs to execute when > 0.
+	// When 0 and BrokerRPCContinuous is true (or Mode == ModeBrokerRPC),
+	// workers run continuously for Duration.
 	BrokerRPCCount int
+	// BrokerRPCContinuous runs broker RPC workers for the full Duration even
+	// when BrokerRPCCount is 0.
+	BrokerRPCContinuous bool
+	// BrokerRPCConcurrency is the number of concurrent goroutines issuing
+	// BrokerRPC calls (default 1). Set >= 64..128 to exercise MaxConcurrentRPCs.
+	BrokerRPCConcurrency int
+	// BrokerRPCPacing optionally spaces each worker's BrokerRPC calls across
+	// the window. When 0 and BrokerRPCCount > 0, calls are spaced evenly across
+	// Duration/BrokerRPCCount per worker if PaceBrokerRPCs is true.
+	BrokerRPCPacing time.Duration
+	// ControlConcurrency is the number of concurrent workers for RotateToken /
+	// ControlProbe during load (default 1).
+	ControlConcurrency int
+	// BaselineControlSamples is the number of control probes measured before
+	// load starts to establish the baseline p99 for control_p99_added_ms.
+	BaselineControlSamples int
 	// EnableBulkTunnelOnAgent0 installs an in-memory bulk TCP producer on
 	// Agents[0]'s DialLocal so StalledTunnel fills the stream receive window.
 	EnableBulkTunnelOnAgent0 bool
+	// EnablePTY installs a FakePTYSpawner on every agent (enabled automatically
+	// in ModePhase2 or when PTYWorker != nil).
+	EnablePTY bool
+	// PTYCount is the number of concurrent PTY workers to spawn when PTYWorker
+	// is non-nil (default 1).
+	PTYCount int
+	// ClockSkew is subtracted from raw (receipt - hub_send) send-to-receipt
+	// delays to compute skew-corrected send-to-receipt delay.
+	ClockSkew time.Duration
+	// DrainAfter triggers OnDrainTrigger after this offset into Duration.
+	DrainAfter time.Duration
+	// MemorySampleInterval controls how often MemorySampler is called during
+	// the load window (default 1s when MemorySampler != nil).
+	MemorySampleInterval time.Duration
 
 	// Deliver sends one deliver-message flush to agentID with body and returns
-	// the HTTP status code, outcome string, and any error. Required.
+	// the HTTP status code, outcome string, and any error. Required in ModeDeliver.
 	Deliver func(ctx context.Context, agentID, body string) (status int, outcome string, err error)
 	// RotateToken invokes POST /v1/control/rotate-token on agentID. Optional.
 	RotateToken func(ctx context.Context, agentID string) error
-	// BrokerRPC invokes one hub->broker list/status RPC. Optional.
+	// BrokerRPC invokes one hub->broker list/status/logs RPC. Optional.
 	BrokerRPC func(ctx context.Context, seq int) error
+	// ControlProbe invokes one lightweight control-plane RPC for baseline vs
+	// under-load p99 measurement. Optional; falls back to RotateToken or
+	// BrokerRPC when unset and BaselineControlSamples > 0.
+	ControlProbe func(ctx context.Context, agentID string) error
 	// StalledTunnel opens a bulk TCP tunnel stream to Agents[0] and leaves its
 	// reader completely stalled until the returned close function is called.
 	// Optional.
 	StalledTunnel func(ctx context.Context, agentID string) (closeFn func(), err error)
+	// PTYWorker runs an interactive PTY echo/keepalive session against agentID
+	// until ctx is cancelled or the server closes the stream (e.g. 4503 drain).
+	PTYWorker func(ctx context.Context, agentID string) (*PTYResult, error)
+	// MemorySampler samples hub/aggregate RSS memory. Optional.
+	MemorySampler func(ctx context.Context) (MemorySample, error)
+	// OnDrainTrigger is invoked once at DrainAfter into the load window to
+	// initiate a planned hub drain (e.g. SIGINT to hub-b). Optional.
+	OnDrainTrigger func(ctx context.Context) error
 }
 
 // LatencyStats summarizes a slice of recorded durations.
@@ -117,8 +231,27 @@ func SummarizeLatencies(samples []time.Duration) LatencyStats {
 	}
 }
 
+// SkewCorrectedDelay computes the skew-corrected send-to-receipt delay from the
+// hub-stamped NotAfterUnixMS, the agent receipt timestamp, and known clockSkew
+// (agentClock - hubClock). Returns raw delay and non-negative skew-corrected
+// delay. If notAfterUnixMS <= 0, ok is false.
+func SkewCorrectedDelay(notAfterUnixMS int64, receiptAt time.Time, clockSkew time.Duration) (raw, corrected time.Duration, ok bool) {
+	if notAfterUnixMS <= 0 {
+		return 0, 0, false
+	}
+	hubSendAt := time.UnixMilli(notAfterUnixMS).Add(-agentcontrol.DeliverNotAfter)
+	raw = receiptAt.Sub(hubSendAt)
+	corrected = raw - clockSkew
+	if corrected < 0 {
+		corrected = 0
+	}
+	return raw, corrected, true
+}
+
 // Result holds counters, errors, and latencies from a C19 load run.
 type Result struct {
+	Mode                    Mode
+	Duration                time.Duration
 	AgentCount              int
 	DeliverAttempts         int64
 	DeliverSucceeded        int64
@@ -131,25 +264,69 @@ type Result struct {
 	RotateTokenErrors       int64
 	BrokerRPCSucceeded      int64
 	BrokerRPCErrors         int64
+	BrokerRPC429s           int64
+	ControlProbeSucceeded   int64
+	ControlProbeErrors      int64
+	Control429s             int64
+	Total429s               int64
+	MaxConcurrentBrokerRPCs int64
+	MaxConcurrentControls   int64
+	PTYEchoSucceeded        int64
+	PTYEchoErrors           int64
+	Drain4503Count          int64
+	Drain4503Reasons        []string
+	SessionReconnections    int64
 	StalledBulkBytesAtStart int64
 	StalledBulkBytesWritten int64
+	PeakMemoryBytes         int64
+	MemorySamples           []MemorySample
 
-	DeliverLatencies   []time.Duration
-	RotateLatencies    []time.Duration
-	BrokerRPCLatencies []time.Duration
-	FirstError         error
+	DeliverLatencies         []time.Duration
+	DeliverPasteLatencies    []time.Duration
+	LargePasteLatencies      []time.Duration
+	SendToReceiptDelays      []time.Duration
+	RawSendToReceiptDelays   []time.Duration
+	CombinedDeliverLatencies []time.Duration
+	RotateLatencies          []time.Duration
+	BrokerRPCLatencies       []time.Duration
+	BaselineControlLatencies []time.Duration
+	LoadControlLatencies     []time.Duration
+	PTYLatencies             []time.Duration
+	FirstError               error
 }
 
-// Run starts all configured fake agents, optionally opens a stalled bulk TCP
-// tunnel on agent 0, executes the mixed deliver-message + 512 KiB + rotate-token
-// + broker RPC workload for cfg.Duration, tears everything down cleanly, and
+func updateHighWater(high *atomic.Int64, cur int64) {
+	for {
+		prev := high.Load()
+		if cur <= prev {
+			return
+		}
+		if high.CompareAndSwap(prev, cur) {
+			return
+		}
+	}
+}
+
+// Run starts all configured fake agents, optionally establishes a baseline
+// control latency, opens a stalled bulk TCP tunnel on agent 0, executes the
+// configured C19 workload for cfg.Duration, tears everything down cleanly, and
 // returns the aggregated Result.
 func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if len(cfg.Agents) == 0 {
 		return nil, errors.New("c19driver: at least one agent target is required")
 	}
-	if cfg.Deliver == nil {
-		return nil, errors.New("c19driver: Deliver callback is required")
+	mode := cfg.Mode
+	if mode == "" {
+		mode = ModeDeliver
+	}
+	if !mode.Valid() {
+		return nil, fmt.Errorf("c19driver: invalid mode %q", mode)
+	}
+	if mode == ModeDeliver && cfg.Deliver == nil {
+		return nil, errors.New("c19driver: Deliver callback is required in deliver mode")
+	}
+	if mode == ModeBrokerRPC && cfg.BrokerRPC == nil {
+		return nil, errors.New("c19driver: BrokerRPC callback is required in broker-rpc mode")
 	}
 	if cfg.Duration <= 0 {
 		cfg.Duration = 5 * time.Second
@@ -166,8 +343,32 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if cfg.BrokerRPCCount < 0 {
 		cfg.BrokerRPCCount = 0
 	}
+	if cfg.BrokerRPCConcurrency <= 0 {
+		cfg.BrokerRPCConcurrency = 1
+	}
+	if cfg.ControlConcurrency <= 0 {
+		cfg.ControlConcurrency = 1
+	}
+	if cfg.PTYCount <= 0 && cfg.PTYWorker != nil {
+		cfg.PTYCount = 1
+	}
+	if cfg.MemorySampleInterval <= 0 {
+		cfg.MemorySampleInterval = time.Second
+	}
 
-	var bulkWritten atomic.Int64
+	enablePTY := cfg.EnablePTY || mode == ModePhase2 || cfg.PTYWorker != nil
+
+	var (
+		mu             sync.Mutex
+		bulkWritten    atomic.Int64
+		reconnections  atomic.Int64
+		admittedCounts = make([]atomic.Int64, len(cfg.Agents))
+		res            = &Result{
+			Mode:     mode,
+			Duration: cfg.Duration,
+		}
+	)
+
 	agentOpts := make([]conduittest.AgentOptions, len(cfg.Agents))
 	for i, target := range cfg.Agents {
 		hubURL := target.HubURL
@@ -175,12 +376,38 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			hubURL = cfg.DefaultHubURL
 		}
 		tok := target.Token
+		agentIdx := i
 		opt := conduittest.AgentOptions{
-			HubURL:    hubURL,
-			AgentID:   target.AgentID,
-			ProjectID: target.ProjectID,
-			LaunchID:  target.LaunchID,
-			Token:     func() string { return tok },
+			HubURL:          hubURL,
+			AgentID:         target.AgentID,
+			ProjectID:       target.ProjectID,
+			LaunchID:        target.LaunchID,
+			Token:           func() string { return tok },
+			HTTPClient:      cfg.HTTPClient,
+			TLSClientConfig: cfg.TLSClientConfig,
+			EnablePTY:       enablePTY,
+			OnSession: func(_ *conduitv1.Welcome) {
+				if admittedCounts[agentIdx].Add(1) > 1 {
+					reconnections.Add(1)
+				}
+			},
+			OnDeliverTiming: func(dt conduittest.DeliverTiming) {
+				if dt.Status != http.StatusOK {
+					return
+				}
+				raw, corrected, hasDelay := SkewCorrectedDelay(dt.NotAfterUnixMS, dt.ReceiptAt, cfg.ClockSkew)
+				mu.Lock()
+				res.DeliverPasteLatencies = append(res.DeliverPasteLatencies, dt.PasteDuration)
+				if dt.TextBytes >= LargeBodyBytes {
+					res.LargePasteLatencies = append(res.LargePasteLatencies, dt.PasteDuration)
+				}
+				if hasDelay {
+					res.RawSendToReceiptDelays = append(res.RawSendToReceiptDelays, raw)
+					res.SendToReceiptDelays = append(res.SendToReceiptDelays, corrected)
+					res.CombinedDeliverLatencies = append(res.CombinedDeliverLatencies, corrected+dt.PasteDuration)
+				}
+				mu.Unlock()
+			},
 		}
 		if i == 0 && cfg.EnableBulkTunnelOnAgent0 {
 			opt.DialLocal = func(_ context.Context, _, _ string) (net.Conn, error) {
@@ -207,7 +434,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		agentOpts[i] = opt
 	}
 
-	admitCtx, admitCancel := context.WithTimeout(ctx, 30*time.Second)
+	admitCtx, admitCancel := context.WithTimeout(ctx, 45*time.Second)
 	agents, err := conduittest.StartAgents(admitCtx, agentOpts)
 	admitCancel()
 	if err != nil {
@@ -224,6 +451,59 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		}
 		closeWg.Wait()
 	}()
+	res.AgentCount = len(agents)
+
+	// Resolve the control probe used for baseline vs under-load p99 added.
+	controlProbe := cfg.ControlProbe
+	if controlProbe == nil && cfg.BaselineControlSamples > 0 {
+		switch {
+		case cfg.RotateToken != nil:
+			controlProbe = cfg.RotateToken
+		case cfg.BrokerRPC != nil:
+			var baseSeq atomic.Int64
+			controlProbe = func(c context.Context, _ string) error {
+				return cfg.BrokerRPC(c, int(baseSeq.Add(1)))
+			}
+		}
+	}
+
+	// Baseline control-plane latency phase (before stalled tunnel and load).
+	if controlProbe != nil && cfg.BaselineControlSamples > 0 {
+		for i := 0; i < cfg.BaselineControlSamples; i++ {
+			target := cfg.Agents[i%len(cfg.Agents)]
+			callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			start := time.Now()
+			err := controlProbe(callCtx, target.AgentID)
+			elapsed := time.Since(start)
+			cancel()
+			if err == nil {
+				res.BaselineControlLatencies = append(res.BaselineControlLatencies, elapsed)
+			}
+		}
+	}
+
+	// Take initial memory sample if configured.
+	sampleMemory := func() {
+		if cfg.MemorySampler == nil {
+			return
+		}
+		sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		sample, err := cfg.MemorySampler(sctx)
+		cancel()
+		if err != nil || sample.Bytes <= 0 {
+			return
+		}
+		if sample.Timestamp.IsZero() {
+			sample.Timestamp = time.Now().UTC()
+		}
+		mu.Lock()
+		res.MemorySamples = append(res.MemorySamples, sample)
+		if sample.Bytes > res.PeakMemoryBytes {
+			res.PeakMemoryBytes = sample.Bytes
+		}
+		mu.Unlock()
+	}
+	sampleMemory()
 
 	// Open the stalled bulk tunnel stream before the load window starts so its
 	// receive window fills and backpressures before any workload begins.
@@ -272,22 +552,15 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 					lastBytes = nowBytes
 				}
 				if time.Now().After(stallDeadline) {
-					// Record the current count rather than erroring here so
-					// callers asserting StalledBulkBytesAtStart == StalledBulkBytesWritten
-					// can surface the lack of backpressure directly.
 					stalledAtStart = nowBytes
 					break
 				}
 			}
 		}
 	}
+	res.StalledBulkBytesAtStart = stalledAtStart
 
-	res := &Result{
-		AgentCount:              len(agents),
-		StalledBulkBytesAtStart: stalledAtStart,
-	}
 	var (
-		mu                  sync.Mutex
 		deliverAttempt      atomic.Int64
 		deliverOK           atomic.Int64
 		deliverNonDelivered atomic.Int64
@@ -299,6 +572,17 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		rotateErr           atomic.Int64
 		brokerOK            atomic.Int64
 		brokerErr           atomic.Int64
+		broker429           atomic.Int64
+		brokerInFlight      atomic.Int64
+		brokerHighWater     atomic.Int64
+		controlOK           atomic.Int64
+		controlErr          atomic.Int64
+		control429          atomic.Int64
+		controlInFlight     atomic.Int64
+		controlHighWater    atomic.Int64
+		ptyOK               atomic.Int64
+		ptyErr              atomic.Int64
+		drain4503           atomic.Int64
 	)
 	recordErr := func(e error) {
 		if e == nil {
@@ -316,158 +600,362 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	var wg sync.WaitGroup
 
-	// 1. Per-agent periodic delivery loops (1 delivery every DeliverInterval,
-	//    staggered across agents so they spread smoothly over the window).
-	for i, target := range cfg.Agents {
+	// 0a. Periodic memory sampling during load.
+	if cfg.MemorySampler != nil {
 		wg.Add(1)
-		go func(idx int, agentID string) {
+		go func() {
 			defer wg.Done()
-			stagger := time.Duration(idx) * cfg.DeliverInterval / time.Duration(len(cfg.Agents))
-			if stagger > 0 {
-				select {
-				case <-loadCtx.Done():
-					return
-				case <-time.After(stagger):
-				}
-			}
-			seq := 0
-			sendOne := func() {
-				callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-				defer cancel()
-				start := time.Now()
-				deliverAttempt.Add(1)
-				status, outcome, err := cfg.Deliver(callCtx, agentID, fmt.Sprintf("c19-agent-%d-msg-%d", idx, seq))
-				elapsed := time.Since(start)
-				seq++
-				if status == http.StatusTooManyRequests {
-					deliver429.Add(1)
-				}
-				if err != nil || status != http.StatusOK {
-					deliverErr.Add(1)
-					if err != nil {
-						recordErr(fmt.Errorf("deliver agent %s: %w", agentID, err))
-					} else {
-						recordErr(fmt.Errorf("deliver agent %s: status %d", agentID, status))
-					}
-					return
-				}
-				if outcome != "delivered" {
-					deliverNonDelivered.Add(1)
-					recordErr(fmt.Errorf("deliver agent %s: outcome %q, want delivered", agentID, outcome))
-					return
-				}
-				deliverOK.Add(1)
-				mu.Lock()
-				res.DeliverLatencies = append(res.DeliverLatencies, elapsed)
-				mu.Unlock()
-			}
-			sendOne()
-			tick := time.NewTicker(cfg.DeliverInterval)
+			tick := time.NewTicker(cfg.MemorySampleInterval)
 			defer tick.Stop()
 			for {
 				select {
 				case <-loadCtx.Done():
 					return
 				case <-tick.C:
-					sendOne()
+					sampleMemory()
 				}
 			}
-		}(i, target.AgentID)
+		}()
 	}
 
-	// 2. Large (512 KiB) deliver-message bodies mixed across agents.
-	if cfg.LargeBodyCount > 0 {
-		largePayload := strings.Repeat("X", LargeBodyBytes)
+	// 0b. Optional planned drain trigger at DrainAfter.
+	if cfg.OnDrainTrigger != nil && cfg.DrainAfter > 0 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 0; i < cfg.LargeBodyCount; i++ {
-				target := cfg.Agents[i%len(cfg.Agents)]
-				callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-				start := time.Now()
-				deliverAttempt.Add(1)
-				status, outcome, err := cfg.Deliver(callCtx, target.AgentID, largePayload)
-				elapsed := time.Since(start)
-				cancel()
-				if status == http.StatusTooManyRequests {
-					deliver429.Add(1)
-				}
-				if err != nil || status != http.StatusOK {
-					largeErr.Add(1)
-					deliverErr.Add(1)
-					if err != nil {
-						recordErr(fmt.Errorf("large deliver agent %s: %w", target.AgentID, err))
-					} else {
-						recordErr(fmt.Errorf("large deliver agent %s: status %d", target.AgentID, status))
-					}
-					continue
-				}
-				if outcome != "delivered" {
-					largeErr.Add(1)
-					deliverNonDelivered.Add(1)
-					recordErr(fmt.Errorf("large deliver agent %s: outcome %q, want delivered", target.AgentID, outcome))
-					continue
-				}
-				largeOK.Add(1)
-				deliverOK.Add(1)
-				mu.Lock()
-				res.DeliverLatencies = append(res.DeliverLatencies, elapsed)
-				mu.Unlock()
+			select {
+			case <-loadCtx.Done():
+				return
+			case <-time.After(cfg.DrainAfter):
+			}
+			if err := cfg.OnDrainTrigger(loadCtx); err != nil {
+				recordErr(fmt.Errorf("drain trigger: %w", err))
 			}
 		}()
+	}
+
+	// 1. Per-agent periodic delivery loops (ModeDeliver).
+	// Serialize per-agent deliver-message calls with a per-agent mutex,
+	// mirroring the production broker's per-container delivery lock so
+	// periodic and 512 KiB flushes to the same agent do not collide with
+	// sciontool's 409 busy guard.
+	agentDeliverMu := make([]sync.Mutex, len(cfg.Agents))
+	if mode == ModeDeliver && cfg.Deliver != nil {
+		for i, target := range cfg.Agents {
+			wg.Add(1)
+			go func(idx int, agentID string) {
+				defer wg.Done()
+				stagger := time.Duration(idx) * cfg.DeliverInterval / time.Duration(len(cfg.Agents))
+				if stagger > 0 {
+					select {
+					case <-loadCtx.Done():
+						return
+					case <-time.After(stagger):
+					}
+				}
+				seq := 0
+				sendOne := func() {
+					agentDeliverMu[idx].Lock()
+					defer agentDeliverMu[idx].Unlock()
+					callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+					defer cancel()
+					start := time.Now()
+					deliverAttempt.Add(1)
+					status, outcome, err := cfg.Deliver(callCtx, agentID, fmt.Sprintf("c19-agent-%d-msg-%d", idx, seq))
+					elapsed := time.Since(start)
+					seq++
+					if status == http.StatusTooManyRequests || is429(err) {
+						deliver429.Add(1)
+					}
+					if err != nil || status != http.StatusOK {
+						deliverErr.Add(1)
+						if err != nil {
+							recordErr(fmt.Errorf("deliver agent %s: %w", agentID, err))
+						} else {
+							recordErr(fmt.Errorf("deliver agent %s: status %d", agentID, status))
+						}
+						return
+					}
+					if outcome != "delivered" {
+						deliverNonDelivered.Add(1)
+						recordErr(fmt.Errorf("deliver agent %s: outcome %q, want delivered", agentID, outcome))
+						return
+					}
+					deliverOK.Add(1)
+					mu.Lock()
+					res.DeliverLatencies = append(res.DeliverLatencies, elapsed)
+					mu.Unlock()
+				}
+				sendOne()
+				tick := time.NewTicker(cfg.DeliverInterval)
+				defer tick.Stop()
+				for {
+					select {
+					case <-loadCtx.Done():
+						return
+					case <-tick.C:
+						sendOne()
+					}
+				}
+			}(i, target.AgentID)
+		}
+
+		// 2. Large (512 KiB) deliver-message bodies paced smoothly across agents.
+		if cfg.LargeBodyCount > 0 {
+			largePayload := strings.Repeat("X", LargeBodyBytes)
+			pacing := time.Duration(0)
+			if cfg.LargeBodyCount > 1 && cfg.Duration > 0 {
+				pacing = cfg.Duration / time.Duration(cfg.LargeBodyCount+1)
+				// Cap pacing so short CI smoke tests still finish all large bodies.
+				if pacing > 500*time.Millisecond && cfg.Duration <= 6*time.Second {
+					pacing = 0
+				}
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := 0; i < cfg.LargeBodyCount; i++ {
+					if i > 0 && pacing > 0 {
+						select {
+						case <-loadCtx.Done():
+							// Still complete configured large bodies? In live runs
+							// stop at duration end; in short runs pacing is 0.
+							return
+						case <-time.After(pacing):
+						}
+					}
+					targetIdx := i % len(cfg.Agents)
+					target := cfg.Agents[targetIdx]
+					agentDeliverMu[targetIdx].Lock()
+					callCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+					start := time.Now()
+					deliverAttempt.Add(1)
+					status, outcome, err := cfg.Deliver(callCtx, target.AgentID, largePayload)
+					elapsed := time.Since(start)
+					cancel()
+					agentDeliverMu[targetIdx].Unlock()
+					if status == http.StatusTooManyRequests || is429(err) {
+						deliver429.Add(1)
+					}
+					if err != nil || status != http.StatusOK {
+						largeErr.Add(1)
+						deliverErr.Add(1)
+						if err != nil {
+							recordErr(fmt.Errorf("large deliver agent %s: %w", target.AgentID, err))
+						} else {
+							recordErr(fmt.Errorf("large deliver agent %s: status %d", target.AgentID, status))
+						}
+						continue
+					}
+					if outcome != "delivered" {
+						largeErr.Add(1)
+						deliverNonDelivered.Add(1)
+						recordErr(fmt.Errorf("large deliver agent %s: outcome %q, want delivered", target.AgentID, outcome))
+						continue
+					}
+					largeOK.Add(1)
+					deliverOK.Add(1)
+					mu.Lock()
+					res.DeliverLatencies = append(res.DeliverLatencies, elapsed)
+					mu.Unlock()
+				}
+			}()
+		}
 	}
 
 	// 3. Control RPCs (rotate-token) mixed across agents, starting with agent 0
 	//    (which shares its session with the stalled bulk tunnel).
 	if cfg.RotateToken != nil && cfg.RotateTokenCount > 0 {
+		var rotateSeq atomic.Int64
+		workers := min(cfg.ControlConcurrency, cfg.RotateTokenCount)
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					i := int(rotateSeq.Add(1) - 1)
+					if i >= cfg.RotateTokenCount {
+						return
+					}
+					target := cfg.Agents[i%len(cfg.Agents)]
+					cur := controlInFlight.Add(1)
+					updateHighWater(&controlHighWater, cur)
+					callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+					start := time.Now()
+					err := cfg.RotateToken(callCtx, target.AgentID)
+					elapsed := time.Since(start)
+					cancel()
+					controlInFlight.Add(-1)
+					if is429(err) {
+						control429.Add(1)
+					}
+					if err != nil {
+						rotateErr.Add(1)
+						recordErr(fmt.Errorf("rotate-token agent %s: %w", target.AgentID, err))
+						continue
+					}
+					rotateOK.Add(1)
+					mu.Lock()
+					res.RotateLatencies = append(res.RotateLatencies, elapsed)
+					res.LoadControlLatencies = append(res.LoadControlLatencies, elapsed)
+					mu.Unlock()
+				}
+			}()
+		}
+	}
+
+	// 3b. Under-load control probe loop (when BaselineControlSamples > 0 and
+	//     ControlProbe is explicitly provided or RotateToken is not already
+	//     generating load control samples).
+	if controlProbe != nil && cfg.BaselineControlSamples > 0 && (cfg.ControlProbe != nil || cfg.RotateTokenCount == 0) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := 0; i < cfg.RotateTokenCount; i++ {
-				target := cfg.Agents[i%len(cfg.Agents)]
-				callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				start := time.Now()
-				err := cfg.RotateToken(callCtx, target.AgentID)
-				elapsed := time.Since(start)
-				cancel()
-				if err != nil {
-					rotateErr.Add(1)
-					recordErr(fmt.Errorf("rotate-token agent %s: %w", target.AgentID, err))
-					continue
+			tick := time.NewTicker(max(50*time.Millisecond, cfg.Duration/40))
+			defer tick.Stop()
+			seq := 0
+			for {
+				select {
+				case <-loadCtx.Done():
+					return
+				case <-tick.C:
+					target := cfg.Agents[seq%len(cfg.Agents)]
+					seq++
+					cur := controlInFlight.Add(1)
+					updateHighWater(&controlHighWater, cur)
+					callCtx, cancel := context.WithTimeout(loadCtx, 10*time.Second)
+					start := time.Now()
+					err := controlProbe(callCtx, target.AgentID)
+					elapsed := time.Since(start)
+					cancel()
+					controlInFlight.Add(-1)
+					if is429(err) {
+						control429.Add(1)
+					}
+					if err != nil {
+						if loadCtx.Err() != nil {
+							return
+						}
+						controlErr.Add(1)
+						recordErr(fmt.Errorf("control probe agent %s: %w", target.AgentID, err))
+						continue
+					}
+					controlOK.Add(1)
+					mu.Lock()
+					res.LoadControlLatencies = append(res.LoadControlLatencies, elapsed)
+					mu.Unlock()
 				}
-				rotateOK.Add(1)
-				mu.Lock()
-				res.RotateLatencies = append(res.RotateLatencies, elapsed)
-				mu.Unlock()
 			}
 		}()
 	}
 
-	// 4. Broker RPC churn (list/status) over the broker's conduit session.
-	if cfg.BrokerRPC != nil && cfg.BrokerRPCCount > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < cfg.BrokerRPCCount; i++ {
-				callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				start := time.Now()
-				err := cfg.BrokerRPC(callCtx, i)
-				elapsed := time.Since(start)
-				cancel()
-				if err != nil {
-					brokerErr.Add(1)
-					recordErr(fmt.Errorf("broker RPC %d: %w", i, err))
-					continue
+	// 4. Concurrent broker RPC churn (list/status/logs) over the broker's
+	//    conduit session with configurable concurrency and smooth pacing.
+	runBrokerRPC := cfg.BrokerRPC != nil && (cfg.BrokerRPCCount > 0 || cfg.BrokerRPCContinuous || mode == ModeBrokerRPC)
+	if runBrokerRPC {
+		workers := cfg.BrokerRPCConcurrency
+		if cfg.BrokerRPCCount > 0 && workers > cfg.BrokerRPCCount {
+			workers = cfg.BrokerRPCCount
+		}
+		var brokerSeq atomic.Int64
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+				// Stagger worker starts gently when pacing is set.
+				if cfg.BrokerRPCPacing > 0 && workers > 1 {
+					stagger := time.Duration(workerID) * cfg.BrokerRPCPacing / time.Duration(workers)
+					if stagger > 0 {
+						select {
+						case <-loadCtx.Done():
+							return
+						case <-time.After(stagger):
+						}
+					}
 				}
-				brokerOK.Add(1)
-				mu.Lock()
-				res.BrokerRPCLatencies = append(res.BrokerRPCLatencies, elapsed)
-				mu.Unlock()
-			}
-		}()
+				for {
+					var seq int
+					if cfg.BrokerRPCCount > 0 {
+						seq = int(brokerSeq.Add(1) - 1)
+						if seq >= cfg.BrokerRPCCount {
+							return
+						}
+					} else {
+						if loadCtx.Err() != nil {
+							return
+						}
+						seq = int(brokerSeq.Add(1) - 1)
+					}
+					cur := brokerInFlight.Add(1)
+					updateHighWater(&brokerHighWater, cur)
+					parentCtx := ctx
+					if cfg.BrokerRPCCount == 0 {
+						parentCtx = loadCtx
+					}
+					callCtx, cancel := context.WithTimeout(parentCtx, 15*time.Second)
+					start := time.Now()
+					err := cfg.BrokerRPC(callCtx, seq)
+					elapsed := time.Since(start)
+					cancel()
+					brokerInFlight.Add(-1)
+					if is429(err) {
+						broker429.Add(1)
+					}
+					if err != nil {
+						if cfg.BrokerRPCCount == 0 && loadCtx.Err() != nil {
+							return
+						}
+						brokerErr.Add(1)
+						recordErr(fmt.Errorf("broker RPC %d: %w", seq, err))
+					} else {
+						brokerOK.Add(1)
+						mu.Lock()
+						res.BrokerRPCLatencies = append(res.BrokerRPCLatencies, elapsed)
+						mu.Unlock()
+					}
+					if cfg.BrokerRPCPacing > 0 {
+						select {
+						case <-loadCtx.Done():
+							if cfg.BrokerRPCCount == 0 {
+								return
+							}
+						case <-time.After(cfg.BrokerRPCPacing):
+						}
+					}
+				}
+			}(w)
+		}
+	}
+
+	// 5. Interactive PTY echo/keepalive workers (ModePhase2 or drain observer).
+	if cfg.PTYWorker != nil && cfg.PTYCount > 0 {
+		for i := 0; i < cfg.PTYCount; i++ {
+			target := cfg.Agents[i%len(cfg.Agents)]
+			wg.Add(1)
+			go func(agentID string) {
+				defer wg.Done()
+				pr, err := cfg.PTYWorker(loadCtx, agentID)
+				if err != nil {
+					ptyErr.Add(1)
+					recordErr(fmt.Errorf("pty agent %s: %w", agentID, err))
+				}
+				if pr != nil {
+					ptyOK.Add(pr.EchoSucceeded)
+					ptyErr.Add(pr.EchoErrors)
+					mu.Lock()
+					res.PTYLatencies = append(res.PTYLatencies, pr.Latencies...)
+					if pr.Drain4503 {
+						drain4503.Add(1)
+						res.Drain4503Reasons = append(res.Drain4503Reasons, pr.CloseReason)
+					}
+					mu.Unlock()
+				}
+			}(target.AgentID)
+		}
 	}
 
 	wg.Wait()
+	sampleMemory()
 
 	res.DeliverAttempts = deliverAttempt.Load()
 	res.DeliverSucceeded = deliverOK.Load()
@@ -480,6 +968,17 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	res.RotateTokenErrors = rotateErr.Load()
 	res.BrokerRPCSucceeded = brokerOK.Load()
 	res.BrokerRPCErrors = brokerErr.Load()
+	res.BrokerRPC429s = broker429.Load()
+	res.ControlProbeSucceeded = controlOK.Load()
+	res.ControlProbeErrors = controlErr.Load()
+	res.Control429s = control429.Load()
+	res.Total429s = res.Deliver429s + res.BrokerRPC429s + res.Control429s
+	res.MaxConcurrentBrokerRPCs = brokerHighWater.Load()
+	res.MaxConcurrentControls = controlHighWater.Load()
+	res.PTYEchoSucceeded = ptyOK.Load()
+	res.PTYEchoErrors = ptyErr.Load()
+	res.Drain4503Count = drain4503.Load()
+	res.SessionReconnections = reconnections.Load()
 	res.StalledBulkBytesWritten = bulkWritten.Load()
 	return res, nil
 }
