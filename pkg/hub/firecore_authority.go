@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
@@ -388,4 +389,56 @@ func (s *Server) fireEffectCeiling(ctx context.Context, auth FireAuthority) (sto
 		InitiatorCredentialKind:     attr.InitiatorCredentialKind,
 		InitiatorCredentialID:       attr.InitiatorCredentialID,
 	}, nil
+}
+
+// checkTriggerRecordedAuthority validates the recorded authority of a System
+// One-bearing trigger before any model evaluation or egress (T2 M1). Contained
+// in firecore_authority.go per Stage 1 §16.4 (TestFireCoreAuthorityCallersContained).
+// Terminal authority denials return (trigger.ErrFireRecordedAuthorityRefused, nil);
+// transient lookup or context errors return ("", err) so the queue retries
+// without recording a terminal refusal and with zero provider I/O.
+func (s *Server) checkTriggerRecordedAuthority(ctx context.Context, tr *store.Trigger) (string, error) {
+	if s == nil || tr == nil {
+		return "", errors.New("trigger recorded authority checker unavailable")
+	}
+	const permID = "trigger.update"
+	rec := hubfire.RecordedAuthority{
+		DefinitionKind: hubfire.DefinitionKindTrigger,
+		DefinitionID:   tr.ID,
+		Attribution:    tr.InitiatorAttribution,
+		Ceiling:        tr.AuthorityCeiling,
+	}
+	auth, identity, err := s.resolveRecordedAuthority(ctx, rec, tr.ProjectID, permID)
+	if err != nil {
+		if errors.Is(err, errScheduledAuthorityDenied) || errors.Is(err, errScheduledAuthorityUnrecorded) {
+			return trigger.ErrFireRecordedAuthorityRefused, nil
+		}
+		return "", err
+	}
+	if !EffectCeilingAllows(auth.Ceiling, permID, false) {
+		return trigger.ErrFireRecordedAuthorityRefused, nil
+	}
+	if auth.PrincipalKind == store.DelegationPrincipalUser {
+		userIdent, ok := identity.(UserIdentity)
+		if !ok {
+			return trigger.ErrFireRecordedAuthorityRefused, nil
+		}
+		if s.authzService == nil {
+			return "", errors.New("authorization service is uninitialized")
+		}
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(userIdent),
+			Credential: credentialContextForIdentity(userIdent),
+			Resource:   triggerResource(tr.ProjectID),
+			Action:     ActionUpdate,
+			Permission: permID,
+		})
+		if !decision.Allowed {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
+			return trigger.ErrFireRecordedAuthorityRefused, nil
+		}
+	}
+	return "", nil
 }
