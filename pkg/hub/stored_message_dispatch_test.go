@@ -69,7 +69,7 @@ func TestStoredMessageDispatch(t *testing.T) {
 		assert.True(t, sm.Broadcasted)
 		assert.False(t, sm.Plain, "re-driven message must include standard sender envelope")
 		assert.Equal(t, row.Channel, sm.Channel)
-		assert.Equal(t, row.ThreadID, sm.ThreadID)
+		assert.Empty(t, sm.ThreadID, "rebuilt dispatch envelope keys on ConversationID, not ThreadID")
 		assert.Equal(t, row.ConversationID, sm.ConversationID)
 		assert.False(t, sm.ConversationAsserted)
 		assert.Equal(t, row.ID, sm.StoredMessageID)
