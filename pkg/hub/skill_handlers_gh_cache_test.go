@@ -1756,6 +1756,7 @@ func TestSkillsResolve_GHCarriesResolvingCredential(t *testing.T) {
 	srv.config.GitHubAppConfig.AppID = 1
 	srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
 	srv.mu.Unlock()
+	wireFakeSkillGitHub(srv, ghSrv.URL)
 
 	require.NoError(t, st.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
 		InstallationID: installIDVal,

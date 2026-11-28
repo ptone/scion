@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ghauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -98,12 +99,13 @@ func (s *Server) githubScopeCapabilityKeys() capabilityKeys {
 // ghCredRequest identifies the resource scope, GitHub repository, and caller
 // for unified Hub GitHub credential resolution.
 type ghCredRequest struct {
-	Scope     string // store.TemplateScopeProject | store.TemplateScopeGlobal | store.TemplateScopeUser
-	ScopeID   string
-	Owner     string
-	Repo      string
-	Requester UserIdentity // optional; defaults to GetUserIdentityFromContext(ctx)
-	Quiet     bool         // log credential selection at Debug instead of Info (e.g. per-agent-create drift checks, skill resolution)
+	Scope          string // store.TemplateScopeProject | store.TemplateScopeGlobal | store.TemplateScopeUser
+	ScopeID        string
+	Owner          string
+	Repo           string
+	Requester      UserIdentity                // optional; defaults to GetUserIdentityFromContext(ctx)
+	Quiet          bool                        // log credential selection at Debug instead of Info (e.g. per-agent-create drift checks, skill resolution)
+	AppPermissions *githubapp.TokenPermissions // optional; when set, narrows GitHub App installation token permissions
 }
 
 // githubCredential resolves the GitHub credential and principal scope for a
@@ -127,7 +129,7 @@ func (s *Server) githubCredential(ctx context.Context, r ghCredRequest) githubfe
 		if r.ScopeID == "" {
 			return githubfetch.Credential{Scope: githubfetch.AnonScope, Kind: githubfetch.CredAnonymous}
 		}
-		return s.projectGitHubCredential(ctx, r.ScopeID, r.Owner, r.Repo, r.Quiet)
+		return s.projectGitHubCredential(ctx, r.ScopeID, r.Owner, r.Repo, r.Quiet, r.AppPermissions)
 	case store.TemplateScopeGlobal:
 		return s.scopedGitHubCredential(ctx, secret.ScopeHub, s.HubID(), r.Owner, r.Repo, r.Quiet)
 	case store.TemplateScopeUser:
@@ -154,7 +156,7 @@ func (s *Server) logGitHubCredentialSelection(quiet bool, msg string, args ...an
 	s.resourceLog.Info(msg, args...)
 }
 
-func (s *Server) projectGitHubCredential(ctx context.Context, projectID, owner, repo string, quiet bool) githubfetch.Credential {
+func (s *Server) projectGitHubCredential(ctx context.Context, projectID, owner, repo string, quiet bool, appPerms *githubapp.TokenPermissions) githubfetch.Credential {
 	if val, key := s.ghConventionCredential(ctx, secret.ScopeProject, projectID, owner, repo); val != "" {
 		s.logGitHubCredentialSelection(quiet, "using project credential for resource import", "projectID", projectID, "secret", key)
 		return githubfetch.Credential{
@@ -167,7 +169,15 @@ func (s *Server) projectGitHubCredential(ctx context.Context, projectID, owner, 
 	var hint string
 	project, err := s.store.GetProject(ctx, projectID)
 	if err == nil && project != nil && project.GitHubInstallationID != nil {
-		token, _, mintErr := s.MintGitHubAppTokenForProject(ctx, project)
+		var (
+			token   string
+			mintErr error
+		)
+		if appPerms != nil {
+			token, _, mintErr = s.MintGitHubAppTokenWithPermissions(ctx, project, *appPerms)
+		} else {
+			token, _, mintErr = s.MintGitHubAppTokenForProject(ctx, project)
+		}
 		if mintErr == nil && token != "" {
 			return githubfetch.Credential{
 				Token: token,

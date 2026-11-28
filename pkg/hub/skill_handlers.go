@@ -2195,6 +2195,14 @@ func (s *Server) deleteGHRepoScopeCache(ctx context.Context, ep githubfetch.Endp
 // upstream is unresponsive.
 const hubGitHubRefreshTimeout = 2 * time.Minute
 
+// hubGHStaleRevalidateTimeout caps how long a request with a stale credentialed
+// tree entry waits synchronously for a live revalidation flight before serving
+// the stale entry and letting the detached flight finish and record its own
+// outcome (transient refresh-failure backoff or authoritative denial purge).
+// Kept well below the broker's 30s Hub client timeout so a hanging GitHub
+// upstream serves stale instead of failing with a caller context timeout.
+var hubGHStaleRevalidateTimeout = 5 * time.Second
+
 // ghRefreshFailureBackoff is the nominal duration a background stale-refresh
 // waits before retrying the same cache key after a failure (jittered via
 // agent.JitteredTTL so failed refreshes do not all retry together). Without
@@ -2434,11 +2442,12 @@ func (s *Server) resolveGitHubSkillWithCredMemo(ctx context.Context, rawURI, pro
 			cred = cached
 		} else {
 			cred = s.githubCredential(ctx, ghCredRequest{
-				Scope:   store.TemplateScopeProject,
-				ScopeID: projectID,
-				Owner:   ghRef.Owner,
-				Repo:    ghRef.Repo,
-				Quiet:   true,
+				Scope:          store.TemplateScopeProject,
+				ScopeID:        projectID,
+				Owner:          ghRef.Owner,
+				Repo:           ghRef.Repo,
+				Quiet:          true,
+				AppPermissions: &skillGitHubReadOnlyPermissions,
 			})
 			credMemo.set(credKey, cred)
 		}
@@ -2610,14 +2619,33 @@ func (s *Server) resolveGitHubSkillWithCredMemo(ctx context.Context, rawURI, pro
 			return nil, ferr
 		}
 
-		return s.fetchAndCacheGitHubSkill(flightCtx, ep, flightKey, refKey, rawURI, ghRef, cred, isBranchRef, flightFreshRef, staleRef, staleTree, refSHAMemo)
+		entry, ferr := s.fetchAndCacheGitHubSkill(flightCtx, ep, flightKey, refKey, rawURI, ghRef, cred, isBranchRef, flightFreshRef, staleRef, staleTree, refSHAMemo)
+		if ferr != nil {
+			// Record transient failures inside the detached flight so backoff
+			// takes effect even if the initiating caller stopped waiting early
+			// (e.g. hubGHStaleRevalidateTimeout fired or caller ctx ended).
+			// Authoritative denials are never transient and purge the cache
+			// instead of recording a refresh failure.
+			if isGHTransientFailure(ferr) {
+				s.recordGHRefreshFailure(flightKey)
+			}
+			return nil, ferr
+		}
+		s.clearGHRefreshFailure(flightKey)
+		return entry, nil
 	})
+
+	var staleTimer <-chan time.Time
+	if staleTree != nil {
+		t := time.NewTimer(hubGHStaleRevalidateTimeout)
+		defer t.Stop()
+		staleTimer = t.C
+	}
 
 	select {
 	case res := <-resultCh:
 		if res.Err != nil {
 			if staleTree != nil && isGHTransientFailure(res.Err) {
-				s.recordGHRefreshFailure(flightKey)
 				slog.WarnContext(ctx, "github_resolution_cache: refresh failed transiently; serving stale entry",
 					"uri", rawURI, "commit_sha", safeShortSHA(staleTree.CommitSHA), "error", res.Err)
 				injectGHStaleServe(flightKey, false)
@@ -2625,7 +2653,6 @@ func (s *Server) resolveGitHubSkillWithCredMemo(ctx context.Context, rawURI, pro
 			}
 			return nil, res.Err
 		}
-		s.clearGHRefreshFailure(flightKey)
 		// Build the response from this caller's own ghRef, not whichever
 		// caller happened to lead or already have the result cached: the
 		// flight (and the cache re-check above) share one *GitHubCacheEntry
@@ -2634,6 +2661,11 @@ func (s *Server) resolveGitHubSkillWithCredMemo(ctx context.Context, rawURI, pro
 		// "@HEAD", or different owner/repo letter case) — the entry carries
 		// none of that, so each caller supplies it from its own parsed ghRef.
 		return buildResolvedSkillResponse(ghRef, res.Val.(*GitHubCacheEntry), downloadToken), nil
+	case <-staleTimer:
+		slog.WarnContext(ctx, "github_resolution_cache: credentialed revalidation timed out; serving stale entry while flight completes",
+			"uri", rawURI, "commit_sha", safeShortSHA(staleTree.CommitSHA))
+		injectGHStaleServe(flightKey, true)
+		return buildResolvedSkillResponse(ghRef, staleTree, downloadToken), nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -2844,9 +2876,10 @@ func (s *Server) fetchAndCacheGitHubSkill(
 	if err != nil {
 		if isGHAuthoritativeDenial(err) {
 			var ghe *githubfetch.Error
-			if isBranchRef && errors.As(err, &ghe) && ghe.Kind == githubfetch.KindNotFound {
-				// Ref resolution already succeeded for this repo and scope; a
-				// 404 from ListTree means this skill path does not exist at
+			if refProven && errors.As(err, &ghe) && ghe.Kind == githubfetch.KindNotFound {
+				// A live ResolveRefConditional call succeeded in this flight,
+				// proving repo and credential access right now; a 404 from
+				// ListTree therefore means this skill path does not exist at
 				// commitSHA. Delete only this path's tree row so a missing path
 				// does not evict other skills/refs in the shared repo scope.
 				if s.ghResolutionStore != nil {
@@ -2856,6 +2889,13 @@ func (s *Server) fetchAndCacheGitHubSkill(
 					}
 				}
 			} else {
+				// Purge the entire {host, owner, repo, scope} cache whenever
+				// access was not freshly proven in this flight (fresh ref cache
+				// hit, refSHAMemo hit, or SHA-pinned !isBranchRef) or on
+				// auth_rejected/forbidden. For SHA-pinned resolves, a ListTree
+				// 404 purges the repo scope (including anon rows) by design,
+				// since ListTree alone cannot distinguish a missing SHA from
+				// credential revocation.
 				s.deleteGHRepoScopeCache(ctx, ep, ghRef.Owner, ghRef.Repo, scope)
 			}
 			s.rememberGHDenial(flightKey, err)

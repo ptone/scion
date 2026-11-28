@@ -704,76 +704,165 @@ func TestSkillsResolve_P4_PerRequestCredentialMemo(t *testing.T) {
 	})
 }
 
-// TestSkillsResolve_P4_CredentialedStaleTimeoutBackoff verifies O2: after a
-// credentialed stale refresh fails transiently (timeout), a second resolve
-// within the refresh-failure backoff window serves stale immediately without
-// making another upstream call.
+type ghFuncDoer func(ctx context.Context, req githubfetch.Request) (*githubfetch.Response, error)
+
+func (f ghFuncDoer) Open(ctx context.Context, req githubfetch.Request) (*githubfetch.Response, error) {
+	return f(ctx, req)
+}
+
+// TestSkillsResolve_P4_CredentialedStaleTimeoutBackoff verifies R1 (fix round 3):
+//   - When GitHub hangs longer than the caller's deadline on a credentialed stale
+//     revalidation (returning remotefetch.ReasonTimeout through the production
+//     retry path), (a) the first call serves the stale entry once
+//     hubGHStaleRevalidateTimeout fires (well before the caller's deadline), and
+//     (b) after the detached flight drains and records transient backoff inside
+//     the flight, a second call serves stale with 0 new upstream calls.
+//   - If an authoritative denial (404) arrives in the detached flight after
+//     hubGHStaleRevalidateTimeout already served stale, the flight deletes the
+//     cached rows and records the negative memo so the next request is not served.
 func TestSkillsResolve_P4_CredentialedStaleTimeoutBackoff(t *testing.T) {
-	const (
-		owner = "acme"
-		repo  = "hanging-repo"
-		uri   = "gh://" + owner + "/" + repo + "/s@main"
-		sha   = "8888888888888888888888888888888888888888"
-		pat   = "ghp_timeout_backoff_pat"
-	)
+	t.Run("hang_serves_stale_and_records_backoff", func(t *testing.T) {
+		const (
+			owner     = "acme"
+			repo      = "hanging-repo"
+			skillPath = "skills/s"
+			uri       = "gh://" + owner + "/" + repo + "/s@main"
+			sha       = "8888888888888888888888888888888888888888"
+			pat       = "ghp_timeout_backoff_pat"
+		)
 
-	var upstreamCalls atomic.Int64
-	release := make(chan struct{})
-	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upstreamCalls.Add(1)
-		select {
-		case <-release:
-		case <-r.Context().Done():
+		origTimeout := hubGHStaleRevalidateTimeout
+		hubGHStaleRevalidateTimeout = 40 * time.Millisecond
+		t.Cleanup(func() { hubGHStaleRevalidateTimeout = origTimeout })
+
+		var upstreamCalls atomic.Int64
+		srv, _, _, _, project := setupSkillAuthzTest(t)
+		srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+		// Doer hangs 250ms per attempt (longer than the 150ms caller deadline)
+		// and returns remotefetch.ReasonTimeout so githubfetch.Client exercises
+		// its real KindTimeout + retry path.
+		srv.skillGitHubDoer = ghFuncDoer(func(ctx context.Context, _ githubfetch.Request) (*githubfetch.Response, error) {
+			upstreamCalls.Add(1)
+			select {
+			case <-time.After(250 * time.Millisecond):
+				return nil, &remotefetch.Error{Reason: remotefetch.ReasonTimeout, Detail: "upstream hung"}
+			case <-ctx.Done():
+				return nil, &remotefetch.Error{Reason: remotefetch.ReasonTimeout, Detail: ctx.Err().Error()}
+			}
+		})
+
+		useReimportCredBackend(srv, secret.ScopeProject, project.ID, map[string]string{
+			"GITHUB_TOKEN": pat,
+		})
+		cred := srv.githubCredential(context.Background(), ghCredRequest{
+			Scope: store.TemplateScopeProject, ScopeID: project.ID, Owner: owner, Repo: repo,
+		})
+		scope := cred.EffectiveScope()
+		seedGHSkillCache(t, srv, uri, scope, sha, `"e1"`, time.Now().Add(-time.Minute), nil)
+
+		ep := srv.skillGitHubEndpoint()
+		flightKey := githubfetch.RefCacheKey(ep.APIHost(), owner, repo, "main", scope) + ":" + skillPath
+
+		// (a) Caller deadline (150ms) is shorter than upstream hang (250ms per
+		// attempt, ~700ms with retry), yet the first call returns stale in ~40ms.
+		callerCtx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+		defer cancel()
+		resp1, err := srv.resolveGitHubSkill(callerCtx, uri, project.ID, nil)
+		require.NoError(t, err, "first call must serve stale before caller deadline expires")
+		require.NotNil(t, resp1)
+		assert.Equal(t, safeShortSHA(sha), resp1.ResolvedVersion)
+
+		// Wait for the detached flight to finish its ReasonTimeout + retry and
+		// record refresh-failure backoff inside the flight.
+		require.Eventually(t, func() bool {
+			return srv.recentGHRefreshFailure(flightKey)
+		}, 3*time.Second, 20*time.Millisecond, "detached flight must record transient refresh-failure backoff")
+		callsAfterDrain := upstreamCalls.Load()
+		require.Equal(t, int64(2), callsAfterDrain, "production MaxRetries=1 must attempt initial + 1 retry on ReasonTimeout")
+
+		// (b) Second call after the flight drains serves stale with 0 new upstream calls.
+		resp2, err := srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
+		require.NoError(t, err)
+		require.NotNil(t, resp2)
+		assert.Equal(t, safeShortSHA(sha), resp2.ResolvedVersion)
+		assert.Equal(t, callsAfterDrain, upstreamCalls.Load(),
+			"second resolve within transient-failure backoff must not call hanging upstream again")
+	})
+
+	t.Run("denial_after_timer_purges_and_blocks_next", func(t *testing.T) {
+		const (
+			owner = "acme"
+			repo  = "slow-deny-repo"
+			uri   = "gh://" + owner + "/" + repo + "/s@main"
+			sha   = "8888888888888888888888888888888888888889"
+			pat   = "ghp_slow_deny_pat"
+		)
+
+		origTimeout := hubGHStaleRevalidateTimeout
+		hubGHStaleRevalidateTimeout = 40 * time.Millisecond
+		t.Cleanup(func() { hubGHStaleRevalidateTimeout = origTimeout })
+
+		gate := make(chan struct{})
+		t.Cleanup(func() {
+			select {
+			case <-gate:
+			default:
+				close(gate)
+			}
+		})
+
+		srv, _, alice, _, project := setupSkillAuthzTest(t)
+		entClient := enttest.NewClient(t)
+		srv.ghResolutionStore = NewGitHubResolutionStore(entClient)
+		srv.skillGitHubDoer = ghFuncDoer(func(ctx context.Context, _ githubfetch.Request) (*githubfetch.Response, error) {
+			select {
+			case <-gate:
+				return nil, &remotefetch.Error{Reason: remotefetch.ReasonStatus, Status: http.StatusNotFound}
+			case <-ctx.Done():
+				return nil, &remotefetch.Error{Reason: remotefetch.ReasonTimeout, Detail: ctx.Err().Error()}
+			}
+		})
+
+		useReimportCredBackend(srv, secret.ScopeProject, project.ID, map[string]string{
+			"GITHUB_TOKEN": pat,
+		})
+		cred := srv.githubCredential(context.Background(), ghCredRequest{
+			Scope: store.TemplateScopeProject, ScopeID: project.ID, Owner: owner, Repo: repo,
+		})
+		scope := cred.EffectiveScope()
+		seedGHSkillCache(t, srv, uri, scope, sha, `"e1"`, time.Now().Add(-time.Minute), nil)
+
+		resolve := func(t *testing.T) ResolveSkillsResponse {
+			t.Helper()
+			rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
+				ResolveSkillsRequest{Skills: []ResolveSkillRef{{URI: uri}}, ProjectID: project.ID})
+			require.Equal(t, http.StatusOK, rec.Code)
+			var resp ResolveSkillsResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+			return resp
 		}
-	}))
-	t.Cleanup(func() {
-		close(release)
-		gh.Close()
+
+		// First call: revalidation timer fires at 40ms while flight is blocked -> serves stale.
+		resp1 := resolve(t)
+		require.Empty(t, resp1.Errors)
+		require.Len(t, resp1.Resolved, 1)
+		assert.Equal(t, safeShortSHA(sha), resp1.Resolved[0].ResolvedVersion)
+
+		// Release the detached flight to receive 404 -> deletes all rows and writes negative memo.
+		close(gate)
+		require.Eventually(t, func() bool {
+			n, err := entClient.GitHubResolutionCache.Query().
+				Where(githubresolutioncache.TokenScopeEQ(scope)).
+				Count(context.Background())
+			return err == nil && n == 0
+		}, 3*time.Second, 20*time.Millisecond, "detached flight denial must purge cached rows")
+
+		// Next request must NOT be served stale; it gets the denial.
+		resp2 := resolve(t)
+		require.Empty(t, resp2.Resolved, "request after late denial must not be served stale")
+		require.Len(t, resp2.Errors, 1)
+		assert.Equal(t, agent.SkillErrCodeNotFound, resp2.Errors[0].Code)
 	})
-
-	srv, _, alice, _, project := setupSkillAuthzTest(t)
-	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
-	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
-	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
-	// Short client timeout so the hanging fake fails quickly with KindTimeout.
-	srv.skillGitHubDoer = &skillTestHTTPDoer{client: &http.Client{Timeout: 50 * time.Millisecond}}
-
-	useReimportCredBackend(srv, secret.ScopeProject, project.ID, map[string]string{
-		"GITHUB_TOKEN": pat,
-	})
-	cred := srv.githubCredential(context.Background(), ghCredRequest{
-		Scope: store.TemplateScopeProject, ScopeID: project.ID, Owner: owner, Repo: repo,
-	})
-	scope := cred.EffectiveScope()
-	seedGHSkillCache(t, srv, uri, scope, sha, `"e1"`, time.Now().Add(-time.Minute), nil)
-
-	resolve := func(t *testing.T) ResolveSkillsResponse {
-		t.Helper()
-		rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
-			ResolveSkillsRequest{Skills: []ResolveSkillRef{{URI: uri}}, ProjectID: project.ID})
-		require.Equal(t, http.StatusOK, rec.Code)
-		var resp ResolveSkillsResponse
-		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-		return resp
-	}
-
-	// First resolve hits the hanging upstream, times out, records refresh failure,
-	// and serves the stale entry.
-	resp1 := resolve(t)
-	require.Empty(t, resp1.Errors)
-	require.Len(t, resp1.Resolved, 1)
-	assert.Equal(t, safeShortSHA(sha), resp1.Resolved[0].ResolvedVersion)
-	callsAfterFirst := upstreamCalls.Load()
-	require.GreaterOrEqual(t, callsAfterFirst, int64(1))
-
-	// Second resolve within the backoff window serves stale immediately with 0
-	// additional upstream calls.
-	resp2 := resolve(t)
-	require.Empty(t, resp2.Errors)
-	require.Len(t, resp2.Resolved, 1)
-	assert.Equal(t, safeShortSHA(sha), resp2.Resolved[0].ResolvedVersion)
-	assert.Equal(t, callsAfterFirst, upstreamCalls.Load(),
-		"second resolve within transient-failure backoff must not call hanging upstream again")
 }
 
 // TestSkillsResolve_P4_SHAPinnedTTLBoundsRevocationForNonAnon verifies O3:
@@ -984,12 +1073,14 @@ func TestSkillsResolve_P4_BranchWrittenTreeExpiresForSHAPinned(t *testing.T) {
 	}
 }
 
-// TestSkillsResolve_P4_ListTreeNotFoundDeletesOnlyPath verifies O1 (fix round 2):
-//   - A 404 from ListTree after a successful ResolveRef (missing skill path / typo)
-//     deletes only that path's tree row and records the negative memo without
-//     wiping other cached ref/tree rows for the same {host, owner, repo, scope}.
-//   - A 403 (forbidden) from ListTree or a 404 from ResolveRef still purges all
-//     cached rows for {host, owner, repo, scope}.
+// TestSkillsResolve_P4_ListTreeNotFoundDeletesOnlyPath verifies O1 (fix rounds 2 & 3):
+//   - A 404 from ListTree when ResolveRefConditional succeeded in THIS flight
+//     (refProven == true) deletes only that path's tree row and records the
+//     negative memo without wiping other cached ref/tree rows for {host, owner, repo, scope}.
+//   - A 404 from ListTree when the ref was NOT proven in this flight (fresh ref
+//     row cached before credential revocation) purges the entire repo/scope cache
+//     so a cached sibling skill is no longer servable.
+//   - A 403 (forbidden) from ListTree still purges all cached rows for the scope.
 func TestSkillsResolve_P4_ListTreeNotFoundDeletesOnlyPath(t *testing.T) {
 	const (
 		owner      = "acme"
@@ -997,23 +1088,36 @@ func TestSkillsResolve_P4_ListTreeNotFoundDeletesOnlyPath(t *testing.T) {
 		sha        = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 		goodURI    = "gh://" + owner + "/" + repo + "/good@main"
 		missingURI = "gh://" + owner + "/" + repo + "/missing@main"
+		otherURI   = "gh://" + owner + "/" + repo + "/other@main"
 		forbidURI  = "gh://" + owner + "/" + repo + "/forbid@main"
 		pat        = "ghp_path_404_pat"
 	)
 
 	var (
+		revoked      atomic.Bool
 		missingCalls atomic.Int64
 	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		if revoked.Load() {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
 		_, _ = w.Write([]byte(sha))
 	})
 	mux.HandleFunc(ghTreeTestPath(owner, repo, sha, "skills/good"), func(w http.ResponseWriter, _ *http.Request) {
+		if revoked.Load() {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(ghTreeTestSingleFile))
 	})
 	mux.HandleFunc(ghTreeTestPath(owner, repo, sha, "skills/missing"), func(w http.ResponseWriter, _ *http.Request) {
 		missingCalls.Add(1)
+		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+	})
+	mux.HandleFunc(ghTreeTestPath(owner, repo, sha, "skills/other"), func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
 	})
 	mux.HandleFunc(ghTreeTestPath(owner, repo, sha, "skills/forbid"), func(w http.ResponseWriter, _ *http.Request) {
@@ -1031,10 +1135,12 @@ func TestSkillsResolve_P4_ListTreeNotFoundDeletesOnlyPath(t *testing.T) {
 	})
 
 	ctx := context.Background()
+	ep := srv.skillGitHubEndpoint()
 	cred := srv.githubCredential(ctx, ghCredRequest{
 		Scope: store.TemplateScopeProject, ScopeID: project.ID, Owner: owner, Repo: repo,
 	})
 	scope := cred.EffectiveScope()
+	refKey := githubfetch.RefCacheKey(ep.APIHost(), owner, repo, "main", scope)
 
 	resolve := func(t *testing.T, u string) ResolveSkillsResponse {
 		t.Helper()
@@ -1055,8 +1161,15 @@ func TestSkillsResolve_P4_ListTreeNotFoundDeletesOnlyPath(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
 
-	// 2. Resolving a missing path on the same branch returns not_found, writes
-	// the negative memo, and preserves the ref + "good" tree rows.
+	// 2. Expire the ref row so ResolveRefConditional runs and succeeds in THIS
+	// flight (refProven == true). ListTree 404 for "missing" deletes only that
+	// path's tree row, preserving ref + "good" tree rows (count == 2).
+	refRow, err := srv.ghResolutionStore.load(ctx, refKey)
+	require.NoError(t, err)
+	require.NotNil(t, refRow)
+	refRow.ExpiresAt = time.Now().Add(-time.Minute)
+	require.NoError(t, srv.ghResolutionStore.Put(ctx, refKey, *refRow))
+
 	resp = resolve(t, missingURI)
 	require.Empty(t, resp.Resolved)
 	require.Len(t, resp.Errors, 1)
@@ -1067,7 +1180,7 @@ func TestSkillsResolve_P4_ListTreeNotFoundDeletesOnlyPath(t *testing.T) {
 		Where(githubresolutioncache.TokenScopeEQ(scope)).
 		Count(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, 2, count, "ListTree 404 on a missing skill path must NOT wipe other cached rows for the repo/scope")
+	assert.Equal(t, 2, count, "ListTree 404 after in-flight ResolveRef success must NOT wipe other cached rows")
 
 	// Immediate retry of missing path is absorbed by the negative memo.
 	resp = resolve(t, missingURI)
@@ -1075,7 +1188,32 @@ func TestSkillsResolve_P4_ListTreeNotFoundDeletesOnlyPath(t *testing.T) {
 	assert.Equal(t, agent.SkillErrCodeNotFound, resp.Errors[0].Code)
 	assert.Equal(t, int64(1), missingCalls.Load(), "negative memo must absorb immediate retry of missing path")
 
-	// 3. A 403 (forbidden) from ListTree wipes ALL rows for {host, owner, repo, scope}.
+	// 3. Fresh ref row + revoked credential: ref is NOT proven in this flight
+	// (freshRef != nil), so ListTree 404 on "other" must purge the entire
+	// repo/scope cache and prevent serving cached sibling "good".
+	revoked.Store(true)
+	resp = resolve(t, otherURI)
+	require.Empty(t, resp.Resolved)
+	require.Len(t, resp.Errors, 1)
+	assert.Equal(t, agent.SkillErrCodeNotFound, resp.Errors[0].Code)
+
+	count, err = entClient.GitHubResolutionCache.Query().
+		Where(githubresolutioncache.TokenScopeEQ(scope)).
+		Count(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, count, "ListTree 404 without in-flight ref proof must purge all repo/scope rows")
+
+	resp = resolve(t, goodURI)
+	require.Empty(t, resp.Resolved, "cached sibling must NOT be servable after fresh-ref ListTree 404 purge")
+	require.Len(t, resp.Errors, 1)
+	assert.Equal(t, agent.SkillErrCodeNotFound, resp.Errors[0].Code)
+
+	// 4. Re-populate and verify a 403 (forbidden) from ListTree wipes ALL rows.
+	revoked.Store(false)
+	srv.ghFailures.Clear(refKey + ":skills/good")
+	resp = resolve(t, goodURI)
+	require.Len(t, resp.Resolved, 1)
+
 	resp = resolve(t, forbidURI)
 	require.Empty(t, resp.Resolved)
 	require.Len(t, resp.Errors, 1)

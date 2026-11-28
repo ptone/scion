@@ -3233,9 +3233,10 @@ type Server struct {
 	ghNow         func() time.Time
 	ghRandFloat64 func() float64
 
-	// ghFailures remembers, per cache key, that GitHub recently reported a
-	// gh:// ref as not found (see rememberGHNotFound and resolveGitHubSkill).
-	// It is in memory only, per hub process, and never written to the store.
+	// ghFailures remembers, per flight key, that GitHub recently returned an
+	// authoritative denial (401/403/404) for a gh:// skill (see rememberGHDenial
+	// and resolveGitHubSkill). It is in memory only, per hub process, and never
+	// written to the store.
 	ghFailures agent.FailureMemo
 
 	// ghCooldown holds gh:// resolution requests back per credential
