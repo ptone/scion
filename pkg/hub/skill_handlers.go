@@ -1820,10 +1820,12 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Per-request memo for (owner,repo,ref,tokenScope) → commitSHA.
-	// URIs sharing the same tuple — the common case for a skill bundle in one
-	// repo — perform a single ref→SHA lookup instead of one per URI.
+	// Per-request memos for (owner,repo,ref,tokenScope) → commitSHA and
+	// (projectID, lower(owner), lower(repo)) → Credential. URIs sharing a repo
+	// in one batch pay one credential lookup and one ref→SHA lookup instead of
+	// repeating Secret Manager / DB / GitHub RPCs per URI.
 	refSHAMemo := newGHSHAMemo()
+	credMemo := newGHCredMemo()
 
 	for _, skillRef := range req.Skills {
 		// GitHub skill resolution: gh:// URIs are handled by the Hub's GitHub resolution cache
@@ -1833,7 +1835,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 					skillRef.URI, agent.SkillErrCodeForbidden, 0, ghDeniedMessage))
 				continue
 			}
-			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID, refSHAMemo)
+			ghResolved, err := s.resolveGitHubSkillWithCredMemo(ctx, skillRef.URI, req.ProjectID, refSHAMemo, credMemo)
 			if err != nil {
 				resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceGitHub,
 					skillRef.URI, ghErrorCode(err), ghErrorStatus(err), err.Error()))
@@ -2299,6 +2301,38 @@ func (g *ghSHAMemo) set(key, value string) {
 	g.m[key] = value
 }
 
+// ghCredMemo is a per-request mutex-guarded memo mapping
+// (projectID, lower(owner), lower(repo)) to the resolved githubfetch.Credential
+// (including anonymous/absent results). Scoped strictly to one HTTP request so
+// rotation and revocation take effect on the next request.
+type ghCredMemo struct {
+	mu sync.Mutex
+	m  map[string]githubfetch.Credential
+}
+
+func newGHCredMemo() *ghCredMemo {
+	return &ghCredMemo{m: make(map[string]githubfetch.Credential)}
+}
+
+func (g *ghCredMemo) get(key string) (githubfetch.Credential, bool) {
+	if g == nil {
+		return githubfetch.Credential{}, false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	v, ok := g.m[key]
+	return v, ok
+}
+
+func (g *ghCredMemo) set(key string, cred githubfetch.Credential) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.m[key] = cred
+}
+
 // ghFlightJoinHook, when non-nil, is called immediately before every caller —
 // leader and followers alike — calls ghResolveFlight.DoChan for cacheKey.
 // Tests use it to know precisely when a second (or later) caller has reached
@@ -2359,6 +2393,10 @@ func (s *Server) githubCooldown() *agent.GitHubCooldown {
 //     cached ref and tree rows for {host, owner, repo, scope}, writes the
 //     1-minute negative memo, and is never masked by a stale entry.
 func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID string, refSHAMemo *ghSHAMemo) (*ResolvedSkillResponse, error) {
+	return s.resolveGitHubSkillWithCredMemo(ctx, rawURI, projectID, refSHAMemo, nil)
+}
+
+func (s *Server) resolveGitHubSkillWithCredMemo(ctx context.Context, rawURI, projectID string, refSHAMemo *ghSHAMemo, credMemo *ghCredMemo) (*ResolvedSkillResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -2382,16 +2420,24 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	}
 	isBranchRef := !githubfetch.IsFullCommitSHA(ghRef.Ref)
 
-	// 2. Resolve credential via unified Hub precedence (D2). The caller has
+	// 2. Resolve credential via unified Hub precedence (D2), memoized per
+	// (projectID, lower(owner), lower(repo)) for this request. The caller has
 	// already passed canUseProjectGitHubToken for non-empty projectID.
 	var cred githubfetch.Credential
 	if projectID != "" {
-		cred = s.githubCredential(ctx, ghCredRequest{
-			Scope:   store.TemplateScopeProject,
-			ScopeID: projectID,
-			Owner:   ghRef.Owner,
-			Repo:    ghRef.Repo,
-		})
+		credKey := projectID + "\x00" + strings.ToLower(ghRef.Owner) + "/" + strings.ToLower(ghRef.Repo)
+		if cached, ok := credMemo.get(credKey); ok {
+			cred = cached
+		} else {
+			cred = s.githubCredential(ctx, ghCredRequest{
+				Scope:   store.TemplateScopeProject,
+				ScopeID: projectID,
+				Owner:   ghRef.Owner,
+				Repo:    ghRef.Repo,
+				Quiet:   true,
+			})
+			credMemo.set(credKey, cred)
+		}
 	} else {
 		cred = githubfetch.Credential{
 			Scope: githubfetch.AnonScope,
@@ -2481,12 +2527,20 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 							injectGHStaleServe(flightKey, refreshStarted)
 							return buildResolvedSkillResponse(ghRef, staleTree, downloadToken), nil
 						}
-						// Non-anon scope: serve stale immediately only when
-						// the scope's cooldown is active; otherwise refresh
-						// synchronously below and serve stale only on a
-						// transient failure (never on authoritative denial).
+						// Non-anon scope: serve stale immediately when the
+						// scope's cooldown is active or a recent transient
+						// refresh failure is in backoff (avoiding paying a full
+						// upstream timeout on every request while GitHub is
+						// degraded). Authoritative denials never record a
+						// refresh failure — they purge the cache instead.
 						if _, cooling := s.githubCooldown().Active(scope); cooling {
 							slog.WarnContext(ctx, "github_resolution_cache: serving stale entry during active cooldown",
+								"uri", rawURI, "commit_sha", safeShortSHA(staleTree.CommitSHA))
+							injectGHStaleServe(flightKey, false)
+							return buildResolvedSkillResponse(ghRef, staleTree, downloadToken), nil
+						}
+						if s.recentGHRefreshFailure(flightKey) {
+							slog.WarnContext(ctx, "github_resolution_cache: serving stale entry during transient refresh-failure backoff",
 								"uri", rawURI, "commit_sha", safeShortSHA(staleTree.CommitSHA))
 							injectGHStaleServe(flightKey, false)
 							return buildResolvedSkillResponse(ghRef, staleTree, downloadToken), nil
@@ -2495,30 +2549,6 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 				}
 			}
 		}
-	}
-
-	modelessFallback := func(err error) (*ResolvedSkillResponse, error) {
-		if s.ghResolutionStore == nil || ctx.Err() != nil || isGHAuthoritativeDenial(err) {
-			return nil, err
-		}
-		var treeKey string
-		switch {
-		case !isBranchRef:
-			treeKey = flightKey
-		case freshRef != nil:
-			treeKey = githubfetch.TreeCacheKey(apiHost, ghRef.Owner, ghRef.Repo, freshRef.CommitSHA, ghRef.SkillPath, scope)
-		case staleRef != nil:
-			treeKey = githubfetch.TreeCacheKey(apiHost, ghRef.Owner, ghRef.Repo, staleRef.CommitSHA, ghRef.SkillPath, scope)
-		default:
-			return nil, err
-		}
-		legacy, ok, lerr := s.ghResolutionStore.GetModeless(ctx, treeKey, isBranchRef, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
-		if lerr != nil || !ok {
-			return nil, err
-		}
-		slog.WarnContext(ctx, "github_resolution_cache: re-resolve failed; serving an entry from before file modes were recorded, so its files may lack executable bits",
-			"uri", rawURI, "commit_sha", safeShortSHA(legacy.CommitSHA), "error", err)
-		return buildResolvedSkillResponse(ghRef, legacy, downloadToken), nil
 	}
 
 	// Negative memo (not_found / auth_rejected / forbidden) within FailureMemoTTL.
@@ -2533,7 +2563,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		if ra < 0 {
 			ra = 0
 		}
-		rlErr := &githubfetch.Error{
+		return nil, &githubfetch.Error{
 			Kind:       githubfetch.KindRateLimited,
 			Status:     http.StatusTooManyRequests,
 			RetryAfter: ra,
@@ -2541,7 +2571,6 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 			CredKind:   cred.Kind,
 			Hint:       cred.Hint,
 		}
-		return modelessFallback(rlErr)
 	}
 
 	// 5. Cache miss (or credentialed stale revalidation): coalesce concurrent
@@ -2583,13 +2612,15 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	case res := <-resultCh:
 		if res.Err != nil {
 			if staleTree != nil && isGHTransientFailure(res.Err) {
+				s.recordGHRefreshFailure(flightKey)
 				slog.WarnContext(ctx, "github_resolution_cache: refresh failed transiently; serving stale entry",
 					"uri", rawURI, "commit_sha", safeShortSHA(staleTree.CommitSHA), "error", res.Err)
 				injectGHStaleServe(flightKey, false)
 				return buildResolvedSkillResponse(ghRef, staleTree, downloadToken), nil
 			}
-			return modelessFallback(res.Err)
+			return nil, res.Err
 		}
+		s.clearGHRefreshFailure(flightKey)
 		// Build the response from this caller's own ghRef, not whichever
 		// caller happened to lead or already have the result cached: the
 		// flight (and the cache re-check above) share one *GitHubCacheEntry
@@ -2743,7 +2774,7 @@ func (s *Server) fetchAndCacheGitHubSkill(
 						"uri", rawURI, "error", err)
 				}
 			}
-			if staleTree != nil && fileEntriesHaveModes(staleTree.FileEntries) {
+			if staleTree != nil {
 				slog.InfoContext(ctx, "github_resolution_cache: ref 304 not modified, extended TTL without re-listing",
 					"uri", rawURI, "commit_sha", safeShortSHA(commitSHA))
 				return staleTree, nil
@@ -2769,7 +2800,7 @@ func (s *Server) fetchAndCacheGitHubSkill(
 	}
 
 	treeKey := githubfetch.TreeCacheKey(apiHost, ghRef.Owner, ghRef.Repo, commitSHA, ghRef.SkillPath, scope)
-	if staleTree != nil && staleTree.CommitSHA == commitSHA && fileEntriesHaveModes(staleTree.FileEntries) {
+	if staleTree != nil && staleTree.CommitSHA == commitSHA {
 		s.ghFailures.Clear(flightKey)
 		return staleTree, nil
 	}
@@ -2806,12 +2837,20 @@ func (s *Server) fetchAndCacheGitHubSkill(
 
 	bundleHash := computeBundleHash(fileEntries)
 
+	// SHA-pinned refs (!isBranchRef) have no ref row in front of the tree row.
+	// For non-anon scopes, cap the tree row to the 30m fresh TTL so revocation
+	// exposure never exceeds one fresh TTL; anon keeps the 24h SHA TTL.
+	treeTTL := agent.DefaultSHAResolutionCacheTTL
+	if !isBranchRef && scope != githubfetch.AnonScope {
+		treeTTL = agent.DefaultResolutionCacheTTL
+	}
+
 	entry := GitHubCacheEntry{
 		CommitSHA:   commitSHA,
 		FileEntries: fileEntries,
 		BundleHash:  bundleHash,
 		TokenScope:  scope,
-		ExpiresAt:   s.ghClockNow().Add(agent.JitteredTTL(agent.DefaultSHAResolutionCacheTTL, s.ghRand())),
+		ExpiresAt:   s.ghClockNow().Add(agent.JitteredTTL(treeTTL, s.ghRand())),
 		OriginalURI: rawURI,
 	}
 

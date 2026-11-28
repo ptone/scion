@@ -103,7 +103,7 @@ type ghCredRequest struct {
 	Owner     string
 	Repo      string
 	Requester UserIdentity // optional; defaults to GetUserIdentityFromContext(ctx)
-	Quiet     bool         // log credential selection at Debug instead of Info (e.g. per-agent-create drift checks)
+	Quiet     bool         // log credential selection at Debug instead of Info (e.g. per-agent-create drift checks, skill resolution)
 }
 
 // githubCredential resolves the GitHub credential and principal scope for a
@@ -144,6 +144,9 @@ func (s *Server) githubCredential(ctx context.Context, r ghCredRequest) githubfe
 }
 
 func (s *Server) logGitHubCredentialSelection(quiet bool, msg string, args ...any) {
+	if s.resourceLog == nil {
+		return
+	}
 	if quiet {
 		s.resourceLog.Debug(msg, args...)
 		return

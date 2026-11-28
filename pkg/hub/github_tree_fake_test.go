@@ -119,9 +119,8 @@ func seedGHSkillCache(
 			ExpiresAt:   expiresAt,
 			OriginalURI: uri,
 		}))
-		// Keep the tree row fresh unless the caller explicitly passed a past
-		// expiry for a modeless test.
-		if fileEntriesHaveModes(files) && time.Now().After(treeExpiresAt) {
+		// Keep the tree row fresh when the ref row is seeded as stale.
+		if time.Now().After(treeExpiresAt) {
 			treeExpiresAt = time.Now().Add(time.Hour)
 		}
 	} else {

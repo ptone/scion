@@ -482,6 +482,9 @@ func TestSkillsResolve_P4_RevocationStaleAndETag304(t *testing.T) {
 	assert.Equal(t, safeShortSHA(sha), resp.Resolved[0].ResolvedVersion)
 
 	// 4. Authoritative 404 for credentialed scope deletes ref+tree rows and is NOT served stale.
+	// Step 3's transient 5xx activated refresh-failure backoff; clear it to
+	// simulate backoff expiry before the next revalidation sees the revoked 404.
+	srv.clearGHRefreshFailure(refKey + ":" + skillPath)
 	expireRef()
 	mode.Store(3)
 	resp = resolve(t)
@@ -595,4 +598,229 @@ func TestSkillsResolve_P4_SharedCooldownWithReimport(t *testing.T) {
 
 	_, otherActive := srv.githubCooldown().Active(githubfetch.AnonScope)
 	assert.False(t, otherActive, "cooldown must not leak to anon scope")
+}
+
+// TestSkillsResolve_P4_PerRequestCredentialMemo verifies R1: resolving N warm
+// gh:// URIs in one repo for one project performs only one pass of SecretBackend
+// Get calls (including for anon/absent results), while a URI in a different repo
+// in the same batch performs its own lookup.
+func TestSkillsResolve_P4_PerRequestCredentialMemo(t *testing.T) {
+	const (
+		owner = "acme"
+		repoA = "repo-a"
+		repoB = "repo-b"
+		sha   = "7777777777777777777777777777777777777777"
+		pat   = "ghp_memo_test_pat"
+	)
+
+	t.Run("PAT project deduplicates same repo and separates other repo", func(t *testing.T) {
+		srv, _, alice, _, project := setupSkillAuthzTest(t)
+		srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+		wireFakeSkillGitHub(srv, "https://api.github.com")
+
+		backend, _ := useReimportCredBackend(srv, secret.ScopeProject, project.ID, map[string]string{
+			"GITHUB_TOKEN": pat,
+		})
+		cred := srv.githubCredential(context.Background(), ghCredRequest{
+			Scope: store.TemplateScopeProject, ScopeID: project.ID, Owner: owner, Repo: repoA,
+		})
+		scope := cred.EffectiveScope()
+		require.True(t, strings.HasPrefix(scope, "secret:"))
+
+		// Seed 4 warm skills in repoA (mixed case owner/repo) and 1 in repoB.
+		uris := []string{
+			"gh://acme/repo-a/s1@main",
+			"gh://Acme/Repo-A/s2@main",
+			"gh://ACME/REPO-A/s3@main",
+			"gh://acme/repo-a/s4@main",
+			"gh://acme/repo-b/s5@main",
+		}
+		for _, u := range uris {
+			seedGHSkillCache(t, srv, u, scope, sha, `"e1"`, time.Now().Add(time.Hour), nil)
+		}
+
+		// Reset counter right before the batch resolve.
+		backend.gets = 0
+		refs := make([]ResolveSkillRef, len(uris))
+		for i, u := range uris {
+			refs[i] = ResolveSkillRef{URI: u}
+		}
+		rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
+			ResolveSkillsRequest{Skills: refs, ProjectID: project.ID})
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var resp ResolveSkillsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		require.Empty(t, resp.Errors)
+		require.Len(t, resp.Resolved, len(uris))
+
+		// One lookup pass for (project, acme/repo-a) = 3 Gets (GH_ACME__REPO_A,
+		// GH_ACME, GITHUB_TOKEN) + one lookup pass for (project, acme/repo-b) = 3 Gets.
+		// Without per-request memoization, 5 URIs would perform 15 Gets.
+		assert.Equal(t, 6, backend.gets, "4 URIs in repo-a + 1 in repo-b must do exactly 2 credential lookup passes")
+	})
+
+	t.Run("anon project memoizes absent credentials across same repo", func(t *testing.T) {
+		srv, _, alice, _, project := setupSkillAuthzTest(t)
+		srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+		wireFakeSkillGitHub(srv, "https://api.github.com")
+
+		backend, _ := useReimportCredBackend(srv, secret.ScopeProject, project.ID, nil)
+		uris := []string{
+			"gh://acme/repo-a/s1@main",
+			"gh://acme/repo-a/s2@main",
+			"gh://acme/repo-a/s3@main",
+			"gh://acme/repo-a/s4@main",
+		}
+		for _, u := range uris {
+			seedGHSkillCache(t, srv, u, githubfetch.AnonScope, sha, `"e1"`, time.Now().Add(time.Hour), nil)
+		}
+
+		backend.gets = 0
+		refs := make([]ResolveSkillRef, len(uris))
+		for i, u := range uris {
+			refs[i] = ResolveSkillRef{URI: u}
+		}
+		rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
+			ResolveSkillsRequest{Skills: refs, ProjectID: project.ID})
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var resp ResolveSkillsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		require.Empty(t, resp.Errors)
+		require.Len(t, resp.Resolved, len(uris))
+
+		// Exactly 1 lookup pass (3 Gets: GH_ACME__REPO_A, GH_ACME, GITHUB_TOKEN)
+		// for all 4 URIs, not 12.
+		assert.Equal(t, 3, backend.gets, "absent/anon credentials must be memoized per repo within a request")
+	})
+}
+
+// TestSkillsResolve_P4_CredentialedStaleTimeoutBackoff verifies O2: after a
+// credentialed stale refresh fails transiently (timeout), a second resolve
+// within the refresh-failure backoff window serves stale immediately without
+// making another upstream call.
+func TestSkillsResolve_P4_CredentialedStaleTimeoutBackoff(t *testing.T) {
+	const (
+		owner = "acme"
+		repo  = "hanging-repo"
+		uri   = "gh://" + owner + "/" + repo + "/s@main"
+		sha   = "8888888888888888888888888888888888888888"
+		pat   = "ghp_timeout_backoff_pat"
+	)
+
+	var upstreamCalls atomic.Int64
+	release := make(chan struct{})
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		gh.Close()
+	})
+
+	srv, _, alice, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	// Short client timeout so the hanging fake fails quickly with KindTimeout.
+	srv.skillGitHubDoer = &skillTestHTTPDoer{client: &http.Client{Timeout: 50 * time.Millisecond}}
+
+	useReimportCredBackend(srv, secret.ScopeProject, project.ID, map[string]string{
+		"GITHUB_TOKEN": pat,
+	})
+	cred := srv.githubCredential(context.Background(), ghCredRequest{
+		Scope: store.TemplateScopeProject, ScopeID: project.ID, Owner: owner, Repo: repo,
+	})
+	scope := cred.EffectiveScope()
+	seedGHSkillCache(t, srv, uri, scope, sha, `"e1"`, time.Now().Add(-time.Minute), nil)
+
+	resolve := func(t *testing.T) ResolveSkillsResponse {
+		t.Helper()
+		rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
+			ResolveSkillsRequest{Skills: []ResolveSkillRef{{URI: uri}}, ProjectID: project.ID})
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp ResolveSkillsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		return resp
+	}
+
+	// First resolve hits the hanging upstream, times out, records refresh failure,
+	// and serves the stale entry.
+	resp1 := resolve(t)
+	require.Empty(t, resp1.Errors)
+	require.Len(t, resp1.Resolved, 1)
+	assert.Equal(t, safeShortSHA(sha), resp1.Resolved[0].ResolvedVersion)
+	callsAfterFirst := upstreamCalls.Load()
+	require.GreaterOrEqual(t, callsAfterFirst, int64(1))
+
+	// Second resolve within the backoff window serves stale immediately with 0
+	// additional upstream calls.
+	resp2 := resolve(t)
+	require.Empty(t, resp2.Errors)
+	require.Len(t, resp2.Resolved, 1)
+	assert.Equal(t, safeShortSHA(sha), resp2.Resolved[0].ResolvedVersion)
+	assert.Equal(t, callsAfterFirst, upstreamCalls.Load(),
+		"second resolve within transient-failure backoff must not call hanging upstream again")
+}
+
+// TestSkillsResolve_P4_SHAPinnedTTLBoundsRevocationForNonAnon verifies O3:
+// SHA-pinned (@<40-hex>) tree rows for non-anon scopes use the 30m fresh TTL
+// (DefaultResolutionCacheTTL) rather than the 24h SHA TTL, while anon keeps 24h.
+func TestSkillsResolve_P4_SHAPinnedTTLBoundsRevocationForNonAnon(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "sha-ttl-repo"
+		skillPath = "skills/s"
+		sha       = "9999999999999999999999999999999999999999"
+		uri       = "gh://" + owner + "/" + repo + "/s@" + sha
+		pat       = "ghp_sha_ttl_pat"
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(ghTreeTestPath(owner, repo, sha, skillPath), func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(ghTreeTestSingleFile))
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+	wireFakeSkillGitHub(srv, gh.URL)
+
+	fixedNow := time.Now().UTC().Truncate(time.Second)
+	srv.ghNow = func() time.Time { return fixedNow }
+	srv.ghRandFloat64 = func() float64 { return 0.5 } // 0% jitter = exact nominal TTL
+
+	ctx := context.Background()
+	ep := srv.skillGitHubEndpoint()
+
+	// 1. Anon SHA-pinned ref gets 24h TTL.
+	_, err := srv.resolveGitHubSkill(ctx, uri, "", nil)
+	require.NoError(t, err)
+	anonKey := githubfetch.TreeCacheKey(ep.APIHost(), owner, repo, sha, skillPath, githubfetch.AnonScope)
+	anonEntry, hit, err := srv.ghResolutionStore.Get(ctx, anonKey)
+	require.NoError(t, err)
+	require.True(t, hit)
+	assert.WithinDuration(t, fixedNow.Add(agent.DefaultSHAResolutionCacheTTL), anonEntry.ExpiresAt, time.Second,
+		"anon SHA-pinned tree row must keep 24h TTL")
+
+	// 2. Credentialed SHA-pinned ref gets 30m fresh TTL.
+	useReimportCredBackend(srv, secret.ScopeProject, project.ID, map[string]string{
+		"GITHUB_TOKEN": pat,
+	})
+	cred := srv.githubCredential(ctx, ghCredRequest{
+		Scope: store.TemplateScopeProject, ScopeID: project.ID, Owner: owner, Repo: repo,
+	})
+	_, err = srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+	require.NoError(t, err)
+	credKey := githubfetch.TreeCacheKey(ep.APIHost(), owner, repo, sha, skillPath, cred.EffectiveScope())
+	credEntry, hit, err := srv.ghResolutionStore.Get(ctx, credKey)
+	require.NoError(t, err)
+	require.True(t, hit)
+	assert.WithinDuration(t, fixedNow.Add(agent.DefaultResolutionCacheTTL), credEntry.ExpiresAt, time.Second,
+		"non-anon SHA-pinned tree row must use 30m fresh TTL to bound revocation exposure")
 }

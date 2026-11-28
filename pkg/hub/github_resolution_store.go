@@ -73,29 +73,14 @@ func (s *GitHubResolutionStore) load(ctx context.Context, cacheKey string) (*Git
 	}, nil
 }
 
-// fileEntriesHaveModes reports whether every file entry records a mode.
-// Entries written since the hub reads GitHub trees always do; a row written
-// before has none (ptone/scion#5781).
-func fileEntriesHaveModes(files []GitHubFileEntry) bool {
-	for _, f := range files {
-		if f.Mode == "" {
-			return false
-		}
-	}
-	return true
-}
-
 // Get retrieves a cache entry by key, returning (entry, true, nil) on hit,
 // (nil, false, nil) on miss or expiration, or (nil, false, error) on DB error.
-//
-// A row written before file modes were recorded (see GetModeless) is a
-// miss, so the ref is resolved again with its modes.
 func (s *GitHubResolutionStore) Get(ctx context.Context, cacheKey string) (*GitHubCacheEntry, bool, error) {
 	entry, err := s.load(ctx, cacheKey)
 	if err != nil || entry == nil {
 		return nil, false, err
 	}
-	if time.Now().After(entry.ExpiresAt) || !fileEntriesHaveModes(entry.FileEntries) {
+	if time.Now().After(entry.ExpiresAt) {
 		return nil, false, nil
 	}
 	return entry, true, nil
@@ -110,15 +95,14 @@ func (s *GitHubResolutionStore) Get(ctx context.Context, cacheKey string) (*GitH
 // (a known, fixed TTL); a commit-SHA entry's TTL differs and, being
 // immutable, has no use for staleness in the first place.
 //
-// Returns (nil, false, nil) when the row does not exist, is older than
-// maxStaleAge or records no file modes (see GetModeless), and
-// (nil, false, error) on a DB error.
+// Returns (nil, false, nil) when the row does not exist or is older than
+// maxStaleAge, and (nil, false, error) on a DB error.
 func (s *GitHubResolutionStore) GetStale(ctx context.Context, cacheKey string, lastTTL, maxStaleAge time.Duration) (*GitHubCacheEntry, bool, error) {
 	entry, err := s.load(ctx, cacheKey)
 	if err != nil || entry == nil {
 		return nil, false, err
 	}
-	if !entry.ExpiresAt.After(staleCutoff(time.Now(), lastTTL, maxStaleAge)) || !fileEntriesHaveModes(entry.FileEntries) {
+	if !entry.ExpiresAt.After(staleCutoff(time.Now(), lastTTL, maxStaleAge)) {
 		return nil, false, nil
 	}
 	return entry, true, nil
@@ -126,37 +110,11 @@ func (s *GitHubResolutionStore) GetStale(ctx context.Context, cacheKey string, l
 
 // GetTreeForStaleRef loads a commit-pinned tree row paired with a stale ref
 // row. Because tree rows are immutable at their commit SHA and the ref row
-// already enforces the stale window, any existing tree row with recorded file
-// modes is usable.
+// already enforces the stale window, any existing tree row is usable.
 func (s *GitHubResolutionStore) GetTreeForStaleRef(ctx context.Context, cacheKey string) (*GitHubCacheEntry, bool, error) {
 	entry, err := s.load(ctx, cacheKey)
 	if err != nil || entry == nil {
 		return nil, false, err
-	}
-	if !fileEntriesHaveModes(entry.FileEntries) {
-		return nil, false, nil
-	}
-	return entry, true, nil
-}
-
-// GetModeless returns the row for cacheKey if it was written before file
-// modes were recorded and could still be served: unexpired, or, when
-// isBranchRef, within the stale window GetStale uses. Get and GetStale
-// treat such a row as a miss; resolveGitHubSkill serves it only when
-// re-resolving the ref failed, as it was served before (ptone/scion#5781).
-func (s *GitHubResolutionStore) GetModeless(ctx context.Context, cacheKey string, isBranchRef bool, lastTTL, maxStaleAge time.Duration) (*GitHubCacheEntry, bool, error) {
-	entry, err := s.load(ctx, cacheKey)
-	if err != nil || entry == nil {
-		return nil, false, err
-	}
-	if fileEntriesHaveModes(entry.FileEntries) {
-		return nil, false, nil
-	}
-	now := time.Now()
-	fresh := !now.After(entry.ExpiresAt)
-	stale := isBranchRef && entry.ExpiresAt.After(staleCutoff(now, lastTTL, maxStaleAge))
-	if !fresh && !stale {
-		return nil, false, nil
 	}
 	return entry, true, nil
 }

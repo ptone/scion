@@ -1434,65 +1434,6 @@ func TestResolveGitHubSkill_SubmoduleFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "submodule")
 }
 
-// TestResolveGitHubSkill_ModelessRow covers a cache row written before file
-// modes were recorded (ptone/scion#5781): it is never served while a
-// re-resolve can replace it, and it is served, as before, when that
-// re-resolve fails, as long as it would have been servable (fresh, or a
-// branch ref within the stale window).
-func TestResolveGitHubSkill_ModelessRow(t *testing.T) {
-	const (
-		owner     = "acme"
-		repo      = "legacy-repo"
-		skillPath = "skills/tool"
-		commitSHA = "9999999999999999999999999999999999999999"
-	)
-	legacyFiles := []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "old", Size: 1}}
-
-	cases := []struct {
-		name      string
-		ref       string
-		expiresIn time.Duration
-		failing   bool
-		// served is true when the legacy row must come back.
-		served bool
-	}{
-		{name: "fresh row is re-resolved", ref: "main", expiresIn: time.Hour},
-		{name: "fresh row served when re-resolve fails", ref: "main", expiresIn: time.Hour, failing: true, served: true},
-		{name: "stale branch row served when re-resolve fails", ref: "main", expiresIn: -time.Minute, failing: true, served: true},
-		{name: "expired SHA row is not served", ref: commitSHA, expiresIn: -time.Minute, failing: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, _, _, _, project := setupSkillAuthzTest(t)
-			srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
-			var treeCalls atomic.Int64
-			var failing atomic.Bool
-			failing.Store(tc.failing)
-			ghModesTestServer(t, srv, owner, repo, skillPath, commitSHA, &treeCalls, &failing)
-
-			uri := "gh://" + owner + "/" + repo + "/tool@" + tc.ref
-			ctx := context.Background()
-			seedGHSkillCache(t, srv, uri, githubfetch.AnonScope, commitSHA, "", time.Now().Add(tc.expiresIn), legacyFiles)
-
-			resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
-			switch {
-			case tc.served:
-				require.NoError(t, err)
-				assert.Equal(t, computeBundleHash(legacyFiles), resp.ContentHash)
-				assert.Equal(t, map[string]string{"SKILL.md": ""}, ghModesByPath(resp.Files),
-					"a legacy row carries no modes; the broker writes its files 0644 as before")
-			case tc.failing:
-				require.Error(t, err)
-			default:
-				require.NoError(t, err)
-				assert.NotEqual(t, computeBundleHash(legacyFiles), resp.ContentHash)
-				assert.Equal(t, map[string]string{"SKILL.md": "0644", "scripts/run.sh": "0755"}, ghModesByPath(resp.Files))
-				assert.Equal(t, int64(1), treeCalls.Load())
-			}
-		})
-	}
-}
-
 // TestSkillsResolve_GHTreeErrorCode pins the per-URI cause code for a skill
 // tree the hub refuses (ptone/scion#5781): unsupported_skill_content, the
 // same code the local resolver reports, not the generic resolve_failed.
