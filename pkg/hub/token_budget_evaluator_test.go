@@ -472,8 +472,9 @@ func TestTokenBudgetEvaluator_ConsumedOnlyCASFiresNoHook(t *testing.T) {
 	require.Len(t, crossings, 1)
 	assert.Equal(t, store.UsageBudgetStateWarn, crossings[0].NewState)
 
-	// Second ingest: +200 -> 800/1000 (warn stays warn; CAS bumps consumed_at_eval & state_version).
-	ev2 := ingestTestTokens(t, s, projID, nil, now, 200, false)
+	// Second ingest: +100 -> 700/1000 (still between 50% and 80% soft thresholds;
+	// warn stays warn, CAS bumps consumed_at_eval & state_version without crossing 80%).
+	ev2 := ingestTestTokens(t, s, projID, nil, now, 100, false)
 	eval.EvaluateIngestedEvents(ctx, []*store.UsageEvent{ev2})
 
 	st, err := s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
@@ -484,7 +485,7 @@ func TestTokenBudgetEvaluator_ConsumedOnlyCASFiresNoHook(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, store.UsageBudgetStateWarn, st.State)
-	assert.Equal(t, int64(800), st.ConsumedAtEval)
+	assert.Equal(t, int64(700), st.ConsumedAtEval)
 	assert.Equal(t, int64(2), st.StateVersion)
 	assert.Len(t, crossings, 1, "warn-stays-warn consumed-only CAS must not fire a new crossing")
 }
