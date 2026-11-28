@@ -267,6 +267,27 @@ answered, in the conversation of the prompt.
 `recommended` means the answer matched your `default`. Act on the answer, and
 reply in the conversation when the user expects a result.
 
+A user may also include an optional **comment** (one line of plain text, up to
+200 characters) with any answer, including an Other answer. When present, the
+`decision-response` adds one trailing Go-quoted line after the answer line and
+sets envelope metadata `decision_comment` (the raw unquoted text):
+
+```text
+[decision-response] deploy-target v1 ("Where should ...") answer=Staging (choice staging) by <user>
+comment="Staging, but skip the load test this time."
+```
+
+- When no comment was given, neither the `comment="..."` line nor
+  `decision_comment` is sent.
+- Confirming an interpreted answer **with a comment** delivers a
+  `decision-response` carrying `confirmed` inside the parenthesis
+  (`answer=Staging (choice staging, confirmed)`) plus the trailing
+  `comment="..."` line and `decision_comment` metadata. Confirming without a
+  comment still delivers nothing.
+- **Act on the comment as part of the answer.** Do not ask for secrets in
+  comments: they are stored permanently in the decision log, visible to
+  everyone who can read the conversation, and searchable.
+
 A user may also **dismiss** one or more open decisions instead of answering
 (once the version is at least 5 minutes old). You receive one
 `decision-response` per dismiss call (for example
@@ -316,8 +337,8 @@ scion decisions show <key>
 `--withdrawn` shows withdrawn ones, `--dismissed` shows dismissed ones, `--all`
 adds replaced, withdrawn and dismissed versions, and `-q`/`--search <text>` (2
 to 256 characters) searches the question, key, effective answer label, Other
-text, and dismissal reason. `show <key>` prints every version of a key with its choices,
-withdrawal or dismissal details, and every recorded answer. Both take `--json`.
+text, comment, and dismissal reason. `show <key>` prints every version of a key with its choices,
+withdrawal or dismissal details, and every recorded answer (including any comment). Both take `--json`.
 
 ## A user answers in words instead
 
