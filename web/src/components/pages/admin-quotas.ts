@@ -784,9 +784,20 @@ export class ScionPageAdminQuotas extends LitElement {
     this.showEntitlementDialog = true;
   }
 
+  private formatEntitlementIfMatch(updatedAt: string | undefined): string | null {
+    const trimmed = (updatedAt || '').trim();
+    if (!trimmed || Number.isNaN(Date.parse(trimmed))) {
+      return null;
+    }
+    // Preserve the raw RFC3339Nano string from the list payload (avoiding JS
+    // Date millisecond truncation); the Hub's parseEntitlementIfMatch parses
+    // quoted RFC3339Nano and compares at microsecond precision.
+    return `"${trimmed}"`;
+  }
+
   private openEditEntitlement(binding: EntitlementBinding): void {
     this.editingEntitlement = binding;
-    this.editingEntitlementEtag = null;
+    this.editingEntitlementEtag = this.formatEntitlementIfMatch(binding.updatedAt);
     this.entitlementDialogConflict = false;
     this.entitlementForm = {
       subjectType: binding.subjectType,
@@ -798,21 +809,6 @@ export class ScionPageAdminQuotas extends LitElement {
     };
     this.entitlementDialogError = null;
     this.showEntitlementDialog = true;
-    void this.fetchEntitlementRevision(binding.id);
-  }
-
-  private async fetchEntitlementRevision(bindingId: string): Promise<void> {
-    try {
-      const res = await apiFetch(`/api/v1/admin/entitlements/${encodeURIComponent(bindingId)}`);
-      if (!res.ok) return;
-      if (this.editingEntitlement?.id !== bindingId) return;
-      const etag = res.headers.get('ETag');
-      if (etag) {
-        this.editingEntitlementEtag = etag;
-      }
-    } catch {
-      // Best-effort revision fetch; PUT still works unconditionally when ETag is absent.
-    }
   }
 
   private async saveEntitlement(): Promise<void> {

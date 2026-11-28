@@ -305,7 +305,7 @@ describe('scion-page-admin-quotas — llm_tokens limits & entitlement edit (pton
     expect(element.shadowRoot?.textContent).not.toContain('llm_tokens_per_project_day');
   });
 
-  it('edits an llm_tokens binding sending explicit pause_new tokenAction and If-Match ETag, and handles 412', async () => {
+  it('edits an llm_tokens binding sending explicit pause_new tokenAction and If-Match from list updatedAt, and handles 412', async () => {
     setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
     setFeatureFlag(TOKENOMICS_TOKEN_BUDGETS_FLAG, true);
 
@@ -315,7 +315,6 @@ describe('scion-page-admin-quotas — llm_tokens limits & entitlement edit (pton
       body: Record<string, unknown>;
     }> = [];
     let putCount = 0;
-    let etagGetResolved = false;
 
     vi.stubGlobal(
       'fetch',
@@ -334,21 +333,6 @@ describe('scion-page-admin-quotas — llm_tokens limits & entitlement edit (pton
         if (path.endsWith(`/api/v1/admin/usage/${TOKEN_LIMIT.id}`)) {
           return Promise.resolve(
             jsonResponse({ limitDefinition: TOKEN_LIMIT, reservations: [], totalActive: 0 })
-          );
-        }
-        if (
-          path.endsWith(`/api/v1/admin/entitlements/${BINDING_NO_ACTION.id}`) &&
-          method === 'GET'
-        ) {
-          etagGetResolved = true;
-          return Promise.resolve(
-            new Response(JSON.stringify(BINDING_NO_ACTION), {
-              status: 200,
-              headers: {
-                'Content-Type': 'application/json',
-                ETag: '"2026-11-28T10:00:00Z"',
-              },
-            })
           );
         }
         if (
@@ -408,15 +392,8 @@ describe('scion-page-admin-quotas — llm_tokens limits & entitlement edit (pton
       ) as (HTMLElement & { value?: string }) | null;
       expect(sel?.getAttribute('value')).toBe('pause_new');
     });
-    // Wait for GET ETag revision fetch to settle without fixed setTimeout
-    await vi.waitFor(() => {
-      expect(etagGetResolved).toBe(true);
-      expect(
-        (element as unknown as { editingEntitlementEtag: string | null }).editingEntitlementEtag
-      ).toBe('"2026-11-28T10:00:00Z"');
-    });
 
-    // Submit -> hits 412, verifies If-Match and explicit pause_new tokenAction
+    // Submit -> hits 412, verifies If-Match derived from list updatedAt and explicit pause_new tokenAction
     (
       element.shadowRoot?.querySelector('[data-testid="entitlement-submit-btn"]') as HTMLElement
     ).click();
@@ -486,11 +463,25 @@ describe('scion-page-admin-quotas — llm_tokens limits & entitlement edit (pton
     expect(subjType?.hasAttribute('disabled')).toBe(true);
   });
 
-  it('preserves user edits made before the background ETag GET resolves', async () => {
+  it('sends list updatedAt as If-Match (preserving microseconds) so a concurrent admin update causes 412 instead of silent revert, while keeping typed edits', async () => {
     setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
     setFeatureFlag(TOKENOMICS_TOKEN_BUDGETS_FLAG, true);
 
-    let resolveGet!: (res: Response) => void;
+    const INITIAL_BINDING = {
+      ...BINDING_NO_ACTION,
+      value: 5_000_000,
+      updatedAt: '2026-11-28T10:00:00.123456Z',
+    };
+    const CONCURRENT_BINDING = {
+      ...BINDING_NO_ACTION,
+      value: 7_000_000,
+      tokenAction: 'notify_only',
+      updatedAt: '2026-11-28T11:00:00.654321Z',
+    };
+
+    // Simulate another admin modifying the binding on the Hub after the list loaded.
+    let serverBinding = INITIAL_BINDING;
+    let getByIdCalls = 0;
     const putCalls: Array<{ headers: Record<string, string>; body: Record<string, unknown> }> = [];
 
     vi.stubGlobal(
@@ -505,33 +496,36 @@ describe('scion-page-admin-quotas — llm_tokens limits & entitlement edit (pton
           return Promise.resolve(jsonResponse({ items: [] }));
         }
         if (path.endsWith(`/api/v1/admin/limits/${TOKEN_LIMIT.id}/entitlements`)) {
-          return Promise.resolve(jsonResponse({ items: [BINDING_NO_ACTION] }));
+          return Promise.resolve(jsonResponse({ items: [serverBinding] }));
         }
         if (path.endsWith(`/api/v1/admin/usage/${TOKEN_LIMIT.id}`)) {
           return Promise.resolve(
             jsonResponse({ limitDefinition: TOKEN_LIMIT, reservations: [], totalActive: 0 })
           );
         }
-        if (
-          path.endsWith(`/api/v1/admin/entitlements/${BINDING_NO_ACTION.id}`) &&
-          method === 'GET'
-        ) {
-          return new Promise<Response>((resolve) => {
-            resolveGet = resolve;
-          });
+        if (path.endsWith(`/api/v1/admin/entitlements/${INITIAL_BINDING.id}`) && method === 'GET') {
+          getByIdCalls++;
+          return Promise.resolve(
+            new Response(JSON.stringify(serverBinding), {
+              status: 200,
+              headers: {
+                'Content-Type': 'application/json',
+                ETag: `"${serverBinding.updatedAt}"`,
+              },
+            })
+          );
         }
-        if (
-          path.endsWith(`/api/v1/admin/entitlements/${BINDING_NO_ACTION.id}`) &&
-          method === 'PUT'
-        ) {
-          putCalls.push({
-            headers: (init?.headers as Record<string, string>) || {},
-            body: JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as Record<
-              string,
-              unknown
-            >,
-          });
-          return Promise.resolve(jsonResponse({ ...BINDING_NO_ACTION, value: 9_000_000 }));
+        if (path.endsWith(`/api/v1/admin/entitlements/${INITIAL_BINDING.id}`) && method === 'PUT') {
+          const headers = (init?.headers as Record<string, string>) || {};
+          const body = JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as Record<
+            string,
+            unknown
+          >;
+          putCalls.push({ headers, body });
+          if (headers['If-Match'] !== `"${serverBinding.updatedAt}"`) {
+            return Promise.resolve(jsonResponse({ error: 'revision mismatch' }, 412));
+          }
+          return Promise.resolve(jsonResponse({ ...serverBinding, ...body }));
         }
         return Promise.resolve(jsonResponse({}, 404));
       })
@@ -551,14 +545,16 @@ describe('scion-page-admin-quotas — llm_tokens limits & entitlement edit (pton
         element?.shadowRoot?.querySelector('[data-testid="edit-entitlement-btn"]')
       ).not.toBeNull();
     });
+
+    // Concurrent admin updates the binding on the Hub before this admin clicks Edit
+    serverBinding = CONCURRENT_BINDING;
+
     (
       element.shadowRoot?.querySelector('[data-testid="edit-entitlement-btn"]') as HTMLElement
     ).click();
-    await vi.waitFor(() => {
-      expect(typeof resolveGet).toBe('function');
-    });
+    await element.updateComplete;
 
-    // User types a new value BEFORE the delayed GET resolves
+    // Admin types a new value (not overwritten by any background GET)
     const valueInput = element.shadowRoot?.querySelector(
       '[data-testid="entitlement-value"]'
     ) as HTMLInputElement;
@@ -566,28 +562,28 @@ describe('scion-page-admin-quotas — llm_tokens limits & entitlement edit (pton
     valueInput.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
     await element.updateComplete;
 
-    // Now resolve the delayed GET with the old value (5_000_000) and an ETag
-    resolveGet(
-      new Response(JSON.stringify(BINDING_NO_ACTION), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json', ETag: '"2026-11-28T10:00:00Z"' },
-      })
-    );
-    await vi.waitFor(() => {
-      expect(
-        (element as unknown as { editingEntitlementEtag: string | null }).editingEntitlementEtag
-      ).toBe('"2026-11-28T10:00:00Z"');
-    });
-    await element.updateComplete;
-
-    // Submit must keep user's 9000000 and still attach the fetched If-Match ETag
+    // Submit: must carry the list row's revision (10:00:00.123456Z), NOT the
+    // concurrent server revision, so the Hub returns 412 and never reverts.
     (
       element.shadowRoot?.querySelector('[data-testid="entitlement-submit-btn"]') as HTMLElement
     ).click();
     await vi.waitFor(() => {
       expect(putCalls.length).toBe(1);
+      expect(
+        element?.shadowRoot?.querySelector('[data-testid="entitlement-dialog-error"]')?.textContent
+      ).toContain('412');
     });
+
+    expect(getByIdCalls).toBe(0);
+    expect(putCalls[0].headers['If-Match']).toBe('"2026-11-28T10:00:00.123456Z"');
     expect(putCalls[0].body.value).toBe(9_000_000);
-    expect(putCalls[0].headers['If-Match']).toBe('"2026-11-28T10:00:00Z"');
+    // The 412 handler refreshes the entitlements table with the concurrent 7M / notify_only binding.
+    await vi.waitFor(() => {
+      expect(
+        element?.shadowRoot
+          ?.querySelector('[data-testid="entitlement-token-action"]')
+          ?.textContent?.trim()
+      ).toBe('Notify only');
+    });
   });
 });
