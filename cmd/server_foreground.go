@@ -2141,7 +2141,9 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 // validateMCPStartup validates MCP listener configuration at startup.
 // In embedded mode (--enable-hub), server.mcp.hub_endpoint is ignored.
 // In standalone mode (without --enable-hub), server.mcp.hub_endpoint is
-// required and must be a valid http(s) origin URL.
+// required and must be a valid http(s) origin URL, and any configured
+// transport auth source must use a proxy mode (SCION_TRANSPORT_MODE=iap or
+// cloudrun_invoker) so bridge tokens never land in Authorization.
 func validateMCPStartup(cfg *config.GlobalConfig, hubEnabled bool) error {
 	if cfg == nil || !cfg.MCP.Enabled {
 		return nil
@@ -2156,6 +2158,77 @@ func validateMCPStartup(cfg *config.GlobalConfig, hubEnabled bool) error {
 	if _, err := config.ValidateMCPHubEndpoint(rawEndpoint); err != nil {
 		return err
 	}
+	if _, _, err := mcpserver.ResolveStandaloneTransportAuth(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func mcpListenParams(cfg *config.GlobalConfig) (host string, port int, path string) {
+	host = cfg.MCP.Host
+	if host == "" {
+		host = cfg.Hub.Host
+	}
+	port = cfg.MCP.Port
+	if port == 0 {
+		port = mcpserver.DefaultPort
+	}
+	path = cfg.MCP.Path
+	if path == "" {
+		path = mcpserver.DefaultPath
+	}
+	return host, port, path
+}
+
+func launchMCPServer(
+	ctx context.Context,
+	shutdownSeq *serverShutdownSequence,
+	cfg *config.GlobalConfig,
+	backend mcpserver.HubBackend,
+	healthProbe func(context.Context) error,
+	hubEndpoint string,
+	wg *sync.WaitGroup,
+	errCh chan<- error,
+) error {
+	mcpHost, mcpPort, mcpPath := mcpListenParams(cfg)
+	ver := version.Short()
+
+	mcpSrv, err := mcpserver.New(mcpserver.Options{
+		Host:           mcpHost,
+		Port:           mcpPort,
+		Path:           mcpPath,
+		PublicURL:      cfg.MCP.PublicURL,
+		AllowedOrigins: cfg.MCP.AllowedOrigins,
+		Version:        ver,
+		Backend:        backend,
+		HubHealthProbe: healthProbe,
+		Logger:         slog.Default().With("component", "mcp"),
+	})
+	if err != nil {
+		return fmt.Errorf("initializing MCP server: %w", err)
+	}
+
+	shutdownSeq.addStep(shutdownPhaseMark, mcpSrv.BeginShutdown)
+
+	modeLabel := "MCP server"
+	extra := ""
+	if hubEndpoint != "" {
+		modeLabel = "standalone MCP server"
+		extra = fmt.Sprintf(", hub_endpoint=%s", hubEndpoint)
+	}
+	if cfg.MCP.PublicURL != "" {
+		log.Printf("Starting %s on %s:%d (path=%s%s, public_url=%s)", modeLabel, mcpHost, mcpPort, mcpPath, extra, cfg.MCP.PublicURL)
+	} else {
+		log.Printf("Starting %s on %s:%d (path=%s%s)", modeLabel, mcpHost, mcpPort, mcpPath, extra)
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := mcpSrv.Start(ctx); err != nil {
+			errCh <- fmt.Errorf("mcp server error: %w", err)
+		}
+	}()
 	return nil
 }
 
@@ -2173,68 +2246,25 @@ func startEmbeddedMCPServer(
 	if cfg == nil || !cfg.MCP.Enabled {
 		return nil
 	}
-	mcpHost := cfg.MCP.Host
-	if mcpHost == "" {
-		mcpHost = cfg.Hub.Host
-	}
-	mcpPort := cfg.MCP.Port
-	if mcpPort == 0 {
-		mcpPort = mcpserver.DefaultPort
-	}
-	mcpPath := cfg.MCP.Path
-	if mcpPath == "" {
-		mcpPath = mcpserver.DefaultPath
-	}
-
-	ver := version.Short()
 	backend := mcpserver.NewBackend(mcpserver.BackendOptions{
 		HubBaseURL: "http://in-process",
 		Transport: &mcpserver.InProcessTransport{
 			Handler: hubSrv.Handler(),
 		},
-		Version: ver,
+		Version: version.Short(),
 		ExperimentChecker: func(_ context.Context, _ mcpserver.Credential, name string) (bool, error) {
 			return hubSrv.ExperimentEnabled(name), nil
 		},
 		DisableTransportAuth: true,
 	})
-
-	mcpSrv, err := mcpserver.New(mcpserver.Options{
-		Host:           mcpHost,
-		Port:           mcpPort,
-		Path:           mcpPath,
-		PublicURL:      cfg.MCP.PublicURL,
-		AllowedOrigins: cfg.MCP.AllowedOrigins,
-		Version:        ver,
-		Backend:        backend,
-		Logger:         slog.Default().With("component", "mcp"),
-	})
-	if err != nil {
-		return fmt.Errorf("initializing MCP server: %w", err)
-	}
-
-	shutdownSeq.addStep(shutdownPhaseMark, mcpSrv.BeginShutdown)
-
-	if cfg.MCP.PublicURL != "" {
-		log.Printf("Starting MCP server on %s:%d (path=%s, public_url=%s)", mcpHost, mcpPort, mcpPath, cfg.MCP.PublicURL)
-	} else {
-		log.Printf("Starting MCP server on %s:%d (path=%s)", mcpHost, mcpPort, mcpPath)
-	}
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := mcpSrv.Start(ctx); err != nil {
-			errCh <- fmt.Errorf("mcp server error: %w", err)
-		}
-	}()
-	return nil
+	return launchMCPServer(ctx, shutdownSeq, cfg, backend, nil, "", wg, errCh)
 }
 
 // startStandaloneMCPServer builds and starts the standalone MCP HTTP listener
 // backed by a network RoundTripper pointing at server.mcp.hub_endpoint, with
-// hubclient's automatic SCION_TRANSPORT_MODE transportauth layering, cached
-// remote experiment probing, and Hub /healthz readiness monitoring.
+// a single shared transportauth.TokenSource (for SCION_TRANSPORT_MODE=iap|
+// cloudrun_invoker), cached remote experiment probing, and Hub /healthz
+// readiness monitoring.
 func startStandaloneMCPServer(
 	ctx context.Context,
 	shutdownSeq *serverShutdownSequence,
@@ -2252,58 +2282,19 @@ func startStandaloneMCPServer(
 	if hubEndpoint == "" {
 		return fmt.Errorf("--enable-mcp (server.mcp.enabled) without --enable-hub requires %s", config.MCPHubEndpointKey)
 	}
-
-	mcpHost := cfg.MCP.Host
-	if mcpHost == "" {
-		mcpHost = cfg.Hub.Host
-	}
-	mcpPort := cfg.MCP.Port
-	if mcpPort == 0 {
-		mcpPort = mcpserver.DefaultPort
-	}
-	mcpPath := cfg.MCP.Path
-	if mcpPath == "" {
-		mcpPath = mcpserver.DefaultPath
+	taSrc, taMode, err := mcpserver.ResolveStandaloneTransportAuth()
+	if err != nil {
+		return err
 	}
 
-	ver := version.Short()
 	backendOpts := mcpserver.BackendOptions{
 		HubBaseURL:           hubEndpoint,
-		Version:              ver,
+		Version:              version.Short(),
 		DisableTransportAuth: false,
+		TransportAuthSource:  taSrc,
+		TransportAuthMode:    taMode,
 	}
-
-	mcpSrv, err := mcpserver.New(mcpserver.Options{
-		Host:           mcpHost,
-		Port:           mcpPort,
-		Path:           mcpPath,
-		PublicURL:      cfg.MCP.PublicURL,
-		AllowedOrigins: cfg.MCP.AllowedOrigins,
-		Version:        ver,
-		Backend:        mcpserver.NewBackend(backendOpts),
-		HubHealthProbe: mcpserver.NewHubHealthProbe(backendOpts),
-		Logger:         slog.Default().With("component", "mcp"),
-	})
-	if err != nil {
-		return fmt.Errorf("initializing standalone MCP server: %w", err)
-	}
-
-	shutdownSeq.addStep(shutdownPhaseMark, mcpSrv.BeginShutdown)
-
-	if cfg.MCP.PublicURL != "" {
-		log.Printf("Starting standalone MCP server on %s:%d (path=%s, hub_endpoint=%s, public_url=%s)", mcpHost, mcpPort, mcpPath, hubEndpoint, cfg.MCP.PublicURL)
-	} else {
-		log.Printf("Starting standalone MCP server on %s:%d (path=%s, hub_endpoint=%s)", mcpHost, mcpPort, mcpPath, hubEndpoint)
-	}
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := mcpSrv.Start(ctx); err != nil {
-			errCh <- fmt.Errorf("mcp server error: %w", err)
-		}
-	}()
-	return nil
+	return launchMCPServer(ctx, shutdownSeq, cfg, mcpserver.NewBackend(backendOpts), mcpserver.NewHubHealthProbe(backendOpts), hubEndpoint, wg, errCh)
 }
 
 // checkBrokerPort checks that the runtime broker's port is free.

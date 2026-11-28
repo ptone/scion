@@ -32,9 +32,9 @@ const (
 )
 
 // NewHubHealthProbe returns a probe function suitable for Options.HubHealthProbe
-// in standalone mode. It calls GET <HubBaseURL>/healthz through hubclient (with
-// AllowlistTransport and SCION_TRANSPORT_MODE transportauth layering enabled
-// unless opts.DisableTransportAuth is set).
+// in standalone mode. It builds one reusable hubclient (sharing opts's
+// resolved transportauth.TokenSource so OIDC tokens are cached across ticks
+// rather than minted per probe) and calls GET <HubBaseURL>/healthz.
 func NewHubHealthProbe(opts BackendOptions) func(ctx context.Context) error {
 	baseURL := opts.HubBaseURL
 	if baseURL == "" {
@@ -45,17 +45,20 @@ func NewHubHealthProbe(opts BackendOptions) func(ctx context.Context) error {
 		Version:                   opts.Version,
 		AllowTransportAuthHeaders: !opts.DisableTransportAuth,
 	}
+	src, mode, taErr := resolveBackendTransportAuth(opts)
+	if taErr != nil {
+		return func(context.Context) error { return taErr }
+	}
+	hc := &http.Client{Transport: rt}
+	cl, clErr := hubclient.New(baseURL,
+		hubclient.WithHTTPClient(hc),
+		hubclient.WithTransportAuth(src, mode),
+	)
+	if clErr != nil {
+		return func(context.Context) error { return clErr }
+	}
 	return func(ctx context.Context) error {
-		hc := &http.Client{Transport: rt}
-		clOpts := []hubclient.Option{hubclient.WithHTTPClient(hc)}
-		if opts.DisableTransportAuth {
-			clOpts = append(clOpts, hubclient.WithTransportAuth(nil, 0))
-		}
-		cl, err := hubclient.New(baseURL, clOpts...)
-		if err != nil {
-			return err
-		}
-		_, err = cl.Health(ctx)
+		_, err := cl.Health(ctx)
 		return err
 	}
 }

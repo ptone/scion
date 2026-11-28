@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -268,8 +269,8 @@ func TestStandalone_ExperimentProbeCachingAndAuthErrors(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/api/v1/experiments":
-			if r.URL.Query().Get("include") != "server" {
-				t.Errorf("expected include=server query param, got %q", r.URL.RawQuery)
+			if r.URL.Query().Get("name") != experiments.MCPServer {
+				t.Errorf("expected name=%s query param, got %q", experiments.MCPServer, r.URL.RawQuery)
 			}
 			expCalls.Add(1)
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -618,5 +619,232 @@ func TestReadMessages_OldHubRejectsStartTail(t *testing.T) {
 	}
 	if len(out.Messages) != 1 || out.Messages[0].Text != "hello from old hub" {
 		t.Fatalf("unexpected messages: %+v", out.Messages)
+	}
+}
+
+type countingTokenSource struct {
+	mu      sync.Mutex
+	mints   int
+	token   string
+	expires time.Time
+}
+
+func (s *countingTokenSource) Token() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.token == "" || time.Now().After(s.expires) {
+		s.mints++
+		s.token = "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDB9.counted-sig"
+		s.expires = time.Now().Add(time.Hour)
+	}
+	return s.token, nil
+}
+
+func (s *countingTokenSource) SetToken(tok string, exp time.Time) {
+	s.mu.Lock()
+	s.token = tok
+	s.expires = exp
+	s.mu.Unlock()
+}
+
+func (s *countingTokenSource) Expiry() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.expires
+}
+
+func (s *countingTokenSource) mintCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mints
+}
+
+// TestStandalone_TransportAuthTokenSourceReusedAcrossCalls verifies R1:
+// a single resolved transportauth.TokenSource shared across the backend and
+// health probe mints at most 1 token over N Hub calls and health probes.
+func TestStandalone_TransportAuthTokenSourceReusedAcrossCalls(t *testing.T) {
+	var hubCalls atomic.Int32
+	fakeHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalls.Add(1)
+		if got := r.Header.Get("X-Serverless-Authorization"); !strings.HasPrefix(got, "Bearer ") {
+			t.Errorf("%s %s: missing X-Serverless-Authorization header (got %q)", r.Method, r.URL.Path, got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "healthy"})
+		case "/api/v1/experiments":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"experiments": map[string]bool{experiments.MCPServer: true},
+			})
+		case "/api/v1/auth/me":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "u1", "email": "u1@example.com"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer fakeHub.Close()
+
+	src := &countingTokenSource{}
+	opts := BackendOptions{
+		HubBaseURL:           fakeHub.URL,
+		Transport:            fakeHub.Client().Transport,
+		DisableTransportAuth: false,
+		TransportAuthSource:  src,
+		TransportAuthMode:    transportauth.HeaderServerlessAuthorization,
+	}
+	backend := NewBackend(opts)
+	probe := NewHubHealthProbe(opts)
+
+	ctx := context.Background()
+	cred := Credential{Bearer: "scion_pat_caller"}
+
+	if ok, err := backend.ExperimentEnabled(ctx, cred, experiments.MCPServer); err != nil || !ok {
+		t.Fatalf("ExperimentEnabled: ok=%v err=%v", ok, err)
+	}
+	for i := 0; i < 10; i++ {
+		if _, err := backend.Me(ctx, cred); err != nil {
+			t.Fatalf("Me[%d]: %v", i, err)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if err := probe(ctx); err != nil {
+			t.Fatalf("health probe[%d]: %v", i, err)
+		}
+	}
+
+	if got := src.mintCount(); got != 1 {
+		t.Fatalf("transport token mints = %d over %d Hub calls, want exactly 1", got, hubCalls.Load())
+	}
+}
+
+// TestStandalone_RefusesTransportAuthWithoutProxyMode verifies O2: when a
+// transport token source resolves from the environment but SCION_TRANSPORT_MODE
+// is unset or unrecognised, standalone mode refuses to place the bridge token
+// in Authorization.
+func TestStandalone_RefusesTransportAuthWithoutProxyMode(t *testing.T) {
+	const fakeTok = "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDB9.sig"
+	for _, badMode := range []string{"", "authorization", "unknown"} {
+		t.Run("mode_"+badMode, func(t *testing.T) {
+			t.Setenv("SCION_TRANSPORT_TOKEN", fakeTok)
+			t.Setenv("SCION_TRANSPORT_MODE", badMode)
+
+			if _, _, err := ResolveStandaloneTransportAuth(); err == nil {
+				t.Fatalf("ResolveStandaloneTransportAuth(mode=%q) = nil, want error", badMode)
+			}
+
+			backend := NewBackend(BackendOptions{
+				HubBaseURL:           "http://127.0.0.1:1",
+				DisableTransportAuth: false,
+			})
+			if _, err := backend.Me(context.Background(), Credential{Bearer: "scion_pat_caller"}); err == nil {
+				t.Fatalf("NewBackend.Me(mode=%q) succeeded, want fail-closed error", badMode)
+			}
+		})
+	}
+}
+
+// TestStandalone_UpstreamProxyAuthRejectionReturns503Not401 verifies O3:
+// non-JSON 401/403 responses from an upstream proxy (IAP or Cloud Run invoker)
+// return 503 upstream_auth_failed without WWW-Authenticate instead of blaming
+// the caller's credential, while structured Hub JSON 401/403 still pass through.
+func TestStandalone_UpstreamProxyAuthRejectionReturns503Not401(t *testing.T) {
+	cases := []struct {
+		name        string
+		hubStatus   int
+		hubCT       string
+		hubBody     string
+		wantStatus  int
+		wantErrCode string
+		wantWWWAuth bool
+	}{
+		{
+			name:        "iap_html_401",
+			hubStatus:   http.StatusUnauthorized,
+			hubCT:       "text/html; charset=utf-8",
+			hubBody:     "<html><body>Invalid IAP credentials</body></html>",
+			wantStatus:  http.StatusServiceUnavailable,
+			wantErrCode: "upstream_auth_failed",
+			wantWWWAuth: false,
+		},
+		{
+			name:        "cloudrun_invoker_html_403",
+			hubStatus:   http.StatusForbidden,
+			hubCT:       "text/html; charset=utf-8",
+			hubBody:     "<html><body>Your client does not have permission to get URL /api/v1/experiments</body></html>",
+			wantStatus:  http.StatusServiceUnavailable,
+			wantErrCode: "upstream_auth_failed",
+			wantWWWAuth: false,
+		},
+		{
+			name:        "hub_json_401",
+			hubStatus:   http.StatusUnauthorized,
+			hubCT:       "application/json",
+			hubBody:     `{"error":{"code":"unauthorized","message":"token expired"}}`,
+			wantStatus:  http.StatusUnauthorized,
+			wantErrCode: "unauthorized",
+			wantWWWAuth: true,
+		},
+		{
+			name:        "hub_json_403",
+			hubStatus:   http.StatusForbidden,
+			hubCT:       "application/json",
+			hubBody:     `{"error":{"code":"forbidden","message":"account suspended"}}`,
+			wantStatus:  http.StatusForbidden,
+			wantErrCode: "forbidden",
+			wantWWWAuth: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tc.hubCT)
+				w.WriteHeader(tc.hubStatus)
+				_, _ = io.WriteString(w, tc.hubBody)
+			}))
+			defer fakeHub.Close()
+
+			backend := NewBackend(BackendOptions{
+				HubBaseURL:           fakeHub.URL,
+				Transport:            fakeHub.Client().Transport,
+				DisableTransportAuth: true,
+			})
+			srv, err := New(Options{Backend: backend})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			mcpTS := httptest.NewServer(srv.Handler())
+			defer mcpTS.Close()
+
+			initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"o3-test","version":"0.1"}}}`
+			req, _ := http.NewRequest(http.MethodPost, mcpTS.URL+"/mcp", strings.NewReader(initBody))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			req.Header.Set("Authorization", "Bearer scion_pat_caller")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+			gotWWW := resp.Header.Get("WWW-Authenticate")
+			if tc.wantWWWAuth && gotWWW != wwwAuthenticateHeader {
+				t.Fatalf("WWW-Authenticate = %q, want %q", gotWWW, wwwAuthenticateHeader)
+			}
+			if !tc.wantWWWAuth && gotWWW != "" {
+				t.Fatalf("WWW-Authenticate = %q, want empty", gotWWW)
+			}
+			var body map[string]string
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if body["error"] != tc.wantErrCode {
+				t.Fatalf("error = %q, want %q", body["error"], tc.wantErrCode)
+			}
+		})
 	}
 }

@@ -12,7 +12,9 @@ The MCP server is gated by the `hub.mcp_server` [experiment](/scion/reference/ex
 `scion server start --enable-mcp` can run in two modes using the same binary and container image:
 
 - **Embedded mode** (`--enable-hub --enable-mcp`): binds the MCP listener (default port `9820`) alongside the Hub in the same process and dispatches Hub API calls in-process with no network hop.
-- **Standalone mode** (`--enable-mcp` without `--enable-hub`): runs as a stateless HTTP facade against a remote Hub configured by `server.mcp.hub_endpoint`.
+- **Standalone mode** (`--hosted --enable-mcp`, or `--enable-mcp --enable-hub=false`): runs as a stateless HTTP facade against a remote Hub configured by `server.mcp.hub_endpoint`. (In workstation mode without `--hosted`, `scion server start` enables the Hub by default, so pass `--hosted` or `--enable-hub=false` to run standalone.)
+
+Deploy the standalone MCP server against a Hub version that supports the `GET /api/v1/experiments?name=hub.mcp_server` probe (an older Hub ignores `?name=` and omits `hub.mcp_server`, causing `/mcp` to fail closed with `404`).
 
 Use **standalone mode** when:
 
@@ -68,7 +70,7 @@ gcloud run deploy scion-mcp \
   --port=9820 \
   --service-account="scion-mcp@${PROJECT_ID}.iam.gserviceaccount.com" \
   --allow-unauthenticated \
-  --args="server,start,--foreground,--production,--enable-mcp" \
+  --args="server,start,--foreground,--hosted,--enable-mcp" \
   --set-env-vars="SCION_SERVER_MCP_HOST=0.0.0.0,SCION_SERVER_MCP_PORT=9820,SCION_SERVER_MCP_HUBENDPOINT=https://hub.example.com,SCION_SERVER_MCP_PUBLICURL=https://mcp.example.com,SCION_TRANSPORT_MODE=iap,SCION_TRANSPORT_AUDIENCE=${IAP_OAUTH_CLIENT_ID}"
 ```
 
@@ -77,7 +79,7 @@ Notes for Cloud Run:
 - On Cloud Run with an IAP-protected Hub, grant `scion-mcp@${PROJECT_ID}.iam.gserviceaccount.com` the `roles/iap.httpsResourceAccessor` role on the Hub's backend service and set `SCION_TRANSPORT_MODE=iap` and `SCION_TRANSPORT_AUDIENCE` to the IAP OAuth Client ID.
 - If the Hub is a private Cloud Run service protected by IAM instead of IAP, grant `roles/run.invoker` on the Hub service and set `SCION_TRANSPORT_MODE=cloudrun_invoker` and `SCION_TRANSPORT_AUDIENCE` to the Hub's Cloud Run URL.
 - Cloud Run caps individual HTTP request durations at 60 minutes; long-lived streams end at that boundary and clients reconnect with their last cursor.
-- Configure the Cloud Run startup and liveness probes against `/healthz` and readiness against `/readyz` on port `9820`.
+- Configure the Cloud Run startup and liveness probes against `/healthz` on port `9820`; use `/readyz` for load-balancer health checks and Kubernetes readiness probes.
 
 ## Recipe 2: GKE Service without IAP
 
@@ -106,7 +108,7 @@ spec:
             - server
             - start
             - --foreground
-            - --production
+            - --hosted
             - --enable-mcp
           env:
             - name: SCION_SERVER_MCP_HOST

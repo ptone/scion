@@ -44,6 +44,18 @@ func TestValidateMCPStartup(t *testing.T) {
 	if err := validateMCPStartup(&config.GlobalConfig{MCP: config.MCPServerConfig{Enabled: true, HubEndpoint: "https://hub.example.com"}}, false); err != nil {
 		t.Fatalf("enabled MCP without hub and valid hub_endpoint should succeed, got: %v", err)
 	}
+
+	t.Run("standalone_refuses_transport_token_without_proxy_mode", func(t *testing.T) {
+		t.Setenv("SCION_TRANSPORT_TOKEN", "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjQxMDI0NDQ4MDB9.sig")
+		t.Setenv("SCION_TRANSPORT_MODE", "")
+		if err := validateMCPStartup(&config.GlobalConfig{MCP: config.MCPServerConfig{Enabled: true, HubEndpoint: "https://hub.example.com"}}, false); err == nil {
+			t.Fatal("expected error when transport auth is configured without SCION_TRANSPORT_MODE=iap|cloudrun_invoker")
+		}
+		t.Setenv("SCION_TRANSPORT_MODE", "iap")
+		if err := validateMCPStartup(&config.GlobalConfig{MCP: config.MCPServerConfig{Enabled: true, HubEndpoint: "https://hub.example.com"}}, false); err != nil {
+			t.Fatalf("expected success with SCION_TRANSPORT_MODE=iap, got: %v", err)
+		}
+	})
 }
 
 func TestV1ServerMCPRoundTrip(t *testing.T) {

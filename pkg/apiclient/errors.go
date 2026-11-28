@@ -38,6 +38,10 @@ type APIError struct {
 	// an HTTP-date form, which this field does not parse); callers must not
 	// treat 0 as "retry immediately."
 	RetryAfterSeconds int
+	// NonJSONBody is true when the error response body did not decode as the
+	// Hub's structured JSON error envelope (for example an HTML or plain-text
+	// 401/403 returned by IAP or Cloud Run invoker IAM before reaching the Hub).
+	NonJSONBody bool
 }
 
 // Error implements the error interface.
@@ -240,22 +244,29 @@ func ParseErrorResponse(resp *http.Response) *APIError {
 	}
 
 	if resp.Body == nil {
+		apiErr.NonJSONBody = true
 		return apiErr
 	}
 
 	// Try to parse the response body
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseBodyBytes))
 	if err != nil {
+		apiErr.NonJSONBody = true
 		return apiErr
 	}
 
 	var errResp errorResponse
 	if err := json.Unmarshal(body, &errResp); err != nil {
+		apiErr.NonJSONBody = true
 		// If we can't parse the error, use the body as the message
 		if len(body) > 0 && len(body) < 500 {
 			apiErr.Message = string(body)
 		}
 		return apiErr
+	}
+
+	if errResp.Error.Code == "" && errResp.Error.Message == "" {
+		apiErr.NonJSONBody = true
 	}
 
 	if errResp.Error.Code != "" {

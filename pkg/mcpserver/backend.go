@@ -25,7 +25,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 )
 
 // HubBackend is the narrow interface over the Hub REST API used by MCP tools
@@ -66,17 +68,27 @@ type BackendOptions struct {
 	ExperimentCacheTTL time.Duration
 	// Now overrides the clock used by the standalone experiment cache (for tests).
 	Now func() time.Time
-	// DisableTransportAuth suppresses hubclient's automatic SCION_TRANSPORT_MODE
-	// wrapping. Set true for embedded mode; leave false for standalone mode.
+	// DisableTransportAuth suppresses transport auth resolution. Set true for
+	// embedded mode; leave false for standalone mode.
 	DisableTransportAuth bool
+	// TransportAuthSource and TransportAuthMode optionally supply a pre-resolved
+	// transportauth.TokenSource and HeaderMode shared across the backend and
+	// health probe so OIDC tokens are cached for their lifetime instead of
+	// minted per request. When nil and DisableTransportAuth is false, NewBackend
+	// resolves them once from the environment via ResolveStandaloneTransportAuth.
+	TransportAuthSource transportauth.TokenSource
+	TransportAuthMode   transportauth.HeaderMode
 }
 
 type hubBackend struct {
-	baseURL              string
-	transport            http.RoundTripper
-	expCheck             ExperimentChecker
-	expCache             *experimentCache
-	disableTransportAuth bool
+	baseURL           string
+	transport         http.RoundTripper
+	expCheck          ExperimentChecker
+	expCache          *experimentCache
+	expGroup          singleflight.Group
+	transportAuthSrc  transportauth.TokenSource
+	transportAuthMode transportauth.HeaderMode
+	transportAuthErr  error
 }
 
 // NewBackend creates a HubBackend backed by hubclient and the given transport.
@@ -92,25 +104,31 @@ func NewBackend(opts BackendOptions) HubBackend {
 		Version:                   opts.Version,
 		AllowTransportAuthHeaders: !opts.DisableTransportAuth,
 	}
+	src, mode, taErr := resolveBackendTransportAuth(opts)
 	return &hubBackend{
-		baseURL:              baseURL,
-		transport:            rt,
-		expCheck:             opts.ExperimentChecker,
-		expCache:             newExperimentCache(opts.ExperimentCacheTTL, opts.Now),
-		disableTransportAuth: opts.DisableTransportAuth,
+		baseURL:           baseURL,
+		transport:         rt,
+		expCheck:          opts.ExperimentChecker,
+		expCache:          newExperimentCache(opts.ExperimentCacheTTL, opts.Now),
+		transportAuthSrc:  src,
+		transportAuthMode: mode,
+		transportAuthErr:  taErr,
 	}
 }
 
 func (b *hubBackend) clientFor(c Credential) (hubclient.Client, error) {
+	if b.transportAuthErr != nil {
+		return nil, b.transportAuthErr
+	}
 	hc := &http.Client{
 		Transport: b.transport,
 	}
 	opts := []hubclient.Option{
 		hubclient.WithHTTPClient(hc),
 		hubclient.WithAuthenticator(&credentialAuthenticator{cred: c}),
-	}
-	if b.disableTransportAuth {
-		opts = append(opts, hubclient.WithTransportAuth(nil, 0))
+		// Always pass WithTransportAuth (including nil when disabled/unset) so
+		// hubclient.New never re-runs transportauth.FromEnv() per request.
+		hubclient.WithTransportAuth(b.transportAuthSrc, b.transportAuthMode),
 	}
 	return hubclient.New(b.baseURL, opts...)
 }
@@ -205,27 +223,39 @@ func (b *hubBackend) ExperimentEnabled(ctx context.Context, c Credential, name s
 	if val, ok := b.expCache.get(name); ok {
 		return val, nil
 	}
-	cl, err := b.clientFor(c)
+	v, err, _ := b.expGroup.Do(name, func() (any, error) {
+		if val, ok := b.expCache.get(name); ok {
+			return val, nil
+		}
+		cl, err := b.clientFor(c)
+		if err != nil {
+			return false, err
+		}
+		enabled, err := hubclient.FetchExperiment(ctx, cl, name)
+		if err != nil {
+			return false, err
+		}
+		b.expCache.set(name, enabled)
+		return enabled, nil
+	})
 	if err != nil {
 		return false, err
 	}
-	exps, err := hubclient.FetchServerExperiments(ctx, cl)
-	if err != nil {
-		return false, err
-	}
-	b.expCache.set(exps)
-	return exps[name], nil
+	return v.(bool), nil
 }
 
 // experimentCache caches resolved hub-wide experiment flags for at most ttl
 // (default 30s) per Hub in standalone mode (§4.5). Errors are never cached.
 type experimentCache struct {
-	mu        sync.RWMutex
-	ttl       time.Duration
-	now       func() time.Time
+	mu      sync.RWMutex
+	ttl     time.Duration
+	now     func() time.Time
+	entries map[string]experimentCacheEntry
+}
+
+type experimentCacheEntry struct {
+	value     bool
 	fetchedAt time.Time
-	values    map[string]bool
-	hasValues bool
 }
 
 func newExperimentCache(ttl time.Duration, now func() time.Time) *experimentCache {
@@ -236,29 +266,28 @@ func newExperimentCache(ttl time.Duration, now func() time.Time) *experimentCach
 		now = time.Now
 	}
 	return &experimentCache{
-		ttl: ttl,
-		now: now,
+		ttl:     ttl,
+		now:     now,
+		entries: make(map[string]experimentCacheEntry),
 	}
 }
 
 func (c *experimentCache) get(name string) (bool, bool) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if !c.hasValues || c.now().Sub(c.fetchedAt) >= c.ttl {
+	e, ok := c.entries[name]
+	c.mu.RUnlock()
+	if !ok || c.now().Sub(e.fetchedAt) >= c.ttl {
 		return false, false
 	}
-	return c.values[name], true
+	return e.value, true
 }
 
-func (c *experimentCache) set(values map[string]bool) {
-	copied := make(map[string]bool, len(values))
-	for k, v := range values {
-		copied[k] = v
-	}
+func (c *experimentCache) set(name string, value bool) {
 	c.mu.Lock()
-	c.values = copied
-	c.fetchedAt = c.now()
-	c.hasValues = true
+	c.entries[name] = experimentCacheEntry{
+		value:     value,
+		fetchedAt: c.now(),
+	}
 	c.mu.Unlock()
 }
 

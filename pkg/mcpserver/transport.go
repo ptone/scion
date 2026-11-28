@@ -20,8 +20,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 type transportMetaKey struct{}
@@ -264,4 +267,40 @@ func sanitizeHeaderValue(s string) string {
 		s = s[:128]
 	}
 	return s
+}
+
+// ResolveStandaloneTransportAuth resolves the process-level transport OIDC
+// token source and header mode once for standalone MCP mode.
+//
+// If no transport source is configured in the environment, it returns
+// (nil, 0, nil). If a transport source resolves, SCION_TRANSPORT_MODE must be
+// a proxy mode ("iap" or "cloudrun_invoker") so the bridge's transport token
+// can never be placed in Authorization alongside or in place of a caller's
+// credential (§4.2).
+func ResolveStandaloneTransportAuth() (transportauth.TokenSource, transportauth.HeaderMode, error) {
+	src, err := transportauth.FromEnv()
+	if err != nil {
+		return nil, 0, err
+	}
+	if src == nil {
+		return nil, 0, nil
+	}
+	rawMode := os.Getenv(transportauth.EnvTransportMode)
+	if !transportauth.IsProxyMode(rawMode) {
+		return nil, 0, fmt.Errorf("standalone MCP server requires %s=iap or cloudrun_invoker when transport auth is configured (got %q); refusing to place bridge transport token in Authorization", transportauth.EnvTransportMode, rawMode)
+	}
+	return src, transportauth.ModeFromString(rawMode), nil
+}
+
+func resolveBackendTransportAuth(opts BackendOptions) (transportauth.TokenSource, transportauth.HeaderMode, error) {
+	if opts.DisableTransportAuth {
+		return nil, 0, nil
+	}
+	if opts.TransportAuthSource != nil {
+		if opts.TransportAuthMode != transportauth.HeaderProxyAuthorization && opts.TransportAuthMode != transportauth.HeaderServerlessAuthorization {
+			return nil, 0, fmt.Errorf("standalone MCP server requires proxy or serverless transport auth header mode; refusing Authorization mode")
+		}
+		return opts.TransportAuthSource, opts.TransportAuthMode, nil
+	}
+	return ResolveStandaloneTransportAuth()
 }

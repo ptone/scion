@@ -17,6 +17,7 @@ package hubclient
 import (
 	"context"
 	"fmt"
+	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
@@ -25,24 +26,27 @@ type experimentsResponse struct {
 	Experiments map[string]bool `json:"experiments"`
 }
 
-// FetchServerExperiments queries GET /api/v1/experiments?include=server using
-// the client's configured HTTP transport, authenticator, and transport auth.
-// It returns the resolved map of web-layer and server-layer experiments.
-func FetchServerExperiments(ctx context.Context, cl Client) (map[string]bool, error) {
+// FetchExperiment queries GET /api/v1/experiments?name=<name> using the
+// client's configured HTTP transport, authenticator, and transport auth.
+// Only flags on the Hub's narrow probe allowlist (such as hub.mcp_server) are
+// accepted.
+func FetchExperiment(ctx context.Context, cl Client, name string) (bool, error) {
 	c, ok := cl.(*client)
 	if !ok {
-		return nil, fmt.Errorf("hubclient: FetchServerExperiments requires a default *hubclient.client")
+		return false, fmt.Errorf("hubclient: FetchExperiment requires a default *hubclient.client")
 	}
-	resp, err := c.get(ctx, "/api/v1/experiments?include=server", nil)
+	q := url.Values{}
+	q.Set("name", name)
+	resp, err := c.get(ctx, "/api/v1/experiments?"+q.Encode(), nil)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 	decoded, err := apiclient.DecodeRequired[experimentsResponse](resp)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 	if decoded == nil || decoded.Experiments == nil {
-		return map[string]bool{}, nil
+		return false, nil
 	}
-	return decoded.Experiments, nil
+	return decoded.Experiments[name], nil
 }

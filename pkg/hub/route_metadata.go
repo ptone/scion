@@ -248,6 +248,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/experiments": {
 		Pattern: "/api/v1/experiments", RouteID: "experiments.resolved",
 		Classification: RouteAuthenticated,
+		// Visitors are admitted on GET only so standalone MCP servers can probe
+		// ?name=hub.mcp_server with a visitor's credential; handleExperiments
+		// refuses bare GET /api/v1/experiments for visitors with 403.
+		VisitorMethods: []string{http.MethodGet},
 	},
 	"/api/v1/profiling": {
 		Pattern: "/api/v1/profiling", RouteID: "profiling.client",

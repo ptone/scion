@@ -19,6 +19,8 @@ package mcpserver_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
@@ -39,6 +42,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"github.com/knadh/koanf/v2"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -1046,5 +1051,170 @@ func TestIntegration_CrossReplicaCursorResume(t *testing.T) {
 	}
 	if out2.NextCursor == "" || out2.NextCursor == out1.NextCursor {
 		t.Fatalf("expected replica 2 next_cursor to advance from %q, got %q", out1.NextCursor, out2.NextCursor)
+	}
+}
+
+// TestIntegration_VisitorPassesFrontDoorInBothModes verifies R2: a linked
+// project visitor authenticating with X-Scion-Federation-Token gets parity
+// between embedded and standalone modes (404 when hub.mcp_server is off,
+// 200 OK on initialize when hub.mcp_server is on — never 403 at the
+// standalone experiment probe).
+func TestIntegration_VisitorPassesFrontDoorInBothModes(t *testing.T) {
+	for _, mode := range []mcpMode{modeEmbedded, modeStandalone} {
+		t.Run(string(mode), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			const (
+				issuerURL = "https://idp-mcp-visitor.example.com"
+				audience  = "https://hub-mcp-visitor.example.com"
+				kid       = "mcp-visitor-kid-1"
+			)
+
+			privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatalf("rsa.GenerateKey: %v", err)
+			}
+			jwk := jose.JSONWebKey{Key: &privKey.PublicKey, KeyID: kid, Algorithm: string(jose.RS256), Use: "sig"}
+			jwksBytes, err := json.Marshal(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{jwk}})
+			if err != nil {
+				t.Fatalf("marshal jwks: %v", err)
+			}
+			jwksTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(jwksBytes)
+			}))
+			defer jwksTS.Close()
+
+			dbPath := filepath.Join(t.TempDir(), "hub-visitor.db")
+			entClient, err := entc.OpenSQLite(dbPath, entc.PoolConfig{MaxOpenConns: 1})
+			if err != nil {
+				t.Fatalf("entc.OpenSQLite: %v", err)
+			}
+			if err := entc.AutoMigrate(ctx, entClient); err != nil {
+				t.Fatalf("entc.AutoMigrate: %v", err)
+			}
+			st := entadapter.NewCompositeStore(entClient)
+			t.Cleanup(func() { _ = st.Close() })
+
+			hubSrv, err := hub.New(hub.ServerConfig{
+				Host: "127.0.0.1",
+				Port: 0,
+				Federation: config.FederationConfig{
+					Enabled: true,
+					TrustedIssuers: []config.TrustedIssuerConfig{
+						{
+							IssuerURL:          issuerURL,
+							IssuerType:         "user",
+							JWKSURL:            jwksTS.URL,
+							ExpectedAudience:   audience,
+							AllowVisitorGrants: true,
+						},
+					},
+				},
+			}, st)
+			if err != nil {
+				t.Fatalf("hub.New: %v", err)
+			}
+			t.Cleanup(func() { _ = hubSrv.Shutdown(context.Background()) })
+
+			ops := hub.NewOperationalSettings(st, koanf.New("."), koanf.New("."))
+			if _, err := ops.Refresh(ctx); err != nil {
+				t.Fatalf("ops.Refresh: %v", err)
+			}
+			hubSrv.SetOperationalSettings(ops)
+
+			setFlags := func(mcpOn bool) {
+				doc, err := json.Marshal(map[string]any{
+					"overrides": map[string]bool{
+						experiments.FederationProjectVisitors: true,
+						experiments.MCPServer:                 mcpOn,
+					},
+				})
+				if err != nil {
+					t.Fatalf("marshal flags: %v", err)
+				}
+				if _, err := st.UpsertHubSetting(ctx, "experiments", doc, "test", -1, "seeded"); err != nil {
+					t.Fatalf("UpsertHubSetting: %v", err)
+				}
+				if _, err := ops.Refresh(ctx); err != nil {
+					t.Fatalf("ops.Refresh: %v", err)
+				}
+			}
+
+			// Seed linked federated visitor account.
+			iss := issuerURL
+			email := "visitor-mcp@corp.example.com"
+			fedUser := &store.User{
+				DisplayName:    "MCP Visitor",
+				Kind:           store.UserKindFederated,
+				Status:         store.UserStatusActive,
+				HomeIssuer:     &iss,
+				FederatedEmail: &email,
+			}
+			if err := st.CreateFederatedUser(ctx, fedUser); err != nil {
+				t.Fatalf("CreateFederatedUser: %v", err)
+			}
+			if _, err := st.LinkFederatedIdentity(ctx, fedUser.ID, issuerURL, "sub-mcp-visitor", email); err != nil {
+				t.Fatalf("LinkFederatedIdentity: %v", err)
+			}
+
+			// Mint signed OIDC JWT for the visitor.
+			signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: privKey}, (&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid))
+			if err != nil {
+				t.Fatalf("jose.NewSigner: %v", err)
+			}
+			now := time.Now()
+			visitorJWT, err := jwt.Signed(signer).Claims(map[string]any{
+				"iss":            issuerURL,
+				"sub":            "sub-mcp-visitor",
+				"aud":            audience,
+				"iat":            now.Unix(),
+				"exp":            now.Add(time.Hour).Unix(),
+				"email":          email,
+				"email_verified": true,
+				"name":           "MCP Visitor",
+			}).Serialize()
+			if err != nil {
+				t.Fatalf("sign visitor JWT: %v", err)
+			}
+
+			setFlags(false)
+			endpoint, stopMCP := startMCPServerForMode(t, ctx, mode, hubSrv, nil)
+			defer stopMCP()
+
+			postInit := func() (int, string) {
+				t.Helper()
+				initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"visitor-client","version":"0.1"}}}`
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(initBody))
+				if err != nil {
+					t.Fatalf("NewRequest: %v", err)
+				}
+				req.Header.Set(mcpserver.HeaderFederationToken, visitorJWT)
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Accept", "application/json, text/event-stream")
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatalf("POST /mcp: %v", err)
+				}
+				b, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				return resp.StatusCode, string(b)
+			}
+
+			// 1. hub.mcp_server off -> 404 in both embedded and standalone modes.
+			if code, body := postInit(); code != http.StatusNotFound {
+				t.Fatalf("mode=%s hub.mcp_server=false: got %d (%s), want 404", mode, code, body)
+			}
+
+			// 2. hub.mcp_server on -> 200 OK in both modes (never 403).
+			setFlags(true)
+			if mode == modeStandalone {
+				time.Sleep(15 * time.Millisecond)
+			}
+			if code, body := postInit(); code != http.StatusOK {
+				t.Fatalf("mode=%s hub.mcp_server=true: got %d (%s), want 200", mode, code, body)
+			}
+		})
 	}
 }

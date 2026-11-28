@@ -236,8 +236,8 @@ func TestHandleExperiments_FullChain(t *testing.T) {
 		}
 	})
 
-	t.Run("include=server returns server-only experiments from one snapshot", func(t *testing.T) {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/experiments?include=server", nil)
+	t.Run("name=hub.mcp_server returns only that single flag", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/experiments?name="+experiments.MCPServer, nil)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 		}
@@ -245,11 +245,20 @@ func TestHandleExperiments_FullChain(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
+		if len(body.Experiments) != 1 {
+			t.Fatalf("expected exactly 1 experiment in response, got %v", body.Experiments)
+		}
 		if v, ok := body.Experiments[experiments.MCPServer]; !ok || v {
 			t.Errorf("expected %s=false (present=true), got %v (present=%v)", experiments.MCPServer, v, ok)
 		}
-		if v, ok := body.Experiments[fixtureWebDefaultOn]; !ok || !v {
-			t.Errorf("expected web.fixture_default_on=true alongside server flags, got %v (present=%v)", v, ok)
+	})
+
+	t.Run("unknown or unlisted name is refused with 400", func(t *testing.T) {
+		for _, bad := range []string{"hub.conduit", "hub.nonexistent", "web.fixture_default_on"} {
+			rec := doRequest(t, srv, http.MethodGet, "/api/v1/experiments?name="+bad, nil)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("?name=%s: expected 400, got %d: %s", bad, rec.Code, rec.Body.String())
+			}
 		}
 	})
 
