@@ -348,12 +348,12 @@ func (e *Engine) harvestTrajectory(
 	}
 
 	var (
-		totalSegments int
-		totalBytes    int64
-		policyRefused bool
+		totalSegments  int
+		totalBytes     int64
+		policyRefused  bool
 		captureUnavail bool
-		hadError      bool
-		firstErr      error
+		hadError       bool
+		firstErr       error
 	)
 
 	reason := "broker_harvest_" + string(trigger)

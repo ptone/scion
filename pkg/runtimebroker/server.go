@@ -587,7 +587,7 @@ type Server struct {
 	// exitHarvestTracker tracks running->exited transitions fed by
 	// HeartbeatService and schedules at most one async post_exit harvest per
 	// (agent, run).
-	exitHarvestTracker *exitHarvestTracker
+	exitHarvestTracker   *exitHarvestTracker
 	loadMappingSettings  func() (*config.VersionedSettings, error)
 	saDiscoveryOnce      sync.Once
 	saDiscoveryClients   map[string]kubernetes.Interface

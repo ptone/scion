@@ -34,12 +34,12 @@ import (
 
 func TestHubClientAdapter_EndToEndOverHTTP(t *testing.T) {
 	var (
-		mu             sync.Mutex
-		gotPrepare     *telemetrycontract.TrajectorySegmentPrepareRequest
-		gotUploaded    []byte
-		gotCommit      *telemetrycontract.TrajectorySegmentCommitRequest
-		gotUsage       *telemetrycontract.UsageIngestRequest
-		gotHarvestRep  *telemetrycontract.TrajectoryHarvestReportRequest
+		mu            sync.Mutex
+		gotPrepare    *telemetrycontract.TrajectorySegmentPrepareRequest
+		gotUploaded   []byte
+		gotCommit     *telemetrycontract.TrajectorySegmentCommitRequest
+		gotUsage      *telemetrycontract.UsageIngestRequest
+		gotHarvestRep *telemetrycontract.TrajectoryHarvestReportRequest
 	)
 
 	var srv *httptest.Server

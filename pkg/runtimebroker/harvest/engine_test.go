@@ -44,11 +44,11 @@ type fakeHub struct {
 	commitErr  error
 	usageErr   error
 
-	prepared []PrepareSegmentRequest
-	uploaded map[string][]byte // segmentID -> compressed bytes
+	prepared  []PrepareSegmentRequest
+	uploaded  map[string][]byte // segmentID -> compressed bytes
 	committed map[string][]byte // segmentID -> raw bytes
-	usage    []telemetrycontract.UsageEvent
-	reports  []Report
+	usage     []telemetrycontract.UsageEvent
+	reports   []Report
 
 	onPrepare func(agentID string, req PrepareSegmentRequest) (*telemetrycontract.TrajectorySegmentPrepareResponse, error)
 }
