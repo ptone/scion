@@ -479,8 +479,10 @@ func TestProjectDecisions_SearchCommentWaitingMadeAndNoCommentGolden(t *testing.
 
 	// 1. In-memory Waiting tab search (pendingPromptMatches) matches a comment on an effective answer.
 	scope := &decisionScopeSet{
-		conversationLabel: map[string]string{},
-		agentNames:        map[string]string{},
+		projectReadableScope: &projectReadableScope{
+			conversationLabel: map[string]string{},
+			agentNames:        map[string]string{},
+		},
 	}
 	promptWithComment := &store.ProjectDecisionPrompt{
 		ChatKey: "topic-1",
@@ -520,25 +522,24 @@ func TestProjectDecisions_SearchCommentWaitingMadeAndNoCommentGolden(t *testing.
 	assert.Equal(t, "Skip the loadtest window", madeHit.Entries[0].Comment)
 
 	// 4. No-comment golden: raw Made tab JSON omits "comment" when no comment was recorded.
-	rawRR := f.userReq(t, f.bob, "/api/v1/projects/"+f.projectID+"/decisions?tab=made&q=nocmt-topic")
-	require.Equal(t, http.StatusOK, rawRR.Code, rawRR.Body.String())
-	assert.NotContains(t, rawRR.Body.String(), `"comment"`, "no-comment Made log entry must omit comment key")
+	rawCode, rawBody := f.get(t, f.bob, url.Values{"tab": {ProjectDecisionsTabMade}, "q": {"nocmt-topic"}})
+	require.Equal(t, http.StatusOK, rawCode, string(rawBody))
+	assert.NotContains(t, string(rawBody), `"comment"`, "no-comment Made log entry must omit comment key")
 
 	// 5. DM privacy: another user cannot find a DM decision by searching its comment.
-	_, pDM := f.dmPrompt(t, f.alice, `[{"id":"cmt-dm","question":"Approve secret rollout?","choices":["Yes","No"]}]`, false)
-	dmAnsRR := f.answer(t, f.alice, pDM.Decisions[0].RowID, map[string]interface{}{
+	dmAnsRR := f.answer(t, f.bob, f.dmRowID, map[string]interface{}{
 		"choice_id": "1",
 		"comment":   "dm-only-canary-token",
 	})
 	require.Equal(t, http.StatusOK, dmAnsRR.Code, dmAnsRR.Body.String())
 
-	aliceHit := f.made(t, f.alice, url.Values{"q": {"dm-only-canary-token"}})
-	require.Len(t, aliceHit.Entries, 1)
-	assert.Equal(t, "cmt-dm", aliceHit.Entries[0].Decision.Key)
-	assert.Equal(t, "dm-only-canary-token", aliceHit.Entries[0].Comment)
+	bobDMHit := f.made(t, f.bob, url.Values{"q": {"dm-only-canary-token"}})
+	require.Len(t, bobDMHit.Entries, 1)
+	assert.Equal(t, "rotate-key", bobDMHit.Entries[0].Decision.Key)
+	assert.Equal(t, "dm-only-canary-token", bobDMHit.Entries[0].Comment)
 
-	bobMiss := f.made(t, f.bob, url.Values{"q": {"dm-only-canary-token"}})
-	assert.Empty(t, bobMiss.Entries, "comment search must respect DM privacy")
+	aliceDMMiss := f.made(t, f.alice, url.Values{"q": {"dm-only-canary-token"}})
+	assert.Empty(t, aliceDMMiss.Entries, "comment search must respect DM privacy")
 
 	// 6. Agent decisions list -q finds comments, and show returns comment (and omits it when absent).
 	listRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?state=decided&q=LOADTEST", nil)
