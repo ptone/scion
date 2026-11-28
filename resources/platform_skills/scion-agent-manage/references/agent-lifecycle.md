@@ -23,8 +23,9 @@ change. Reincarnating it yourself, or from another agent, keeps the chain and do
 clear the denial. Run `--dry-run` first to catch unintended model or config fallback
 drift, move any needed container-local `/tmp/` files to persistent storage beforehand
 (in-place container recreation wipes `/tmp/`, while keeping the agent home unless
-`--harness` or `--broker` rebuilds it), and record active branch, `HEAD` SHA, and
-any backup ref in `--handoff-file` when workspace Git state matters. Because reincarnation returns before the
+`--harness` or `--broker` rebuilds it), and record in `--handoff-file` the active
+branch, `HEAD` SHA and any backup ref when workspace Git state matters, and the full
+36-character ID of each conversation the role still follows (prefixes cannot be caught up). Because reincarnation returns before the
 replacement container finishes starting, verify that the agent reaches `running` (rather
 than `error`) and confirm a resumed-work receipt; this proves runtime continuity, whereas
 `resolvedVersion` in `~/.scion/resolved-skills.json` inside the container verifies

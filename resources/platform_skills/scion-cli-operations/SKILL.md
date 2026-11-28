@@ -2,7 +2,8 @@
 name: scion-cli-operations
 description: >-
   Operational constraints for Scion agents running in containerized sandboxes.
-  Covers prohibited commands and hub-only API access.
+  Covers prohibited commands, hub-only API access, and shell safety: the zsh tool
+  shell, and waiting on and stopping your own processes.
   Complements the scion CLI reference and messaging skills.
 ---
 
@@ -19,7 +20,7 @@ You are an autonomous Scion agent running inside a containerized sandbox. Your w
 - **Do Not Use Global**: Never use the `--global` option; you are operating in a project workspace and it is set implicitly by default.
 - **Do Not Interact with Settings or Login Commands**.
 
-## Shell Safety for Task Prompts
+## Shell Safety
 
 The `scion start` task prompt is embedded in a shell command. **Do not use backticks, `$variables`, or other shell metacharacters** in the inlined prompt — they cause the shell to exit before the agent starts, with no visible error. For long or formatted briefs, write the content to a file and pass a filepath reference instead:
 
@@ -31,6 +32,12 @@ scion start <name> \
 **Use absolute paths** in task prompts and briefs. A sub-agent's working directory may differ from yours — relative paths resolve against the sub-agent's `/workspace`, not yours.
 
 **Avoid non-ASCII escape sequences in shell strings.** Bash only expands `\x` hex escapes inside `$'...'` quoting — inside double quotes, `\xe2\x80\x94` sends 12 literal characters, not an em-dash. Use plain ASCII punctuation in task prompts and messages.
+
+**Your tool shell is zsh, not bash.** An unquoted `$VAR` holding several words stays one argument (use an array or `${=VAR}`); `"$H:t"`-style text after a variable is a history modifier (write `"${H}:path"`); an unmatched glob aborts the command with `no matches found` (quote it: `--include='*.go'`); and loops written for bash should run under `bash -c '…'`.
+
+## Waiting On and Stopping Your Own Processes
+
+Your tool shell's command line contains every pattern you type, so `pgrep -f <pattern>` and `pkill -f <pattern>` match the shell running them: an `until ! pgrep -f …` loop never exits, and `pkill -f` kills your own tool shell (often exit 144), skipping the rest of that command. Track the process you started instead: use your harness's background-task completion notice, or record `$!` and `wait` on or `kill` that PID, or poll for an exit marker the command writes (`cmd >log 2>&1; echo "EXIT $?" >>log`).
 
 ## Recommended Commands
 
