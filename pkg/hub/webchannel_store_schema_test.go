@@ -45,19 +45,24 @@ func TestPgTableExistsQuery_FiltersCurrentSchema(t *testing.T) {
 	assert.Contains(t, q, "FROM information_schema.tables")
 	assert.Contains(t, q, "table_schema = $1")
 	assert.Contains(t, q, "table_name = $2")
+	cq := strings.Join(strings.Fields(pgColumnExistsQuery), " ")
+	assert.Contains(t, cq, "FROM information_schema.columns")
+	assert.Contains(t, cq, "table_schema = $1")
+	assert.Contains(t, cq, "table_name = $2")
+	assert.Contains(t, cq, "column_name = $3")
 	assert.Equal(t, "SELECT current_schema()", pgCurrentSchemaQuery)
 }
 
 // TestPgWebChatStore_TableExistenceChecksUseHelper pins, without a database,
-// that pgTableExistsQuery is the only information_schema lookup in the
-// Postgres web chat store, so no call site can reintroduce an unfiltered
-// check.
+// that pgTableExistsQuery and pgColumnExistsQuery are the only
+// information_schema lookups in the Postgres web chat store, so no call site
+// can reintroduce an unfiltered check.
 func TestPgWebChatStore_TableExistenceChecksUseHelper(t *testing.T) {
 	src, err := os.ReadFile("webchannel_store_postgres.go")
 	require.NoError(t, err)
 	re := regexp.MustCompile(`(?i)information_schema|pg_catalog|pg_tables|pg_indexes|pg_class|pg_namespace|to_regclass`)
-	assert.Len(t, re.FindAllString(string(src), -1), 1,
-		"catalog lookups in webchannel_store_postgres.go must go through pgTableExists")
+	assert.Len(t, re.FindAllString(string(src), -1), 2,
+		"catalog lookups in webchannel_store_postgres.go must go through pgTableExists or pgTableColumnExists")
 }
 
 // TestPgWebChatStore_ExternalTablesQualified pins, without a database, that

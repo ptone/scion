@@ -1820,15 +1820,8 @@ func (s *pgWebChatStore) backfillNativeMessageConversations() error {
 		slog.Debug("Webchat native message conversation backfill deferred: messages table does not exist yet")
 		return nil
 	}
-	schema, err := s.currentSchema(context.Background())
+	hasConvCol, err := s.columnExists(context.Background(), "messages", "conversation_id")
 	if err != nil {
-		return err
-	}
-	var hasConvCol bool
-	if err := s.db.QueryRow(`SELECT EXISTS (
-		SELECT 1 FROM information_schema.columns
-		WHERE table_schema = $1 AND table_name = 'messages' AND column_name = 'conversation_id'
-	)`, schema).Scan(&hasConvCol); err != nil {
 		return fmt.Errorf("check messages.conversation_id column: %w", err)
 	}
 	if !hasConvCol {
@@ -2742,6 +2735,31 @@ func (s *pgWebChatStore) tableExists(ctx context.Context, table string) (bool, e
 		return false, err
 	}
 	return pgTableExists(ctx, s.db, schema, table)
+}
+
+// pgColumnExistsQuery reports whether a column exists on a table in the given
+// schema, using the same single-schema rule as pgTableExistsQuery.
+const pgColumnExistsQuery = `SELECT EXISTS (
+	SELECT 1 FROM information_schema.columns
+	WHERE table_schema = $1 AND table_name = $2 AND column_name = $3
+)`
+
+// pgTableColumnExists reports whether column exists on table in schema.
+func pgTableColumnExists(ctx context.Context, db *sql.DB, schema, table, column string) (bool, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx, pgColumnExistsQuery, schema, table, column).Scan(&exists); err != nil {
+		return false, fmt.Errorf("webchat store: check column %s.%s exists: %w", table, column, err)
+	}
+	return exists, nil
+}
+
+// columnExists reports whether column exists on table in the store's current schema.
+func (s *pgWebChatStore) columnExists(ctx context.Context, table, column string) (bool, error) {
+	schema, err := s.currentSchema(ctx)
+	if err != nil {
+		return false, err
+	}
+	return pgTableColumnExists(ctx, s.db, schema, table, column)
 }
 
 // addThreadIDIndex creates an index on messages.thread_id for query performance.
